@@ -583,7 +583,7 @@ def _assign_synthesized_handles(rows: list[RegistryRow]) -> list[RegistryRow]:
 
 
 def _nft_manager_for_chain(chain: str) -> str | None:
-    """Look up the canonical NPM address for ``chain``, or ``None``.
+    """Look up the canonical UniV3 NPM address for ``chain``, or ``None``.
 
     Audit F2 (CI EIP-55 invariant): the previous implementation kept a
     parallel ``_NFT_MANAGER_BY_CHAIN`` dict in this module with
@@ -600,16 +600,53 @@ def _nft_manager_for_chain(chain: str) -> str | None:
     ``almanak.framework.connectors.uniswap_v3.receipt_parser``. We
     import it here as the single source of truth — the backfill is
     explicitly scoped to UniV3 LP, so depending on the parser's map
-    is appropriate (no other connector module is reached). Returning
-    ``None`` on an unrecognized chain keeps the backfill from
-    silently synthesizing a row with a fabricated address (Empty ≠
-    zero, per the broader cutover rule).
+    is appropriate. Returning ``None`` on an unrecognized chain keeps
+    the backfill from silently synthesizing a row with a fabricated
+    address (Empty ≠ zero, per the broader cutover rule).
+
+    For protocol-aware lookup (Slipstream forks ship their own NPM at
+    a different address than canonical UniV3 on the same chain), use
+    :func:`_nft_manager_for_protocol_chain` instead.
     """
     from almanak.framework.connectors.uniswap_v3.receipt_parser import (
         POSITION_MANAGER_ADDRESSES,
     )
 
     return POSITION_MANAGER_ADDRESSES.get((chain or "").strip().lower())
+
+
+def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
+    """Look up the canonical NPM address for ``(protocol, chain)``.
+
+    Slipstream forks (Aerodrome on Base, Velodrome on Optimism / future
+    chains) deploy their own NonfungiblePositionManager at a different
+    address than canonical Uniswap V3 on the same chain. Routing through
+    the UniV3 map (``_nft_manager_for_chain``) would silently corrupt
+    the ``physical_identity_hash`` tuple — the hash input would not
+    match the on-chain NPM emitter, and ``position_registry`` lookups
+    would consistently miss (VIB-4305).
+
+    - ``aerodrome_slipstream`` / ``velodrome_slipstream`` → read from
+      ``AERODROME[<chain>]['cl_nft']`` via the parser's
+      ``_SLIPSTREAM_NPM_ADDRESSES`` map (built at import time from
+      ``almanak.core.contracts.AERODROME`` — the single source of
+      truth shared with the parser address-filter).
+    - Anything else (``uniswap_v3`` / ``sushiswap_v3`` /
+      ``pancakeswap_v3`` / unrecognized / empty) → delegate to
+      :func:`_nft_manager_for_chain` (UniV3 family lookup).
+
+    Returns ``None`` (NOT ``""``) on unrecognized chains, so the caller
+    can distinguish "no NPM registered" from "NPM is the empty string".
+    """
+    protocol_norm = (protocol or "").strip().lower()
+    chain_norm = (chain or "").strip().lower()
+    if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
+        from almanak.framework.connectors.aerodrome.receipt_parser import (
+            _SLIPSTREAM_NPM_ADDRESSES,
+        )
+
+        return _SLIPSTREAM_NPM_ADDRESSES.get(chain_norm) or None
+    return _nft_manager_for_chain(chain_norm)
 
 
 def _extract_pool_address_from_legacy_event(ev: dict[str, Any]) -> str | None:

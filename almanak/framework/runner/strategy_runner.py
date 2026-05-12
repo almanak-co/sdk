@@ -2337,21 +2337,33 @@ class StrategyRunner:
         self,
         strategy: StrategyProtocol,
         intent_type_str: str,
+        protocol: str = "",
     ) -> tuple[str, str] | None:
         """Resolve ``(chain, nft_manager_addr)`` from the strategy.
 
         Returns ``None`` and INFO-logs when no canonical NPM address is
-        registered for the strategy's chain (the caller falls back to
-        ``save_ledger_entry``).
+        registered for the strategy's (chain, protocol) pair (the caller
+        falls back to ``save_ledger_entry``).
+
+        ``protocol`` is consulted because Slipstream forks (Aerodrome on
+        Base, Velodrome on Optimism) ship their OWN NonfungiblePositionManager
+        contract at a different address than the canonical Uniswap V3 NPM
+        on the same chain. Using the wrong NPM here would silently corrupt
+        the ``physical_identity_hash`` tuple (T08 invariant #1) — the hash
+        would not match the on-chain emitter address, and lookups against
+        ``position_registry`` would consistently miss.
         """
-        from almanak.framework.migration.backfill import _nft_manager_for_chain
+        from almanak.framework.migration.backfill import _nft_manager_for_protocol_chain
 
         chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
         chain = (chain or "").lower()
-        nft_manager = _nft_manager_for_chain(chain)
+        protocol_norm = (protocol or "").lower()
+        nft_manager = _nft_manager_for_protocol_chain(protocol_norm, chain)
         if not nft_manager:
             logger.info(
-                "Registry-mode skip: no NPM known for chain %r; falling back to save_ledger_entry for %s",
+                "Registry-mode skip: no NPM known for (protocol=%r, chain=%r); "
+                "falling back to save_ledger_entry for %s",
+                protocol_norm,
                 chain,
                 intent_type_str,
             )
@@ -2364,13 +2376,22 @@ class StrategyRunner:
         result: Any,
         chain: str,
         intent_type_str: str,
+        protocol: str = "",
     ) -> tuple[dict, Any] | None:
         """Resolve ``(receipt, parser)`` from the execution result.
 
         Returns ``None`` and INFO-logs when (a) the receipt isn't
-        recoverable from the result shape or (b) the
-        ``UniswapV3ReceiptParser`` import fails (defensive — module
-        load shouldn't fail in production).
+        recoverable from the result shape or (b) the parser import fails
+        (defensive — module load shouldn't fail in production).
+
+        ``protocol`` selects the protocol-specific parser class because
+        Slipstream forks emit ``IncreaseLiquidity`` / ``DecreaseLiquidity``
+        events from a different NPM address than canonical Uniswap V3.
+        The Uniswap V3 parser filters those events by its own NPM address
+        and would silently return ``None`` from
+        ``extract_lp_open_data`` / ``extract_lp_close_data`` on a Slipstream
+        receipt (this exact bug, VIB-4305, was caught in production on
+        lp_aerodrome).
         """
         receipt = self._extract_receipt_from_result(result)
         if receipt is None:
@@ -2379,7 +2400,14 @@ class StrategyRunner:
                 intent_type_str,
             )
             return None
+        protocol_norm = (protocol or "").lower()
         try:
+            if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
+                from almanak.framework.connectors.aerodrome.receipt_parser import (
+                    AerodromeSlipstreamReceiptParser,
+                )
+
+                return receipt, AerodromeSlipstreamReceiptParser(chain=chain)
             from almanak.framework.connectors.uniswap_v3.receipt_parser import (
                 UniswapV3ReceiptParser,
             )
@@ -2656,13 +2684,15 @@ class StrategyRunner:
         _ = success
 
         # Resolve chain + NPM + receipt + parser. Each step short-circuits
-        # to ``False`` on miss with an INFO log inside the helper.
-        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str)
+        # to ``False`` on miss with an INFO log inside the helper. Protocol
+        # is threaded through so Slipstream forks select the correct NPM
+        # address AND the correct receipt parser class (VIB-4305).
+        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol)
         if chain_resolved is None:
             return False
         chain, nft_manager = chain_resolved
         receipt_resolved = self._registry_resolve_receipt_and_parser(
-            result=result, chain=chain, intent_type_str=intent_type_str
+            result=result, chain=chain, intent_type_str=intent_type_str, protocol=protocol
         )
         if receipt_resolved is None:
             return False

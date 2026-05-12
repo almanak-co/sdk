@@ -1760,6 +1760,11 @@ _ERC721_TRANSFER_TOPIC = EVENT_TOPICS["Transfer"].lower()
 # Slipstream CL Pool emits the standard Uniswap V3-style Pool.Mint event.
 # keccak256("Mint(address,address,int24,int24,uint128,uint256,uint256)")
 _SLIPSTREAM_POOL_MINT_TOPIC = "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
+# Slipstream CL Pool emits the standard Uniswap V3-style Pool.Burn event on close.
+# keccak256("Burn(address,int24,int24,uint128,uint256,uint256)")
+# Distinct from EVENT_TOPICS["Burn"] (V2 AMM ``Burn(address,uint256,uint256,address)``)
+# — Slipstream is a Uniswap V3 fork at the pool layer.
+_SLIPSTREAM_POOL_BURN_TOPIC = "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c"
 # SwapCL event topic from the CL pool — carries post-swap current tick.
 _SLIPSTREAM_SWAP_CL_TOPIC = EVENT_TOPICS["SwapCL"].lower()
 
@@ -2389,6 +2394,323 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         if value is None:
             return ExtractMissing(reason="no IncreaseLiquidity event in receipt")
         return ExtractOk(value=value)
+
+    # =========================================================================
+    # Registry-mode payload builders (VIB-4305 / T12 follow-up to PR #2241).
+    # =========================================================================
+    #
+    # Strategy-runner ``_maybe_save_ledger_with_registry`` consumes these two
+    # methods to compose ``position_registry.payload`` for LP_OPEN / LP_CLOSE
+    # intents on Slipstream CL positions. They mirror the Uniswap V3 reference
+    # implementation in
+    # ``almanak/framework/connectors/uniswap_v3/receipt_parser.py``
+    # (PR #1869 / T08 / T12). The dict-shape helpers
+    # (``_open_payload_disagrees`` / ``_build_close_receipt_payload`` /
+    # ``_merge_open_payload_fields``) are reused from
+    # ``UniswapV3ReceiptParser`` — they operate on plain dicts with no
+    # UniV3-specific assumptions, and re-implementing them here would be
+    # drift. The receipt-decoding (token_id from DecreaseLiquidity, pool from
+    # Pool Burn, NPM address) is Slipstream-specific because the emitter
+    # addresses and event signatures differ from canonical UniV3.
+
+    def _nft_manager_address(self) -> str:
+        """Return the canonical Slipstream NPM address for ``self.chain``.
+
+        Sourced from ``_SLIPSTREAM_NPM_ADDRESSES`` (built at import time from
+        ``almanak.core.contracts.AERODROME[<chain>]['cl_nft']``). The address
+        is part of the ``physical_identity_hash`` input tuple (T08 invariant
+        #1) and is a parser-side configuration constant — NEVER an off-chain
+        RPC call — so the hash stays receipt-derivable from the receipt +
+        parser config alone.
+
+        Returns an empty string when no NPM is registered for the chain,
+        matching the "Empty ≠ zero" contract: the caller (registry-payload
+        builder) refuses to compose a payload on empty.
+        """
+        return _SLIPSTREAM_NPM_ADDRESSES.get((self.chain or "").lower(), "")
+
+    def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
+        """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close
+        receipt.
+
+        Slipstream NPM emits ``DecreaseLiquidity(uint256 indexed tokenId, …)``
+        on every ``decreaseLiquidity()`` call (identical ABI to UniV3). The
+        indexed tokenId sits in ``topics[1]``. Returns ``None`` if no such
+        log is in the receipt OR the emitting NPM doesn't match the
+        configured chain — the close-side identity is then derivable only
+        from strategy-supplied state, which is the legacy path the registry
+        cutover is replacing. The caller treats ``None`` as
+        "fall back to ``accounting_only``" with an ERROR log; no
+        ``Decimal("0")`` substitution.
+
+        Called by:
+
+        - ``extract_registry_payload_close`` to anchor the close payload.
+        - ``StrategyRunner._lookup_open_registry_payload`` when no
+          token_id is supplied explicitly.
+        """
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+        npm_address = self._nft_manager_address()
+        if not npm_address:
+            return None
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if not topics or len(topics) < 2:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            if first_topic != _DECREASE_LIQUIDITY_TOPIC:
+                continue
+            if address != npm_address:
+                continue
+
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+            try:
+                return int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    @staticmethod
+    def _pool_address_from_burn(receipt: dict[str, Any]) -> str:
+        """Recover the Slipstream pool address from a Pool ``Burn`` log emitter.
+
+        Slipstream is a Uniswap V3 fork at the pool layer, so the close-side
+        receipt carries a UV3-shape ``Burn(address indexed owner, int24
+        indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256
+        amount0, uint256 amount1)`` event. The pool itself emits the log, so
+        ``log.address`` IS the pool address. We capture the FIRST burn we
+        see (multicall closes targeting the same pool produce repeated burns
+        with the same emitter).
+
+        Returns lowercase hex address, or ``"" `` when no Pool Burn log is
+        present. Empty string is the "Empty ≠ zero" signal — the caller
+        refuses to compose the payload rather than collapsing to ``None`` /
+        ``"0x000…"``.
+        """
+        logs = receipt.get("logs") or []
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+
+            if not topics:
+                continue
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+            if first_topic != _SLIPSTREAM_POOL_BURN_TOPIC:
+                continue
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+            if address and address != _ZERO_ADDRESS:
+                return address
+        return ""
+
+    def extract_registry_payload_open(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_OPEN ``position_registry.payload`` dict.
+
+        Reads the existing :meth:`extract_lp_open_data` output for
+        ``position_id`` / ``tick_lower`` / ``tick_upper`` / ``liquidity`` /
+        ``amount0`` / ``amount1`` / ``pool_address`` and composes the
+        canonical 8-key shape (plus optional ``fee_tier`` and the per-chain
+        ``nft_manager_addr``). Returns ``None`` when any of the load-bearing
+        identity fields are missing — the caller treats that as "fall back
+        to ``accounting_only``", per CLAUDE.md "Empty ≠ zero" (a
+        zero-substituted token_id would silently corrupt the
+        ``physical_identity_hash``).
+
+        Args:
+            receipt: Transaction receipt dict with ``logs`` field.
+            fee_tier: Optional pool fee tier (e.g. ``500`` for 0.05%);
+                forwarded from the intent's compile-time metadata. ``None``
+                when unknown — the payload key stays absent rather than
+                substituting ``0`` (Empty ≠ zero).
+
+        Returns:
+            ``dict`` JSON-serializable with the 8 (or 9 with fee_tier) keys
+            ratified by the PRD §Registry Data Shape and the T08 golden, OR
+            ``None`` when the LP_OPEN data isn't extractable from the
+            receipt.
+        """
+        lp_data = self.extract_lp_open_data(receipt)
+        if lp_data is None:
+            return None
+        if lp_data.position_id is None or lp_data.position_id <= 0:
+            # token_id is the identity anchor; a zero/negative value would
+            # corrupt physical_identity_hash. Refuse to build the payload.
+            return None
+        if not lp_data.pool_address:
+            # pool_address is the semantic_grouping_key anchor; missing it
+            # would let two un-grouped rows in the same pool collide on
+            # ix_registry_auto_mode. Refuse rather than emit a partial row.
+            return None
+        if lp_data.tick_lower is None or lp_data.tick_upper is None:
+            # Range is part of the position's economic identity; missing
+            # ticks would let teardown / rebalancing read malformed bounds.
+            return None
+        if lp_data.liquidity is None:
+            return None
+        nft_manager_addr = self._nft_manager_address()
+        if not nft_manager_addr:
+            # No NPM registered for this chain → refuse to emit a payload
+            # with an empty identity component. ``_SLIPSTREAM_NPM_ADDRESSES``
+            # is the single source of truth; extending Slipstream to a new
+            # chain is a one-line ``AERODROME[<chain>]['cl_nft']`` change.
+            return None
+
+        payload: dict[str, Any] = {
+            "token_id": str(lp_data.position_id),
+            "pool_address": lp_data.pool_address.lower(),
+            "tick_lower": lp_data.tick_lower,
+            "tick_upper": lp_data.tick_upper,
+            "liquidity": str(lp_data.liquidity),
+            "amount0": str(lp_data.amount0) if lp_data.amount0 is not None else None,
+            "amount1": str(lp_data.amount1) if lp_data.amount1 is not None else None,
+            "nft_manager_addr": nft_manager_addr,
+        }
+        if fee_tier is not None and fee_tier > 0:
+            payload["fee_tier"] = int(fee_tier)
+        if self.token0_symbol:
+            payload["_token0_label"] = self.token0_symbol
+        if self.token1_symbol:
+            payload["_token1_label"] = self.token1_symbol
+        return payload
+
+    def extract_registry_payload_close(
+        self,
+        receipt: dict[str, Any],
+        *,
+        open_payload: dict[str, Any] | None = None,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_CLOSE ``position_registry.payload`` dict.
+
+        Reads :meth:`extract_lp_close_data` (Burn / Collect amounts) and
+        decodes the close-side ``DecreaseLiquidity`` event for the NFT
+        ``token_id``, plus the Slipstream Pool Burn log for the pool
+        emitter address. Then composes the close payload shape ratified by
+        the T08 ``lp_close/expected_registry_row.json`` golden.
+
+        Audit M1 (CodeRabbit): a real Slipstream LP_CLOSE proves itself
+        with **both** ``DecreaseLiquidity`` on the NPM AND a Pool ``Burn``
+        log carrying the pool address. A Collect-only receipt is NOT a
+        close — it's a fee harvest. If we silently synthesized
+        ``token_id`` / ``pool_address`` from ``open_payload`` here, a
+        Collect-only receipt or a malformed close would produce a
+        "successful" close payload with stale OPEN-side anchors, and the
+        registry would mark a still-open NFT as closed (cutover spec
+        D3.F6 silent-error class).
+
+        The flow:
+
+        1. Decode close-side amounts (``extract_lp_close_data``).
+        2. Decode the DecreaseLiquidity log (``_decreaseliquidity_token_id``).
+        3. Decode the Pool Burn log (``_pool_address_from_burn``).
+        4. Verify receipt-derived identity anchors are present and non-zero.
+        5. Cross-check against ``open_payload`` (``_open_payload_disagrees``)
+           — refuse on disagreement.
+        6. Compose the receipt-only payload
+           (``_build_close_receipt_payload``).
+        7. Merge OPEN-time fields (``_merge_open_payload_fields``) — ticks,
+           OPEN-time amounts, original mint liquidity, fee tier, token
+           labels (close receipt cannot re-derive these).
+        8. Apply the ``fee_tier`` argument if ``open_payload`` didn't carry
+           one (setdefault — OPEN-side wins).
+
+        Helpers ``_open_payload_disagrees`` / ``_build_close_receipt_payload``
+        / ``_merge_open_payload_fields`` are reused from
+        :class:`UniswapV3ReceiptParser` — they operate on plain dicts with
+        no UV3-specific assumptions and are the single source of truth for
+        the merge / cross-check semantics.
+
+        Returns ``None`` when the close-side identity anchors (token_id +
+        pool_address) cannot be derived OR cross-checks fail. The caller
+        treats that as "fall back to ``accounting_only``" with an ERROR
+        log (no zero substitution).
+        """
+        # Local import keeps the module-load order independent — both
+        # parsers import each other's helpers only in the registry-payload
+        # path. The helpers are static / classmethod and require no UV3
+        # parser state.
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            UniswapV3ReceiptParser,
+        )
+
+        lp_close = self.extract_lp_close_data(receipt)
+        if lp_close is None:
+            return None
+        token_id = self._decreaseliquidity_token_id(receipt)
+        if token_id is None or token_id <= 0:
+            return None
+        # ``extract_lp_close_data`` does NOT populate ``pool_address`` for
+        # Slipstream (the NPM Collect / DecreaseLiquidity events don't carry
+        # the pool emitter — the Pool Burn does). Decode it explicitly.
+        pool_address = self._pool_address_from_burn(receipt)
+        if not pool_address:
+            return None
+        if UniswapV3ReceiptParser._open_payload_disagrees(
+            open_payload=open_payload,
+            token_id=token_id,
+            pool_address=pool_address,
+        ):
+            return None
+
+        nft_manager_addr = self._nft_manager_address()
+        if not nft_manager_addr:
+            return None
+
+        payload = UniswapV3ReceiptParser._build_close_receipt_payload(
+            token_id=token_id,
+            pool_address=pool_address,
+            lp_close=lp_close,
+            nft_manager_addr=nft_manager_addr,
+        )
+        UniswapV3ReceiptParser._merge_open_payload_fields(payload, open_payload)
+        if fee_tier is not None and fee_tier > 0:
+            payload.setdefault("fee_tier", int(fee_tier))
+        if self.token0_symbol:
+            payload.setdefault("_token0_label", self.token0_symbol)
+        if self.token1_symbol:
+            payload.setdefault("_token1_label", self.token1_symbol)
+        return payload
 
 
 __all__ = [
