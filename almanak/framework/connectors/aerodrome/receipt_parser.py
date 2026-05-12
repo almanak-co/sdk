@@ -20,7 +20,12 @@ from almanak.framework.execution.extract_result import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
+    from almanak.framework.execution.extracted_data import (
+        LPCloseData,
+        LPOpenData,
+        ProtocolFees,
+        SwapAmounts,
+    )
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.utils.log_formatters import (
     format_gas_cost,
@@ -1752,6 +1757,30 @@ _INCREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["IncreaseLiquidity"].lower()
 _DECREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["DecreaseLiquidity"].lower()
 _COLLECT_CL_TOPIC = EVENT_TOPICS["CollectCL"].lower()
 _ERC721_TRANSFER_TOPIC = EVENT_TOPICS["Transfer"].lower()
+# Slipstream CL Pool emits the standard Uniswap V3-style Pool.Mint event.
+# keccak256("Mint(address,address,int24,int24,uint128,uint256,uint256)")
+_SLIPSTREAM_POOL_MINT_TOPIC = "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
+# SwapCL event topic from the CL pool — carries post-swap current tick.
+_SLIPSTREAM_SWAP_CL_TOPIC = EVENT_TOPICS["SwapCL"].lower()
+
+
+# Aerodrome Slipstream NonfungiblePositionManager addresses, sourced from the
+# canonical contracts registry (single source of truth — `AERODROME` in
+# ``almanak/core/contracts.py``). Slipstream is a Base-only deployment today;
+# adding a new chain is a one-line change in ``contracts.py`` and this dict
+# rebuilds automatically.
+def _build_slipstream_npm_addresses() -> dict[str, str]:
+    from almanak.core.contracts import AERODROME
+
+    out: dict[str, str] = {}
+    for chain, entry in AERODROME.items():
+        cl_nft = entry.get("cl_nft")
+        if cl_nft:
+            out[chain.lower()] = cl_nft.lower()
+    return out
+
+
+_SLIPSTREAM_NPM_ADDRESSES: dict[str, str] = _build_slipstream_npm_addresses()
 
 
 class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
@@ -1854,6 +1883,288 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         except Exception as e:
             logger.warning(f"Failed to extract Slipstream CL liquidity: {e}")
             return None
+
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":  # noqa: C901
+        """Extract LP open data from a Slipstream CL mint receipt.
+
+        Looks for ``IncreaseLiquidity`` events emitted by the Aerodrome
+        Slipstream NonfungiblePositionManager when an LP position is opened
+        or topped up. The event signature is::
+
+            IncreaseLiquidity(
+                uint256 indexed tokenId,
+                uint128 liquidity,
+                uint256 amount0,
+                uint256 amount1,
+            )
+
+        Slipstream is a Uniswap V3 fork, so the surrounding receipt shape is
+        identical: the CL pool emits a Uniswap-V3-style ``Mint`` event right
+        before the NPM ``IncreaseLiquidity``; we track the most recent
+        NPM-owned Pool Mint to recover tick bounds and pool address.
+
+        Behaviour contract (matches the Uniswap V3 baseline parser):
+
+        - Returns ``LPOpenData`` populated with the raw on-chain ints
+          (``position_id``, ``liquidity``, ``amount0``, ``amount1``).
+          The accounting handler is responsible for decimal-scaling.
+        - Returns ``None`` when no ``IncreaseLiquidity`` log is present.
+        - No outer ``try/except`` — the fail-closed variant
+          ``extract_lp_open_data_result`` distinguishes parser crash vs.
+          missing event per VIB-3159 / Blueprint 19.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``LPOpenData`` if an ``IncreaseLiquidity`` event is present,
+            ``None`` otherwise.
+        """
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+
+        chain_key = (self.chain or "").lower()
+        npm_address = _SLIPSTREAM_NPM_ADDRESSES.get(chain_key)
+        if not npm_address:
+            # Fail loud on unsupported chains rather than defaulting to Base.
+            # A silent fallback would mis-attribute logs once Slipstream ships
+            # on a second chain — the parser's address-filter would reject
+            # every IncreaseLiquidity from the real NPM, silently returning
+            # ``LPOpenData = None`` and breaking LP accounting.
+            logger.warning(
+                "Slipstream NPM not registered for chain %r — extend "
+                "almanak.core.contracts.AERODROME[<chain>]['cl_nft']",
+                chain_key,
+            )
+            return None
+
+        last_npm_mint: dict[str, Any] | None = None
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+                data = log.get("data", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+                data = getattr(log, "data", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if not topics:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            # Track the most recent Pool Mint emitted with owner == NPM. The
+            # next matching IncreaseLiquidity claims ITS ticks (and pool
+            # address) — a multi-position bundle won't cross-contaminate.
+            if first_topic == _SLIPSTREAM_POOL_MINT_TOPIC and len(topics) >= 4:
+                if self._mint_owner_matches_npm(topics, npm_address):
+                    last_npm_mint = log
+                continue
+
+            if address != npm_address:
+                continue
+
+            if len(topics) < 2:
+                continue
+
+            if first_topic != _INCREASE_LIQUIDITY_TOPIC:
+                continue
+
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+
+            try:
+                token_id = int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                continue
+
+            normalized = HexDecoder.normalize_hex(data)
+            if not normalized or normalized == "0x":
+                continue
+
+            # IncreaseLiquidity data layout: liquidity (uint128, left-padded
+            # to 32 bytes), amount0 (uint256), amount1 (uint256). Reading the
+            # first slot as uint256 is equivalent to uint128 because the high
+            # 16 bytes are zero — matches the Uniswap V3 baseline behaviour.
+            # Decode failures here represent a malformed receipt (NPM emitted
+            # a structurally-invalid IncreaseLiquidity log), NOT a missing
+            # event. Propagate so ``extract_lp_open_data_result`` wraps as
+            # ``ExtractError`` rather than ``ExtractMissing`` (VIB-3159 /
+            # Blueprint 19 fail-closed disambiguation).
+            try:
+                liquidity = HexDecoder.decode_uint256(normalized, 0)
+                amount0 = HexDecoder.decode_uint256(normalized, 32)
+                amount1 = HexDecoder.decode_uint256(normalized, 64)
+            except Exception as exc:
+                raise ValueError(f"Malformed IncreaseLiquidity payload at offset 0-96: {exc}") from exc
+
+            tick_lower, tick_upper = self._ticks_from_pool_mint(last_npm_mint)
+
+            pool_address = ""
+            if last_npm_mint is not None:
+                addr_attr = (
+                    last_npm_mint.get("address")
+                    if hasattr(last_npm_mint, "get")
+                    else getattr(last_npm_mint, "address", "")
+                )
+                if isinstance(addr_attr, bytes):
+                    addr_attr = "0x" + addr_attr.hex()
+                pool_address = str(addr_attr).lower()
+
+            current_tick = self._current_tick_from_swap_cl(logs, pool_address)
+
+            logger.info(
+                f"Extracted Slipstream LP open data: tokenId={token_id} "
+                f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
+                f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
+            )
+            return LPOpenData(
+                position_id=token_id,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                liquidity=liquidity,
+                amount0=amount0,
+                amount1=amount1,
+                current_tick=current_tick,
+                pool_address=pool_address,
+            )
+
+        return None
+
+    @staticmethod
+    def _mint_owner_matches_npm(topics: list[Any], npm_address: str) -> bool:
+        """Return True iff the Pool Mint event's ``owner`` indexed topic == NPM.
+
+        Uses ``HexDecoder.topic_to_address`` for the indexed-address codec —
+        the same helper the rest of this parser already uses (e.g. lines
+        751, 794, 902 for ``_decode_*_data`` paths and ``from_addr``
+        extraction). Single source of truth for "20-byte address inside a
+        32-byte topic" decoding.
+        """
+        if len(topics) < 2:
+            return False
+        owner_addr = HexDecoder.topic_to_address(topics[1])
+        if not owner_addr:
+            return False
+        return owner_addr.lower() == npm_address.lower()
+
+    @staticmethod
+    def _ticks_from_pool_mint(mint_log: dict[str, Any] | None) -> tuple[int | None, int | None]:
+        """Decode (tickLower, tickUpper) from a Slipstream CL Pool Mint log.
+
+        Mint(address sender, address indexed owner, int24 indexed tickLower,
+             int24 indexed tickUpper, uint128 amount, uint256 amount0,
+             uint256 amount1) — ticks live at topics[2] and topics[3] as
+             indexed int24 values right-padded into 32-byte topics.
+        """
+        if mint_log is None:
+            return (None, None)
+        topics = mint_log.get("topics", []) if hasattr(mint_log, "get") else getattr(mint_log, "topics", [])
+        if len(topics) < 4:
+            return (None, None)
+
+        def _decode_indexed_int24(topic: Any) -> int | None:
+            if isinstance(topic, bytes):
+                topic = "0x" + topic.hex()
+            topic = str(topic).lower()
+            if not topic.startswith("0x"):
+                topic = "0x" + topic
+            try:
+                v = int(topic, 16)
+            except (ValueError, TypeError):
+                return None
+            # Indexed int24 is stored as a 32-byte two's-complement value;
+            # sign-extend by inspecting the top bit of the original 256-bit
+            # word (negative numbers come back as huge unsigned values).
+            if v >= 2**255:
+                v -= 2**256
+            return v
+
+        return (_decode_indexed_int24(topics[2]), _decode_indexed_int24(topics[3]))
+
+    @staticmethod
+    def _current_tick_from_swap_cl(logs: list[Any], pool_address: str) -> int | None:
+        """Decode post-swap current tick from a Slipstream SwapCL event.
+
+        SwapCL data layout (Uniswap V3-compatible):
+            amount0 (int256, 32B) + amount1 (int256, 32B)
+            + sqrtPriceX96 (uint160, padded 32B)
+            + liquidity (uint128, padded 32B)
+            + tick (int24, sign-extended into 32B).
+        Tick lives at byte offset 128 and is decoded via ``decode_int24``
+        (clamps to int24 range, matching the Uniswap V3 baseline at
+        ``uniswap_v3/receipt_parser.py:1779``).
+
+        For multi-hop / bundled receipts with more than one SwapCL log on
+        the same pool, we keep the LATEST tick — receipts come back from
+        the RPC in logIndex order, so the final matching SwapCL carries
+        the live post-swap tick the LP_OPEN sees. A single malformed log
+        does not abort the scan; we ``continue`` and let later valid logs
+        win.
+
+        Returns None when no matching SwapCL event is present (e.g. a pure
+        NPM.mint LP_OPEN with pre-balanced amounts).
+        """
+        if not pool_address:
+            return None
+        pool_addr_lower = pool_address.lower()
+        latest_tick: int | None = None
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+                data = log.get("data", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+                data = getattr(log, "data", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            if str(address).lower() != pool_addr_lower:
+                continue
+            if not topics:
+                continue
+            topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            topic0 = str(topic0).lower()
+            if not topic0.startswith("0x"):
+                topic0 = "0x" + topic0
+            if topic0 != _SLIPSTREAM_SWAP_CL_TOPIC:
+                continue
+
+            normalized = HexDecoder.normalize_hex(data)
+            # ``normalize_hex`` returns the payload WITHOUT a 0x prefix, so a
+            # fully-formed SwapCL data field is exactly 5 × 64 = 320 hex chars
+            # (amount0 + amount1 + sqrtPriceX96 + liquidity + tick). Skip
+            # truncated logs but keep scanning for a later valid one.
+            if not normalized or len(normalized) < 5 * 64:
+                continue
+            try:
+                latest_tick = HexDecoder.decode_int24(normalized, 128)
+            except Exception:
+                # Malformed slot at offset 128 — skip this log, try next.
+                continue
+        return latest_tick
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from Slipstream CL receipt.
@@ -2032,6 +2343,25 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if value is None:
             return ExtractMissing(reason="no Collect or DecreaseLiquidity event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPOpenData"]:
+        """Fail-closed variant of extract_lp_open_data for Slipstream CL.
+
+        Per VIB-3159 / Blueprint 19: callers that need to distinguish
+        "parser crashed" from "no IncreaseLiquidity event present" use this
+        variant. The bare ``extract_lp_open_data`` returns ``None`` on
+        missing event and propagates exceptions unchanged.
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_lp_open_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no IncreaseLiquidity event in receipt")
         return ExtractOk(value=value)
 
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:

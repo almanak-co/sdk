@@ -932,6 +932,358 @@ class TestSlipstreamReceiptParser:
 
 
 # =============================================================================
+# AerodromeSlipstreamReceiptParser.extract_lp_open_data
+# =============================================================================
+
+
+_SLIPSTREAM_NPM_BASE = "0x827922686190790b37229fd06084350e74485b72"
+_SLIPSTREAM_POOL_MINT_TOPIC = (
+    "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"
+)
+
+
+def _slipstream_pool_mint_log(
+    *,
+    tick_lower: int,
+    tick_upper: int,
+    pool: str = POOL,
+    owner: str = _SLIPSTREAM_NPM_BASE,
+    amount: int = 0,
+    amount0: int = 0,
+    amount1: int = 0,
+    log_index: int = 1,
+) -> dict:
+    """Uniswap-V3-style pool Mint event emitted by a Slipstream CL pool.
+
+    Layout:
+        topics = [topic0, owner(indexed), tickLower(indexed int24), tickUpper(indexed int24)]
+        data   = sender(32B) + amount(32B) + amount0(32B) + amount1(32B)
+    """
+
+    def _int24_topic(value: int) -> str:
+        # Sign-extend to 256 bits, then pad to 32 bytes.
+        if value < 0:
+            value = value + (1 << 256)
+        return "0x" + f"{value:064x}"
+
+    return {
+        "address": pool,
+        "topics": [
+            _SLIPSTREAM_POOL_MINT_TOPIC,
+            _addr_topic(owner),
+            _int24_topic(tick_lower),
+            _int24_topic(tick_upper),
+        ],
+        "data": "0x"
+        + _addr_topic(WALLET).removeprefix("0x")  # sender
+        + _pad32(amount)
+        + _pad32(amount0)
+        + _pad32(amount1),
+        "logIndex": log_index,
+    }
+
+
+def _npm_increase_liquidity_log(
+    *,
+    token_id: int,
+    liquidity: int,
+    amount0: int,
+    amount1: int,
+    npm: str = _SLIPSTREAM_NPM_BASE,
+    log_index: int = 2,
+) -> dict:
+    """IncreaseLiquidity event emitted by the Slipstream NPM (address-filtered)."""
+    return {
+        "address": npm,
+        "topics": [
+            EVENT_TOPICS["IncreaseLiquidity"],
+            _addr_topic("0x" + format(token_id, "040x")),
+        ],
+        "data": "0x" + _pad32(liquidity) + _pad32(amount0) + _pad32(amount1),
+        "logIndex": log_index,
+    }
+
+
+def _slipstream_swap_cl_log(
+    *,
+    tick: int,
+    pool: str = POOL,
+    amount0: int = 1,
+    amount1: int = -1,
+    sqrt_price_x96: int = 0,
+    liquidity: int = 0,
+    log_index: int = 0,
+) -> dict:
+    """SwapCL event from a Slipstream pool (Uniswap V3-compatible layout)."""
+
+    def _signed_pad32(v: int) -> str:
+        if v < 0:
+            v = v + (1 << 256)
+        return f"{v:064x}"
+
+    return {
+        "address": pool,
+        "topics": [EVENT_TOPICS["SwapCL"], _addr_topic(WALLET), _addr_topic(WALLET)],
+        "data": "0x"
+        + _signed_pad32(amount0)
+        + _signed_pad32(amount1)
+        + _pad32(sqrt_price_x96)
+        + _pad32(liquidity)
+        + _signed_pad32(tick),
+        "logIndex": log_index,
+    }
+
+
+class TestSlipstreamExtractLpOpenData:
+    def test_full_path_with_pool_mint_and_swap(self) -> None:
+        """Happy path: Pool Mint + IncreaseLiquidity + SwapCL — full LPOpenData."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _slipstream_swap_cl_log(tick=12345),
+            _slipstream_pool_mint_log(tick_lower=-100, tick_upper=100),
+            _npm_increase_liquidity_log(
+                token_id=42, liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.position_id == 42
+        assert out.liquidity == 10**18
+        assert out.amount0 == 1_000_000
+        assert out.amount1 == 5 * 10**14
+        assert out.tick_lower == -100
+        assert out.tick_upper == 100
+        assert out.current_tick == 12345
+        assert out.pool_address == POOL.lower()
+
+    def test_negative_tick_sign_extension(self) -> None:
+        """Pool Mint with negative ticks decodes to signed int24."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-887220, tick_upper=-100),
+            _npm_increase_liquidity_log(
+                token_id=1, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.tick_lower == -887220
+        assert out.tick_upper == -100
+
+    def test_no_increase_liquidity_returns_none(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        assert parser.extract_lp_open_data(_receipt([])) is None
+
+    def test_ignores_increase_from_non_npm_address(self) -> None:
+        """IncreaseLiquidity from an unrelated contract is filtered out."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _npm_increase_liquidity_log(
+                token_id=1, liquidity=1, amount0=1, amount1=1,
+                npm="0x" + "ee" * 20,  # NOT the canonical NPM
+            ),
+        ]
+        assert parser.extract_lp_open_data(_receipt(logs)) is None
+
+    def test_ignores_pool_mint_with_non_npm_owner(self) -> None:
+        """Pool Mint with owner != NPM still yields LPOpenData, but ticks=None."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _slipstream_pool_mint_log(
+                tick_lower=-100, tick_upper=100, owner=WALLET,
+            ),
+            _npm_increase_liquidity_log(
+                token_id=99, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.position_id == 99
+        assert out.tick_lower is None
+        assert out.tick_upper is None
+        assert out.pool_address == ""
+
+    def test_no_swap_event_leaves_current_tick_none(self) -> None:
+        """No SwapCL in the receipt → current_tick=None (framework slot0 fallback)."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-50, tick_upper=50),
+            _npm_increase_liquidity_log(
+                token_id=7, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.current_tick is None
+        assert out.tick_lower == -50
+        assert out.tick_upper == 50
+
+    def test_log_with_object_shape_uses_getattr(self) -> None:
+        """Logs presented as objects (web3 AttributeDict-like) decode via getattr."""
+
+        class _LogObj:
+            def __init__(self, d: dict) -> None:
+                self.topics = d["topics"]
+                self.address = d["address"]
+                self.data = d["data"]
+
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        receipt = {
+            "logs": [
+                _LogObj(_slipstream_pool_mint_log(tick_lower=-200, tick_upper=200)),
+                _LogObj(_npm_increase_liquidity_log(
+                    token_id=11, liquidity=10, amount0=1, amount1=2
+                )),
+            ]
+        }
+        out = parser.extract_lp_open_data(receipt)
+        assert out is not None
+        assert out.position_id == 11
+        assert out.tick_lower == -200
+        assert out.tick_upper == 200
+
+    def test_log_with_bytes_address_decoded(self) -> None:
+        """Logs whose ``address`` field is raw bytes still match the NPM filter."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        npm_bytes = bytes.fromhex(_SLIPSTREAM_NPM_BASE.removeprefix("0x"))
+        increase = _npm_increase_liquidity_log(
+            token_id=22, liquidity=1, amount0=1, amount1=1
+        )
+        # Override address with bytes form
+        increase["address"] = npm_bytes
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-50, tick_upper=50),
+            increase,
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.position_id == 22
+
+    def test_empty_topics_log_skipped(self) -> None:
+        """Logs with empty topics lists are skipped (defensive)."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        empty_log = {"address": _SLIPSTREAM_NPM_BASE, "topics": [], "data": "0x"}
+        logs = [
+            empty_log,
+            _slipstream_pool_mint_log(tick_lower=-10, tick_upper=10),
+            _npm_increase_liquidity_log(
+                token_id=33, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.position_id == 33
+
+    def test_malformed_tokenid_topic_skipped(self) -> None:
+        """A non-hex tokenId topic on an IncreaseLiquidity is skipped (not crashed)."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        bad_log = {
+            "address": _SLIPSTREAM_NPM_BASE,
+            "topics": [EVENT_TOPICS["IncreaseLiquidity"], "0xZZZZNOTHEX"],
+            "data": "0x" + _pad32(1) + _pad32(1) + _pad32(1),
+        }
+        # The bad log is skipped; no good IL follows → return None
+        assert parser.extract_lp_open_data(_receipt([bad_log])) is None
+
+    def test_pool_mint_with_fewer_than_4_topics_skipped(self) -> None:
+        """Pool Mint logs with < 4 topics (malformed) do not crash the parser."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        short_mint = {
+            "address": POOL,
+            "topics": [_SLIPSTREAM_POOL_MINT_TOPIC, _addr_topic(_SLIPSTREAM_NPM_BASE)],
+            "data": "0x",
+        }
+        # The short pool mint is skipped; the IncreaseLiquidity still decodes
+        # but without ticks (last_npm_mint stays None).
+        logs = [
+            short_mint,
+            _npm_increase_liquidity_log(
+                token_id=44, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        out = parser.extract_lp_open_data(_receipt(logs))
+        assert out is not None
+        assert out.position_id == 44
+        assert out.tick_lower is None
+        assert out.tick_upper is None
+
+    def test_unknown_chain_fails_loud(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Unknown chain returns None AND emits the fail-loud warning.
+
+        Asserts both the return value (None) AND the warning content, so a
+        regression that silently swallows the warning still trips this test.
+        """
+        import logging
+
+        parser = AerodromeSlipstreamReceiptParser(chain="optimism")
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-10, tick_upper=10),
+            _npm_increase_liquidity_log(
+                token_id=55, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        with caplog.at_level(
+            logging.WARNING,
+            logger="almanak.framework.connectors.aerodrome.receipt_parser",
+        ):
+            result = parser.extract_lp_open_data(_receipt(logs))
+        # Behavioural contract: no silent default to Base.
+        assert result is None
+        # The warning must name the unsupported chain so an operator can act on it.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("optimism" in r.getMessage() for r in warnings), (
+            f"Expected a WARNING naming 'optimism' but got: "
+            f"{[r.getMessage() for r in warnings]!r}"
+        )
+        assert any("Slipstream NPM not registered" in r.getMessage() for r in warnings), (
+            "Expected the 'Slipstream NPM not registered' fail-loud phrasing in the warning"
+        )
+
+    def test_malformed_increase_liquidity_propagates(self) -> None:
+        """Malformed IncreaseLiquidity payload raises (becomes ExtractError)."""
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        bad = {
+            "address": _SLIPSTREAM_NPM_BASE,
+            "topics": [
+                EVENT_TOPICS["IncreaseLiquidity"],
+                _addr_topic("0x" + format(1, "040x")),
+            ],
+            # Empty data and a non-hex char inside — passes the not-empty check
+            # but fails the uint256 decode.
+            "data": "0xZZ",
+        }
+        result = parser.extract_lp_open_data_result(_receipt([bad]))
+        # Malformed payload → ExtractError, NOT ExtractMissing
+        assert isinstance(result, ExtractError)
+
+    def test_result_wrapper_ok(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        logs = [
+            _slipstream_pool_mint_log(tick_lower=-100, tick_upper=100),
+            _npm_increase_liquidity_log(
+                token_id=1, liquidity=1, amount0=1, amount1=1
+            ),
+        ]
+        result = parser.extract_lp_open_data_result(_receipt(logs))
+        assert isinstance(result, ExtractOk)
+
+    def test_result_wrapper_missing(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        result = parser.extract_lp_open_data_result(_receipt([]))
+        assert isinstance(result, ExtractMissing)
+
+    def test_result_wrapper_crash(self) -> None:
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+
+        def boom(_r: dict) -> None:
+            raise RuntimeError("synthetic")
+
+        parser.extract_lp_open_data = boom  # type: ignore[method-assign]
+        result = parser.extract_lp_open_data_result(_receipt([]))
+        assert isinstance(result, ExtractError)
+
+
+# =============================================================================
 # Resolution helpers — _resolve_token_info, _resolve_decimals
 # =============================================================================
 
