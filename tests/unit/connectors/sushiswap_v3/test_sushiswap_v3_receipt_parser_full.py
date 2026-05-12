@@ -678,11 +678,34 @@ class TestExtractPositionId:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         assert parser.extract_position_id({"logs": []}) is None
 
-    def test_unknown_chain_falls_back_to_arbitrum(self):
-        # Unknown chain → uses arbitrum fallback PM address
+    def test_unknown_chain_fails_loud(self, caplog):
+        """Unknown chain returns None AND emits a fail-loud WARNING.
+
+        Earlier behaviour silently defaulted to the Arbitrum NPM address,
+        which would mis-attribute mints on a real chain and silently break
+        LP accounting. The task spec for the SushiSwap V3 LP extraction work
+        (mirrors AGENTS.md "Fail-loud on unknown chains") inverted that to
+        return None + WARN. The previous assertion of the silent-default
+        behaviour is preserved here as a fail-loud regression test.
+        """
+        import logging
+
         parser = SushiSwapV3ReceiptParser(chain="unknown_chain")
         receipt = _make_receipt([_make_erc721_mint_log(chain="arbitrum")])
-        assert parser.extract_position_id(receipt) == NFT_TOKEN_ID
+        with caplog.at_level(
+            logging.WARNING,
+            logger="almanak.framework.connectors.sushiswap_v3.receipt_parser",
+        ):
+            result = parser.extract_position_id(receipt)
+        assert result is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("unknown_chain" in r.getMessage() for r in warnings), (
+            f"Expected a WARNING naming 'unknown_chain' but got "
+            f"{[r.getMessage() for r in warnings]!r}"
+        )
+        assert any(
+            "SushiSwap V3 NPM not registered" in r.getMessage() for r in warnings
+        ), "Expected the fail-loud 'SushiSwap V3 NPM not registered' phrasing"
 
     def test_wrong_contract_skipped(self):
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")

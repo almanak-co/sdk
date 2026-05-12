@@ -40,9 +40,19 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 from almanak.framework.execution.events import SwapResultPayload
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import (
+        LPCloseData,
+        LPOpenData,
+        SwapAmounts,
+    )
 from almanak.framework.utils.log_formatters import (
     format_gas_cost,
     format_slippage_bps,
@@ -64,6 +74,15 @@ EVENT_TOPICS: dict[str, str] = {
     "Flash": "0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+    # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId,
+    # uint128 liquidity, uint256 amount0, uint256 amount1) — identical to the
+    # Uniswap V3 NPM event (Sushi V3 is a fork). Used by ``extract_lp_open_data``
+    # to recover (tokenId, liquidity, amount0, amount1) from an LP_OPEN receipt.
+    "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+    # NonfungiblePositionManager.DecreaseLiquidity — emitted on LP_CLOSE.
+    # Kept alongside IncreaseLiquidity for parity with the Uniswap V3 baseline
+    # (registry-mode close-side identity hash, VIB-4198/T12).
+    "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
 }
 
 
@@ -86,17 +105,38 @@ def _normalize_topic(topic: str | bytes) -> str:
     return topic
 
 
-# SushiSwap V3 NonfungiblePositionManager addresses per chain
-POSITION_MANAGER_ADDRESSES: dict[str, str] = {
-    "ethereum": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
-    "arbitrum": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
-    "base": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
-    "polygon": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
-    "avalanche": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
-    "bsc": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
-    "bnb": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
-    "optimism": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
-}
+# SushiSwap V3 NonfungiblePositionManager addresses, sourced from the
+# canonical contracts registry (single source of truth — ``SUSHISWAP_V3`` in
+# ``almanak/core/contracts.py``). Adding a new chain is a one-line change in
+# ``contracts.py`` and this dict rebuilds automatically at import time.
+def _build_sushiswap_v3_npm_addresses() -> dict[str, str]:
+    """Build {chain: position_manager} from the canonical SUSHISWAP_V3 registry.
+
+    Mirrors the pattern Aerodrome Slipstream uses for its NPM dict (PR #2241)
+    — keeps the parser in lock-step with the rest of the connector (SDK,
+    adapter, compiler) and removes the risk of an address drift when a new
+    chain is added to ``contracts.SUSHISWAP_V3`` but forgotten in the parser.
+
+    The ``bsc`` entry in the canonical registry is aliased as ``bnb`` here
+    because the framework uses ``bnb`` as the chain key on intent
+    construction; both are accepted to avoid a silent miss on either spelling.
+    """
+    from almanak.core.contracts import SUSHISWAP_V3
+
+    out: dict[str, str] = {}
+    for chain, entry in SUSHISWAP_V3.items():
+        pm = entry.get("position_manager")
+        if pm:
+            out[chain.lower()] = pm.lower()
+    # Framework canonical chain key for Binance Smart Chain is ``bnb``; the
+    # contracts registry uses ``bsc``. Alias the two so a receipt parsed with
+    # either key resolves the same address.
+    if "bsc" in out and "bnb" not in out:
+        out["bnb"] = out["bsc"]
+    return out
+
+
+POSITION_MANAGER_ADDRESSES: dict[str, str] = _build_sushiswap_v3_npm_addresses()
 
 # Zero address for detecting mints (ERC-721 Transfer from address(0))
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -958,11 +998,19 @@ class SushiSwapV3ReceiptParser:
             if not logs:
                 return None
 
-            # Get position manager address for this chain
-            position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+            # Get position manager address for this chain. Fail loud when the
+            # chain isn't registered rather than silently defaulting to a
+            # different chain's NPM — a stale default would mis-attribute
+            # every NFT mint and silently return None for the real position.
+            chain_key = (self.chain or "").lower()
+            position_manager = POSITION_MANAGER_ADDRESSES.get(chain_key)
             if not position_manager:
-                # Fall back to Arbitrum address
-                position_manager = "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49".lower()
+                logger.warning(
+                    "SushiSwap V3 NPM not registered for chain %r — extend "
+                    "almanak.core.contracts.SUSHISWAP_V3[<chain>]['position_manager']",
+                    chain_key,
+                )
+                return None
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
 
@@ -1356,20 +1404,333 @@ class SushiSwapV3ReceiptParser:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
 
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:  # noqa: C901
+        """Extract LP open data from a SushiSwap V3 mint receipt.
+
+        Looks for ``IncreaseLiquidity`` events emitted by the SushiSwap V3
+        NonfungiblePositionManager when an LP position is opened or topped up.
+        The event signature is::
+
+            IncreaseLiquidity(
+                uint256 indexed tokenId,
+                uint128 liquidity,
+                uint256 amount0,
+                uint256 amount1,
+            )
+
+        SushiSwap V3 is a clean Uniswap V3 fork, so the surrounding receipt
+        shape is identical: the V3 pool emits a ``Mint`` event right before
+        the NPM ``IncreaseLiquidity``; we track the most recent NPM-owned
+        Pool Mint to recover tick bounds and pool address, then read the
+        post-swap current tick from a Pool ``Swap`` event in the same receipt.
+
+        Behaviour contract (matches the Uniswap V3 baseline parser):
+
+        - Returns ``LPOpenData`` populated with the raw on-chain ints
+          (``position_id``, ``liquidity``, ``amount0``, ``amount1``).
+          The accounting handler is responsible for decimal-scaling.
+        - Returns ``None`` (and emits a WARNING) when ``self.chain`` is not
+          registered in ``SUSHISWAP_V3`` — does NOT silently default.
+        - Returns ``None`` when no ``IncreaseLiquidity`` log is present in
+          a receipt from a registered chain.
+        - No outer ``try/except`` — the fail-closed variant
+          ``extract_lp_open_data_result`` distinguishes parser crash vs.
+          missing event per VIB-3159 / Blueprint 19.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``LPOpenData`` if an ``IncreaseLiquidity`` event is present,
+            ``None`` otherwise.
+        """
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        # No outer ``try/except Exception`` here. The fail-closed variant
+        # ``extract_lp_open_data_result`` is the documented entry point for
+        # callers that need parser-crash vs. event-missing disambiguation
+        # (VIB-3159 / Blueprint 19). A blanket-catch in this method would
+        # collapse "parser crashed on a malformed receipt" into "no event
+        # present" and re-introduce the ghost-position class of bug.
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+
+        chain_key = (self.chain or "").lower()
+        npm_address = POSITION_MANAGER_ADDRESSES.get(chain_key)
+        if not npm_address:
+            # Fail loud on unsupported chains rather than defaulting to any
+            # specific chain. A silent fallback would mis-attribute logs once
+            # SushiSwap V3 ships on a chain we haven't registered — the
+            # parser's address-filter would reject every IncreaseLiquidity
+            # from the real NPM, silently returning ``None`` and breaking
+            # LP accounting end-to-end.
+            logger.warning(
+                "SushiSwap V3 NPM not registered for chain %r — extend "
+                "almanak.core.contracts.SUSHISWAP_V3[<chain>]['position_manager']",
+                chain_key,
+            )
+            return None
+
+        increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
+        mint_topic = EVENT_TOPICS["Mint"].lower()
+
+        # Track the most recent Pool Mint whose ``owner`` indexed topic
+        # equals the NPM. The next matching IncreaseLiquidity claims ITS
+        # ticks (and pool address) — a multi-position bundle won't
+        # cross-contaminate.
+        last_npm_mint: dict[str, Any] | None = None
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+                data = log.get("data", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+                data = getattr(log, "data", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if not topics:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            # Track the most recent Pool Mint emitted with owner == NPM.
+            if first_topic == mint_topic and len(topics) >= 4:
+                if self._mint_owner_matches_npm(topics, npm_address):
+                    last_npm_mint = log
+                continue
+
+            if address != npm_address:
+                continue
+
+            if len(topics) < 2:
+                continue
+
+            if first_topic != increase_topic:
+                continue
+
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+
+            try:
+                token_id = int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                # Malformed indexed topic on an otherwise-matched event is
+                # a known shape we want to skip-not-crash; the next log
+                # might be a legitimate match.
+                continue
+
+            normalized = HexDecoder.normalize_hex(data)
+            if not normalized or normalized == "0x":
+                continue
+
+            # IncreaseLiquidity data layout: liquidity (uint128, left-padded
+            # to 32 bytes), amount0 (uint256), amount1 (uint256). Each field
+            # starts on a 32-byte boundary.
+            liquidity = HexDecoder.decode_uint128(normalized, 0)
+            amount0 = HexDecoder.decode_uint256(normalized, 32)
+            amount1 = HexDecoder.decode_uint256(normalized, 64)
+
+            tick_lower, tick_upper = self._ticks_from_pool_mint(last_npm_mint)
+
+            pool_address = ""
+            if last_npm_mint is not None:
+                addr_attr = (
+                    last_npm_mint.get("address")
+                    if hasattr(last_npm_mint, "get")
+                    else getattr(last_npm_mint, "address", "")
+                )
+                if isinstance(addr_attr, bytes):
+                    addr_attr = "0x" + addr_attr.hex()
+                pool_address = str(addr_attr).lower()
+
+            current_tick = self._current_tick_from_swap_event(logs, pool_address)
+
+            logger.info(
+                f"Extracted SushiSwap V3 LP open data: tokenId={token_id} "
+                f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
+                f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
+            )
+            return LPOpenData(
+                position_id=token_id,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                liquidity=liquidity,
+                amount0=amount0,
+                amount1=amount1,
+                current_tick=current_tick,
+                pool_address=pool_address,  # VIB-3893: framework slot0 fallback
+            )
+
+        return None
+
+    @staticmethod
+    def _mint_owner_matches_npm(topics: list[Any], npm_address: str) -> bool:
+        """Return True iff the Pool Mint event's ``owner`` indexed topic == NPM.
+
+        SushiSwap V3 Pool ``Mint`` event signature::
+
+            Mint(address sender, address indexed owner, int24 indexed tickLower,
+                 int24 indexed tickUpper, uint128 amount, uint256 amount0,
+                 uint256 amount1)
+
+        ``owner`` is the second topic (after topic0). Indexed addresses
+        are right-aligned in a 32-byte topic; compare the low 40 hex chars.
+        """
+        if len(topics) < 2:
+            return False
+        owner_topic = topics[1]
+        if isinstance(owner_topic, bytes):
+            owner_topic = "0x" + owner_topic.hex()
+        owner_topic = str(owner_topic).lower()
+        try:
+            owner_addr = "0x" + owner_topic.removeprefix("0x").rjust(64, "0")[-40:]
+        except Exception:
+            return False
+        return owner_addr == npm_address.lower()
+
+    @staticmethod
+    def _ticks_from_pool_mint(mint_log: dict[str, Any] | None) -> tuple[int | None, int | None]:
+        """Decode (tickLower, tickUpper) from a SushiSwap V3 Pool Mint log.
+
+        ``Mint(address sender, address indexed owner, int24 indexed tickLower,
+               int24 indexed tickUpper, uint128 amount, uint256 amount0,
+               uint256 amount1)`` — ticks live at topics[2] and topics[3] as
+        indexed int24 values right-padded into 32-byte topics.
+
+        Returns ``(None, None)`` when the mint log is absent or has fewer than
+        4 topics (defensive: malformed shapes do not crash the parser).
+        """
+        if mint_log is None:
+            return (None, None)
+        topics = mint_log.get("topics", []) if hasattr(mint_log, "get") else getattr(mint_log, "topics", [])
+        if len(topics) < 4:
+            return (None, None)
+
+        def _decode(topic: Any) -> int | None:
+            if isinstance(topic, bytes):
+                topic = "0x" + topic.hex()
+            try:
+                # int24 sign-extension. HexDecoder.decode_int24 handles
+                # two's-complement; raw int(...) would return the unsigned
+                # value for negative ticks.
+                return HexDecoder.decode_int24(str(topic), 0)
+            except Exception:
+                return None
+
+        return (_decode(topics[2]), _decode(topics[3]))
+
+    @staticmethod
+    def _current_tick_from_swap_event(logs: list[Any], pool_address: str) -> int | None:
+        """Find a Swap event from ``pool_address`` and decode its post-swap tick.
+
+        VIB-3887 (Uniswap V3 baseline). The Uniswap V3 / SushiSwap V3 Pool
+        Swap event signature is::
+
+            event Swap(address indexed sender, address indexed recipient,
+                       int256 amount0, int256 amount1, uint160 sqrtPriceX96,
+                       uint128 liquidity, int24 tick)
+
+        Layout: topics[0] = signature, topics[1] = sender, topics[2] =
+        recipient. The non-indexed payload in ``data`` is
+        ``amount0 (32) | amount1 (32) | sqrtPriceX96 (32) | liquidity (32)
+        | tick (32, int24 right-aligned)``. The tick lives at byte offset 128.
+
+        Returns ``None`` when no matching Swap is present (e.g. a pure
+        NPM.mint LP_OPEN with pre-balanced inputs) — caller leaves
+        ``current_tick=None`` and the framework's slot0 fallback kicks in.
+        """
+        if not pool_address:
+            return None
+        swap_topic = SWAP_EVENT_TOPIC.lower()
+        pool_addr_lower = pool_address.lower()
+        latest_swap_log: Any = None
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            if str(address).lower() != pool_addr_lower:
+                continue
+            if not topics:
+                continue
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            if str(first_topic).lower() != swap_topic:
+                continue
+            latest_swap_log = log  # later swaps override (post-swap tick is the live one)
+
+        if latest_swap_log is None:
+            return None
+        data = (
+            latest_swap_log.get("data", "") if hasattr(latest_swap_log, "get") else getattr(latest_swap_log, "data", "")
+        )
+        if isinstance(data, bytes):
+            data = "0x" + data.hex()
+        try:
+            normalized = HexDecoder.normalize_hex(str(data))
+            if not normalized or normalized == "0x":
+                return None
+            # tick is the 5th 32-byte slot in the data payload (offset 128).
+            return HexDecoder.decode_int24(normalized, 128)
+        except Exception:
+            return None
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from transaction receipt.
 
-        Looks for Collect events from SushiSwap V3 pools which indicate
-        fees and principal being collected when closing/reducing a position.
+        Looks for Collect and/or Burn events from SushiSwap V3 pools which
+        indicate fees and principal being collected when closing or reducing
+        a position. The compiler emits LP_CLOSE as a 3-TX bundle on Sushi V3
+        (``lp_decrease_liquidity`` + ``lp_collect`` + ``lp_burn``), so a
+        single receipt typically carries EITHER Burn (decrease tx) OR
+        Collect (collect tx), not both — the runner's
+        :meth:`_extract_receipt_from_result` picks one and asks the parser
+        for whatever it can recover from it. Mirrors the Uniswap V3 baseline
+        contract.
 
         Collect event: Collect(address indexed owner, int24 indexed tickLower,
                                int24 indexed tickUpper, uint128 amount0, uint128 amount1)
+
+        Burn event: Burn(address indexed owner, int24 indexed tickLower,
+                         int24 indexed tickUpper, uint128 amount,
+                         uint256 amount0, uint256 amount1)
+
+        Captures ``pool_address`` from the Burn event's emitter (the V3 pool)
+        — required for the framework's slot0 fallback (VIB-3940) and for the
+        registry-mode close payload (VIB-4198 / T12) whose
+        ``physical_identity_hash`` / ``semantic_grouping_key`` derivation
+        needs the pool address.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LPCloseData dataclass if Collect event found, None otherwise
+            LPCloseData dataclass if at least one Collect or Burn event is
+            present, None otherwise. ``amount0_collected`` / ``amount1_collected``
+            prefer Collect amounts when available; fall back to Burn's
+            principal-only amounts when the receipt only carries a Burn (the
+            ``lp_decrease_liquidity`` TX in a Sushi 3-TX close bundle).
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
@@ -1381,9 +1742,20 @@ class SushiSwapV3ReceiptParser:
             collect_topic = EVENT_TOPICS["Collect"].lower()
             burn_topic = EVENT_TOPICS["Burn"].lower()
 
-            total_amount0 = 0
-            total_amount1 = 0
-            liquidity_removed = None
+            collect_amount0 = 0
+            collect_amount1 = 0
+            burn_amount0 = 0
+            burn_amount1 = 0
+            burn_liquidity_total = 0
+            saw_collect = False
+            saw_burn = False
+            # VIB-4198 / T12: capture pool address from the Burn event emitter
+            # (the V3 pool itself emits Burn). Empty when no Burn is present
+            # — bare ``collect()`` fee-harvests don't reveal the pool in the
+            # current log shape. The registry-payload close-path treats an
+            # empty pool_address as "fall back to save_ledger_entry", per
+            # CLAUDE.md "Empty ≠ zero".
+            pool_address = ""
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1403,30 +1775,358 @@ class SushiSwapV3ReceiptParser:
                     # Collect(address indexed owner, address recipient, int24 indexed tickLower,
                     #         int24 indexed tickUpper, uint128 amount0, uint128 amount1)
                     # data layout: recipient (offset 0), amount0 (offset 32), amount1 (offset 64)
-                    amount0 = HexDecoder.decode_uint128(data, 32)
-                    amount1 = HexDecoder.decode_uint128(data, 64)
-                    total_amount0 += amount0
-                    total_amount1 += amount1
+                    collect_amount0 += HexDecoder.decode_uint128(data, 32)
+                    collect_amount1 += HexDecoder.decode_uint128(data, 64)
+                    saw_collect = True
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # Burn event - liquidity being removed
                     # data: amount (uint128), amount0 (uint256), amount1 (uint256)
-                    liquidity_removed = HexDecoder.decode_uint128(data, 0)
+                    burn_liquidity_total += HexDecoder.decode_uint128(data, 0)
+                    burn_amount0 += HexDecoder.decode_uint256(data, 32)
+                    burn_amount1 += HexDecoder.decode_uint256(data, 64)
+                    saw_burn = True
+                    if not pool_address:
+                        # Burn is emitted by the pool itself — its emitter
+                        # address IS the pool. Capture once on the first
+                        # Burn we see; subsequent Burns in a multicall close
+                        # should be the same pool.
+                        addr = log.get("address", "")
+                        if isinstance(addr, bytes):
+                            addr = "0x" + addr.hex()
+                        if addr:
+                            pool_address = str(addr).lower()
 
-            if total_amount0 > 0 or total_amount1 > 0:
-                return LPCloseData(
-                    amount0_collected=total_amount0,
-                    amount1_collected=total_amount1,
-                    fees0=0,  # SushiSwap V3 doesn't separate fees in events
-                    fees1=0,
-                    liquidity_removed=liquidity_removed,
-                )
+            if not (saw_collect or saw_burn):
+                return None
 
-            return None
+            liquidity_removed = burn_liquidity_total if saw_burn else None
+
+            # principal = burn amounts; fees = collect - burn when both are
+            # in the same receipt (UV3 single-TX close path), clamped at
+            # zero. On Sushi V3 the 3-TX bundle splits Burn and Collect into
+            # separate receipts; a Burn-only receipt yields fees={0,0}, a
+            # Collect-only receipt yields full collect as ``amount{0,1}_collected``
+            # (we cannot disentangle without the burn).
+            fees0 = max(collect_amount0 - burn_amount0, 0) if (saw_collect and saw_burn) else 0
+            fees1 = max(collect_amount1 - burn_amount1, 0) if (saw_collect and saw_burn) else 0
+
+            return LPCloseData(
+                amount0_collected=collect_amount0 if saw_collect else burn_amount0,
+                amount1_collected=collect_amount1 if saw_collect else burn_amount1,
+                fees0=fees0,
+                fees1=fees1,
+                liquidity_removed=liquidity_removed,
+                pool_address=pool_address,  # VIB-4198 / T12 — registry-mode close
+            )
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
+
+    # =============================================================================
+    # Registry payload extraction — VIB-4198 (T12) SushiSwap V3 LP cutover
+    # =============================================================================
+    #
+    # SushiSwap V3 is a clean Uniswap V3 fork. The registry payload shape is
+    # identical to the UniV3 baseline (PRD §Registry Data Shape + T08 golden
+    # contract), and so are the shape-only helpers
+    # (``_open_payload_disagrees``, ``_build_close_receipt_payload``,
+    # ``_merge_open_payload_fields``). We import-and-reuse those helpers from
+    # ``almanak.framework.connectors.uniswap_v3.receipt_parser`` rather than
+    # duplicating ~150 LoC of data-shape glue across forks — duplication
+    # would let the two forks drift on Audit M1 cross-check semantics and on
+    # the T08 contract.
+    #
+    # Sushi-specific bits (NPM address dict and DecreaseLiquidity emitter
+    # filter) stay here because they depend on Sushi's NPM addresses, NOT
+    # Uniswap's — the two forks deploy distinct NonfungiblePositionManagers
+    # on every chain (e.g. Arbitrum: UV3 = 0xC36442b4..., Sushi V3 =
+    # 0x2214A42d...).
+
+    def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
+        """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side
+        receipt.
+
+        The SushiSwap V3 NPM emits ``DecreaseLiquidity(uint256 indexed
+        tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)`` on
+        every ``decreaseLiquidity()`` call (event signature is identical to
+        Uniswap V3 — Sushi V3 is a clean fork). ``topics[1]`` is the
+        indexed tokenId. Returns ``None`` if no such log is in the receipt
+        or the emitter doesn't match the configured chain's Sushi NPM —
+        the close-side identity is then derivable only from strategy-supplied
+        state, which is the legacy path the registry cutover replaces.
+        T12's caller treats ``None`` as "fall back to ``accounting_only``"
+        with an INFO log; no ``Decimal("0")`` substitution.
+        """
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+
+        decrease_topic = EVENT_TOPICS["DecreaseLiquidity"].lower()
+        position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+        if not position_manager:
+            # Unknown chain — refuse rather than guess. Mirrors the
+            # ``extract_lp_open_data`` fail-loud contract above.
+            return None
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if not topics or len(topics) < 2:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            if first_topic != decrease_topic:
+                continue
+            if address != position_manager:
+                continue
+
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+            try:
+                return int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def _nft_manager_address(self) -> str:
+        """Return the canonical Sushi V3 NPM address for ``self.chain``, lowercased.
+
+        The address is part of the ``physical_identity_hash`` input tuple
+        (per T08 invariant #1). It is a parser-side configuration constant
+        — NOT an off-chain RPC call — so the hash stays receipt-derivable
+        from the receipt + parser config alone. Returns the empty string
+        on unsupported chains rather than falling back to the Uniswap V3
+        NPM (which is a different deployment); the caller treats empty as
+        a path-applicability miss.
+        """
+        return POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+
+    def extract_registry_payload_open(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_OPEN ``position_registry.payload`` dict for Sushi V3.
+
+        Reads :meth:`extract_lp_open_data` and composes the 8-key (or 11-key
+        with ``fee_tier`` + token labels) shape ratified by PRD §Registry
+        Data Shape and the T08 golden. Returns ``None`` when any of the
+        load-bearing identity fields are missing — the caller treats that
+        as "fall back to accounting_only", per CLAUDE.md "Empty ≠ zero" (a
+        zero-substituted ``token_id`` would silently corrupt the
+        ``physical_identity_hash``).
+
+        Args:
+            receipt: Transaction receipt dict with ``logs`` field.
+            fee_tier: Optional pool fee tier (e.g. ``3000`` for 0.3%);
+                forwarded from the intent's compile-time metadata. ``None``
+                when unknown — the payload key stays absent rather than
+                substituting ``0``.
+
+        Returns:
+            ``dict`` JSON-serializable with the canonical keys, OR
+            ``None`` when the LP_OPEN data isn't extractable.
+        """
+        lp_data = self.extract_lp_open_data(receipt)
+        if lp_data is None:
+            return None
+        if lp_data.position_id is None or lp_data.position_id <= 0:
+            # token_id is the identity anchor; a zero/negative value would
+            # corrupt physical_identity_hash. Refuse to build the payload.
+            return None
+        if not lp_data.pool_address:
+            # pool_address is the semantic_grouping_key anchor; missing it
+            # would let two un-grouped rows in the same pool collide on
+            # ix_registry_auto_mode. Refuse rather than emit a partial row.
+            return None
+        if lp_data.tick_lower is None or lp_data.tick_upper is None:
+            # Range is part of the position's economic identity; missing
+            # ticks would let teardown / rebalancing read malformed bounds.
+            return None
+        if lp_data.liquidity is None:
+            return None
+
+        nft_manager_addr = self._nft_manager_address()
+        if not nft_manager_addr:
+            # Sushi NPM not registered for this chain — refuse rather than
+            # forge an identity tuple. The runner will fall back.
+            return None
+
+        payload: dict[str, Any] = {
+            "token_id": str(lp_data.position_id),
+            "pool_address": lp_data.pool_address.lower(),
+            "tick_lower": lp_data.tick_lower,
+            "tick_upper": lp_data.tick_upper,
+            "liquidity": str(lp_data.liquidity),
+            "amount0": str(lp_data.amount0) if lp_data.amount0 is not None else None,
+            "amount1": str(lp_data.amount1) if lp_data.amount1 is not None else None,
+            "nft_manager_addr": nft_manager_addr,
+        }
+        if fee_tier is not None and fee_tier > 0:
+            payload["fee_tier"] = int(fee_tier)
+        if self.token0_symbol:
+            payload["_token0_label"] = self.token0_symbol
+        if self.token1_symbol:
+            payload["_token1_label"] = self.token1_symbol
+        return payload
+
+    def extract_registry_payload_close(
+        self,
+        receipt: dict[str, Any],
+        *,
+        open_payload: dict[str, Any] | None = None,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_CLOSE ``position_registry.payload`` dict for Sushi V3.
+
+        Mirrors the Uniswap V3 baseline (the shape contract is identical —
+        Sushi V3 is a clean fork). Reads :meth:`extract_lp_close_data` and
+        the close-side ``DecreaseLiquidity`` event for the NFT ``token_id``,
+        then composes the 13-key shape that the T08 ``lp_close``
+        ``expected_registry_row.json`` golden specifies.
+
+        Audit M1 (CodeRabbit) contract: a real LP_CLOSE proves itself with
+        DecreaseLiquidity on the receipt AND a Burn log carrying the pool
+        address. A Collect-only receipt is NOT a close — it's a fee
+        harvest. If we silently synthesized ``token_id`` / ``pool_address``
+        from ``open_payload`` here, a malformed or fee-only close would
+        produce a "successful" close payload with stale OPEN-side anchors,
+        and the registry would mark a still-open NFT as closed (cutover
+        spec D3.F6 silent-error class).
+
+        The flow is:
+
+        1. Decode close-side events (:meth:`extract_lp_close_data`) and the
+           DecreaseLiquidity log (:meth:`_decreaseliquidity_token_id`).
+        2. Verify the receipt-derived identity anchors are present and
+           non-zero.
+        3. Cross-check against ``open_payload`` if supplied — refuse on
+           any disagreement (Uniswap V3's ``_open_payload_disagrees``).
+        4. Compose the receipt-only payload (Uniswap V3's
+           ``_build_close_receipt_payload``).
+        5. Merge OPEN-time fields the close receipt cannot re-derive
+           (Uniswap V3's ``_merge_open_payload_fields``) — ticks,
+           OPEN-time amounts, original mint liquidity, fee tier, token
+           labels.
+        6. Apply the ``fee_tier`` argument if ``open_payload`` didn't
+           carry one (``setdefault`` semantics — OPEN-side wins).
+
+        Returns ``None`` when the close-side identity anchors (token_id +
+        pool_address) cannot be derived OR cross-checks fail. The caller
+        treats that as "fall back to accounting_only" with an INFO log
+        (no zero substitution).
+        """
+        # Import the shape-only helpers from the Uniswap V3 baseline.
+        # Sushi V3 is a clean fork — the data-shape contract is identical,
+        # and duplicating these helpers would let Sushi drift from the
+        # T08 golden and Audit M1 semantics on every Uniswap V3 update.
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            UniswapV3ReceiptParser,
+        )
+
+        lp_close = self.extract_lp_close_data(receipt)
+        if lp_close is None:
+            return None
+        token_id = self._decreaseliquidity_token_id(receipt)
+        if token_id is None or token_id <= 0:
+            return None
+        pool_address = (lp_close.pool_address or "").lower()
+        if not pool_address:
+            return None
+        if UniswapV3ReceiptParser._open_payload_disagrees(
+            open_payload=open_payload,
+            token_id=token_id,
+            pool_address=pool_address,
+        ):
+            return None
+
+        nft_manager_addr = self._nft_manager_address()
+        if not nft_manager_addr:
+            # Sushi NPM not registered for this chain — but if we reached
+            # this point ``_decreaseliquidity_token_id`` already required
+            # the NPM to match an emitted log, so this is defensive only.
+            return None
+
+        payload = UniswapV3ReceiptParser._build_close_receipt_payload(
+            token_id=token_id,
+            pool_address=pool_address,
+            lp_close=lp_close,
+            nft_manager_addr=nft_manager_addr,
+        )
+        UniswapV3ReceiptParser._merge_open_payload_fields(payload, open_payload)
+        if fee_tier is not None and fee_tier > 0:
+            payload.setdefault("fee_tier", int(fee_tier))
+        return payload
+
+    # =============================================================================
+    # Fail-closed result variants (VIB-3159 / Blueprint 19)
+    # =============================================================================
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash.
+
+        Returns ``None`` when parsing succeeded (caller should proceed), or an
+        ``ExtractError`` variant when it did not. This is the strict
+        counterpart to the legacy ``extract_*`` methods, which silently
+        swallow exceptions and return ``None`` — making the "benign missing"
+        and "crashed parsing" cases indistinguishable (VIB-3159).
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPOpenData]:
+        """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.
+
+        Distinguishes "no IncreaseLiquidity event" (benign — e.g. LP_OPEN
+        that failed mid-bundle) from "parser crashed". Both are returned
+        as ``None`` by the legacy method, which forces the enricher to
+        treat genuine parse failures as missing data — exactly the
+        ghost-position class of bug VIB-3159 addresses.
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            logs = receipt.get("logs", [])
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not logs:
+            return ExtractMissing(reason="no logs in receipt")
+        try:
+            value = self.extract_lp_open_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no IncreaseLiquidity event from SushiSwap V3 position manager")
+        return ExtractOk(value=value)
 
     # Backward compatibility methods
     def is_sushiswap_event(self, topic: str | bytes) -> bool:

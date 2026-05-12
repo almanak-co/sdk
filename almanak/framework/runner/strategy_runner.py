@@ -2408,6 +2408,18 @@ class StrategyRunner:
                 )
 
                 return receipt, AerodromeSlipstreamReceiptParser(chain=chain)
+            if protocol_norm == "sushiswap_v3":
+                # SushiSwap V3's NPM lives at a distinct address per chain
+                # (e.g. Arbitrum: 0xf0cbce1942... vs UV3's 0xC36442b4...).
+                # The UV3 parser would filter every Sushi IncreaseLiquidity /
+                # DecreaseLiquidity log out by NPM-address and silently emit
+                # "no payload extractable" — same mode-skip pattern VIB-4305
+                # caught for Slipstream. Route to the Sushi-specific parser.
+                from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+                    SushiSwapV3ReceiptParser,
+                )
+
+                return receipt, SushiSwapV3ReceiptParser(chain=chain)
             from almanak.framework.connectors.uniswap_v3.receipt_parser import (
                 UniswapV3ReceiptParser,
             )
