@@ -245,12 +245,21 @@ from almanak.framework.intents import Intent
 
 ### Reserved fields on every intent
 
-`Intent.registry_handle` (added on `BaseIntent` by VIB-4192 / T06b) is a reserved opaque
-field that the runner uses to thread the open position's handle through ADJUST / CLOSE
-intents. **Strategy authors should not set it manually** — the runner extracts it from
-the prior open's result and passes it through. Synthesising a handle by hand bypasses
-the position-registry dedup invariant and will fail at `save_ledger_and_registry`. See
-`../../../blueprints/28-position-registry.md` for the contract.
+`Intent.registry_handle` (added on `BaseIntent` by VIB-4192 / T06b; factory ergonomics
+lifted by VIB-4285) is an optional opaque field that disambiguates multiple positions on
+the same `(primitive, semantic_group)`.
+
+- **Single-position strategies** (the common case): leave it unset. The runner threads
+  the auto-assigned handle through ADJUST / CLOSE intents from the prior open's result.
+- **Multi-position strategies** (e.g. two LP legs on the same pool): pass an explicit
+  per-leg handle on every OPEN so the auto-mode collision guard (`ix_registry_auto_mode`
+  partial unique index) does not reject the second open. Example:
+  `Intent.lp_open(..., registry_handle="hedge_leg_long")`.
+
+Synthesising a handle that does not match the prior open will fail at
+`save_ledger_and_registry` with `RegistryAutoCollisionError`. See
+`../../../blueprints/28-position-registry.md` §3.5 and §6 anti-pattern #13 for the
+contract.
 
 ### Not-yet-implemented IntentType values (fail-fast at compile time)
 

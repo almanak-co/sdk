@@ -8,18 +8,19 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 20 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, and accounting outbox |
+| StateService | 27 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
 | IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
-| DashboardService | 15 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, and trade tape |
+| DashboardService | 16 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, and activity feed |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
 | LifecycleService | 6 | Agent state management, heartbeat, and commands |
+| PositionService | 1 | Position registry reconciliation against on-chain truth (T24 / VIB-4210) |
 
 ## Health
 
@@ -409,6 +410,96 @@ Mark an outbox entry as processed, failed, or retry-pending.
 
 ```protobuf
 rpc UpdateOutboxEntry(UpdateOutboxEntryRequest) returns (UpdateOutboxEntryResponse)
+```
+
+### SaveLedgerAndRegistry
+
+Atomic single-transaction commit of `transaction_ledger`, `position_registry`, and (when
+supplied) the position handle mapping. Replaces the legacy `SaveLedgerEntry` →
+`SavePositionEvent` sequence with a single atomic write so a gateway crash between rows
+cannot orphan a registry handle or strand a phantom position (GH bug #2130).
+
+**Wire `mode` field** (`SaveLedgerAndRegistryRequest.mode`):
+
+| Wire value | Behavior |
+|---|---|
+| `""` (proto3 default) | Equivalent to `"commit"`. Backwards-compatible for clients that don't set the field. |
+| `"commit"` | Full atomic three-write: ledger INSERT + registry UPSERT + handle backfill. |
+| `"registry_reconciliation"` | Registry UPSERT + handle backfill only — **ledger is NOT touched**. Used exclusively by `PositionService.Reconcile` when `apply=true`. Writing a synthesized ledger row on this path would pollute the immutable intent history (reconciliation discovers chain-only positions with no corresponding intent). |
+
+Any other value (including the framework-side `CommitMode` Literal values
+`"accounting_only"` and `"registry"`) is rejected with `INVALID_ARGUMENT`. The Python
+framework wrapper (`almanak/framework/accounting/commit.py:save_ledger_and_registry`)
+exposes a higher-level `CommitMode = Literal["accounting_only", "registry",
+"registry_reconciliation"]` API where `"accounting_only"` is routed through
+`SaveLedgerEntry` instead and `"registry"` is translated to the wire's `"commit"`.
+
+Ticket: VIB-4197 (local SQLite) / VIB-4205 / T19 (hosted Postgres) / VIB-4210 / T24
+(reconciliation mode). See Blueprint 28 §4.
+
+```protobuf
+rpc SaveLedgerAndRegistry(SaveLedgerAndRegistryRequest) returns (SaveLedgerAndRegistryResponse)
+```
+
+### UpsertMigrationState
+
+Insert or update the `migration_state` row for a `(deployment_id, primitive, cutover_key)`
+tuple. Drives the registry-mode cutover boot guard (Blueprint 06 §"Migration State Table").
+Part of T22 / VIB-4208 (SQLite half).
+
+```protobuf
+rpc UpsertMigrationState(UpsertMigrationStateRequest) returns (UpsertMigrationStateResponse)
+```
+
+### GetMigrationState
+
+Read the current `migration_state` row for a `(deployment_id, primitive, cutover_key)`.
+Returns `null` when no row exists — interpreted as "cutover not yet deployed for this
+surface" (raises `RegistryCutoverNotDeployedError` at boot if `mode='registry'` write is
+attempted).
+
+```protobuf
+rpc GetMigrationState(GetMigrationStateRequest) returns (GetMigrationStateResponse)
+```
+
+### UpdateMigrationState
+
+Partial-update of a `migration_state` row (e.g. recording backfill progress, watermarks).
+Distinct from `MarkBackfillComplete` which is the terminal one-shot flip.
+
+```protobuf
+rpc UpdateMigrationState(UpdateMigrationStateRequest) returns (UpdateMigrationStateResponse)
+```
+
+### MarkBackfillComplete
+
+One-shot atomic flip of the `migration_state.complete` flag from `0` to `1`. Gates the
+boot guard against `RegistryBackfillIncompleteError`: until this RPC fires for a surface,
+registry-mode writes are refused in all execution modes (live, paper, dry_run).
+
+```protobuf
+rpc MarkBackfillComplete(MarkBackfillCompleteRequest) returns (MarkBackfillCompleteResponse)
+```
+
+### GetPositionEventsFiltered
+
+Read `position_events` rows filtered by `(deployment_id, primitive, opened_after_block,
+status, …)`. Used by the cutover backfill job to project historical position lifecycle
+into `position_registry`. Distinct from `GetPositionHistory` which targets a single
+position lifecycle.
+
+```protobuf
+rpc GetPositionEventsFiltered(GetPositionEventsFilteredRequest) returns (GetPositionEventsFilteredResponse)
+```
+
+### GetPositionRegistryOpenRows
+
+Enumerate currently-open rows in `position_registry` for a `(deployment_id, chain,
+primitive)` tuple. Used by `PositionService.Reconcile` to compute the diff vs on-chain
+truth, and by the cutover backfill job to detect duplicates before insert.
+
+```protobuf
+rpc GetPositionRegistryOpenRows(GetPositionRegistryOpenRowsRequest) returns (GetPositionRegistryOpenRowsResponse)
 ```
 
 ## ExecutionService
@@ -967,6 +1058,16 @@ Time-ordered tape of executed trades for the dashboard timeline view.
 rpc GetTradeTape(GetTradeTapeRequest) returns (GetTradeTapeResponse)
 ```
 
+### GetActivityFeed
+
+Time-ordered feed of strategy lifecycle events (intent emitted, compiled, executed,
+teardown, alerts) for the dashboard activity view. Distinct from `GetTradeTape` which
+shows only trade fills.
+
+```protobuf
+rpc GetActivityFeed(GetActivityFeedRequest) returns (GetActivityFeedResponse)
+```
+
 ## FundingRateService
 
 Provides perpetual funding rate data from venues like GMX V2 and Hyperliquid.
@@ -1237,6 +1338,49 @@ Write a command to an agent.
 
 ```protobuf
 rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
+```
+
+## PositionService
+
+Control-plane reconciliation of `position_registry` against on-chain truth. v1 scope is
+UniV3 LP only (T24 / VIB-4210). Backs the `almanak ax positions reconcile` operator CLI.
+Closes user-facing bug GH #2131 (phantom-missing rows after partial-write outages).
+
+### Reconcile
+
+Re-derive registry rows for a deployment by querying chain state and diffing against the
+current `position_registry` contents. Reports four diff categories:
+
+- `matched` — on-chain and registry agree.
+- `phantom_missing` — on-chain has a position, registry doesn't (the GH #2131 case).
+- `stranded` — registry `status='open'`, chain absent. **Never auto-closed** — operator
+  must run a teardown for the position.
+- `rebuilt` — phantom-missing rows just written (only when request `apply=true`).
+
+When `apply=false` (default), the RPC is dry-run and returns the diff without writing.
+When `apply=true`, phantom-missing rows are inserted into `position_registry` via
+`SaveLedgerAndRegistry(mode='registry_reconciliation')` (registry-only write; ledger is
+NEVER touched on the reconciliation path).
+
+```protobuf
+rpc Reconcile(ReconcileRequest) returns (ReconcileResponse)
+```
+
+**Request:**
+```protobuf
+message ReconcileRequest {
+  string deployment_id = 1;             // ClassName:hash
+  string chain = 2;
+  string wallet_address = 3;
+  repeated string primitives = 4;        // v1: "lp" only
+  repeated string physical_identity_hashes = 5;  // optional filter
+  bool apply = 6;                        // default false (dry-run)
+  int64 max_age_blocks = 7;              // 0 = no check; v1: rejected if > 0 on first-page requests (no page_cursor)
+  bytes page_cursor = 8;                 // Opaque pagination cursor (v1: honored only for stale-cursor validation; single-page contract)
+  int32 page_size = 9;                   // Max rows per page (default 64, cap 256; v1: clamped but does not slice)
+  string operator_note = 10;             // ≤ 256 bytes
+  string trigger = 11;                   // operator_cli | hosted_boot | dashboard | ci
+}
 ```
 
 ## Error Codes

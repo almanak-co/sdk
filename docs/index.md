@@ -106,14 +106,14 @@ almanak/
     strategies/        # IntentStrategy base class
     intents/           # Intent vocabulary & compiler
     state/             # Three-tier state management
-    execution/         # Transaction orchestration
+    execution/         # Transaction orchestration (incl. signers, simulators)
     backtesting/       # PnL, paper trading, sweeps
-    connectors/        # Protocol adapters
-    data/              # Price oracles, indicators
+    connectors/        # Protocol adapters (SDK, adapter, receipt parser)
+    data/              # Price oracles, indicators, token resolution
+    market/            # Canonical MarketSnapshot
     alerting/          # Slack/Telegram notifications
     services/          # Stuck detection, emergency mgmt
   gateway/             # gRPC gateway sidecar
-  transaction_builder/ # Low-level tx building
   core/                # Enums, models, utilities
   cli/                 # Command-line interface
 ```

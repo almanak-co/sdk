@@ -97,14 +97,14 @@ almanak/
     strategies/        # Clase base IntentStrategy
     intents/           # Vocabulario de intenciones y compilador
     state/             # Gestión de estado de tres niveles
-    execution/         # Orquestación de transacciones
+    execution/         # Orquestación de transacciones (incl. signers, simuladores)
     backtesting/       # PnL, paper trading, barrido de parámetros
-    connectors/        # Adaptadores de protocolos
-    data/              # Oráculos de precios, indicadores
+    connectors/        # Adaptadores de protocolos (SDK, adapter, receipt parser)
+    data/              # Oráculos de precios, indicadores, resolución de tokens
+    market/            # MarketSnapshot canónico
     alerting/          # Notificaciones Slack/Telegram
     services/          # Detección de bloqueos, gestión de emergencias
   gateway/             # Sidecar gRPC de la pasarela
-  transaction_builder/ # Construcción de transacciones de bajo nivel
   core/                # Enumeraciones, modelos, utilidades
   cli/                 # Interfaz de línea de comandos
 ```
