@@ -171,8 +171,12 @@ class TestSupportedExtractions:
         """PancakeSwap V3 should support the same extractions as Uniswap V3.
 
         VIB-3204 added ``protocol_fees`` to both parsers' SUPPORTED_EXTRACTIONS
-        so the enricher's capability gate forwards the new extractor. The
-        two parsers remain aligned — this is a regression test for that.
+        so the enricher's capability gate forwards the new extractor.
+        PR ``feat/lp-pancakeswap-protocol`` added ``lp_open_data`` to keep PCS V3
+        in lock-step with Uniswap V3 (both parsers now surface
+        ``LPOpenData`` from the NPM ``IncreaseLiquidity`` event — see
+        VIB-3887 / VIB-3893). The two parsers remain aligned — this is
+        the regression test for that.
         """
         expected = {
             "position_id",
@@ -180,6 +184,7 @@ class TestSupportedExtractions:
             "tick_lower",
             "tick_upper",
             "liquidity",
+            "lp_open_data",
             "lp_close_data",
             "protocol_fees",
         }
@@ -331,11 +336,26 @@ class TestExtractLPCloseData:
         parser = PancakeSwapV3ReceiptParser(chain="bsc")
         assert parser.extract_lp_close_data({"logs": []}) is None
 
-    def test_returns_none_when_no_amounts(self):
-        """If both amounts are 0, should return None."""
+    def test_zero_amounts_still_emit_close_data(self):
+        """Burn+Collect with zero amounts still emit LPCloseData (Empty != Zero).
+
+        VIB-4305: the legacy behaviour returned None when both amounts were
+        zero, masking a real close event with zero principal. The new
+        behaviour mirrors Uniswap V3: a Burn event with zero amount IS a
+        measured close (just on a position with zero residual liquidity)
+        and must be reported as such so the registry-mode write path can
+        mark the position closed.
+        """
         parser = PancakeSwapV3ReceiptParser(chain="bsc")
         receipt = _make_close_receipt(amount0_collected=0, amount1_collected=0)
-        assert parser.extract_lp_close_data(receipt) is None
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == 0
+        assert result.amount1_collected == 0
+        assert result.fees0 == 0
+        assert result.fees1 == 0
+        # pool_address captured from the Burn event emitter (VIB-4305).
+        assert result.pool_address == "0x" + "cc" * 20
 
 
 # ---------------------------------------------------------------------------

@@ -2420,6 +2420,19 @@ class StrategyRunner:
                 )
 
                 return receipt, SushiSwapV3ReceiptParser(chain=chain)
+            if protocol_norm == "pancakeswap_v3":
+                # PancakeSwap V3 deploys its own NPM at
+                # 0x46A15B0b27311cedF172AB29E4f4766fbE7F4364, distinct from
+                # canonical Uniswap V3. Using the UV3 parser against a
+                # Pancake receipt finds zero IncreaseLiquidity events
+                # (different emitter) and silently returns None — the same
+                # ghost-position class the Aerodrome / Sushi branches above
+                # fix.
+                from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+                    PancakeSwapV3ReceiptParser,
+                )
+
+                return receipt, PancakeSwapV3ReceiptParser(chain=chain)
             from almanak.framework.connectors.uniswap_v3.receipt_parser import (
                 UniswapV3ReceiptParser,
             )
