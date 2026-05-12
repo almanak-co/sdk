@@ -45,9 +45,18 @@ _DEPLOYMENT_ID = _AGENT_ID  # 1:1 hosted convention
 class _FakeConn:
     """Records the SQL + args of each call; returns canned rows."""
 
-    def __init__(self, fetch_rows: list | None = None, fetchrow_row: dict | None = None) -> None:
+    def __init__(
+        self,
+        fetch_rows: list | None = None,
+        fetchrow_row: dict | None = None,
+        execute_result: str = "INSERT 0 1",
+    ) -> None:
         self.fetch_rows = fetch_rows or []
         self.fetchrow_row = fetchrow_row
+        # asyncpg returns a command tag string from ``execute`` — e.g.
+        # "INSERT 0 1", "UPDATE 1", "UPDATE 0". Tests pin specific values
+        # when asserting on rowcount-derived return values.
+        self.execute_result = execute_result
         self.calls: list[tuple[str, str, tuple]] = []
 
     async def fetch(self, sql: str, *args):
@@ -57,6 +66,10 @@ class _FakeConn:
     async def fetchrow(self, sql: str, *args):
         self.calls.append(("fetchrow", sql, args))
         return self.fetchrow_row
+
+    async def execute(self, sql: str, *args):
+        self.calls.append(("execute", sql, args))
+        return self.execute_result
 
 
 class _FakePool:
@@ -471,6 +484,292 @@ async def test_get_position_events_dict_with_all_filters():
     assert "position_type = $3" in sql
     assert "event_type = $4" in sql
     assert args == (_DEPLOYMENT_ID, "42", "LP", "CLOSE")
+
+
+# =============================================================================
+# Position events — write/read parity (VIB-4315)
+# =============================================================================
+
+
+def _make_position_event(**overrides):
+    """Build a minimal :class:`PositionEvent` for the writer tests.
+
+    Defaults mirror ``_pe_row`` so the assertions can target the same shape
+    that ``get_position_history`` would return after the round-trip.
+    """
+    from almanak.framework.observability.position_events import PositionEvent
+
+    base = {
+        "id": "pe-1",
+        "deployment_id": _DEPLOYMENT_ID,
+        "cycle_id": "cycle-1",
+        "execution_mode": "live",
+        "position_id": "1234",
+        "position_type": "LP",
+        "event_type": "OPEN",
+        "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
+        "protocol": "uniswap_v3",
+        "chain": "arbitrum",
+        "token0": "USDC",
+        "token1": "WETH",
+        "amount0": "1000",
+        "amount1": "0.3",
+        "value_usd": "2000",
+        "tick_lower": -100,
+        "tick_upper": 100,
+        "liquidity": "12345",
+        "in_range": True,
+        "fees_token0": "0",
+        "fees_token1": "0",
+        "leverage": "",
+        "entry_price": "",
+        "mark_price": "",
+        "unrealized_pnl": "",
+        "is_long": None,
+        "tx_hash": "0xabc",
+        "gas_usd": "1.50",
+        "ledger_entry_id": "tx-1",
+        "protocol_fees_usd": "0.0125",
+        "attribution_json": "{}",
+        "attribution_version": 1,
+    }
+    base.update(overrides)
+    return PositionEvent(**base)
+
+
+@pytest.mark.asyncio
+async def test_save_position_event_writes_all_columns_with_agent_id_from_env(monkeypatch):
+    """SQL shape pin + agent_id resolution from AGENT_ID env (hosted mode)."""
+    monkeypatch.setenv("AGENT_ID", "hosted-agent-xyz")
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    ok = await store.save_position_event(_make_position_event())
+
+    assert ok is True
+    assert len(conn.calls) == 1
+    kind, sql, args = conn.calls[0]
+    assert kind == "execute"
+    assert "INSERT INTO position_events" in sql
+    # Schema columns the SDK must persist; if a new column is added this
+    # assertion fails loudly — same anti-drift contract as the reader test.
+    for col in (
+        "id", "agent_id", "deployment_id", "cycle_id", "execution_mode",
+        "position_id", "position_type", "event_type", "timestamp",
+        "protocol_fees_usd", "attribution_json", "attribution_version",
+    ):
+        assert col in sql, f"column {col!r} missing from save_position_event INSERT"
+    # First-write-wins idempotency (matches SQLite INSERT OR IGNORE).
+    assert "ON CONFLICT (id) DO NOTHING" in sql
+    # JSONB column must be cast on the wire.
+    assert "$32::jsonb" in sql
+
+    # agent_id binding is the hosted AGENT_ID env var, NOT the deployment_id.
+    assert args[0] == "pe-1"          # id
+    assert args[1] == "hosted-agent-xyz"  # agent_id from env
+    assert args[2] == _DEPLOYMENT_ID  # deployment_id
+
+
+@pytest.mark.asyncio
+async def test_save_position_event_falls_back_to_deployment_id_when_agent_id_unset(monkeypatch):
+    """No AGENT_ID env → agent_id column gets the deployment_id (pass-through)."""
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    await store.save_position_event(_make_position_event())
+
+    _, _, args = conn.calls[0]
+    assert args[1] == _DEPLOYMENT_ID  # agent_id falls back to deployment_id
+
+
+@pytest.mark.asyncio
+async def test_save_position_event_preserves_protocol_fees_empty_vs_zero(monkeypatch):
+    """AGENTS.md "Empty ≠ Zero" — Decimal("0") must not collapse to "" on the wire."""
+    monkeypatch.setenv("AGENT_ID", "a")
+
+    # Measured zero stays "0".
+    conn = _FakeConn()
+    store = _make_store(conn)
+    await store.save_position_event(_make_position_event(protocol_fees_usd="0"))
+    assert conn.calls[0][2][30] == "0"
+
+    # Parser-did-not-emit stays "".
+    conn = _FakeConn()
+    store = _make_store(conn)
+    await store.save_position_event(_make_position_event(protocol_fees_usd=""))
+    assert conn.calls[0][2][30] == ""
+
+
+@pytest.mark.asyncio
+async def test_save_position_event_preserves_tri_state_optionals(monkeypatch):
+    """tick_lower / tick_upper / in_range / is_long None must bind as None (NULL)."""
+    monkeypatch.setenv("AGENT_ID", "a")
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    await store.save_position_event(
+        _make_position_event(tick_lower=None, tick_upper=None, in_range=None, is_long=None)
+    )
+
+    _, _, args = conn.calls[0]
+    # Positional order matches the INSERT VALUES list:
+    # ..., $16 tick_lower, $17 tick_upper, $18 liquidity, $19 in_range, ...
+    # ..., $26 unrealized_pnl, $27 is_long, ...
+    assert args[16] is None  # tick_lower
+    assert args[17] is None  # tick_upper
+    assert args[19] is None  # in_range
+    assert args[26] is None  # is_long
+
+
+@pytest.mark.asyncio
+async def test_save_position_event_binds_datetime_not_string(monkeypatch):
+    """asyncpg TIMESTAMPTZ codec rejects raw strings (VIB-4313 redux).
+
+    PositionEvent.timestamp is already a tz-aware datetime in the dataclass;
+    this pins it through the binding so a future refactor that hands a
+    string to ``conn.execute`` would fail the test instead of crashing in
+    hosted prod.
+    """
+    monkeypatch.setenv("AGENT_ID", "a")
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    ts = datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC)
+    await store.save_position_event(_make_position_event(timestamp=ts))
+
+    _, _, args = conn.calls[0]
+    # $9 timestamp position.
+    assert args[8] == ts
+    assert isinstance(args[8], datetime)
+    assert args[8].tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_get_position_history_keys_on_deployment_and_orders_asc():
+    """SQL shape + asc ordering — pnl_attributor needs OPEN before CLOSE."""
+    conn = _FakeConn(fetch_rows=[_pe_row(), _pe_row(id="pe-2", event_type="CLOSE")])
+    store = _make_store(conn)
+
+    rows = await store.get_position_history(_DEPLOYMENT_ID, "1234")
+
+    assert len(rows) == 2
+    assert rows[0]["event_type"] == "OPEN"
+    assert rows[1]["event_type"] == "CLOSE"
+
+    _, sql, args = conn.calls[0]
+    assert "FROM position_events" in sql
+    assert "WHERE deployment_id = $1 AND position_id = $2" in sql
+    assert "ORDER BY timestamp ASC" in sql
+    assert "protocol_fees_usd" in sql
+    # JSONB needs to be selected as text for the dict converter.
+    assert "attribution_json::text AS attribution_text" in sql
+    assert args == (_DEPLOYMENT_ID, "1234")
+
+
+@pytest.mark.asyncio
+async def test_get_position_history_returns_empty_when_no_rows():
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+
+    rows = await store.get_position_history(_DEPLOYMENT_ID, "missing")
+
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_update_position_attribution_returns_true_on_match():
+    """Match → True; runner stamps attribution_json on disk."""
+    # fetchrow returns a single-column row (RETURNING id) when matched.
+    conn = _FakeConn(fetchrow_row=_DictRow({"id": "pe-1"}))
+    store = _make_store(conn)
+
+    ok = await store.update_position_attribution(
+        event_id="pe-1",
+        attribution_json='{"realized_pnl_usd":"-1.23"}',
+        attribution_version=2,
+    )
+
+    assert ok is True
+    _, sql, args = conn.calls[0]
+    assert "UPDATE position_events" in sql
+    assert "SET attribution_json = $1::jsonb, attribution_version = $2" in sql
+    assert "WHERE id = $3" in sql
+    assert "RETURNING id" in sql
+    assert args == ('{"realized_pnl_usd":"-1.23"}', 2, "pe-1")
+
+
+@pytest.mark.asyncio
+async def test_update_position_attribution_returns_false_on_missing_row():
+    """No row matched → False; pnl_attributor logs warning, runner continues."""
+    conn = _FakeConn(fetchrow_row=None)
+    store = _make_store(conn)
+
+    ok = await store.update_position_attribution(
+        event_id="missing-id",
+        attribution_json="{}",
+        attribution_version=0,
+    )
+
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_update_position_attribution_scopes_by_deployment_id_when_provided():
+    """Non-empty deployment_id → extra ``AND deployment_id = $4`` guard (multi-tenant defense-in-depth)."""
+    conn = _FakeConn(fetchrow_row=_DictRow({"id": "pe-1"}))
+    store = _make_store(conn)
+
+    ok = await store.update_position_attribution(
+        event_id="pe-1",
+        attribution_json="{}",
+        attribution_version=1,
+        deployment_id=_DEPLOYMENT_ID,
+    )
+
+    assert ok is True
+    _, sql, args = conn.calls[0]
+    assert "WHERE id = $3 AND deployment_id = $4" in sql
+    assert args == ("{}", 1, "pe-1", _DEPLOYMENT_ID)
+
+
+@pytest.mark.asyncio
+async def test_update_position_attribution_unscoped_when_deployment_id_empty():
+    """Empty deployment_id (default) → single-clause WHERE id = $3 (parity with SQLite + GSM legacy callers)."""
+    conn = _FakeConn(fetchrow_row=_DictRow({"id": "pe-1"}))
+    store = _make_store(conn)
+
+    ok = await store.update_position_attribution(
+        event_id="pe-1",
+        attribution_json="{}",
+        attribution_version=1,
+        # deployment_id omitted → defaults to ""
+    )
+
+    assert ok is True
+    _, sql, args = conn.calls[0]
+    assert "WHERE id = $3" in sql
+    assert "deployment_id" not in sql.split("RETURNING")[0]
+    assert args == ("{}", 1, "pe-1")
+
+
+@pytest.mark.asyncio
+async def test_update_position_attribution_scoped_returns_false_on_deployment_mismatch():
+    """Wrong deployment_id → no row matched → False (defense-in-depth)."""
+    conn = _FakeConn(fetchrow_row=None)  # PG returns no row when scope filter excludes it
+    store = _make_store(conn)
+
+    ok = await store.update_position_attribution(
+        event_id="pe-1",
+        attribution_json="{}",
+        attribution_version=1,
+        deployment_id="wrong-deployment",
+    )
+
+    assert ok is False
+    _, sql, args = conn.calls[0]
+    assert "AND deployment_id = $4" in sql
+    assert args[3] == "wrong-deployment"
 
 
 # =============================================================================

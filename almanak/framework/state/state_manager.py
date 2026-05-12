@@ -1005,6 +1005,215 @@ class PostgresStore:
             rows = await conn.fetch(sql, *params)
         return [_pg_row_to_position_event_dict(row) for row in rows]
 
+    # -------------------------------------------------------------------------
+    # Position events write/read (VIB-4315) — hosted parity with SQLite.
+    # -------------------------------------------------------------------------
+    #
+    # state_service.py routes SavePositionEvent / GetPositionHistory /
+    # UpdatePositionAttribution through ``hasattr(warm, …)`` (see lines 1685,
+    # 1802, 1883). Adding the three methods here closes the only remaining
+    # hosted-vs-local accounting parity gap surfaced by VIB-4185 / T19: the
+    # atomic ledger+registry primitive landed, but the legacy position_events
+    # lifecycle log was still SQLite-only, so a registry-mode LP_OPEN booked
+    # the iteration ACCOUNTING_FAILED and ``pnl_attributor.run_attribution_on_close``
+    # silently degraded (empty get_position_history → no OPEN/CLOSE pair).
+    #
+    # The position_events PG table has lived on prod metrics_db since
+    # ``20260420061038_reconcile_drift``; ``protocol_fees_usd`` (VIB-3966
+    # / PR #27) ships there as the read-side wired by commit 5f9e9b56c.
+
+    async def save_position_event(self, event: "PositionEvent") -> bool:
+        """Persist a position lifecycle event to ``position_events`` (hosted PG).
+
+        Mirrors :meth:`SQLiteStore.save_position_event` (``sqlite.py:2464``).
+        First-write-wins via ``ON CONFLICT (id) DO NOTHING`` — matches the
+        SQLite ``INSERT OR IGNORE`` semantic. Companion partial-UPDATE for
+        attribution columns is :meth:`update_position_attribution` (VIB-3944).
+
+        The PG schema requires ``agent_id NOT NULL`` (the SQLite schema has
+        no such column). We populate it from
+        :func:`almanak.framework.deployment.agent_id`, matching the same
+        ``AGENT_ID``-or-passthrough semantic used by ``resolve_agent_id`` on
+        the gateway read side. ``PostgresStore`` is only instantiated as a
+        warm backend in hosted mode (local SDK uses ``SQLiteStore``), so
+        ``agent_id()`` is always populated when this method runs.
+
+        Empty-vs-zero (``AGENTS.md`` "Empty ≠ Zero"): ``protocol_fees_usd``
+        stores a ``str`` — ``""`` means parser-did-not-emit, ``"0"`` means
+        measured zero. ``getattr(..., "") or ""`` would collapse
+        ``Decimal("0")`` (falsy) to ``""``, so normalise only the
+        None / missing-attr case.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        # Local import — PostgresStore is a hosted-only path so we lazily
+        # touch the deployment helper rather than module-load it.
+        from almanak.framework.deployment import agent_id as _hosted_agent_id
+
+        agent_id_value = _hosted_agent_id() or event.deployment_id
+
+        pfu = getattr(event, "protocol_fees_usd", None)
+        protocol_fees_usd = "" if pfu is None else str(pfu)
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO position_events (
+                    id, agent_id, deployment_id, cycle_id, execution_mode,
+                    position_id, position_type, event_type, timestamp,
+                    protocol, chain, token0, token1, amount0, amount1,
+                    value_usd, tick_lower, tick_upper, liquidity, in_range,
+                    fees_token0, fees_token1, leverage, entry_price,
+                    mark_price, unrealized_pnl, is_long, tx_hash, gas_usd,
+                    ledger_entry_id, protocol_fees_usd,
+                    attribution_json, attribution_version
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24,
+                    $25, $26, $27, $28, $29,
+                    $30, $31,
+                    $32::jsonb, $33
+                )
+                ON CONFLICT (id) DO NOTHING
+                """,
+                event.id,
+                agent_id_value,
+                event.deployment_id,
+                getattr(event, "cycle_id", "") or "",
+                getattr(event, "execution_mode", "") or "",
+                event.position_id,
+                event.position_type,
+                event.event_type,
+                event.timestamp,
+                event.protocol,
+                event.chain,
+                event.token0,
+                event.token1,
+                event.amount0,
+                event.amount1,
+                event.value_usd,
+                event.tick_lower,
+                event.tick_upper,
+                event.liquidity,
+                event.in_range,
+                event.fees_token0,
+                event.fees_token1,
+                event.leverage,
+                event.entry_price,
+                event.mark_price,
+                event.unrealized_pnl,
+                event.is_long,
+                event.tx_hash,
+                event.gas_usd,
+                event.ledger_entry_id,
+                protocol_fees_usd,
+                event.attribution_json or "{}",
+                int(event.attribution_version or 0),
+            )
+        return True
+
+    async def get_position_history(
+        self,
+        deployment_id: str,
+        position_id: str,
+    ) -> list[dict]:
+        """Return the full chronological lifecycle for one position.
+
+        Mirrors :meth:`SQLiteStore.get_position_history` (``sqlite.py:2621``):
+        ``ORDER BY timestamp ASC`` so ``pnl_attributor.run_attribution_on_close``
+        sees the OPEN event before the CLOSE event when pairing for FIFO
+        realised-PnL attribution (VIB-3944). Row shape goes through
+        :func:`_pg_row_to_position_event_dict` for parity with the SQLite
+        dict shape.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        sql = """
+            SELECT id, agent_id, deployment_id, cycle_id, execution_mode,
+                   position_id, position_type, event_type, timestamp,
+                   protocol, chain, token0, token1, amount0, amount1,
+                   value_usd, tick_lower, tick_upper, liquidity, in_range,
+                   fees_token0, fees_token1, leverage, entry_price,
+                   mark_price, unrealized_pnl, is_long, tx_hash, gas_usd,
+                   ledger_entry_id, protocol_fees_usd,
+                   attribution_json::text AS attribution_text,
+                   attribution_version
+            FROM position_events
+            WHERE deployment_id = $1 AND position_id = $2
+            ORDER BY timestamp ASC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, deployment_id, position_id)
+        return [_pg_row_to_position_event_dict(row) for row in rows]
+
+    async def update_position_attribution(
+        self,
+        event_id: str,
+        attribution_json: str,
+        attribution_version: int,
+        deployment_id: str = "",
+    ) -> bool:
+        """Partial-update the attribution columns on a single position_event row.
+
+        Mirrors :meth:`SQLiteStore.update_position_attribution`
+        (``sqlite.py:2540``). Returns ``True`` iff the WHERE clause matched
+        a row (i.e. ``event_id`` exists); ``False`` if the row is missing
+        — the caller logs a warning and degrades attribution to a soft
+        failure rather than halting.
+
+        ``deployment_id`` semantics differ between backends:
+
+        * **SQLite** (single-tenant file): accepted for signature parity,
+          not used in WHERE because the UUID ``event_id`` is globally
+          unique by construction in a folder-scoped DB.
+        * **Postgres** (multi-tenant ``metrics_db``): used as an additional
+          WHERE guard when provided (non-empty), so a bug that passed a
+          wrong ``event_id`` from a different deployment can't silently
+          update another tenant's attribution. UUID uniqueness still makes
+          the cross-deployment match probability negligible; this is
+          defense-in-depth, not a correctness fix.
+
+        Empty ``deployment_id`` (the default) preserves the original
+        single-clause behaviour for callers that have only the ``event_id``.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        scoped = bool(deployment_id)
+
+        async with self._pool.acquire() as conn:
+            if scoped:
+                matched = await conn.fetchrow(
+                    """
+                    UPDATE position_events
+                    SET attribution_json = $1::jsonb, attribution_version = $2
+                    WHERE id = $3 AND deployment_id = $4
+                    RETURNING id
+                    """,
+                    attribution_json,
+                    int(attribution_version),
+                    event_id,
+                    deployment_id,
+                )
+            else:
+                matched = await conn.fetchrow(
+                    """
+                    UPDATE position_events
+                    SET attribution_json = $1::jsonb, attribution_version = $2
+                    WHERE id = $3
+                    RETURNING id
+                    """,
+                    attribution_json,
+                    int(attribution_version),
+                    event_id,
+                )
+        return matched is not None
+
 
 # =============================================================================
 # Postgres row → framework type conversions (VIB-3933)
