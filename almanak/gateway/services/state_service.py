@@ -2699,6 +2699,34 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return getattr(request, field_name) if request.HasField(field_name) else None
 
     @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime:
+        """Parse an ISO-8601 string to a timezone-aware ``datetime``.
+
+        asyncpg's TIMESTAMPTZ codec rejects raw strings client-side, even when
+        the SQL has a ``::timestamptz`` cast (VIB-4313). Naive datetimes are
+        coerced to UTC so the wire value is unambiguous; the metrics-database
+        ``backfill_started_at`` / ``backfill_completed_at`` columns are
+        TIMESTAMPTZ.
+        """
+        # ``fromisoformat`` accepts ``...+00:00`` and (Python 3.11+) the
+        # trailing ``Z``; normalise either to a tz-aware UTC datetime.
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    @classmethod
+    def _parse_optional_iso_datetime(cls, value: str) -> datetime | None:
+        """ISO-8601 string → ``datetime`` with ``""`` proto sentinel = None.
+
+        Mirrors the ``request.field or None`` short-circuit the migration_state
+        RPCs use for "don't touch" semantics.
+        """
+        stripped = (value or "").strip()
+        if not stripped:
+            return None
+        return cls._parse_iso_datetime(stripped)
+
+    @staticmethod
     def _strip_required_triple(request) -> tuple[str, str, str]:
         """Strip the ``(deployment_id, primitive, cutover_key)`` migration_state key.
 
@@ -2940,11 +2968,17 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # PostgreSQL mode (T19 / VIB-4205). Dynamic SET clause matches
             # the SQLite backend's partial-update semantics (sqlite.py:4066).
             #
-            # VIB-4191-dep: assumed TIMESTAMPTZ for ``backfill_started_at``;
-            # asyncpg accepts a string and Postgres implicit-casts it via
-            # the column type. If Infra deploys TEXT, no change needed
-            # (binds as a string either way).
-            backfill_started_at = request.backfill_started_at or None
+            # ``backfill_started_at`` is bound as a ``datetime`` so asyncpg's
+            # TIMESTAMPTZ codec accepts it. asyncpg type-checks parameter
+            # bindings client-side and rejects raw strings even with a
+            # ``::timestamptz`` SQL cast (VIB-4313).
+            try:
+                backfill_started_at = self._parse_optional_iso_datetime(request.backfill_started_at)
+            except ValueError as e:
+                err = f"backfill_started_at must be ISO-8601: {e}"
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(err)
+                return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
             rows_synthesized = self._optional_int_field(request, "rows_synthesized")
             rows_skipped_already_present = self._optional_int_field(request, "rows_skipped_already_present")
 
@@ -2952,9 +2986,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             params: list[Any] = []
             next_placeholder = 1
             if backfill_started_at is not None:
-                # VIB-4191-dep: ``::timestamptz`` cast assumes TIMESTAMPTZ;
-                # if Infra deploys TEXT, drop the cast.
-                sets.append(f"backfill_started_at = ${next_placeholder}::timestamptz")
+                sets.append(f"backfill_started_at = ${next_placeholder}")
                 params.append(backfill_started_at)
                 next_placeholder += 1
             if rows_synthesized is not None:
@@ -3036,9 +3068,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(err)
             return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
-        backfill_completed_at = (request.backfill_completed_at or "").strip()
-        if not backfill_completed_at:
+        backfill_completed_at_str = (request.backfill_completed_at or "").strip()
+        if not backfill_completed_at_str:
             err = "backfill_completed_at is required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+        try:
+            backfill_completed_at = self._parse_iso_datetime(backfill_completed_at_str)
+        except ValueError as e:
+            err = f"backfill_completed_at must be ISO-8601: {e}"
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(err)
             return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
@@ -3057,10 +3096,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # ``position_registry_backfill_complete`` (TRUE literal); if
             # Infra deploys INTEGER 0/1, change ``TRUE`` to ``1``.
             #
-            # VIB-4191-dep: assumed TIMESTAMPTZ for
-            # ``backfill_completed_at``; the ``::timestamptz`` cast on
-            # the bound string is harmless when the column is TEXT but
-            # required when it's TIMESTAMPTZ.
+            # ``backfill_completed_at`` is bound as a ``datetime`` so asyncpg's
+            # TIMESTAMPTZ codec accepts it. asyncpg rejects raw strings client-side
+            # before any ``::timestamptz`` SQL cast would run (VIB-4313).
             try:
                 status = await self._snapshot_execute(
                     """
@@ -3068,7 +3106,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     SET position_registry_backfill_complete = TRUE,
                         rows_synthesized = $4,
                         rows_skipped_already_present = $5,
-                        backfill_completed_at = $6::timestamptz,
+                        backfill_completed_at = $6,
                         updated_at = NOW()
                     WHERE deployment_id = $1
                       AND primitive = $2
@@ -3126,7 +3164,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 cutover_key=cutover_key,
                 rows_synthesized=int(request.rows_synthesized),
                 rows_skipped_already_present=int(request.rows_skipped_already_present),
-                backfill_completed_at=backfill_completed_at,
+                backfill_completed_at=backfill_completed_at_str,
             )
             return gateway_pb2.MarkBackfillCompleteResponse(success=True)
         except Exception as e:

@@ -486,6 +486,49 @@ class TestUpdateMigrationState:
         # Empty request path returns without calling _snapshot_execute.
         state_service._snapshot_execute.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_postgres_binds_backfill_started_at_as_datetime(
+        self, state_service, mock_context
+    ):
+        """VIB-4313: ISO string is parsed to a tz-aware datetime before binding.
+
+        asyncpg's TIMESTAMPTZ codec rejects raw strings client-side; the
+        ``$N::timestamptz`` SQL cast never runs. Regression test ensures the
+        Postgres branch passes a ``datetime`` instance instead of a string.
+        """
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 1")
+        req = gateway_pb2.UpdateMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            backfill_started_at="2026-05-12T08:21:33.574522+00:00",
+        )
+        resp = await state_service.UpdateMigrationState(req, mock_context)
+        assert resp.success
+        state_service._snapshot_execute.assert_awaited_once()
+        bound = state_service._snapshot_execute.await_args.args[1]
+        assert isinstance(bound, datetime)
+        assert bound == datetime(2026, 5, 12, 8, 21, 33, 574522, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_postgres_rejects_malformed_backfill_started_at(
+        self, state_service, mock_context
+    ):
+        """VIB-4313: malformed ISO string returns INVALID_ARGUMENT, not INTERNAL."""
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 1")
+        req = gateway_pb2.UpdateMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            backfill_started_at="not-an-iso-date",
+        )
+        resp = await state_service.UpdateMigrationState(req, mock_context)
+        assert not resp.success
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        state_service._snapshot_execute.assert_not_awaited()
+
 
 class TestMarkBackfillComplete:
     @pytest.mark.asyncio
@@ -517,6 +560,49 @@ class TestMarkBackfillComplete:
         )
         resp = await state_service.MarkBackfillComplete(req, mock_context)
         assert not resp.success
+
+    @pytest.mark.asyncio
+    async def test_postgres_binds_backfill_completed_at_as_datetime(
+        self, state_service, mock_context
+    ):
+        """VIB-4313: same datetime binding contract as UpdateMigrationState."""
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 1")
+        req = gateway_pb2.MarkBackfillCompleteRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            rows_synthesized=3,
+            rows_skipped_already_present=1,
+            backfill_completed_at="2026-05-12T08:21:33.574522+00:00",
+        )
+        resp = await state_service.MarkBackfillComplete(req, mock_context)
+        assert resp.success
+        state_service._snapshot_execute.assert_awaited_once()
+        # $6 (last positional arg) is the timestamp.
+        bound_completed_at = state_service._snapshot_execute.await_args.args[-1]
+        assert isinstance(bound_completed_at, datetime)
+        assert bound_completed_at == datetime(2026, 5, 12, 8, 21, 33, 574522, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_postgres_rejects_malformed_completed_at(
+        self, state_service, mock_context
+    ):
+        """VIB-4313: malformed ISO string returns INVALID_ARGUMENT, not INTERNAL."""
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 1")
+        req = gateway_pb2.MarkBackfillCompleteRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            rows_synthesized=0,
+            rows_skipped_already_present=0,
+            backfill_completed_at="2026/05/12 not-iso",
+        )
+        resp = await state_service.MarkBackfillComplete(req, mock_context)
+        assert not resp.success
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        state_service._snapshot_execute.assert_not_awaited()
 
 
 # =============================================================================
