@@ -185,17 +185,27 @@ class TestGatewayRateLimitState:
             state.record_rate_limit()
         assert state.backoff_seconds <= 10.0
 
-    def test_gateway_record_success_clears_last_429_time(self) -> None:
-        """Gateway record_success() must clear last_429_time."""
+    def test_gateway_record_success_resets_backoff(self) -> None:
+        """Gateway record_success() must reset backoff_seconds and consecutive_429s.
+
+        The gateway provider switched to fail-fast (single bounded 1s retry on
+        429, then raise so the aggregator falls over) and no longer sleeps off
+        a wall-clock backoff. ``last_429_time`` / ``get_wait_time()`` were
+        removed; ``backoff_seconds`` survives only as the advisory value on
+        ``DataSourceRateLimited.retry_after`` and must still reset cleanly on
+        a successful request.
+        """
         from almanak.gateway.data.price.coingecko import RateLimitState as GatewayRateLimitState
 
         state = GatewayRateLimitState()
-        state.record_rate_limit()
-        assert state.last_429_time is not None
+        for _ in range(3):
+            state.record_rate_limit()
+        assert state.consecutive_429s == 3
+        assert state.backoff_seconds == 4.0
 
         state.record_success()
-        assert state.last_429_time is None
-        assert state.get_wait_time() == 0.0
+        assert state.consecutive_429s == 0
+        assert state.backoff_seconds == 1.0
 
     def test_gateway_backoff_sequence(self) -> None:
         """Gateway backoff should follow: 1s, 2s, 4s, 8s, 10s, 10s."""

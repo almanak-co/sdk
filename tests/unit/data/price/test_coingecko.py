@@ -83,10 +83,8 @@ class TestRateLimitState:
         """Test initial rate limit state."""
         state = RateLimitState()
 
-        assert state.last_429_time is None
         assert state.backoff_seconds == 1.0
         assert state.consecutive_429s == 0
-        assert state.get_wait_time() == 0.0
 
     def test_record_rate_limit(self) -> None:
         """Test recording rate limit hit."""
@@ -94,7 +92,6 @@ class TestRateLimitState:
 
         state.record_rate_limit()
 
-        assert state.last_429_time is not None
         assert state.consecutive_429s == 1
         assert state.backoff_seconds == 1.0  # 2^0 = 1
 
@@ -145,15 +142,6 @@ class TestRateLimitState:
 
         assert state.consecutive_429s == 0
         assert state.backoff_seconds == 1.0
-
-    def test_get_wait_time_with_elapsed(self) -> None:
-        """Test wait time decreases as time passes."""
-        state = RateLimitState()
-        state.backoff_seconds = 5.0
-        state.last_429_time = None  # No 429 yet
-
-        # No wait time if never rate limited
-        assert state.get_wait_time() == 0.0
 
 
 # =============================================================================
@@ -578,7 +566,12 @@ class TestCoinGeckoPriceSourceRateLimit:
         assert exc_info.value.retry_after > 0
 
     def test_rate_limit_updates_backoff(self) -> None:
-        """Test rate limit updates backoff state."""
+        """Test rate limit updates backoff state.
+
+        ``get_price`` makes one bounded retry after a 429 (1s pause); both
+        attempts call ``record_rate_limit`` when the mock returns 429 for
+        every call. The retry behaviour is covered in detail by
+        ``tests/gateway/test_coingecko_retry.py``."""
         source = CoinGeckoPriceSource(cache_ttl=30)
 
         mock_resp = AsyncMock()
@@ -592,11 +585,19 @@ class TestCoinGeckoPriceSourceRateLimit:
             with pytest.raises(DataSourceRateLimited):
                 run_async(source.get_price("ETH", "USD"))
 
-        assert source._rate_limit_state.consecutive_429s == 1
-        assert source._rate_limit_state.last_429_time is not None
+        # Two attempts × one record_rate_limit each = 2 consecutive_429s.
+        # backoff_seconds follows 2 ** (consecutive_429s - 1) = 2 ** 1 = 2.0,
+        # capped at max_backoff_seconds (10.0). Asserting the actual value
+        # locks in the exponential math, not just the increment count.
+        assert source._rate_limit_state.consecutive_429s == 2
+        assert source._rate_limit_state.backoff_seconds == 2.0
 
     def test_rate_limit_increments_metrics(self) -> None:
-        """Test rate limit increments rate limit metrics."""
+        """Test rate limit increments rate limit metrics.
+
+        Two attempts under the bounded retry, both 429 → the metric counter
+        records both. Single-attempt success-after-retry is covered in
+        ``tests/gateway/test_coingecko_retry.py``."""
         source = CoinGeckoPriceSource(cache_ttl=30)
 
         mock_resp = AsyncMock()
@@ -610,7 +611,7 @@ class TestCoinGeckoPriceSourceRateLimit:
             with pytest.raises(DataSourceRateLimited):
                 run_async(source.get_price("ETH", "USD"))
 
-        assert source._metrics.rate_limits == 1
+        assert source._metrics.rate_limits == 2
 
 
 # =============================================================================

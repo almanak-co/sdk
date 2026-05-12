@@ -6,7 +6,8 @@ with proper caching, rate limiting, and error handling.
 Key Features:
     - Response caching with configurable TTL
     - Graceful degradation on timeout (returns stale data with reduced confidence)
-    - Exponential backoff with jitter for rate limits (429)
+    - Bounded retry (single 1s pause) on 429, then fail-fast so the aggregator
+      can fall over to other sources without stalling on compounding backoff
     - Comprehensive logging for observability
 
 Example:
@@ -18,8 +19,8 @@ Example:
 """
 
 import asyncio
+import enum
 import logging
-import random
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -252,37 +253,30 @@ class CacheEntry:
 
 @dataclass
 class RateLimitState:
-    """Tracks rate limit state for exponential backoff."""
+    """Tracks rate limit state.
 
-    last_429_time: float | None = None
+    Since the switch to fail-fast (bounded 1s retry on 429, then raise so
+    the aggregator falls over to other sources), the only consumer of this
+    state is ``DataSourceRateLimited.retry_after``, which surfaces
+    ``backoff_seconds`` to callers as advisory metadata. ``consecutive_429s``
+    is retained for observability/metrics.
+    """
+
     backoff_seconds: float = 1.0
     consecutive_429s: int = 0
     max_backoff_seconds: float = 10.0
 
     def record_rate_limit(self) -> None:
         """Record a rate limit hit and increase backoff."""
-        self.last_429_time = time.time()
         self.consecutive_429s += 1
-        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s (capped to prevent timeouts)
+        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s. No longer drives
+        # sleeps; surfaced via DataSourceRateLimited.retry_after only.
         self.backoff_seconds = min(self.max_backoff_seconds, 2 ** (self.consecutive_429s - 1))
 
     def record_success(self) -> None:
         """Record successful request, fully reset backoff state."""
         self.consecutive_429s = 0
         self.backoff_seconds = 1.0
-        self.last_429_time = None
-
-    def get_wait_time(self) -> float:
-        """Get time to wait before next request (with jitter)."""
-        if self.last_429_time is None:
-            return 0.0
-        elapsed = time.time() - self.last_429_time
-        remaining = self.backoff_seconds - elapsed
-        if remaining <= 0:
-            return 0.0
-        # Add jitter: 0-25% of remaining time
-        jitter = random.uniform(0, 0.25 * remaining)
-        return remaining + jitter
 
 
 @dataclass
@@ -327,6 +321,17 @@ class SourceHealthMetrics:
             "last_error": self.last_error,
             "last_error_time": (self.last_error_time.isoformat() if self.last_error_time else None),
         }
+
+
+# Sentinel returned by _attempt_id_fetch / _attempt_address_fetch when the
+# response was 429 and the caller should retry. An Enum-singleton gives mypy a
+# narrowable type after `outcome is _RETRY`, so the orchestrator can `return
+# outcome` and have it land as the right narrowed type.
+class _RetrySentinel(enum.Enum):
+    RETRY = enum.auto()
+
+
+_RETRY = _RetrySentinel.RETRY
 
 
 class CoinGeckoPriceSource(BasePriceSource):
@@ -470,6 +475,54 @@ class CoinGeckoPriceSource(BasePriceSource):
             fetch_latency_ms=latency_ms,
         )
 
+    def _stale_fallback_result(self, cache_key: str, quote_upper: str) -> PriceResult | None:
+        """Return a stale PriceResult from cache with reduced confidence, or None.
+
+        Shared fallback for 429 / non-200 / timeout / network-error branches
+        across ``get_price`` and ``_try_fetch_by_address``. When a stale cache
+        entry exists we prefer returning it (downgraded by
+        ``stale_confidence_multiplier``) over raising, so the aggregator keeps
+        a usable signal from this source during transient outages.
+        """
+        stale = self._get_stale_cached(cache_key, quote_upper)
+        if stale is None:
+            return None
+        self._metrics.successful_requests += 1
+        return PriceResult(
+            price=stale.result.price,
+            source=self.source_name,
+            timestamp=stale.result.timestamp,
+            confidence=stale.result.confidence * self._stale_confidence_multiplier,
+            stale=True,
+        )
+
+    def _stale_or_raise_unavailable(
+        self,
+        cache_token_key: str,
+        quote_upper: str,
+        log_format: str,
+        log_arg: str,
+        reason: str,
+        cause: Exception,
+    ) -> PriceResult:
+        """Return stale data if cached, else raise DataSourceUnavailable.
+
+        Common terminal-error path for TimeoutError / ClientError handlers in
+        ``_try_fetch_by_address``: returning a stale-fallback PriceResult lets
+        the aggregator keep a downgraded signal from this source, while a raise
+        surfaces the outage when nothing is cached so another source can take
+        over. ``log_format`` / ``log_arg`` keep the warm-path log lines
+        contextual to the caller.
+        """
+        stale_result = self._stale_fallback_result(cache_token_key, quote_upper)
+        if stale_result is not None:
+            logger.info(log_format, log_arg, quote_upper)
+            return stale_result
+        raise DataSourceUnavailable(
+            source=self.source_name,
+            reason=reason,
+        ) from cause
+
     def _resolve_token_id(self, token: str) -> str | None:
         """Resolve a token SYMBOL to CoinGecko ID.
 
@@ -563,16 +616,10 @@ class CoinGeckoPriceSource(BasePriceSource):
                 self._metrics.successful_requests += 1
                 return cached_addr.result
 
-        # Check rate limit backoff
-        wait_time = self._rate_limit_state.get_wait_time()
-        if wait_time > 0:
-            logger.info(
-                "Rate limit backoff: waiting %.2fs before request for %s/%s",
-                wait_time,
-                token_upper,
-                quote_upper,
-            )
-            await asyncio.sleep(wait_time)
+        # No proactive sleep before the request. The aggregator fans out
+        # sources concurrently; sleeping here would stall every other source
+        # waiting on this single slow one. On 429 we give CoinGecko one
+        # bounded 1s retry inside the response handler below.
 
         # Resolve token ID (symbol/address -> CoinGecko ID via static registry)
         token_id = self._resolve_token_id(token_upper)
@@ -623,217 +670,82 @@ class CoinGeckoPriceSource(BasePriceSource):
         if self._api_key:
             params["x_cg_pro_api_key"] = self._api_key
 
-        start_time = time.time()
-
+        # Bounded retry: at most one 1s pause after a 429 before giving up.
+        # 1s is enough for CoinGecko free's rate-limit window (~30/min) to
+        # roll over in most cases. Hardcoded; longer values compound across
+        # decide()'s ~5 price calls and risk the framework's 30s
+        # decide_timeout_seconds. Per-attempt logic is in _attempt_id_fetch.
         try:
-            session = await self._get_session()
-            async with session.get(url, params=params) as response:
-                latency_ms = (time.time() - start_time) * 1000
+            for attempt in range(2):
+                if attempt > 0:
+                    await asyncio.sleep(1.0)
 
-                # Handle rate limiting (429)
-                if response.status == 429:
-                    self._rate_limit_state.record_rate_limit()
-                    self._metrics.rate_limits += 1
-                    retry_after = self._rate_limit_state.backoff_seconds
-
-                    logger.warning(
-                        "Rate limited by CoinGecko for %s/%s, backoff: %.2fs",
-                        token_upper,
-                        quote_upper,
-                        retry_after,
-                        extra={
-                            "token": token_upper,
-                            "quote": quote_upper,
-                            "consecutive_429s": self._rate_limit_state.consecutive_429s,
-                        },
-                    )
-
-                    # Try to return stale data if available
-                    stale = self._get_stale_cached(token_upper, quote_upper)
-                    if stale is not None:
-                        logger.info(
-                            "Returning stale data for %s/%s due to rate limit",
-                            token_upper,
-                            quote_upper,
-                        )
-                        self._metrics.successful_requests += 1
-                        return PriceResult(
-                            price=stale.result.price,
-                            source=self.source_name,
-                            timestamp=stale.result.timestamp,
-                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                            stale=True,
-                        )
-
-                    raise DataSourceRateLimited(
-                        source=self.source_name,
-                        retry_after=retry_after,
-                    )
-
-                # Handle other HTTP errors
-                if response.status != 200:
-                    error_msg = f"HTTP {response.status}: {await response.text()}"
-                    self._metrics.errors += 1
-                    self._metrics.last_error = error_msg
-                    self._metrics.last_error_time = datetime.now(UTC)
-
-                    logger.error(
-                        "CoinGecko API error for %s/%s: %s",
-                        token_upper,
-                        quote_upper,
-                        error_msg,
-                    )
-
-                    # Try stale data
-                    stale = self._get_stale_cached(token_upper, quote_upper)
-                    if stale is not None:
-                        logger.info(
-                            "Returning stale data for %s/%s due to API error",
-                            token_upper,
-                            quote_upper,
-                        )
-                        self._metrics.successful_requests += 1
-                        return PriceResult(
-                            price=stale.result.price,
-                            source=self.source_name,
-                            timestamp=stale.result.timestamp,
-                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                            stale=True,
-                        )
-
-                    raise DataSourceUnavailable(
-                        source=self.source_name,
-                        reason=error_msg,
-                    )
-
-                # Parse successful response
-                data = await response.json()
-
-                # Reset rate limit state on success
-                self._rate_limit_state.record_success()
-
-                # Extract price from response
-                # Response format: {"token_id": {"usd": 1234.56}}
-                quote_lower = quote_upper.lower()
-                if token_id not in data:
-                    error_msg = f"Token {token_id} not in response"
-                    self._metrics.errors += 1
-                    self._metrics.last_error = error_msg
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise DataSourceUnavailable(
-                        source=self.source_name,
-                        reason=error_msg,
-                    )
-
-                if quote_lower not in data[token_id]:
-                    error_msg = f"Quote {quote_upper} not in response for {token_id}"
-                    self._metrics.errors += 1
-                    self._metrics.last_error = error_msg
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise DataSourceUnavailable(
-                        source=self.source_name,
-                        reason=error_msg,
-                    )
-
-                price = Decimal(str(data[token_id][quote_lower]))
-
-                # Create result
-                result = PriceResult(
-                    price=price,
-                    source=self.source_name,
-                    timestamp=datetime.now(UTC),
-                    confidence=1.0,
-                    stale=False,
-                )
-
-                # Update cache
-                self._update_cache(token_upper, quote_upper, result, latency_ms)
-
-                # Update metrics
-                self._metrics.successful_requests += 1
-                self._metrics.total_latency_ms += latency_ms
-
-                logger.debug(
-                    "Fetched price for %s/%s: %s (latency: %.2fms)",
+                outcome = await self._attempt_id_fetch(
+                    url,
+                    params,
+                    token_id,
                     token_upper,
                     quote_upper,
-                    price,
-                    latency_ms,
+                    attempt,
                 )
+                if outcome is _RETRY:
+                    continue
+                return outcome  # PriceResult on success or stale fallback
 
-                return result
+            # Both attempts returned _RETRY (429 twice). Try stale, else raise.
+            stale_result = self._stale_fallback_result(token_upper, quote_upper)
+            if stale_result is not None:
+                logger.info(
+                    "Returning stale data for %s/%s due to rate limit",
+                    token_upper,
+                    quote_upper,
+                )
+                return stale_result
+            raise DataSourceRateLimited(
+                source=self.source_name,
+                retry_after=self._rate_limit_state.backoff_seconds,
+            )
 
         except TimeoutError as e:
             self._metrics.timeouts += 1
-            latency_ms = (time.time() - start_time) * 1000
-
             logger.warning(
-                "Timeout fetching %s/%s after %.2fms",
+                "Timeout fetching %s/%s after %.0fs",
                 token_upper,
                 quote_upper,
-                latency_ms,
+                self._request_timeout,
                 extra={
                     "token": token_upper,
                     "quote": quote_upper,
                     "timeout_seconds": self._request_timeout,
                 },
             )
-
-            # Try to return stale data
-            stale = self._get_stale_cached(token_upper, quote_upper)
-            if stale is not None:
-                logger.info(
-                    "Returning stale data for %s/%s due to timeout",
-                    token_upper,
-                    quote_upper,
-                )
-                self._metrics.successful_requests += 1
-                return PriceResult(
-                    price=stale.result.price,
-                    source=self.source_name,
-                    timestamp=stale.result.timestamp,
-                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                    stale=True,
-                )
-
-            raise DataSourceUnavailable(
-                source=self.source_name,
-                reason=f"Timeout after {self._request_timeout}s with no cache",
-            ) from e
+            return self._stale_or_raise_unavailable(
+                token_upper,
+                quote_upper,
+                "Returning stale data for %s/%s due to timeout",
+                token_upper,
+                f"Timeout after {self._request_timeout}s with no cache",
+                e,
+            )
 
         except aiohttp.ClientError as e:
             self._metrics.errors += 1
             self._metrics.last_error = str(e)
             self._metrics.last_error_time = datetime.now(UTC)
-
             logger.error(
                 "Network error fetching %s/%s: %s",
                 token_upper,
                 quote_upper,
                 str(e),
             )
-
-            # Try to return stale data
-            stale = self._get_stale_cached(token_upper, quote_upper)
-            if stale is not None:
-                logger.info(
-                    "Returning stale data for %s/%s due to network error",
-                    token_upper,
-                    quote_upper,
-                )
-                self._metrics.successful_requests += 1
-                return PriceResult(
-                    price=stale.result.price,
-                    source=self.source_name,
-                    timestamp=stale.result.timestamp,
-                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                    stale=True,
-                )
-
-            raise DataSourceUnavailable(
-                source=self.source_name,
-                reason=str(e),
-            ) from e
+            return self._stale_or_raise_unavailable(
+                token_upper,
+                quote_upper,
+                "Returning stale data for %s/%s due to network error",
+                token_upper,
+                str(e),
+                e,
+            )
 
     @staticmethod
     def _address_cache_key(resolved_token: Any) -> str | None:
@@ -854,7 +766,7 @@ class CoinGeckoPriceSource(BasePriceSource):
             return None
         return f"{chain_key.upper()}:{address.lower()}"
 
-    async def _try_fetch_by_address(
+    async def _try_fetch_by_address(  # noqa: C901  (response-code branching + bounded retry)
         self,
         resolved_token: Any,
         cache_token_key: str,
@@ -905,163 +817,307 @@ class CoinGeckoPriceSource(BasePriceSource):
         if self._api_key:
             params["x_cg_pro_api_key"] = self._api_key
 
-        start_time = time.time()
         try:
-            session = await self._get_session()
-            async with session.get(url, params=params) as response:
-                latency_ms = (time.time() - start_time) * 1000
+            # Bounded retry: at most one 1s pause after a 429, then give up.
+            # Each attempt's per-response logic lives in _attempt_address_fetch
+            # so this orchestration function stays trivial.
+            for attempt in range(2):
+                if attempt > 0:
+                    await asyncio.sleep(1.0)
 
-                if response.status == 429:
-                    # Rate limit is a transient outage, not "unknown token".
-                    # Mirror the main path: return stale cache if available,
-                    # otherwise raise DataSourceRateLimited so the aggregator
-                    # accounts for it in health/confidence.
-                    self._rate_limit_state.record_rate_limit()
-                    self._metrics.rate_limits += 1
-                    retry_after = self._rate_limit_state.backoff_seconds
-                    logger.warning(
-                        "Rate limited by CoinGecko on address endpoint for %s/%s, backoff: %.2fs",
-                        address_lower,
-                        quote_upper,
-                        retry_after,
-                    )
-                    stale = self._get_stale_cached(cache_token_key, quote_upper)
-                    if stale is not None:
-                        self._metrics.successful_requests += 1
-                        return PriceResult(
-                            price=stale.result.price,
-                            source=self.source_name,
-                            timestamp=stale.result.timestamp,
-                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                            stale=True,
-                        )
-                    raise DataSourceRateLimited(
-                        source=self.source_name,
-                        retry_after=retry_after,
-                    )
-
-                if response.status != 200:
-                    # Other HTTP errors — also transient. Try stale cache,
-                    # then surface as DataSourceUnavailable so the aggregator
-                    # can fall over to another source cleanly.
-                    body = await response.text()
-                    error_msg = f"HTTP {response.status}: {body[:200]}"
-                    self._metrics.errors += 1
-                    self._metrics.last_error = error_msg
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    logger.info(
-                        "CoinGecko address endpoint returned HTTP %s for %s on %s",
-                        response.status,
-                        address_lower,
-                        platform,
-                    )
-                    stale = self._get_stale_cached(cache_token_key, quote_upper)
-                    if stale is not None:
-                        self._metrics.successful_requests += 1
-                        return PriceResult(
-                            price=stale.result.price,
-                            source=self.source_name,
-                            timestamp=stale.result.timestamp,
-                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                            stale=True,
-                        )
-                    raise DataSourceUnavailable(
-                        source=self.source_name,
-                        reason=error_msg,
-                    )
-
-                data = await response.json()
-                self._rate_limit_state.record_success()
-
-                # Response shape: {"0xabc...": {"usd": 1234.56}}
-                # CoinGecko lowercases addresses in its responses.
-                entry = data.get(address_lower) or data.get(address) or {}
-                quote_lower = quote_upper.lower()
-                raw_price = entry.get(quote_lower)
-                if raw_price is None:
-                    # Token genuinely isn't listed — this is a normal miss,
-                    # not an outage. Return None so the caller's "unknown
-                    # token" path runs and surfaces a clean error.
-                    logger.info(
-                        "CoinGecko address endpoint had no %s price for %s on %s",
-                        quote_upper,
-                        address_lower,
-                        platform,
-                    )
-                    return None
-
-                price = Decimal(str(raw_price))
-                # Address-endpoint listings aren't hand-curated like the
-                # CoinGecko IDs in our static registry — CoinGecko exposes a
-                # price for any token with a listed pool, including thin
-                # and spammy ones. Lower confidence matches what DexScreener
-                # assigns to similarly "automatic" listings so the aggregator
-                # doesn't treat a new low-liquidity token the same as ETH/USDC.
-                result = PriceResult(
-                    price=price,
-                    source=self.source_name,
-                    timestamp=datetime.now(UTC),
-                    confidence=0.85,
-                    stale=False,
-                )
-                self._update_cache(cache_token_key, quote_upper, result, latency_ms)
-                self._metrics.successful_requests += 1
-                self._metrics.total_latency_ms += latency_ms
-                logger.debug(
-                    "Priced %s on %s via CoinGecko address endpoint: %s (latency: %.2fms)",
+                outcome = await self._attempt_address_fetch(
+                    url,
+                    params,
+                    address,
                     address_lower,
                     platform,
-                    price,
-                    latency_ms,
+                    cache_token_key,
+                    quote_upper,
+                    attempt,
                 )
-                return result
+                if outcome is _RETRY:
+                    continue
+                return outcome  # PriceResult on success/stale, None on miss
+
+            # Both attempts returned _RETRY (429 twice). Try stale, else raise.
+            stale_result = self._stale_fallback_result(cache_token_key, quote_upper)
+            if stale_result is not None:
+                return stale_result
+            raise DataSourceRateLimited(
+                source=self.source_name,
+                retry_after=self._rate_limit_state.backoff_seconds,
+            )
 
         except TimeoutError as e:
             self._metrics.timeouts += 1
-            stale = self._get_stale_cached(cache_token_key, quote_upper)
-            if stale is not None:
-                logger.info(
-                    "Returning stale data for %s/%s (address endpoint timeout)",
-                    address_lower,
-                    quote_upper,
-                )
-                self._metrics.successful_requests += 1
-                return PriceResult(
-                    price=stale.result.price,
-                    source=self.source_name,
-                    timestamp=stale.result.timestamp,
-                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                    stale=True,
-                )
-            raise DataSourceUnavailable(
-                source=self.source_name,
-                reason=f"Address endpoint timeout after {self._request_timeout}s with no cache",
-            ) from e
+            return self._stale_or_raise_unavailable(
+                cache_token_key,
+                quote_upper,
+                "Returning stale data for %s/%s (address endpoint timeout)",
+                address_lower,
+                f"Address endpoint timeout after {self._request_timeout}s with no cache",
+                e,
+            )
 
         except aiohttp.ClientError as e:
             self._metrics.errors += 1
             self._metrics.last_error = str(e)
             self._metrics.last_error_time = datetime.now(UTC)
-            stale = self._get_stale_cached(cache_token_key, quote_upper)
-            if stale is not None:
-                logger.info(
-                    "Returning stale data for %s/%s (address endpoint network error: %s)",
+            return self._stale_or_raise_unavailable(
+                cache_token_key,
+                quote_upper,
+                f"Returning stale data for %s/%s (address endpoint network error: {e})",
+                address_lower,
+                str(e),
+                e,
+            )
+
+    async def _attempt_address_fetch(  # noqa: C901  (response-code branching)
+        self,
+        url: str,
+        params: dict[str, str],
+        address: Any,
+        address_lower: str,
+        platform: str,
+        cache_token_key: str,
+        quote_upper: str,
+        attempt: int,
+    ) -> "PriceResult | None | _RetrySentinel":
+        """Run one HTTP attempt of the address-endpoint fetch.
+
+        Returns:
+          - ``PriceResult``: success or stale-cache fallback (on non-200).
+          - ``None``: CoinGecko has no listing for this address (normal miss).
+          - ``_RETRY`` sentinel: status 429, caller should retry.
+
+        Raises ``DataSourceUnavailable`` for non-200 with no stale cache.
+        ``DataSourceRateLimited`` is **not** raised here — the orchestrator in
+        ``_try_fetch_by_address`` decides whether to retry or exhaust.
+        """
+        start_time = time.time()
+        session = await self._get_session()
+        async with session.get(url, params=params) as response:
+            latency_ms = (time.time() - start_time) * 1000
+
+            if response.status == 429:
+                # Rate limit is a transient outage, not "unknown token".
+                # Caller orchestrates retry vs. exhaust.
+                self._rate_limit_state.record_rate_limit()
+                self._metrics.rate_limits += 1
+                logger.warning(
+                    "Rate limited by CoinGecko on address endpoint for %s/%s (attempt %d)",
                     address_lower,
                     quote_upper,
-                    e,
+                    attempt + 1,
                 )
-                self._metrics.successful_requests += 1
-                return PriceResult(
-                    price=stale.result.price,
+                return _RETRY
+
+            if response.status != 200:
+                # Other HTTP errors — also transient. Try stale cache, then
+                # surface as DataSourceUnavailable so the aggregator can
+                # fall over to another source cleanly.
+                body = await response.text()
+                error_msg = f"HTTP {response.status}: {body[:200]}"
+                self._metrics.errors += 1
+                self._metrics.last_error = error_msg
+                self._metrics.last_error_time = datetime.now(UTC)
+                logger.info(
+                    "CoinGecko address endpoint returned HTTP %s for %s on %s",
+                    response.status,
+                    address_lower,
+                    platform,
+                )
+                stale_result = self._stale_fallback_result(cache_token_key, quote_upper)
+                if stale_result is not None:
+                    return stale_result
+                raise DataSourceUnavailable(
                     source=self.source_name,
-                    timestamp=stale.result.timestamp,
-                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
-                    stale=True,
+                    reason=error_msg,
                 )
+
+            data = await response.json()
+            self._rate_limit_state.record_success()
+
+            # Response shape: {"0xabc...": {"usd": 1234.56}}
+            # CoinGecko lowercases addresses in its responses.
+            entry = data.get(address_lower) or data.get(address) or {}
+            quote_lower = quote_upper.lower()
+            raw_price = entry.get(quote_lower)
+            if raw_price is None:
+                # Token genuinely isn't listed — this is a normal miss,
+                # not an outage. Return None so the caller's "unknown
+                # token" path runs and surfaces a clean error.
+                logger.info(
+                    "CoinGecko address endpoint had no %s price for %s on %s",
+                    quote_upper,
+                    address_lower,
+                    platform,
+                )
+                return None
+
+            price = Decimal(str(raw_price))
+            # Address-endpoint listings aren't hand-curated like the
+            # CoinGecko IDs in our static registry — CoinGecko exposes a
+            # price for any token with a listed pool, including thin
+            # and spammy ones. Lower confidence matches what DexScreener
+            # assigns to similarly "automatic" listings so the aggregator
+            # doesn't treat a new low-liquidity token the same as ETH/USDC.
+            result = PriceResult(
+                price=price,
+                source=self.source_name,
+                timestamp=datetime.now(UTC),
+                confidence=0.85,
+                stale=False,
+            )
+            self._update_cache(cache_token_key, quote_upper, result, latency_ms)
+            self._metrics.successful_requests += 1
+            self._metrics.total_latency_ms += latency_ms
+            logger.debug(
+                "Priced %s on %s via CoinGecko address endpoint: %s (latency: %.2fms)",
+                address_lower,
+                platform,
+                price,
+                latency_ms,
+            )
+            return result
+
+    async def _attempt_id_fetch(  # noqa: C901  (response-code branching)
+        self,
+        url: str,
+        params: dict[str, str],
+        token_id: str,
+        token_upper: str,
+        quote_upper: str,
+        attempt: int,
+    ) -> "PriceResult | _RetrySentinel":
+        """Run one HTTP attempt of the `/simple/price` ID-keyed fetch.
+
+        Returns:
+          - ``PriceResult``: success or stale-cache fallback (on non-200).
+          - ``_RETRY`` sentinel: status 429, caller should retry.
+
+        Raises ``DataSourceUnavailable`` for non-200/null/missing-field with
+        no stale cache. ``DataSourceRateLimited`` is **not** raised here —
+        the orchestrator in ``get_price`` decides retry vs. exhaust.
+        """
+        start_time = time.time()
+        session = await self._get_session()
+        async with session.get(url, params=params) as response:
+            latency_ms = (time.time() - start_time) * 1000
+
+            if response.status == 429:
+                self._rate_limit_state.record_rate_limit()
+                self._metrics.rate_limits += 1
+                logger.warning(
+                    "Rate limited by CoinGecko for %s/%s (attempt %d)",
+                    token_upper,
+                    quote_upper,
+                    attempt + 1,
+                    extra={
+                        "token": token_upper,
+                        "quote": quote_upper,
+                        "consecutive_429s": self._rate_limit_state.consecutive_429s,
+                    },
+                )
+                return _RETRY
+
+            if response.status != 200:
+                error_msg = f"HTTP {response.status}: {await response.text()}"
+                self._metrics.errors += 1
+                self._metrics.last_error = error_msg
+                self._metrics.last_error_time = datetime.now(UTC)
+                logger.error(
+                    "CoinGecko API error for %s/%s: %s",
+                    token_upper,
+                    quote_upper,
+                    error_msg,
+                )
+                stale_result = self._stale_fallback_result(token_upper, quote_upper)
+                if stale_result is not None:
+                    logger.info(
+                        "Returning stale data for %s/%s due to API error",
+                        token_upper,
+                        quote_upper,
+                    )
+                    return stale_result
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=error_msg,
+                )
+
+            data = await response.json()
+            self._rate_limit_state.record_success()
+
+            # Response format: {"token_id": {"usd": 1234.56}}
+            quote_lower = quote_upper.lower()
+            raw_price = self._extract_id_price(data, token_id, quote_lower, quote_upper)
+            price = Decimal(str(raw_price))
+
+            result = PriceResult(
+                price=price,
+                source=self.source_name,
+                timestamp=datetime.now(UTC),
+                confidence=1.0,
+                stale=False,
+            )
+            self._update_cache(token_upper, quote_upper, result, latency_ms)
+            self._metrics.successful_requests += 1
+            self._metrics.total_latency_ms += latency_ms
+            logger.debug(
+                "Fetched price for %s/%s: %s (latency: %.2fms)",
+                token_upper,
+                quote_upper,
+                price,
+                latency_ms,
+            )
+            return result
+
+    def _extract_id_price(
+        self,
+        data: dict[str, Any],
+        token_id: str,
+        quote_lower: str,
+        quote_upper: str,
+    ) -> Any:
+        """Validate `/simple/price` response shape and return the raw price.
+
+        Raises ``DataSourceUnavailable`` if the token id is missing, the quote
+        key is missing under it, or the price value is null. ``Decimal(str(None))``
+        would raise ``InvalidOperation``, so the null-value guard surfaces a
+        clean source-level error instead of a downstream decimal crash.
+        """
+        if token_id not in data:
+            error_msg = f"Token {token_id} not in response"
+            self._metrics.errors += 1
+            self._metrics.last_error = error_msg
+            self._metrics.last_error_time = datetime.now(UTC)
             raise DataSourceUnavailable(
                 source=self.source_name,
-                reason=str(e),
-            ) from e
+                reason=error_msg,
+            )
+
+        if quote_lower not in data[token_id]:
+            error_msg = f"Quote {quote_upper} not in response for {token_id}"
+            self._metrics.errors += 1
+            self._metrics.last_error = error_msg
+            self._metrics.last_error_time = datetime.now(UTC)
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=error_msg,
+            )
+
+        raw_price = data[token_id][quote_lower]
+        if raw_price is None:
+            error_msg = f"Price for {token_id}/{quote_upper} is null in response"
+            self._metrics.errors += 1
+            self._metrics.last_error = error_msg
+            self._metrics.last_error_time = datetime.now(UTC)
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=error_msg,
+            )
+
+        return raw_price
 
     @property
     def source_name(self) -> str:
