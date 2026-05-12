@@ -220,6 +220,11 @@ service StateService {
   // transaction_ledger row for category-handler processing in hosted mode.
   rpc GetLedgerEntry(GetLedgerEntryRequest) returns (GetLedgerEntryResponse);
 
+  // Read-side gas aggregator for portfolio_metrics.gas_spent_usd (VIB-4247).
+  // Sums transaction_ledger.gas_usd for a deployment. The gateway performs the
+  // DB read because hosted strategy containers cannot access Postgres directly.
+  rpc SumLedgerGasUsd(SumLedgerGasUsdRequest) returns (SumLedgerGasUsdResponse);
+
   // Cutover storage RPCs — per-(deployment_id, primitive, cutover_key)
   // migration_state CRUD + position_registry read + atomic ledger+registry
   // commit (VIB-4208 / T22 of multi-position-tracking epic).
@@ -733,6 +738,16 @@ message LedgerEntryData {
 message GetLedgerEntryResponse {
   bool found = 1;
   LedgerEntryData entry = 2;
+}
+
+message SumLedgerGasUsdRequest {
+  string deployment_id = 1;
+  string strategy_id = 2;
+}
+message SumLedgerGasUsdResponse {
+  bool success = 1;
+  string gas_usd_total = 2;  // Decimal string
+  string error = 3;
 }
 
 // =============================================================================

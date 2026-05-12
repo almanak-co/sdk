@@ -16,6 +16,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -2549,6 +2550,95 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+    async def SumLedgerGasUsd(
+        self,
+        request: gateway_pb2.SumLedgerGasUsdRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SumLedgerGasUsdResponse:
+        """Return Σ transaction_ledger.gas_usd for portfolio metrics.
+
+        Hosted Postgres stores the strategy identity in ``agent_id``. The wire
+        request still carries ``strategy_id`` for local parity, so the gateway
+        resolves it through ``AGENT_ID`` before using the legacy empty
+        ``deployment_id`` fallback.
+        """
+        deployment_id = (request.deployment_id or "").strip()
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SumLedgerGasUsdResponse(success=False, error="deployment_id is required")
+
+        try:
+            deployment_id = validate_strategy_id(deployment_id, field="deployment_id")
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=str(e))
+
+        fallback_strategy_id = (request.strategy_id or deployment_id).strip()
+        try:
+            fallback_strategy_id = validate_strategy_id(fallback_strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=str(e))
+        agent_id = resolve_agent_id(fallback_strategy_id)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    SELECT COALESCE(
+                        SUM(
+                            CASE
+                                WHEN NULLIF(BTRIM(gas_usd), '') ~ '^[+-]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+)?$'
+                                THEN NULLIF(BTRIM(gas_usd), '')::numeric
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS total
+                    FROM transaction_ledger
+                    WHERE agent_id = $2
+                      AND (deployment_id = $1 OR deployment_id = '')
+                    """,
+                    deployment_id,
+                    agent_id,
+                )
+                total = Decimal(str((row or {"total": 0})["total"] or 0))
+                return gateway_pb2.SumLedgerGasUsdResponse(success=True, gas_usd_total=str(total))
+            except Exception as e:
+                logger.error(
+                    "SumLedgerGasUsd PG failed for deployment_id=%s agent_id=%s: %s",
+                    deployment_id,
+                    agent_id,
+                    e,
+                )
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SumLedgerGasUsdResponse(success=False, error="internal server error")
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "sum_ledger_gas_usd"):
+                error = "warm backend does not support sum_ledger_gas_usd"
+                logger.error("SumLedgerGasUsd unsupported for deployment_id=%s: %s", deployment_id, error)
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=error)
+
+            total = await warm.sum_ledger_gas_usd(deployment_id, fallback_strategy_id)
+            return gateway_pb2.SumLedgerGasUsdResponse(success=True, gas_usd_total=str(total))
+        except Exception as e:
+            logger.error("SumLedgerGasUsd SQLite failed for deployment_id=%s: %s", deployment_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SumLedgerGasUsdResponse(success=False, error="internal server error")
 
     # =========================================================================
     # Cutover storage RPCs (VIB-4208 / T22 SQLite; VIB-4205 / T19 Postgres)

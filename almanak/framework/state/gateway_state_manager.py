@@ -458,32 +458,47 @@ class GatewayStateManager:
         deployment_id: str,
         strategy_id: str | None = None,
     ) -> Decimal:
-        """Hosted-mode placeholder — VIB-4247 follow-up will replace this.
-
-        VIB-4225 (ACC-02) ships the local-mode `sum_ledger_gas_usd` aggregator
-        but the gateway gRPC has no `SumLedgerGasUsd` method today; adding
-        one is a gateway-service surface change tracked under VIB-4247
-        (Infra-labeled, parented under VIB-4225).
-
-        The runner's :func:`_build_metrics_for_snapshot` catches this
-        `NotImplementedError` specifically (NOT a bare ``except Exception``),
-        leaves ``gas_spent_usd = Decimal("0")``, stamps
-        ``snapshot.snapshot_metadata["gas_aggregator_status"] =
-        "hosted_unsupported"``, and logs WARN once. This preserves the
-        pre-PR hosted-mode behaviour (gas_spent_usd was always 0 in hosted)
-        but adds a typed durable trail so operators can see the gap on
-        every snapshot row instead of after the next quarterly audit.
-
-        DO NOT change this raise to anything else (silent zero, generic
-        Exception subclass, etc.) — the runner's catch is type-narrow on
-        ``NotImplementedError`` and only ``NotImplementedError`` triggers
-        the ``hosted_unsupported`` typed status. Any other exception will
-        bubble up as ``AccountingPersistenceError`` and halt the live runner.
-        """
-        del deployment_id, strategy_id  # arguments are part of the contract once VIB-4247 lands
-        raise NotImplementedError(
-            "sum_ledger_gas_usd is local-mode-only — hosted gateway aggregator is follow-up VIB-4247"
+        """Σ transaction_ledger.gas_usd via gateway gRPC (VIB-4247)."""
+        request = gateway_pb2.SumLedgerGasUsdRequest(
+            deployment_id=deployment_id,
+            strategy_id=strategy_id or "",
         )
+        try:
+            response = self._client.state.SumLedgerGasUsd(request, timeout=self._timeout)
+        except grpc.RpcError as exc:
+            code = exc.code() if hasattr(exc, "code") else None
+            if code == grpc.StatusCode.UNIMPLEMENTED:
+                raise NotImplementedError("gateway does not implement SumLedgerGasUsd") from exc
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id or deployment_id,
+                message=f"SumLedgerGasUsd RPC failed for {deployment_id}",
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id or deployment_id,
+                message=f"SumLedgerGasUsd RPC failed for {deployment_id}",
+                cause=exc,
+            ) from exc
+
+        if not response.success:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id or deployment_id,
+                message=f"SumLedgerGasUsd failed for {deployment_id}: {response.error or 'unknown error'}",
+            )
+
+        try:
+            return Decimal(response.gas_usd_total or "0")
+        except Exception as exc:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id or deployment_id,
+                message=f"SumLedgerGasUsd returned invalid Decimal for {deployment_id}",
+                cause=exc,
+            ) from exc
 
     async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save portfolio metrics via gateway gRPC.

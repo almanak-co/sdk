@@ -828,10 +828,10 @@ async def _populate_gas_spent_usd(
 
     - ``"ok"``: aggregator returned a value (possibly 0) — happy path.
     - ``"hosted_unsupported"`` (F4b): backend raised ``NotImplementedError``
-      (see :meth:`GatewayStateManager.sum_ledger_gas_usd` — VIB-4247
-      follow-up). All modes leave ``gas_spent_usd = Decimal("0")`` and log
-      WARN once. **No raise**, even in live hosted mode — preserves the
-      pre-PR behaviour where hosted strategies silently had 0 gas_spent_usd.
+      (old gateway / rollback path). All modes leave ``gas_spent_usd =
+      Decimal("0")`` and log WARN once. **No raise**, even in live hosted mode
+      — preserves the pre-VIB-4247 behaviour where hosted strategies silently
+      had 0 gas_spent_usd.
     - ``"query_failed"`` (F4a + F4c): backend raised any other exception.
       **Live mode raises** ``AccountingPersistenceError("metrics", ...)``;
       paper/dry_run leaves ``gas_spent_usd = Decimal("0")`` and logs ERROR.
@@ -863,7 +863,7 @@ async def _populate_gas_spent_usd(
         logger.warning(
             "gas_aggregator: state_manager has no sum_ledger_gas_usd method; "
             "leaving portfolio_metrics.gas_spent_usd at 0 for deployment_id=%s. "
-            "Follow-up: VIB-4247.",
+            "This is an old-backend compatibility path.",
             deployment_id,
         )
         return
@@ -875,8 +875,8 @@ async def _populate_gas_spent_usd(
         metrics.gas_spent_usd = Decimal("0")
         _stamp("hosted_unsupported")
         logger.warning(
-            "gas_aggregator: hosted backend has not yet implemented sum_ledger_gas_usd "
-            "(VIB-4247); leaving portfolio_metrics.gas_spent_usd at 0 for deployment_id=%s.",
+            "gas_aggregator: backend returned UNIMPLEMENTED for sum_ledger_gas_usd; "
+            "leaving portfolio_metrics.gas_spent_usd at 0 for deployment_id=%s.",
             deployment_id,
         )
         return

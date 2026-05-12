@@ -3,7 +3,7 @@
 Pins the F4a / F4b / F4c / F5 / F6 contract from the frozen UAT card §6.
 
 - F4a (live SQL failure): live mode raises AccountingPersistenceError.
-- F4b (hosted NotImplementedError): all modes leave gas_spent_usd=0,
+- F4b (old gateway NotImplementedError): all modes leave gas_spent_usd=0,
   stamp `gas_aggregator_status="hosted_unsupported"`, log WARN, no halt.
 - F4c (type-narrowness): unrelated ValueError → live mode raises.
 - F5 (NULL/empty rows in ledger): coalesce to 0 inside SUM.
@@ -147,12 +147,12 @@ async def test_f4a_paper_query_failure_logs_and_continues() -> None:
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "query_failed"
 
 
-# --- F4b: hosted NotImplementedError → no raise in any mode ----------------------
+# --- F4b: old gateway NotImplementedError → no raise in any mode -----------------
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_live", [True, False])
 async def test_f4b_hosted_aggregator_unsupported(is_live: bool) -> None:
-    """F4b: NotImplementedError catches in BOTH live and paper; never halts."""
+    """F4b: old gateway UNIMPLEMENTED catches in BOTH live and paper; never halts."""
     state_manager = MagicMock()
     state_manager.sum_ledger_gas_usd = AsyncMock(
         side_effect=NotImplementedError("VIB-4247 follow-up")

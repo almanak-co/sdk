@@ -534,6 +534,11 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.GetLedgerEntryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetLedgerEntryResponse.FromString,
                 _registered_method=True)
+        self.SumLedgerGasUsd = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SumLedgerGasUsd',
+                request_serializer=gateway__pb2.SumLedgerGasUsdRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SumLedgerGasUsdResponse.FromString,
+                _registered_method=True)
         self.UpsertMigrationState = channel.unary_unary(
                 '/almanak.gateway.proto.StateService/UpsertMigrationState',
                 request_serializer=gateway__pb2.UpsertMigrationStateRequest.SerializeToString,
@@ -746,6 +751,15 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SumLedgerGasUsd(self, request, context):
+        """Read-side gas aggregator for portfolio_metrics.gas_spent_usd (VIB-4247).
+        Sums transaction_ledger.gas_usd for a deployment. The gateway performs the
+        DB read because hosted strategy containers cannot access Postgres directly.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def UpsertMigrationState(self, request, context):
         """Cutover storage RPCs — per-(deployment_id, primitive, cutover_key)
         migration_state CRUD + position_registry read + atomic ledger+registry
@@ -922,6 +936,11 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.GetLedgerEntry,
                     request_deserializer=gateway__pb2.GetLedgerEntryRequest.FromString,
                     response_serializer=gateway__pb2.GetLedgerEntryResponse.SerializeToString,
+            ),
+            'SumLedgerGasUsd': grpc.unary_unary_rpc_method_handler(
+                    servicer.SumLedgerGasUsd,
+                    request_deserializer=gateway__pb2.SumLedgerGasUsdRequest.FromString,
+                    response_serializer=gateway__pb2.SumLedgerGasUsdResponse.SerializeToString,
             ),
             'UpsertMigrationState': grpc.unary_unary_rpc_method_handler(
                     servicer.UpsertMigrationState,
@@ -1503,6 +1522,33 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/GetLedgerEntry',
             gateway__pb2.GetLedgerEntryRequest.SerializeToString,
             gateway__pb2.GetLedgerEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SumLedgerGasUsd(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SumLedgerGasUsd',
+            gateway__pb2.SumLedgerGasUsdRequest.SerializeToString,
+            gateway__pb2.SumLedgerGasUsdResponse.FromString,
             options,
             channel_credentials,
             insecure,

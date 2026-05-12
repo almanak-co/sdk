@@ -2080,6 +2080,48 @@ class GetLedgerEntryResponse(_message.Message):
 Global___GetLedgerEntryResponse: _TypeAlias = GetLedgerEntryResponse  # noqa: Y015
 
 @_typing.final
+class SumLedgerGasUsdRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SumLedgerGasUsdRequest: _TypeAlias = SumLedgerGasUsdRequest  # noqa: Y015
+
+@_typing.final
+class SumLedgerGasUsdResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    GAS_USD_TOTAL_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    gas_usd_total: _builtins.str
+    """Decimal string"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        gas_usd_total: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "gas_usd_total", b"gas_usd_total", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SumLedgerGasUsdResponse: _TypeAlias = SumLedgerGasUsdResponse  # noqa: Y015
+
+@_typing.final
 class UpsertMigrationStateRequest(_message.Message):
     """=============================================================================
     Cutover storage messages (VIB-4208 / T22) — mirrors the 13-column

@@ -369,11 +369,13 @@ class TestCircuitBreakerEdgeCases:
     def test_very_short_cooldown(self) -> None:
         """Very short cooldown transitions quickly to half-open."""
         cb = CircuitBreaker(name="test", failure_threshold=1, cooldown_seconds=0.001)
-        cb.record_failure()
-        assert cb.state == CircuitState.OPEN
 
-        import time
+        with patch("almanak.framework.data.routing.circuit_breaker.time") as mock_time:
+            initial_time = 1000.0
+            mock_time.monotonic.return_value = initial_time
+            cb.record_failure()
+            assert cb.state == CircuitState.OPEN
 
-        time.sleep(0.01)
-        assert cb.state == CircuitState.HALF_OPEN
-        assert cb.allow_request() is True
+            mock_time.monotonic.return_value = initial_time + 0.01
+            assert cb.state == CircuitState.HALF_OPEN
+            assert cb.allow_request() is True
