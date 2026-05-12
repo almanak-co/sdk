@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage
 
 # Load .env file if it exists
 -include .env
@@ -57,6 +57,17 @@ check-config-boundary:
 # PR 2's intent-test coverage gate and future tooling.
 check-connector-registry:
 	uv run python scripts/ci/check_connector_registry.py --verbose
+
+# Intent-coverage gate (VIB-4298 PR 2 / VIB-4303). Two-in-one:
+#   1. Marker hygiene — every test_* under tests/intents/ must carry
+#      @pytest.mark.intent(IntentType.X, ...). Always enforced.
+#   2. Coverage gap — every (connector, intent, chain) in ConnectorRegistry
+#      must have an intent test OR a structural entry in
+#      scripts/ci/intent-coverage-excused.yml. Runs --warn-only by default;
+#      a follow-up PR flips to --enforce after the writable backlog clears
+#      (~150 triples as of 2026-05-12).
+check-intent-coverage:
+	uv run python scripts/ci/check_intent_coverage.py --verbose
 
 # Run security checks (bandit for Python security issues)
 security:

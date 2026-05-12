@@ -35,6 +35,7 @@ from almanak.framework.connectors.aster_perps import (
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import TEST_WALLET as _EOA_ADDR
 
 CHAIN_NAME = "bsc"
@@ -71,6 +72,7 @@ def _call_get_pending_trade(web3: Web3, router: str, trade_hash: str) -> bytes:
 class TestAsterPerpsOpenIntent:
     """Test Aster Perps OPEN via PerpOpenIntent on BSC (raw broker, no attribution)."""
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     async def test_open_btc_long_native_bnb_margin(
         self,
         web3: Web3,

@@ -55,6 +55,7 @@ from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
 )
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     get_token_balance,
@@ -237,6 +238,7 @@ async def _open_position(
 class TestTraderJoeV2TeardownDrift:
     """Pins VIB-3742 framework hardening for TJ V2 LP teardown."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_without_bin_ids_after_active_drift_leaks(
         self,
@@ -403,6 +405,7 @@ class TestTraderJoeV2TeardownDrift:
             usdc_after - usdc_before,
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_with_bin_ids_after_active_drift_closes_fully(
         self,
@@ -504,6 +507,7 @@ class TestTraderJoeV2TeardownDrift:
             f"before={usdc_before} after={usdc_after}"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_framework_auto_inject_bin_ids_on_close_intent(
         self,

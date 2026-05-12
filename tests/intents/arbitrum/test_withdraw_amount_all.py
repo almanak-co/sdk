@@ -22,6 +22,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -151,6 +152,7 @@ async def _supply_then_withdraw_all(
 class TestWithdrawAmountAllAaveV3:
     """Test withdraw(amount='all') for Aave V3."""
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_aave_v3_withdraw_amount_all(
         self,
@@ -193,6 +195,7 @@ class TestWithdrawAmountAllAaveV3:
 class TestWithdrawAmountAllCompoundV3:
     """Test withdraw(amount='all') for Compound V3."""
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_compound_v3_withdraw_amount_all(
         self,
@@ -238,6 +241,7 @@ class TestWithdrawAmountAllCompoundV3:
 class TestWithdrawAmountAllSpark:
     """Test withdraw(amount='all') for Spark (Aave V3 fork)."""
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_spark_withdraw_amount_all(
         self,

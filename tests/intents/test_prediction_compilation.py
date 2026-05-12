@@ -26,6 +26,14 @@ from almanak.framework.intents.compiler import (
 )
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
+# Every test under tests/intents/ must declare which IntentType verbs it
+# exercises (VIB-4298 Phase 2). This module covers the three prediction verbs.
+pytestmark = pytest.mark.intent(
+    IntentType.PREDICTION_BUY,
+    IntentType.PREDICTION_SELL,
+    IntentType.PREDICTION_REDEEM,
+)
+
 # =============================================================================
 # Fixtures
 # =============================================================================

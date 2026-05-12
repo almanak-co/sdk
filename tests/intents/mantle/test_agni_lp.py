@@ -26,6 +26,7 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -163,6 +164,7 @@ class TestAgniLPOpenIntent:
     - Balance changes are correct
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_wmnt_weth(
         self,
@@ -297,6 +299,7 @@ class TestAgniLPCloseIntent:
     Test case: Close position that has liquidity (normal close).
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,

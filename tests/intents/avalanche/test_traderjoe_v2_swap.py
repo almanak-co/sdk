@@ -31,7 +31,8 @@ from web3 import Web3
 from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.intents import SwapIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class TestTraderJoeV2SwapCompilation:
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_vib_1406_guard_removed(self):
         """SwapIntent(protocol='traderjoe_v2') must NOT return VIB-1406 block error."""
         compiler = self._make_compiler()
@@ -108,6 +110,7 @@ class TestTraderJoeV2SwapExecution:
     - Layer 4: Exact balance delta verification
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="WAVAX->USDC direction can revert on Anvil fork due to bin liquidity state", strict=False)
@@ -233,6 +236,7 @@ class TestTraderJoeV2SwapExecution:
             usdc_received / 10**6,
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="USDC->WAVAX can revert on Anvil fork due to allowance simulation race or bin liquidity state", strict=False)

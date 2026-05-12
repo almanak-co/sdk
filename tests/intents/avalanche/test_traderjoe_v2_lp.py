@@ -33,6 +33,7 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -137,6 +138,7 @@ class TestTraderJoeV2LPOpenIntent:
     - Balance changes are correct
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_wavax_usdc(
         self,
@@ -311,6 +313,7 @@ class TestTraderJoeV2LPCloseIntent:
     because removeLiquidity removes and returns tokens in one step.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,
@@ -454,6 +457,7 @@ class TestTraderJoeV2LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_no_position(
         self,
@@ -564,6 +568,7 @@ class TestTraderJoeV2LPCloseWithBinIds:
            position ever held — i.e., no liquidity stranded.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_with_bin_ids_zeroes_all_bins(
         self,

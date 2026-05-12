@@ -50,6 +50,7 @@ from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRES
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -93,6 +94,7 @@ class TestStargateBridgeIntent:
     - Source-chain USDC balance decreases by the bridged amount
     """
 
+    @pytest.mark.intent(IntentType.BRIDGE)
     @pytest.mark.asyncio
     async def test_bridge_usdc_arbitrum_to_optimism_using_intent(  # noqa: layers
         self,

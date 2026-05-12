@@ -28,6 +28,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
     SwapIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -132,6 +133,7 @@ class TestUniswapV3LPOpenIntent:
     - Balance changes are correct
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_weth_usdc(
         self,
@@ -271,6 +273,7 @@ class TestUniswapV3LPCloseIntent:
     #3: Position has no liquidity but has owed tokens (decreased but not collected)
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,
@@ -363,6 +366,7 @@ class TestUniswapV3LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_no_fees(
         self,
@@ -456,6 +460,7 @@ class TestUniswapV3LPCloseIntent:
         print(f"WETH delta: {weth_delta}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,

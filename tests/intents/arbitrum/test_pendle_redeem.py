@@ -23,6 +23,7 @@ from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptPars
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
@@ -80,6 +81,7 @@ class TestPendlePTRedeemIntent:
     Flow: buy PT -> warp past maturity -> redeem -> verify.
     """
 
+    @pytest.mark.intent(IntentType.SWAP, IntentType.WITHDRAW)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         strict=False,

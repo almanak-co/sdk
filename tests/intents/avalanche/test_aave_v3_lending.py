@@ -30,6 +30,7 @@ from almanak.framework.intents import (
     SupplyIntent,
     WithdrawIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -116,6 +117,7 @@ class TestAaveV3SupplyIntent:
     - Balance changes and account data match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
         self,
@@ -220,6 +222,7 @@ class TestAaveV3SupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
         self,
@@ -316,6 +319,7 @@ class TestAaveV3SupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_intent_with_insufficient_balance_fails(
         self,
@@ -393,6 +397,7 @@ class TestAaveV3BorrowIntent:
     - Balance changes and account data match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wavax_collateral_using_intent(
         self,
@@ -535,6 +540,7 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
@@ -634,6 +640,7 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,

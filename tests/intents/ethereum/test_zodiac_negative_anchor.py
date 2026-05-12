@@ -33,15 +33,19 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._permission_onchain_harness import (
     PermissionTestCase,
     run_negative_authorisation_case,
 )
 
-pytestmark = pytest.mark.no_zodiac(
-    reason="Negative anchor — deploys its own Safe+Roles inside the harness; "
-    "the conftest Zodiac fixture would conflict with that.",
-)
+pytestmark = [
+    pytest.mark.no_zodiac(
+        reason="Negative anchor — deploys its own Safe+Roles inside the harness; "
+        "the conftest Zodiac fixture would conflict with that.",
+    ),
+    pytest.mark.intent(IntentType.SWAP, IntentType.SUPPLY, IntentType.LP_OPEN),
+]
 
 CHAIN_NAME = "ethereum"
 

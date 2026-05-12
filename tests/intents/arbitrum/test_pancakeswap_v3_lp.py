@@ -25,6 +25,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
     LP_POSITION_MANAGERS,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -121,6 +122,7 @@ class TestPancakeSwapV3LPOpenIntent:
     "Unknown position manager for protocol pancakeswap_v3 on arbitrum".
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_weth_usdc(
         self,
@@ -257,6 +259,7 @@ class TestPancakeSwapV3LPOpenIntent:
 class TestPancakeSwapV3LPCloseIntent:
     """Test PancakeSwap V3 LP Close using LPCloseIntent on Arbitrum."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,

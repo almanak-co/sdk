@@ -22,6 +22,7 @@ from almanak.framework.connectors.benqi.receipt_parser import BenqiReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -60,6 +61,7 @@ class TestBenqiSupplyIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
         self,
@@ -164,6 +166,7 @@ class TestBenqiSupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
         self,
@@ -268,6 +271,7 @@ class TestBenqiSupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_intent_with_insufficient_balance_fails(
         self,

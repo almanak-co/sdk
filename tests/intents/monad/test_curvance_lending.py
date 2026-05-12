@@ -51,6 +51,7 @@ from almanak.framework.connectors.curvance.receipt_parser import (
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -108,6 +109,7 @@ def price_oracle_monad_local(price_oracle_monad: dict[str, Decimal]) -> dict[str
 class TestCurvanceSupplyIntent:
     """4-layer verification of SUPPLY against the Curvance WMON->USDC market."""
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_wmon_as_collateral(
         self,

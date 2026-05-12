@@ -22,6 +22,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -58,6 +59,7 @@ class TestLiFiSwap:
     - Higher slippage tolerance (5%) due to API-sourced routes
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="LiFi KyberSwap routing reverts with TRANSFER_FROM_FAILED on Anvil fork", strict=False)
     @pytest.mark.asyncio
@@ -192,6 +194,7 @@ class TestLiFiSwap:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Reverse direction (WETH -> USDC) may have different routing and slippage, needs separate test",strict=False)
     @pytest.mark.asyncio
@@ -264,6 +267,7 @@ class TestLiFiSwap:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_insufficient_balance_fails_safely(
         self,

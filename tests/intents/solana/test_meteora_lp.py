@@ -20,7 +20,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,
@@ -71,6 +72,7 @@ def _find_sol_usdc_pool():
 class TestMeteoraLPOpenCompilation:
     """Meteora LP Open: LPOpenIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_with_pool_address(self, solana_compiler):
         """LPOpenIntent with explicit pool address compiles via Meteora."""
@@ -132,6 +134,7 @@ class TestMeteoraLPOpenCompilation:
             "sensitive_data must include additional_signers for position keypair"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_routes_correctly(self, solana_compiler):
         """LPOpenIntent with protocol='meteora_dlmm' routes to Meteora adapter."""
@@ -156,6 +159,7 @@ class TestMeteoraLPOpenCompilation:
         bundle = result.action_bundle
         assert bundle.metadata["protocol"] == "meteora_dlmm"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_non_solana_chain_fails(self):
         """Meteora DLMM on a non-Solana chain should fail."""
@@ -187,6 +191,7 @@ class TestMeteoraLPOpenCompilation:
 class TestMeteoraLPCloseCompilation:
     """Meteora LP Close: LPCloseIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_lp_close_missing_pool_fails(self, solana_compiler):
         """LPCloseIntent without pool should fail."""
@@ -201,6 +206,7 @@ class TestMeteoraLPCloseCompilation:
         assert result.status.value == "FAILED"
         assert "pool" in result.error.lower()
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_lp_close_with_pool(self, solana_compiler):
         """LPCloseIntent with pool compiles (may fail on position lookup, which is expected)."""

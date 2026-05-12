@@ -25,6 +25,7 @@ from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     SWAP_MAX_SLIPPAGE,
     get_token_balance,
@@ -38,6 +39,7 @@ CHAIN_NAME = "zerog"
 @pytest.mark.zerog
 @pytest.mark.swap
 class TestJaineSwapIntent:
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_native_a0gi_to_usdce(
         self,

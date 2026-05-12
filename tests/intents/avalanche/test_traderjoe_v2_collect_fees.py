@@ -80,6 +80,7 @@ from almanak.framework.intents import (
     IntentCompiler,
     LPOpenIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._permission_onchain_harness import (
     AuthorizationFailed,
     is_zodiac_authz_revert,
@@ -223,6 +224,7 @@ class TestTraderJoeV2CollectFeesIntent:
       ``execTransactionWithRole`` would surface ``AuthorizationFailed``.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     async def test_collect_fees_wavax_usdc(
         self,

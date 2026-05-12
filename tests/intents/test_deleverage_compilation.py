@@ -33,6 +33,11 @@ from almanak.framework.intents.compiler import (
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.intents.vocabulary import IntentType
 
+# Every test under tests/intents/ must declare which IntentType verbs it
+# exercises (VIB-4298 Phase 2). This module is uniformly about the
+# DELEVERAGE verb, so a single module-level marker is sufficient.
+pytestmark = pytest.mark.intent(IntentType.DELEVERAGE)
+
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 

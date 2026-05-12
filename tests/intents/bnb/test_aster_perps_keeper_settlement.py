@@ -42,6 +42,7 @@ from almanak.framework.connectors.aster_perps import (
     encode_get_position_by_hash_calldata,
 )
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.bnb.conftest import (
     open_aster_perps_position_via_intent,
     pcs_perps_extract_price_request_id,
@@ -70,6 +71,7 @@ def perps_price_oracle() -> dict[str, Decimal]:
 class TestAsterPerpsKeeperSettlement:
     """Validate that the Aster keeper settlement produces broker=0 OpenMarketTrade events."""
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     async def test_open_then_keeper_settle_broker_raw(
         self,
         web3: Web3,

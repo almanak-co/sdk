@@ -25,6 +25,7 @@ from web3 import Web3
 from almanak.framework.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     fund_erc20_token,
@@ -92,6 +93,7 @@ class TestCurve3poolLPOpen:
     - LP tokens minted and balance delta verified
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_dai_usdc(
         self,
@@ -235,6 +237,7 @@ class TestCurve3poolLPLifecycle:
     - Balance conservation: tokens returned >= 0 for each coin
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_open_then_close(
         self,

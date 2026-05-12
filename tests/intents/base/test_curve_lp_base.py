@@ -27,6 +27,7 @@ from web3 import Web3
 from almanak.framework.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
@@ -103,6 +104,7 @@ class TestCurveWethCbethLPOpen:
     - LP tokens minted and balance delta verified
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_weth_cbeth(
         self,
@@ -247,6 +249,7 @@ class TestCurveWethCbethLPClose:
     - WETH + cbETH returned and LP tokens burned
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_weth_cbeth(
         self,

@@ -28,6 +28,7 @@ from almanak.framework.connectors.silo_v2.receipt_parser import SiloV2ReceiptPar
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -91,6 +92,7 @@ class TestSiloV2BorrowIntent:
     enables borrowing USDC from the paired USDC silo.
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wavax_collateral(
         self,
@@ -222,6 +224,7 @@ class TestSiloV2BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_after_borrow(
         self,
@@ -347,6 +350,7 @@ class TestSiloV2BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,

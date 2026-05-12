@@ -37,6 +37,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_swap_semantic_match,
@@ -72,6 +73,7 @@ class TestUniswapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdt0_to_usdg_using_intent(
         self,
@@ -213,6 +215,7 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdg_to_usdt0_using_intent(
         self,
@@ -310,6 +313,7 @@ class TestUniswapV3SwapIntent:
         print(f"USDT0 received: {format_token_amount(usdt0_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

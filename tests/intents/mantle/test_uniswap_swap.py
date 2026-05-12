@@ -21,6 +21,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -58,6 +59,7 @@ class TestUniswapV3SwapIntent:
     USDC and USDT are bridged tokens with standard addresses.
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.skip(
         reason="#2104: token resolver returns LayerZero USD₮0 "
         "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
@@ -151,6 +153,7 @@ class TestUniswapV3SwapIntent:
         print(f"WETH received: {format_token_amount(weth_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.skip(
         reason="#2104: token resolver returns LayerZero USD₮0 "
         "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
@@ -244,6 +247,7 @@ class TestUniswapV3SwapIntent:
         print(f"USDT received: {format_token_amount(usdt_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.skip(
         reason="#2104: token resolver / conftest USDT mismatch; compile-time "
         "pool quote fails. See test_swap_usdt_to_weth_using_intent for the "

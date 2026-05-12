@@ -17,6 +17,7 @@ import pytest
 
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 
 # =============================================================================
 # Test Configuration
@@ -57,6 +58,7 @@ class TestFluidSwapCompileGuard:
     # Fluid is hard-disabled at the compile boundary (VIB-2822); Layers 2-4
     # (execution, receipt parsing, balance deltas) are intentionally absent.
     # See module docstring for full rationale.
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.parametrize(  # noqa: layers
         "from_token,to_token",
         [

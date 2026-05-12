@@ -52,6 +52,7 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._permission_onchain_harness import (
     PermissionTestCase,
     run_negative_authorisation_case,
@@ -112,6 +113,7 @@ _CASES: list = [
 ]
 
 
+@pytest.mark.intent(IntentType.SWAP, IntentType.SUPPLY)
 @pytest.mark.mantle
 @pytest.mark.parametrize("case", _CASES)
 def test_negative_authorisation_blocks_revoked_target(  # noqa: layers

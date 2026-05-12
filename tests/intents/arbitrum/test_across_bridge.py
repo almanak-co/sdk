@@ -49,6 +49,7 @@ from almanak.framework.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRES
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -125,6 +126,7 @@ class TestAcrossBridgeIntent:
     - Source-chain USDC balance decreases by the bridged amount
     """
 
+    @pytest.mark.intent(IntentType.BRIDGE)
     @pytest.mark.asyncio
     async def test_bridge_usdc_arbitrum_to_optimism_using_intent(  # noqa: layers
         self,

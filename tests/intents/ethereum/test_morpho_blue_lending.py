@@ -27,6 +27,7 @@ from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -91,6 +92,7 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 @pytest.mark.borrow
 @pytest.mark.lending
 class TestMorphoBlueBorrowIntent:
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wsteth_collateral_using_intent(
         self,
@@ -212,6 +214,7 @@ class TestMorphoBlueBorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,

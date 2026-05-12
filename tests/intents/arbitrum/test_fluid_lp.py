@@ -14,6 +14,7 @@ import pytest
 from almanak.framework.connectors.fluid.receipt_parser import FluidReceiptParser
 from almanak.framework.connectors.fluid.sdk import FluidSDK, FluidSDKError
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 
 pytestmark = pytest.mark.no_zodiac(reason="fluid connector not in manifest matrix")
 
@@ -37,6 +38,7 @@ def _find_unencumbered_pool(sdk: FluidSDK):
 
 @pytest.mark.integration
 class TestFluidLPCompilation:
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_lp_open_fails_phase1(self, funded_wallet, anvil_rpc_url):
         """LP_OPEN compilation correctly returns FAILED in phase 1.
 
@@ -55,6 +57,7 @@ class TestFluidLPCompilation:
         assert result.status.value == "FAILED", "LP_OPEN should fail in phase 1 (deposit not supported)"
         assert "not supported" in (result.error or "").lower()
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     def test_lp_close_compiles(self, funded_wallet, anvil_rpc_url):
         sdk = FluidSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
         pool_info = _find_unencumbered_pool(sdk)
@@ -65,6 +68,7 @@ class TestFluidLPCompilation:
         result = compiler.compile(intent)
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_rejects_invalid_pool(self, funded_wallet, anvil_rpc_url):
         from almanak.framework.intents.compiler import IntentCompilerConfig
         compiler = IntentCompiler(chain=CHAIN_NAME, wallet_address=funded_wallet, rpc_url=anvil_rpc_url,
@@ -76,12 +80,14 @@ class TestFluidLPCompilation:
 
 
 class TestFluidReceiptParsing:
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_parser_extracts_nft_id(self):
         from tests.unit.connectors.fluid.test_fluid_receipt_parser import _log_operate, _make_receipt
         parser = FluidReceiptParser()
         receipt = _make_receipt([_log_operate(nft_id=42, token0_amt=1_000_000, token1_amt=2_000_000)])
         assert parser.extract_position_id(receipt) == 42
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     def test_supported_extractions(self):
         parser = FluidReceiptParser()
         assert "position_id" in parser.SUPPORTED_EXTRACTIONS
@@ -90,6 +96,7 @@ class TestFluidReceiptParsing:
 
 @pytest.mark.integration
 class TestEncumbranceGuard:
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_sdk_pool_data_readable(self, anvil_rpc_url):
         """Verify pool data is readable from on-chain (smoke test)."""
         sdk = FluidSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)

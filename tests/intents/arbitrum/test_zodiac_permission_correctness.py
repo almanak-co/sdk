@@ -39,6 +39,7 @@ from almanak.framework.execution.signer.safe.constants import (
     ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
     SafeOperation,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._permission_onchain_harness import (
     PermissionTestCase,
     run_negative_authorisation_case,
@@ -108,6 +109,7 @@ ERC20_APPROVE_ABI = [
 ]
 
 
+@pytest.mark.intent(IntentType.SWAP)
 @pytest.mark.arbitrum
 @pytest.mark.asyncio
 async def test_zodiac_plumbing_allows_approve_on_wildcarded_usdc(  # noqa: layers
@@ -196,6 +198,7 @@ async def test_zodiac_plumbing_allows_approve_on_wildcarded_usdc(  # noqa: layer
 # =============================================================================
 
 
+@pytest.mark.intent(IntentType.SWAP)
 @pytest.mark.arbitrum
 @pytest.mark.asyncio
 async def test_manifest_authorises_uniswap_v3_swap(  # noqa: layers
@@ -220,6 +223,7 @@ async def test_manifest_authorises_uniswap_v3_swap(  # noqa: layers
     )
 
 
+@pytest.mark.intent(IntentType.SWAP)
 @pytest.mark.arbitrum
 @pytest.mark.asyncio
 async def test_manifest_denies_swap_after_router_revoked(  # noqa: layers

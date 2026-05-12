@@ -23,7 +23,8 @@ from web3 import Web3
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents.vocabulary import CollectFeesIntent, LPOpenIntent
+from almanak.framework.intents import CollectFeesIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -132,6 +133,7 @@ class TestUniswapV4CollectFeesIntent:
     - Balance deltas are non-negative (fees collected >= 0)
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     async def test_collect_fees_weth_usdc(
         self,
@@ -252,6 +254,7 @@ class TestUniswapV4CollectFeesIntent:
         print(f"\nFees collected from position {position_id} (may be 0 on fresh position)")
         print("\nALL 4 LAYERS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     async def test_collect_fees_without_position_id_fails(
         self,

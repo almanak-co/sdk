@@ -32,6 +32,7 @@ from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeRecei
 from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -165,6 +166,7 @@ class TestAerodromeLPOpen:
       * Receipt parses cleanly via ``AerodromeReceiptParser``.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_usdc_weth_volatile(
         self,
@@ -308,6 +310,7 @@ class TestAerodromeLPClose:
       * Receipt parses cleanly.
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_usdc_weth_returns_tokens(
         self,

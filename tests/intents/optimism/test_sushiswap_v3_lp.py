@@ -28,6 +28,7 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -124,6 +125,7 @@ async def _open_position_via_intent(
 class TestSushiSwapV3LPOpenIntent:
     """Test SushiSwap V3 LP Open using LPOpenIntent."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_weth_usdc(
         self,
@@ -247,6 +249,7 @@ class TestSushiSwapV3LPOpenIntent:
 class TestSushiSwapV3LPCloseIntent:
     """Test SushiSwap V3 LP Close using LPCloseIntent."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,
@@ -329,6 +332,7 @@ class TestSushiSwapV3LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_no_fees(
         self,
@@ -408,6 +412,7 @@ class TestSushiSwapV3LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,

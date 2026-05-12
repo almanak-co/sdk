@@ -35,6 +35,7 @@ from almanak.framework.connectors.sushiswap_v3.receipt_parser import SushiSwapV3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -73,6 +74,7 @@ class TestSushiSwapV3SwapIntent:
     - Balance changes match expected amounts (bilateral conservation)
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,

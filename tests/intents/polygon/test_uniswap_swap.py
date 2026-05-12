@@ -21,6 +21,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -58,6 +59,7 @@ class TestUniswapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -175,6 +177,7 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,
@@ -240,6 +243,7 @@ class TestUniswapV3SwapIntent:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_native_matic_to_usdc_using_intent(
         self,
@@ -416,6 +420,7 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

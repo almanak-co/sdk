@@ -25,7 +25,8 @@ from web3 import Web3
 
 from almanak.framework.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.intents import SwapIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
 
 # =============================================================================
@@ -60,6 +61,7 @@ def _is_anvil_running(url: str = ANVIL_URL) -> bool:
 class TestCurveOptimismPoolConfig:
     """Verify crvusd_usdc pool is correctly configured in CURVE_POOLS."""
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_optimism_in_curve_pools(self):
         """'optimism' chain must have a CURVE_POOLS entry."""
         assert "optimism" in CURVE_POOLS, (
@@ -67,6 +69,7 @@ class TestCurveOptimismPoolConfig:
             "Add CURVE_POOLS['optimism'] with at least the crvusd_usdc pool."
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_crvusd_usdc_pool_present(self):
         """crvusd_usdc pool must be in CURVE_POOLS['optimism']."""
         assert POOL_KEY in CURVE_POOLS.get("optimism", {}), (
@@ -74,6 +77,7 @@ class TestCurveOptimismPoolConfig:
             f"Found: {list(CURVE_POOLS.get('optimism', {}).keys())}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_address_correct(self):
         """Pool address must match deployed StableSwap NG contract."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
@@ -82,6 +86,7 @@ class TestCurveOptimismPoolConfig:
             f"expected {EXPECTED_POOL_ADDRESS}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_contains_native_usdc(self):
         """Pool coin_addresses must include native USDC (not USDC.e)."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
@@ -91,6 +96,7 @@ class TestCurveOptimismPoolConfig:
             f"{pool['coin_addresses']}. Ensure this is native USDC, not USDC.e."
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_contains_crvusd(self):
         """Pool coin_addresses must include crvUSD."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
@@ -100,11 +106,13 @@ class TestCurveOptimismPoolConfig:
             f"{pool['coin_addresses']}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_is_stableswap_type(self):
         """Pool type must be 'stableswap' for StableSwap NG."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
         assert pool["pool_type"] == "stableswap"
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_n_coins_is_2(self):
         """crvusd_usdc is a 2-coin pool."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
@@ -112,6 +120,7 @@ class TestCurveOptimismPoolConfig:
         assert len(pool["coin_addresses"]) == 2
         assert len(pool["coins"]) == 2
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_lp_token_equals_pool_address(self):
         """StableSwap NG: LP token IS the pool contract address."""
         pool = CURVE_POOLS["optimism"][POOL_KEY]
@@ -119,6 +128,7 @@ class TestCurveOptimismPoolConfig:
             "For StableSwap NG pools, lp_token must equal pool address"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_no_bridged_usdc_in_native_usdc_pool(self):
         """Pool must NOT contain USDC.e (bridged) — only native USDC."""
         bridged_usdc_e = "0x7F5c764cBc14f9669B88837ca1490cca17c31607"
@@ -145,6 +155,7 @@ class TestCurveOptimismSwapCompilation:
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_usdc_to_crvusd_swap_compiles(self):
         """SwapIntent USDC -> crvUSD on Optimism must compile successfully."""
         compiler = self._make_compiler()
@@ -165,6 +176,7 @@ class TestCurveOptimismSwapCompilation:
         )
         assert result.action_bundle is not None
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_crvusd_to_usdc_swap_compiles(self):
         """SwapIntent crvUSD -> USDC on Optimism must compile successfully."""
         compiler = self._make_compiler()
@@ -183,6 +195,7 @@ class TestCurveOptimismSwapCompilation:
             f"crvUSD -> USDC swap compilation failed: {result.error}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_compiled_swap_targets_correct_pool(self):
         """Compiled transactions must target the crvusd_usdc pool address."""
         compiler = self._make_compiler()
@@ -206,6 +219,7 @@ class TestCurveOptimismSwapCompilation:
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_native_usdc_not_usdc_e(self):
         """Compiled approve must use native USDC address (not USDC.e)."""
         bridged_usdc_e = "0x7F5c764cBc14f9669B88837ca1490cca17c31607".lower()
@@ -248,6 +262,7 @@ class TestCurveOptimismSwapOnAnvil:
     Start with: anvil --fork-url https://mainnet.optimism.io --port 8545
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_usdc_to_crvusd_swap_full_lifecycle(
         self,

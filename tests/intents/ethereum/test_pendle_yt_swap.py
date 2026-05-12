@@ -39,6 +39,7 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.result_enricher import ResultEnricher
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
@@ -115,6 +116,7 @@ class TestPendleYTSwapIntent:
     ~50 sUSDe.
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_susde_to_yt_susde_amount_in_matches_user_intent(
         self,
@@ -297,6 +299,7 @@ class TestPendleYTSwapIntent:
         print(f"  YT:    +{yt_received_wei / 10**YT_SUSDE_DECIMALS}")
         print("\nVIB-3751 INVARIANTS HOLD: amount_in matches user intent (~50, not ~60_898).")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_yt_swap_enricher_threads_decimals_through_metadata(
         self,

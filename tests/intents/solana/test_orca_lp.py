@@ -20,7 +20,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,
@@ -71,6 +72,7 @@ def _find_sol_usdc_pool():
 class TestOrcaLPOpenCompilation:
     """Orca LP Open: LPOpenIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_with_pool_address(self, solana_compiler):
         """LPOpenIntent with explicit pool address compiles via Orca."""
@@ -128,6 +130,7 @@ class TestOrcaLPOpenCompilation:
             "sensitive_data must include additional_signers for NFT keypair"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_routes_correctly(self, solana_compiler):
         """LPOpenIntent with protocol='orca_whirlpools' routes to Orca adapter."""
@@ -152,6 +155,7 @@ class TestOrcaLPOpenCompilation:
         bundle = result.action_bundle
         assert bundle.metadata["protocol"] == "orca_whirlpools"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_non_solana_chain_fails(self):
         """Orca Whirlpools on a non-Solana chain should fail."""
@@ -183,6 +187,7 @@ class TestOrcaLPOpenCompilation:
 class TestOrcaLPCloseCompilation:
     """Orca LP Close: LPCloseIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_lp_close_missing_pool_fails(self, solana_compiler):
         """LPCloseIntent without pool should fail."""
@@ -197,6 +202,7 @@ class TestOrcaLPCloseCompilation:
         assert result.status.value == "FAILED"
         assert "pool" in result.error.lower()
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_lp_close_with_pool(self, solana_compiler):
         """LPCloseIntent with pool compiles (may fail on position lookup, which is expected)."""

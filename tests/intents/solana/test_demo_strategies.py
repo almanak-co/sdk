@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import CHAIN_NAME
 
 # Strategy root
@@ -61,6 +62,7 @@ def _assert_valid_solana_tx(bundle) -> None:
 class TestSolanaSwapDemoStrategy:
     """End-to-end: SolanaSwapStrategy.decide() -> compile -> valid ActionBundle."""
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_decide_returns_swap_intent(self):
         """SolanaSwapStrategy.decide() returns a SwapIntent from config."""
@@ -78,6 +80,7 @@ class TestSolanaSwapDemoStrategy:
         assert intent.from_token == config["from_token"]
         assert intent.to_token == config["to_token"]
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_swap_intent(self, solana_compiler):
         """SwapIntent from demo strategy compiles to a valid ActionBundle."""
@@ -99,6 +102,7 @@ class TestSolanaSwapDemoStrategy:
 
         _assert_valid_solana_tx(result.action_bundle)
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaSwapStrategy has correct decorator metadata."""
@@ -115,6 +119,7 @@ class TestSolanaSwapDemoStrategy:
 class TestSolanaLendDemoStrategy:
     """End-to-end: SolanaLendStrategy.decide() -> compile -> valid ActionBundle."""
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_decide_returns_supply_intent(self):
         """SolanaLendStrategy.decide() returns a SupplyIntent from config."""
@@ -132,6 +137,7 @@ class TestSolanaLendDemoStrategy:
         assert intent.token == config["token"]
         assert intent.amount == Decimal(config["amount"])
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_compile_supply_intent(self, solana_compiler):
         """SupplyIntent from demo strategy compiles to a valid ActionBundle."""
@@ -153,6 +159,7 @@ class TestSolanaLendDemoStrategy:
 
         _assert_valid_solana_tx(result.action_bundle)
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaLendStrategy has correct decorator metadata."""
@@ -169,6 +176,7 @@ class TestSolanaLendDemoStrategy:
 class TestSolanaLPDemoStrategy:
     """End-to-end: SolanaLPStrategy.decide() -> compile -> valid ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_decide_returns_lp_open_intent(self):
         """SolanaLPStrategy.decide() returns an LPOpenIntent from config."""
@@ -187,6 +195,7 @@ class TestSolanaLPDemoStrategy:
         assert intent.range_lower == Decimal(config["range_lower"])
         assert intent.range_upper == Decimal(config["range_upper"])
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_intent(self, solana_compiler):
         """LPOpenIntent from demo strategy compiles to a valid ActionBundle."""
@@ -209,6 +218,7 @@ class TestSolanaLPDemoStrategy:
 
         _assert_valid_solana_tx(result.action_bundle)
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_range_captures_current_price(self):
         """LP config range [50, 150] captures the current SOL price (~$87)."""
@@ -222,6 +232,7 @@ class TestSolanaLPDemoStrategy:
             f"LP range [{range_lower}, {range_upper}] must capture SOL price ~${current_sol_price}"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaLPStrategy has correct decorator metadata."""

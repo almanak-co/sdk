@@ -25,6 +25,7 @@ from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptPars
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -78,6 +79,7 @@ class TestPendleSwapIntent:
     NOTE: PT -> token (sell PT) path is blocked on Arbitrum (VIB-568).
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_weth_to_pt_wsteth_using_intent(
         self,
@@ -202,6 +204,7 @@ class TestPendleSwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_pt_wsteth_using_intent(
         self,
@@ -326,6 +329,7 @@ class TestPendleSwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

@@ -36,6 +36,7 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._permission_onchain_harness import (
     PermissionTestCase,
     run_negative_authorisation_case,
@@ -85,6 +86,7 @@ _CASES: list = [
 # semantics. Semantic correctness is covered by the regular intent tests on
 # this chain; this file proves the manifest is load-bearing. See
 # ``docs/internal/zodiac-permission-onchain-coverage-plan.md``.
+@pytest.mark.intent(IntentType.SWAP, IntentType.SUPPLY)
 @pytest.mark.xlayer
 @pytest.mark.parametrize("case", _CASES)  # noqa: layers
 def test_negative_authorisation_blocks_revoked_target(

@@ -37,6 +37,7 @@ from almanak.framework.connectors.aster_perps import (
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpCloseIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.bnb.conftest import (
     open_aster_perps_position_via_intent,
     pcs_perps_extract_price_request_id,
@@ -64,6 +65,7 @@ def perps_price_oracle() -> dict[str, Decimal]:
 class TestAsterPerpsCloseIntent:
     """Test Aster Perps PERP_CLOSE via the IntentCompiler, broker_id=0."""
 
+    @pytest.mark.intent(IntentType.PERP_OPEN, IntentType.PERP_CLOSE)
     async def test_close_btc_long_via_aster_intent(
         self,
         web3: Web3,
@@ -284,6 +286,7 @@ class TestAsterPerpsCloseIntent:
         print(f"On-chain: position closed ({nonzero_after} residual bookkeeping words)")
         print("\nALL 4 LAYERS PASSED (aster_perps CLOSE-VIA-INTENT path)")
 
+    @pytest.mark.intent(IntentType.PERP_CLOSE)
     async def test_close_intent_missing_position_id_fails(
         self,
         funded_wallet: str,
@@ -310,6 +313,7 @@ class TestAsterPerpsCloseIntent:
         assert "position_id" in (compilation.error or "").lower()
         print(f"Correctly rejected missing position_id: {compilation.error[:80]}...")
 
+    @pytest.mark.intent(IntentType.PERP_CLOSE)
     async def test_close_intent_non_hex_position_id_fails(
         self,
         funded_wallet: str,

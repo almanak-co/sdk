@@ -36,6 +36,7 @@ from almanak.framework.connectors.euler_v2.receipt_parser import EulerV2ReceiptP
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -84,6 +85,7 @@ class TestEulerV2BorrowIntent:
     vault is added to the adapter (e.g., eBTC.b or eWETH.e), remove the xfail markers.
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
@@ -205,6 +207,7 @@ class TestEulerV2BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
@@ -328,6 +331,7 @@ class TestEulerV2BorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,

@@ -20,7 +20,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,
@@ -42,6 +43,7 @@ SOL_USDC_POOL = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"
 class TestRaydiumLPOpenCompilation:
     """Raydium LP Open: LPOpenIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_with_pool_address(self, solana_compiler):
         """LPOpenIntent with explicit pool address compiles via Raydium."""
@@ -86,6 +88,7 @@ class TestRaydiumLPOpenCompilation:
             "sensitive_data must include additional_signers for NFT mint keypair"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_lp_open_default_routes_to_raydium(self, solana_compiler):
         """LPOpenIntent on Solana with 'raydium_clmm' routes correctly."""
@@ -105,6 +108,7 @@ class TestRaydiumLPOpenCompilation:
         assert result.action_bundle is not None
         assert result.action_bundle.metadata.get("protocol") == "raydium_clmm"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_tx_is_versioned(self, solana_compiler):
         """LP open transaction is a valid VersionedTransaction."""
@@ -130,6 +134,7 @@ class TestRaydiumLPOpenCompilation:
         tx = VersionedTransaction.from_bytes(decoded)
         assert tx is not None, "Must deserialize as a valid VersionedTransaction"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_intent_type(self, solana_compiler):
         """ActionBundle has correct intent_type for LP open."""
@@ -151,6 +156,7 @@ class TestRaydiumLPOpenCompilation:
 class TestRaydiumLPCloseCompilation:
     """Raydium LP Close: LPCloseIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_lp_close(self, solana_compiler):
         """LPCloseIntent compiles via Raydium adapter."""
@@ -178,6 +184,7 @@ class TestRaydiumLPCloseCompilation:
         assert metadata.get("protocol") == "raydium_clmm"
         assert metadata.get("action") == "close_position"
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_intent_type(self, solana_compiler):
         """ActionBundle has correct intent_type for LP close."""
@@ -196,6 +203,7 @@ class TestRaydiumLPCloseCompilation:
 class TestRaydiumMathIntegration:
     """Verify Raydium math module works correctly within compilation."""
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_price_to_tick_roundtrip(self):
         """Price -> tick -> price roundtrip is consistent."""
         from almanak.framework.connectors.raydium.math import price_to_tick, tick_to_price
@@ -210,6 +218,7 @@ class TestRaydiumMathIntegration:
             f"Roundtrip error too large: {original} -> tick {tick} -> {recovered} ({pct_diff:.4%})"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_tick_alignment(self):
         """Ticks align correctly to spacing boundaries."""
         from almanak.framework.connectors.raydium.math import align_tick_to_spacing
@@ -223,6 +232,7 @@ class TestRaydiumMathIntegration:
         assert aligned_down <= 119145
         assert aligned_up >= 119145
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_liquidity_from_amounts(self):
         """Liquidity calculation produces reasonable values."""
         from almanak.framework.connectors.raydium.math import (
@@ -258,6 +268,7 @@ class TestRaydiumLPExecution:
     Layer 4: Exact balance deltas (SOL + USDC decrease by LP deposit amounts)
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,
@@ -321,6 +332,7 @@ class TestRaydiumLPExecution:
         # USDC must decrease (LP deposit)
         assert usdc_spent > 0, "USDC must decrease (LP deposit)"
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_open_then_close(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,

@@ -9,12 +9,19 @@ To run:
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.intents.compiler import (
     CompilationStatus,
     IntentCompiler,
     IntentCompilerConfig,
 )
-from almanak.framework.intents.vocabulary import StakeIntent, UnstakeIntent
+from almanak.framework.intents import StakeIntent, UnstakeIntent
+from almanak.framework.intents.vocabulary import IntentType
+
+# Every test under tests/intents/ must declare which IntentType verbs it
+# exercises (VIB-4298 Phase 2). This module covers STAKE + UNSTAKE.
+pytestmark = pytest.mark.intent(IntentType.STAKE, IntentType.UNSTAKE)
 
 # =============================================================================
 # Test Configuration

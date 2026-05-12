@@ -22,7 +22,8 @@ from web3 import Web3
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents.vocabulary import LPOpenIntent
+from almanak.framework.intents import LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -69,6 +70,7 @@ class TestUniswapV4LPOpenIntent:
     - Balance changes match expected deposits
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_weth_usdc(
         self,
@@ -201,6 +203,7 @@ class TestUniswapV4LPOpenIntent:
         print(f"Liquidity:   {liquidity}")
         print("\nALL 4 LAYERS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_with_invalid_pool_fails(
         self,

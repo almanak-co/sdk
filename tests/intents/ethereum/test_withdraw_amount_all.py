@@ -20,6 +20,7 @@ from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -61,6 +62,7 @@ class TestWithdrawAmountAllMorphoBlue:
     delegating to the adapter's existing shares-based path.
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_morpho_blue_withdraw_amount_all(
         self,

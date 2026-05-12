@@ -31,6 +31,7 @@ from almanak.framework.connectors.aster_perps import (
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 
 CHAIN_NAME = "bsc"
 
@@ -53,6 +54,7 @@ def perps_price_oracle() -> dict[str, Decimal]:
 class TestAsterPerpsMinNotionalRejection:
     """Verify Aster's on-chain min-notional guard rejects sub-floor opens cleanly."""
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     async def test_open_below_min_notional_reverts_with_balance_conserved(
         self,
         web3: Web3,

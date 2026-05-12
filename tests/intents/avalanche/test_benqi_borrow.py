@@ -24,6 +24,7 @@ from almanak.framework.connectors.benqi.receipt_parser import BenqiReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -63,6 +64,7 @@ class TestBenqiBorrowIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wavax_collateral_using_intent(
         self,
@@ -204,6 +206,7 @@ class TestBenqiBorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
@@ -308,6 +311,7 @@ class TestBenqiBorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_only_usdc_against_existing_collateral(
         self,
@@ -487,6 +491,7 @@ class TestBenqiBorrowIntent:
     # does not fire here. The on-chain Comptroller's enforcement is also
     # unreliable on Anvil forks (oracle drift), which is the original xfail
     # reason. End-to-end mainnet validation is tracked at GitHub issue #2128.
+    @pytest.mark.intent(IntentType.BORROW)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "

@@ -26,6 +26,7 @@ import pytest
 
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
+    IntentType,
     RepayIntent,
     SupplyIntent,
     WithdrawIntent,
@@ -47,6 +48,7 @@ from tests.intents.solana.conftest import (
 class TestKaminoSupplyCompilation:
     """Kamino supply: SupplyIntent -> Compile -> ActionBundle (real API)."""
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_compile_usdc_supply(self, solana_compiler):
         """SupplyIntent for USDC compiles via Kamino API and returns a valid tx."""
@@ -82,6 +84,7 @@ class TestKaminoSupplyCompilation:
         # Kamino adapter uses "action" key for the operation type
         assert metadata.get("action") == "deposit"
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_compile_sol_supply(self, solana_compiler):
         """SupplyIntent for SOL compiles via Kamino API."""
@@ -98,6 +101,7 @@ class TestKaminoSupplyCompilation:
         assert result.action_bundle is not None
         assert result.action_bundle.transactions
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_kamino_supply_route_from_generic_intent(self, solana_compiler):
         """SupplyIntent with protocol='kamino' routes correctly on Solana."""
@@ -114,6 +118,7 @@ class TestKaminoSupplyCompilation:
         assert result.action_bundle is not None
         assert result.action_bundle.metadata.get("protocol") == "kamino"
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_kamino_supply_tx_is_deserializable(self, solana_compiler):
         """Kamino supply transaction is a valid Solana VersionedTransaction."""
@@ -145,6 +150,7 @@ class TestKaminoBorrowCompilation:
     wallet may not have an obligation yet (the tx would fail on-chain).
     """
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_compile_usdc_borrow_fails_without_obligation(self, solana_compiler):
         """BorrowIntent for USDC fails gracefully when wallet has no obligation.
@@ -180,6 +186,7 @@ class TestKaminoRepayCompilation:
     the compilation pipeline handles this gracefully.
     """
 
+    @pytest.mark.intent(IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_compile_usdc_repay_fails_without_obligation(self, solana_compiler):
         """RepayIntent for USDC fails gracefully when wallet has no obligation."""
@@ -209,6 +216,7 @@ class TestKaminoWithdrawCompilation:
     for a fresh wallet.
     """
 
+    @pytest.mark.intent(IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_compile_usdc_withdraw_fails_without_obligation(self, solana_compiler):
         """WithdrawIntent for USDC fails gracefully when wallet has no obligation."""
@@ -245,6 +253,7 @@ class TestKaminoSupplyExecution:
     Layer 4: Exact balance deltas (USDC decreases by supply amount)
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,
@@ -296,6 +305,7 @@ class TestKaminoSupplyExecution:
             f"Expected: {expected_spent}, Got: {usdc_spent}"
         )
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_insufficient_balance_fails(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,
@@ -342,6 +352,7 @@ class TestKaminoSupplyWithdrawRoundtrip:
     supplied amount (+ small interest allowed for the brief time held).
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_supply_then_withdraw(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,

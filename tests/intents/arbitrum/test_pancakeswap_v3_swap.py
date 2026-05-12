@@ -21,6 +21,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -55,6 +56,7 @@ class TestPancakeSwapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 USDT->WETH swap reverts with STF intermittently", strict=False)
     @pytest.mark.asyncio
@@ -183,6 +185,7 @@ class TestPancakeSwapV3SwapIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.SWAP)
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 WETH->USDT swap reverts with STF intermittently on Anvil fork", strict=False)
     @pytest.mark.asyncio
@@ -271,6 +274,7 @@ class TestPancakeSwapV3SwapIntent:
         print(f"USDT received: {format_token_amount(usdt_received, out_decimals)}")
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

@@ -36,6 +36,7 @@ from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator, ExecutionResult
 from almanak.framework.intents import BorrowIntent, RepayIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -100,6 +101,7 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 @pytest.mark.borrow
 @pytest.mark.lending
 class TestMorphoBlueBorrowIntent:
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_wbtc_collateral_using_intent(
         self,
@@ -224,6 +226,7 @@ class TestMorphoBlueBorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,
@@ -307,6 +310,7 @@ async def _setup_borrow(
 @pytest.mark.repay
 @pytest.mark.lending
 class TestMorphoBlueRepayIntent:
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_full_after_borrow(
         self,
@@ -430,6 +434,7 @@ class TestMorphoBlueRepayIntent:
 @pytest.mark.withdraw
 @pytest.mark.lending
 class TestMorphoBlueWithdrawCollateralIntent:
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_wbtc_collateral_after_repay(
         self,

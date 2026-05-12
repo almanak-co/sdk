@@ -62,6 +62,7 @@ from almanak.framework.intents import (
     UniswapV3LPAdapter,
     WithdrawIntent,
 )
+from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.observability.pnl_attributor import (
     run_attribution_on_close,
     stamp_entry_state_on_open,
@@ -162,6 +163,7 @@ def _advance_time(web3: Web3, seconds: int) -> None:
 class TestAccountingModels:
     """Prove the accounting model layer is correct: types, None discipline, round-trip."""
 
+    @pytest.mark.intent(IntentType.BORROW)
     def test_lending_event_none_discipline(self):  # noqa: layers
         """None and Decimal('0') must never be conflated."""
         identity = _make_identity()
@@ -202,6 +204,7 @@ class TestAccountingModels:
         assert payload["borrow_apr_bps"] == 842
         assert payload["confidence"] == "HIGH"
 
+    @pytest.mark.intent(IntentType.REPAY)
     def test_lending_event_round_trip(self):  # noqa: layers
         """Full serialization round-trip preserves all fields."""
         identity = _make_identity()
@@ -241,6 +244,7 @@ class TestAccountingModels:
         assert restored.supply_apr_bps is None
         assert restored.confidence == AccountingConfidence.HIGH
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_accounting_events_sqlite_persist_and_query(self):  # noqa: layers
         """accounting_events table: save, query by event_type, query by position_key."""
@@ -337,6 +341,7 @@ class TestAccountingModels:
         finally:
             os.unlink(db_path)
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_accounting_writer_raises_in_live_mode_when_store_missing(self):  # noqa: layers
         """AccountingWriter must raise in LIVE mode when store lacks save_accounting_event.
@@ -400,6 +405,7 @@ class TestAccountingModels:
         with pytest.raises(AccountingPersistenceError, match="save_accounting_event"):
             await writer.write(event)
 
+    @pytest.mark.intent(IntentType.REPAY)
     def test_fifo_basis_no_lots_returns_unmatched(self):  # noqa: layers
         """No-lot case: repay with no borrow history must not fabricate interest."""
         store = FIFOBasisStore()
@@ -414,6 +420,7 @@ class TestAccountingModels:
         assert result.unmatched_amount == Decimal("5000"), "Full repay is unmatched"
         assert result.lot_matches == []
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_fifo_basis_matching_full_repay(self):  # noqa: layers
         """FIFO lot matching: full repay after single borrow."""
         store = FIFOBasisStore()
@@ -437,6 +444,7 @@ class TestAccountingModels:
         assert result.unmatched_amount == Decimal("0")
         assert any(lm.lot_id == lot_id for lm in result.lot_matches)
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_fifo_basis_matching_partial_repay(self):  # noqa: layers
         """FIFO lot matching: two borrows, partial repay = pure principal (no interest yet).
 
@@ -463,6 +471,7 @@ class TestAccountingModels:
         assert result2.interest_or_yield == Decimal("620"), "620 is interest over remaining principal"
         assert result2.unmatched_amount == Decimal("0")
 
+    @pytest.mark.intent(IntentType.SWAP, IntentType.WITHDRAW)
     def test_fifo_basis_pt_yield(self):  # noqa: layers
         """FIFO lot matching: PT buy and redeem computes realized yield."""
         store = FIFOBasisStore()
@@ -489,6 +498,7 @@ class TestPendleTopicHashFix:
     This is the evidence for VIB-3419 (P0 gate: no Pendle deployment until verified).
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_old_placeholder_hashes_were_fabricated(self):  # noqa: layers
         """The old hashes showed sequential nibble patterns — definitively not keccak256."""
         OLD_HASHES = {
@@ -521,6 +531,7 @@ class TestPendleTopicHashFix:
                 "This means the hash was not a placeholder — revise this test."
             )
 
+    @pytest.mark.intent(IntentType.WITHDRAW)
     def test_corrected_redeempy_hash_matches_abi(self):  # noqa: layers
         """RedeemPY corrected hash = keccak256('RedeemPY(address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="RedeemPY(address,address,uint256,uint256)"))
@@ -532,6 +543,7 @@ class TestPendleTopicHashFix:
             "The file was not updated with the corrected hash."
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_corrected_mintpy_hash_matches_abi(self):  # noqa: layers
         """MintPY corrected hash = keccak256('MintPY(address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="MintPY(address,address,uint256,uint256)"))
@@ -542,6 +554,7 @@ class TestPendleTopicHashFix:
             f"  Expected: {expected}"
         )
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_corrected_mintsy_hash_matches_abi(self):  # noqa: layers
         """MintSY corrected hash = keccak256('Deposit(address,address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="Deposit(address,address,address,uint256,uint256)"))
@@ -552,6 +565,7 @@ class TestPendleTopicHashFix:
             f"  Expected: {expected}"
         )
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     def test_corrected_redeemsy_hash_matches_abi(self):  # noqa: layers
         """RedeemSY corrected hash = keccak256('Redeem(address,address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="Redeem(address,address,address,uint256,uint256)"))
@@ -562,6 +576,7 @@ class TestPendleTopicHashFix:
             f"  Expected: {expected}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_swap_mint_burn_transfer_unchanged_and_correct(self):  # noqa: layers
         """Swap/Mint/Burn/Transfer hashes were already correct and must not have changed."""
         KNOWN_CORRECT = {
@@ -574,6 +589,7 @@ class TestPendleTopicHashFix:
                 f"{event_name} hash changed unexpectedly: {EVENT_TOPICS[event_name]} != {expected_hash}"
             )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_no_duplicate_hashes_in_topic_map(self):  # noqa: layers
         """Each event name must map to a unique topic hash."""
         hashes = list(EVENT_TOPICS.values())
@@ -581,6 +597,7 @@ class TestPendleTopicHashFix:
             f"Duplicate hashes detected in EVENT_TOPICS: {[h for h in hashes if hashes.count(h) > 1]}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_topic_to_event_reverse_map_consistent(self):  # noqa: layers
         """TOPIC_TO_EVENT must be the exact inverse of EVENT_TOPICS."""
         from almanak.framework.connectors.pendle.receipt_parser import TOPIC_TO_EVENT
@@ -609,6 +626,7 @@ class TestLPAccountingE2E:
     4. No silent None fields where values are computable
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_stamps_entry_prices_on_first_iteration(
         self,
@@ -783,6 +801,7 @@ class TestLPAccountingE2E:
         finally:
             os.unlink(db_path)
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_full_lifecycle_attribution(
         self,
@@ -1031,6 +1050,7 @@ class TestLendingAccountingE2E:
     reading the output knows exactly what is missing and why.
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_morpho_supply_borrow_repay_ledger_traceability(
         self,
@@ -1224,6 +1244,7 @@ class TestLendingAccountingE2E:
         finally:
             os.unlink(db_path)
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_lending_accounting_event_written_for_borrow(  # noqa: layers
         self,
@@ -1441,6 +1462,7 @@ class TestLendingAccountingVIB3418:
 
     # ─── Unit tests (no Anvil) ────────────────────────────────────────────────
 
+    @pytest.mark.intent(IntentType.SWAP)
     def test_build_event_returns_none_for_non_lending_intent(self):  # noqa: layers
         """Swap intents must be silently skipped."""
         from types import SimpleNamespace
@@ -1466,6 +1488,7 @@ class TestLendingAccountingVIB3418:
         )
         assert event is None, "Non-lending intents must return None"
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_build_event_supply_type_and_position_key(self):  # noqa: layers
         """SUPPLY event has correct type, position_key, and ESTIMATED confidence (no gateway)."""
         from almanak.framework.accounting.basis import FIFOBasisStore
@@ -1501,6 +1524,7 @@ class TestLendingAccountingVIB3418:
         assert event.health_factor_after is None
         assert event.health_factor_before is None
 
+    @pytest.mark.intent(IntentType.BORROW)
     def test_build_event_borrow_records_fifo_lot_and_no_interest(self):  # noqa: layers
         """BORROW: records a FIFO lot in the basis store; interest_delta_usd is None at borrow time."""
         from decimal import Decimal
@@ -1543,6 +1567,7 @@ class TestLendingAccountingVIB3418:
         assert event.principal_delta_usd is not None
         assert abs(event.principal_delta_usd - Decimal("100")) < Decimal("1")
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_build_event_repay_with_borrow_lot_computes_interest(self):  # noqa: layers
         """REPAY after a known BORROW: interest = repay_amount - principal_consumed."""
         from decimal import Decimal
@@ -1605,6 +1630,7 @@ class TestLendingAccountingVIB3418:
             f"Interest on 0.5 USDC should be <$2; got {event.interest_delta_usd}"
         )
 
+    @pytest.mark.intent(IntentType.REPAY)
     def test_build_event_repay_without_prior_borrow_interest_is_unavailable(self):  # noqa: layers
         """REPAY with no matching BORROW lots: interest_delta_usd is None (UNAVAILABLE).
 
@@ -1641,6 +1667,7 @@ class TestLendingAccountingVIB3418:
             f"(got {event.interest_delta_usd!r}). Fabricating interest=0 is incorrect."
         )
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     def test_aave_account_data_abi_decoding(self):  # noqa: layers
         """Verify Aave V3 getUserAccountData ABI decoding with a known hex fixture.
 
@@ -1696,6 +1723,7 @@ class TestLendingAccountingVIB3418:
         print(f"  debt_usd       = ${debt_usd}")
         print(f"  health_factor  = {health_factor}")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     def test_aave_selector_matches_function_signature(self):  # noqa: layers
         """Verify 0xbf92857c = keccak256('getUserAccountData(address)')[:4]."""
         from eth_utils import keccak
@@ -1708,6 +1736,7 @@ class TestLendingAccountingVIB3418:
             f"computed={expected}"
         )
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     def test_position_key_format(self):  # noqa: layers
         """Position key must be stable and canonical."""
         from almanak.framework.accounting.lending_accounting import _derive_position_key
@@ -1722,6 +1751,7 @@ class TestLendingAccountingVIB3418:
 
     # ─── Anvil integration tests ──────────────────────────────────────────────
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     @pytest.mark.accounting_e2e
     async def test_aave_account_state_read_via_mock_gateway_after_supply(  # noqa: layers
@@ -1813,6 +1843,7 @@ class TestLendingAccountingVIB3418:
         print(f"  liquidation_threshold    = {state.liquidation_threshold_bps} bps")
         print(f"  1000 USDC supply cost    = {usdc_spent / 1e6:.2f} USDC")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     @pytest.mark.accounting_e2e
     async def test_build_lending_event_full_pipeline_borrow_repay(  # noqa: layers
@@ -2051,12 +2082,14 @@ class TestPositionPnLVIB3424:
 
     # ─── Unit tests: compute_position_pnl ────────────────────────────────────
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_empty_events_returns_none(self):  # noqa: layers
         from almanak.framework.accounting.position_pnl import compute_position_pnl
 
         result = compute_position_pnl([])
         assert result is None
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_supply_cost_basis(self):  # noqa: layers
         from almanak.framework.accounting.position_pnl import compute_position_pnl
 
@@ -2071,6 +2104,7 @@ class TestPositionPnLVIB3424:
         assert pnl.entry_timestamp == "2026-01-01T00:00:00+00:00"
         assert pnl.latest_ledger_entry_id == "led-2"
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     def test_withdraw_reduces_cost_basis(self):  # noqa: layers
         from almanak.framework.accounting.position_pnl import compute_position_pnl
 
@@ -2082,6 +2116,7 @@ class TestPositionPnLVIB3424:
         assert pnl is not None
         assert pnl.cost_basis_usd == Decimal("600.00")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     def test_cost_basis_clamped_to_zero(self):  # noqa: layers
         """Full withdrawal: cost_basis must not go negative."""
         from almanak.framework.accounting.position_pnl import compute_position_pnl
@@ -2094,6 +2129,7 @@ class TestPositionPnLVIB3424:
         assert pnl is not None
         assert pnl.cost_basis_usd == Decimal("0")
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_borrow_repay_realized_pnl(self):  # noqa: layers
         """REPAY with interest_delta_usd → realized_pnl = -interest_paid."""
         from almanak.framework.accounting.position_pnl import compute_position_pnl
@@ -2111,6 +2147,7 @@ class TestPositionPnLVIB3424:
         assert pnl.entry_timestamp == "2026-01-01T00:00:00+00:00"
         assert pnl.latest_ledger_entry_id == "led-r"
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_repay_without_interest_skipped(self):  # noqa: layers
         """None interest_delta_usd must not contribute zero to realized_pnl."""
         from almanak.framework.accounting.position_pnl import compute_position_pnl
@@ -2126,6 +2163,7 @@ class TestPositionPnLVIB3424:
             "realized_pnl must stay 0 when interest_delta_usd is UNAVAILABLE"
         )
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_repay_positive_magnitude_reduces_cost_basis(self):  # noqa: layers
         """Contract: principal_delta_usd is always a non-negative magnitude.
         REPAY with a positive principal must REDUCE cost_basis, not increase it.
@@ -2142,6 +2180,7 @@ class TestPositionPnLVIB3424:
             "REPAY positive magnitude must reduce cost_basis to 0 (not increase to 400)"
         )
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_bad_payload_json_skipped(self):  # noqa: layers
         """Malformed payload_json must not crash compute_position_pnl."""
         from almanak.framework.accounting.position_pnl import compute_position_pnl
@@ -2157,6 +2196,7 @@ class TestPositionPnLVIB3424:
 
     # ─── Unit test: position key derivation ──────────────────────────────────
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_supply(self):  # noqa: layers
         from almanak.framework.teardown.models import PositionType
         from almanak.framework.teardown.models import PositionInfo
@@ -2176,6 +2216,7 @@ class TestPositionPnLVIB3424:
         key = PortfolioValuer._try_derive_lending_position_key(p, "arbitrum")
         assert key == "lending:arbitrum:aave_v3:0xwallet:usdc"
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_with_market_id(self):  # noqa: layers
         from almanak.framework.teardown.models import PositionType
         from almanak.framework.teardown.models import PositionInfo
@@ -2196,6 +2237,7 @@ class TestPositionPnLVIB3424:
         key = PortfolioValuer._try_derive_lending_position_key(p, "arbitrum")
         assert key == "lending:arbitrum:morpho_blue:0xwallet:0xmarketabc:weth"
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     def test_try_derive_lending_position_key_lp_returns_none(self):  # noqa: layers
         """LP position type must return None — only lending types are supported."""
         from almanak.framework.teardown.models import PositionType
@@ -2212,6 +2254,7 @@ class TestPositionPnLVIB3424:
         )
         assert PortfolioValuer._try_derive_lending_position_key(p, "arbitrum") is None
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_missing_asset_returns_none(self):  # noqa: layers
         from almanak.framework.teardown.models import PositionType
         from almanak.framework.teardown.models import PositionInfo
@@ -2229,6 +2272,7 @@ class TestPositionPnLVIB3424:
 
     # ─── Integration: SQLiteStore.get_accounting_events_sync ─────────────────
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_sqlite_get_accounting_events_sync(self):  # noqa: layers
         """get_accounting_events_sync returns saved events without async overhead."""
@@ -2300,6 +2344,7 @@ class TestPositionPnLVIB3424:
 
     # ─── Integration: PortfolioValuer.set_accounting_context ─────────────────
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_portfolio_valuer_enrich_pnl_from_accounting_events(self):  # noqa: layers
         """VIB-3424 end-to-end: accounting event → PositionValue.cost_basis_usd populated.
@@ -2420,6 +2465,7 @@ class TestPositionPnLVIB3424:
         finally:
             os.unlink(db_path)
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     def test_enrich_position_pnl_no_store_is_noop(self):  # noqa: layers
         """_enrich_position_pnl must silently skip when no accounting store is set."""
         from almanak.framework.teardown.models import PositionType
@@ -2457,6 +2503,7 @@ class TestPositionPnLVIB3424:
 
     # ─── Regression tests for Codex P1 + P2 bugs ─────────────────────────────
 
+    @pytest.mark.intent(IntentType.BORROW)
     def test_borrow_unrealized_pnl_uses_liability_semantics(self):  # noqa: layers
         """P1 regression: borrow unrealized_pnl must use value_usd + cost_basis, not value_usd - cost_basis.
 
@@ -2514,6 +2561,7 @@ class TestPositionPnLVIB3424:
         )
         print(f"\n[PASS] P1 fix: borrow unrealized_pnl = ${p_value.unrealized_pnl_usd} (correct: -$4)")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_supply_borrow_same_asset_no_cross_contamination(self):  # noqa: layers
         """P2 regression: SUPPLY and BORROW events for the same wallet/protocol/asset

@@ -1992,3 +1992,74 @@ def zodiac_safe(
         chain=chain,
         anvil_rpc_url=anvil_rpc_url,
     )
+
+
+# =============================================================================
+# Intent-Coverage Marker Hook (VIB-4303 / VIB-4298 Phase 2)
+# =============================================================================
+#
+# Every test collected from ``tests/intents/`` MUST carry an
+# ``@pytest.mark.intent(IntentType.X, ...)`` marker — function level,
+# class level, or module-level ``pytestmark``. This runtime hook fails
+# collection on any item missing the marker, complementing the static
+# AST check in ``scripts/ci/check_intent_coverage.py``.
+#
+# Two layers because they catch different cases:
+#
+# * Static (``check_intent_coverage.py``): runs in ``make lint`` without
+#   importing the test modules. Fast, AST-based, catches simple
+#   missing-decorator cases.
+# * Runtime (this hook): runs at pytest collection. Catches dynamically
+#   generated test items — ``@pytest.mark.parametrize`` expansions,
+#   fixture-generated tests, anything where the test function name only
+#   exists after collection. The AST scan sees the source function once;
+#   collection emits one ``Item`` per parameter set.
+#
+# Both layers enforce the same contract (marker present somewhere up the
+# scope chain), so passing one and failing the other indicates a real
+# bug in the scan logic, not a benign tooling difference.
+
+
+def pytest_collection_modifyitems(config, items):  # type: ignore[no-untyped-def]
+    """Fail collection if any item under tests/intents/ lacks an intent marker.
+
+    Hard-fails by raising ``pytest.UsageError``, which pytest renders as
+    "INTERNALERROR>" and prevents the session from continuing. We do this
+    instead of marking items as failed so the user sees a single clear
+    message rather than N test failures.
+    """
+    missing: list[tuple[str, str]] = []
+    for item in items:
+        path = str(item.fspath)
+        # Only enforce on items physically under tests/intents/. Items
+        # collected from outside (e.g. shared conftest plugins) are out
+        # of scope for this gate.
+        if "/tests/intents/" not in path and not path.endswith("/tests/intents"):
+            continue
+        if not list(item.iter_markers("intent")):
+            missing.append((item.nodeid, path))
+
+    if missing:
+        lines = [
+            "Intent-coverage marker hook (VIB-4303): "
+            f"{len(missing)} test item(s) under tests/intents/ are missing the "
+            "@pytest.mark.intent(IntentType.X, ...) marker.",
+            "",
+            "Add the marker at function, enclosing class, or module level:",
+            "",
+            "    import pytest",
+            "    from almanak.framework.intents.vocabulary import IntentType",
+            "",
+            "    @pytest.mark.intent(IntentType.SWAP)",
+            "    async def test_swap_usdc_to_weth(...):",
+            "        ...",
+            "",
+            "Or module-level:",
+            "",
+            "    pytestmark = pytest.mark.intent(IntentType.SWAP)",
+            "",
+            "Offending items:",
+        ]
+        for nodeid, _path in missing:
+            lines.append(f"  • {nodeid}")
+        raise pytest.UsageError("\n".join(lines))

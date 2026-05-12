@@ -18,7 +18,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.intents import SwapIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,
@@ -37,6 +38,7 @@ from tests.intents.solana.conftest import (
 class TestJupiterSwapCompilation:
     """Jupiter swap: Intent -> Compile -> ActionBundle (real API calls)."""
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_usdc_to_sol_swap(self, solana_compiler, solana_wallet):
         """USDC -> SOL swap compiles to a valid ActionBundle via Jupiter API."""
@@ -88,6 +90,7 @@ class TestJupiterSwapCompilation:
         assert route_params["amount"] > 0
         assert route_params["slippage_bps"] == 500  # 5% = 500 bps
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_sol_to_usdc_swap(self, solana_compiler, solana_wallet):
         """SOL -> USDC swap (reverse direction) compiles successfully."""
@@ -110,6 +113,7 @@ class TestJupiterSwapCompilation:
         assert bundle.metadata.get("input_mint") == SOLANA_TOKENS["SOL"]
         assert bundle.metadata.get("output_mint") == SOLANA_TOKENS["USDC"]
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_usdc_to_usdt_swap(self, solana_compiler):
         """USDC -> USDT stablecoin swap compiles successfully."""
@@ -128,6 +132,7 @@ class TestJupiterSwapCompilation:
         assert result.action_bundle.metadata.get("input_mint") == SOLANA_TOKENS["USDC"]
         assert result.action_bundle.metadata.get("output_mint") == SOLANA_TOKENS["USDT"]
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_amount_usd_swap(self, solana_compiler):
         """SwapIntent with amount_usd resolves to token amount correctly."""
@@ -149,6 +154,7 @@ class TestJupiterSwapCompilation:
             f"Expected ~500000 lamports (0.50 USDC), got {amount_in}"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_swap_has_valid_base64_transaction(self, solana_compiler):
         """The serialized transaction decodes to a valid Solana VersionedTransaction."""
@@ -179,6 +185,7 @@ class TestJupiterSwapCompilation:
         tx = VersionedTransaction.from_bytes(decoded)
         assert tx is not None, "Must deserialize as a valid VersionedTransaction"
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_compile_swap_intent_type(self, solana_compiler):
         """ActionBundle has correct intent_type."""
@@ -210,6 +217,7 @@ class TestJupiterSwapExecution:
     Layer 4: Exact balance deltas (before/after verification)
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_sol(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,
@@ -274,6 +282,7 @@ class TestJupiterSwapExecution:
         # SOL received should be positive (even after gas deduction)
         assert sol_received > 0, "Must receive positive SOL from swap"
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_sol_to_usdc(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,
@@ -337,6 +346,7 @@ class TestJupiterSwapExecution:
             f"SOL spent ({sol_spent}) must be >= swap amount ({expected_sol_spent_min}) + gas"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_insufficient_balance_fails(
         self, solana_fork, funded_solana_wallet, solana_orchestrator, execution_compiler,

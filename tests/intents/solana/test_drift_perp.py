@@ -21,7 +21,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents.vocabulary import PerpCloseIntent, PerpOpenIntent
+from almanak.framework.intents import PerpCloseIntent, PerpOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.solana.conftest import CHAIN_NAME
 
 
@@ -62,6 +63,7 @@ requires_drift_api = pytest.mark.skipif(
 class TestDriftPerpOpenCompilation:
     """Drift Perp Open: PerpOpenIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_open_sol_long(self, solana_compiler):
@@ -126,6 +128,7 @@ class TestDriftPerpOpenCompilation:
         base_amount = int(metadata.get("base_asset_amount", "0"))
         assert base_amount > 0, "base_asset_amount must be positive"
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_open_short(self, solana_compiler):
@@ -151,6 +154,7 @@ class TestDriftPerpOpenCompilation:
         assert bundle.metadata.get("direction") == "short"
         assert bundle.metadata.get("market_index") == 0
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_open_routes_correctly(self, solana_compiler):
@@ -174,6 +178,7 @@ class TestDriftPerpOpenCompilation:
         assert bundle.metadata["protocol"] == "drift"
         assert bundle.metadata["chain_family"] == "SOLANA"
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     @pytest.mark.asyncio
     async def test_compile_perp_open_non_solana_chain_fails(self):
         """Drift on a non-Solana chain should fail with clear error."""
@@ -202,6 +207,7 @@ class TestDriftPerpOpenCompilation:
         assert result.status.value == "FAILED"
         assert "Solana" in result.error
 
+    @pytest.mark.intent(IntentType.PERP_OPEN)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_open_market_alias(self, solana_compiler):
@@ -235,6 +241,7 @@ class TestDriftPerpOpenCompilation:
 class TestDriftPerpCloseCompilation:
     """Drift Perp Close: PerpCloseIntent -> Compile -> ActionBundle."""
 
+    @pytest.mark.intent(IntentType.PERP_CLOSE)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_close_partial(self, solana_compiler):
@@ -279,6 +286,7 @@ class TestDriftPerpCloseCompilation:
         base_amount = int(metadata.get("base_asset_amount", "0"))
         assert base_amount > 0, "base_asset_amount must be positive for partial close"
 
+    @pytest.mark.intent(IntentType.PERP_CLOSE)
     @requires_drift_api
     @pytest.mark.asyncio
     async def test_compile_perp_close_short_direction(self, solana_compiler):
@@ -301,6 +309,7 @@ class TestDriftPerpCloseCompilation:
         assert metadata.get("direction") == "short"
         assert metadata.get("reduce_only") is True
 
+    @pytest.mark.intent(IntentType.PERP_CLOSE)
     @pytest.mark.asyncio
     async def test_compile_perp_close_non_solana_chain_fails(self):
         """Drift perp close on a non-Solana chain should fail."""

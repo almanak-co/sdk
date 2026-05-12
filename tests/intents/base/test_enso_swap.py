@@ -24,6 +24,7 @@ from web3 import Web3
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_swap_semantic_match,
@@ -63,6 +64,7 @@ class TestEnsoSwapIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_via_enso(
         self,
@@ -210,6 +212,7 @@ class TestEnsoSwapIntent:
 
         print("\nALL CHECKS PASSED - BUY (USDC -> WETH) via Enso on Base")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_via_enso(
         self,
@@ -343,6 +346,7 @@ class TestEnsoSwapIntent:
 
         print("\nALL CHECKS PASSED - SELL (WETH -> USDC) via Enso on Base")
 
+    @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_enso_swap_insufficient_balance_fails(
         self,

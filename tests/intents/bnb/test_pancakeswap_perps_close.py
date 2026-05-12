@@ -63,6 +63,7 @@ from almanak.framework.connectors.pancakeswap_perps.sdk import (
     slippage_to_limit_price,
     usd_size_to_qty,
 )
+from almanak.framework.intents.vocabulary import IntentType
 
 # Import helpers from conftest (local bnb conftest)
 from tests.intents.bnb.conftest import (
@@ -90,6 +91,7 @@ class TestPancakeSwapPerpsCloseIntent:
       6. Verify CloseTradeSuccessful + CloseTradeReceived events, balance deltas.
     """
 
+    @pytest.mark.intent(IntentType.PERP_OPEN, IntentType.PERP_CLOSE)
     async def test_open_fill_close_cycle_native_bnb(
         self,
         web3: Web3,

@@ -27,6 +27,7 @@ from almanak.framework.connectors.spark.receipt_parser import SparkReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -117,6 +118,7 @@ class TestSparkSupplyIntent:
     - Balance changes and account data match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_usdc_using_intent(
         self,
@@ -232,6 +234,7 @@ class TestSparkSupplyIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     async def test_withdraw_usdc_using_intent(
         self,
@@ -349,6 +352,7 @@ class TestSparkSupplyIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_intent_with_insufficient_balance_fails(
         self,
@@ -426,6 +430,7 @@ class TestSparkBorrowIntent:
     - Balance changes and account data match expected amounts
     """
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_weth_collateral_using_intent(
         self,
@@ -607,6 +612,7 @@ class TestSparkBorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
@@ -724,6 +730,7 @@ class TestSparkBorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     async def test_borrow_without_collateral_fails(
         self,

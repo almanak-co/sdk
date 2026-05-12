@@ -25,6 +25,7 @@ from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptPars
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
@@ -71,6 +72,7 @@ class TestPendleLPOpenIntent:
     4. wstETH balance decreased, LP token balance increased
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_wsteth_into_pendle_market(
         self,
@@ -198,6 +200,7 @@ class TestPendleLPOpenIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
     async def test_lp_open_insufficient_balance_fails(
         self,
@@ -302,6 +305,7 @@ class TestPendleLPCloseIntent:
         assert lp_balance > 0, "Expected LP tokens after LP_OPEN"
         return lp_balance
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_returns_wsteth(
         self,

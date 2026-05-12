@@ -23,7 +23,8 @@ from web3 import Web3
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents import LPCloseIntent, LPOpenIntent
+from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -137,6 +138,7 @@ class TestUniswapV4LPCloseIntent:
     - Balance changes match expected token returns
     """
 
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_weth_usdc(
         self,
@@ -264,6 +266,7 @@ class TestUniswapV4LPCloseIntent:
         print(f"\nPosition {position_id} successfully closed")
         print("\nALL 4 LAYERS PASSED")
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_without_liquidity_fails_compilation(
         self,
