@@ -6,6 +6,12 @@ for cross-vault collateral/borrow relationships.
 Supported operations: SUPPLY, WITHDRAW, BORROW, REPAY
 """
 
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
 from .adapter import (  # noqa: F401
     EULER_V2_VAULTS,
     EVAULT_FACTORY_ADDRESS,
@@ -24,4 +30,18 @@ from .receipt_parser import (  # noqa: F401
     WITHDRAW_TOPIC,
     EulerV2ParseResult,
     EulerV2ReceiptParser,
+)
+
+register_connector(
+    name="euler_v2",
+    intents=(
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+    ),
+    chains=(
+        "ethereum",
+        "avalanche",
+    ),
 )

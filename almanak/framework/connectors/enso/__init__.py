@@ -86,3 +86,23 @@ __all__ = [
     # VIB-3828: typed-revert helper used at gateway-failure boundaries
     "check_known_router_revert",
 ]
+
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
+register_connector(
+    name="enso",
+    intents=(IntentType.SWAP,),
+    chains=(
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "polygon",
+        "base",
+        "avalanche",
+        "bnb",
+    ),
+)

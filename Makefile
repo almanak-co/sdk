@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry
 
 # Load .env file if it exists
 -include .env
@@ -50,6 +50,13 @@ check-xfail-hygiene:
 # See docs/internal/config-service-plan.md.
 check-config-boundary:
 	uv run python scripts/ci/check_config_boundary.py --check --verbose
+
+# Enforce that every connector dir under almanak/framework/connectors/
+# registers itself in ConnectorRegistry (VIB-4298 PR 1). The registry is the
+# source of truth for the (connector, intent, chain) universe consumed by
+# PR 2's intent-test coverage gate and future tooling.
+check-connector-registry:
+	uv run python scripts/ci/check_connector_registry.py --verbose
 
 # Run security checks (bandit for Python security issues)
 security:

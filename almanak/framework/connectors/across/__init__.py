@@ -52,3 +52,21 @@ __all__ = [
     "ACROSS_SPOKE_POOL_ADDRESSES",
     "ACROSS_SUPPORTED_TOKENS",
 ]
+
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
+register_connector(
+    name="across",
+    intents=(IntentType.BRIDGE,),
+    chains=(
+        "ethereum",
+        "arbitrum",
+        "base",
+        "optimism",
+        "polygon",
+    ),
+)

@@ -96,3 +96,19 @@ def __getattr__(name: str) -> str:
     if name == "DRIFT_DATA_API_BASE_URL":
         return get_drift_data_api_base_url()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
+register_connector(
+    name="drift",
+    intents=(
+        IntentType.PERP_OPEN,
+        IntentType.PERP_CLOSE,
+    ),
+    chains=("solana",),
+)

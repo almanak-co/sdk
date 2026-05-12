@@ -177,3 +177,15 @@ __all__ = [
     # Adapter
     "KrakenAdapter",
 ]
+
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
+register_connector(
+    name="kraken",
+    intents=(IntentType.SWAP,),
+    chains=None,
+)
