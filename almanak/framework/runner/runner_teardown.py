@@ -343,6 +343,11 @@ def _safe_mark(state_manager: Any, method_name: str, strategy_id: str, **kwargs:
 # -------------------------------------------------------------------------
 
 
+# crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; PR touches a single line (``_lifecycle_write_state("TEARING_DOWN")``), zero new branches.
+# Function is the canonical sequencer (market snapshot → intents → routing → manager/inline/fallback);
+# decomposing it requires the four-step SDK crap-refactor protocol (blueprint 14 + Plan agent +
+# test baseline) and is out of scope for a regression fix. ``# noqa: C901`` already in place for
+# the same complexity. Refactor tracked separately.
 async def execute_teardown(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
@@ -370,44 +375,17 @@ async def execute_teardown(  # noqa: C901
     Returns:
         IterationResult with teardown status
     """
-    from ..deployment import is_hosted
-    from ..local_paths import LocalPathError
     from ..teardown import get_teardown_state_manager
     from .runner_models import IterationResult, IterationStatus
 
     strategy_id = strategy.strategy_id
-    # The local teardown state manager is the cross-process approval
-    # channel between the SDK CLI/API and the runner — it lives in
-    # SQLite next to the runner's local DB (VIB-3761). In hosted mode
-    # the channel is owned by the gateway/Postgres, so the local
-    # manager is not instantiated and this helper raises
-    # ``LocalPathError``. Treat hosted mode as "no pending operator
-    # request" — auto-mode below will derive ``is_auto_mode=True`` from
-    # ``request is None`` and the rest of the unwind proceeds.
-    #
-    # In *local* mode, ``LocalPathError`` is genuinely unexpected — it
-    # means a path-resolution helper rejected the call for a reason
-    # other than "hosted mode" (e.g., a misconfigured strategy folder).
-    # Re-raise so the operator sees the misconfiguration instead of
-    # silently disabling the operator-approval flow.
-    manager: Any = None
-    request: Any = None
-    try:
-        manager = get_teardown_state_manager()
-        request = manager.get_active_request(strategy_id)
-    except LocalPathError:
-        # Local mode: ``LocalPathError`` here means a path-helper rejected
-        # the call for a reason other than "hosted mode" (typically a
-        # misconfigured ``ALMANAK_STRATEGY_FOLDER``). Re-raise so the
-        # operator sees the misconfiguration rather than silently
-        # disabling the operator-approval flow.
-        if not is_hosted():
-            raise
-        logger.debug(
-            "execute_teardown[%s]: local teardown state manager unavailable "
-            "(hosted mode); proceeding with auto-mode unwind",
-            strategy_id,
-        )
+    # Both modes have a real cross-process teardown channel now (VIB-4049):
+    # SQLite locally, Postgres in hosted mode. The factory returns the
+    # right backend; any error here is a genuine misconfiguration (e.g.
+    # local strategy folder unresolvable, hosted DB URL unreachable) and
+    # should propagate.
+    manager: Any = get_teardown_state_manager()
+    request: Any = manager.get_active_request(strategy_id)
 
     # Step T1: Create market snapshot (SAME as normal decide() path)
     teardown_market = None
@@ -458,6 +436,13 @@ async def execute_teardown(  # noqa: C901
         )
 
     logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
+    # VIB-4049: switch lifecycle state to TEARING_DOWN now that unwind work is
+    # actually starting. Platform maps this to live_agent_status.TEARDOWN_IN_PROGRESS
+    # so the dashboard / reconciler can distinguish "stopping cleanly" (SLA
+    # 5min) from "actively unwinding positions" (SLA 45min). The terminal
+    # TERMINATED / ERROR writes downstream are unchanged — they take over once
+    # the unwind completes (or fails).
+    runner._lifecycle_write_state(strategy_id, "TEARING_DOWN")
     if request:
         _safe_mark(manager, "mark_started", strategy_id, total_positions=len(teardown_intents))
 

@@ -218,6 +218,81 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
 }
 
 
+# VIB-4049 — hosted teardown bridge tables (Postgres-only).
+#
+# These three tables ride a different lifecycle from the accounting tables
+# above: their DDL is owned by ``metrics-database`` PR #32 (Postgres), and on
+# local SQLite they are created LAZILY by ``SQLiteTeardownStateManager.__init__``
+# the first time a teardown request is written. The gateway's local boot
+# path does NOT eagerly construct ``SQLiteTeardownStateManager`` (only
+# ``SQLiteStore`` for accounting), so including these tables in the SQLite
+# contract would crash a fresh local boot with ``SchemaContractViolation``
+# every time before any teardown work has occurred.
+#
+# We therefore keep them out of ``ACCOUNTING_SCHEMA_CONTRACT_SQLITE`` and
+# only require them at hosted Postgres boot — where the migration is the
+# operative gate, and where lazy table creation is forbidden by
+# ``CLAUDE.md`` "Database schema ownership". Hosted boot fails closed if
+# metrics-database#32 hasn't been applied; local boot doesn't care because
+# the teardown subsystem self-bootstraps.
+TEARDOWN_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
+    "teardown_requests": frozenset(
+        {
+            "agent_id",
+            "mode",
+            "asset_policy",
+            "target_token",
+            "reason",
+            "requested_at",
+            "requested_by",
+            "status",
+            "acknowledged_at",
+            "started_at",
+            "completed_at",
+            "current_phase",
+            "positions_total",
+            "positions_closed",
+            "positions_failed",
+            "cancel_requested",
+            "cancel_deadline",
+            "error_message",
+            "result_json",
+            "updated_at",
+        }
+    ),
+    "teardown_execution_state": frozenset(
+        {
+            "teardown_id",
+            "agent_id",
+            "mode",
+            "status",
+            "total_intents",
+            "completed_intents",
+            "current_intent_index",
+            "started_at",
+            "updated_at",
+            "completed_at",
+            "pending_intents_json",
+            "intent_results_json",
+            "cancel_window_until",
+            "config_json",
+        }
+    ),
+    "teardown_approvals": frozenset(
+        {
+            "teardown_id",
+            "level",
+            "agent_id",
+            "request_json",
+            "response_json",
+            "created_at",
+            "responded_at",
+            "expires_at",
+        }
+    ),
+}
+
+
 # Postgres variant: same table set, ``strategy_id`` → ``agent_id`` per
 # the deployed metrics-database schema. The transformation is
 # table-by-table because some accounting tables (``accounting_events``,
@@ -266,9 +341,16 @@ def _postgres_columns_for(table: str, sqlite_cols: frozenset[str]) -> frozenset[
 
 
 ACCOUNTING_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
-    table: _postgres_columns_for(table, cols)
-    for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
-    if table not in _POSTGRES_DEFERRED_TABLES
+    **{
+        table: _postgres_columns_for(table, cols)
+        for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
+        if table not in _POSTGRES_DEFERRED_TABLES
+    },
+    # Teardown tables are Postgres-only in the contract. Local SQLite creates
+    # them lazily via ``SQLiteTeardownStateManager._init_db`` so they have no
+    # entry in the SQLite contract; hosted Postgres requires the
+    # metrics-database#32 migration to have landed before the gateway boots.
+    **TEARDOWN_SCHEMA_CONTRACT_POSTGRES,
 }
 
 

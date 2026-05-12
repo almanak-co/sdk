@@ -1,8 +1,8 @@
 """Teardown State Manager for persisting teardown requests.
 
 This manager handles the state-based signaling mechanism for teardowns.
-Teardown requests are stored in SQLite/PostgreSQL and checked by strategies
-each iteration.
+Teardown requests are stored in SQLite (local SDK) or PostgreSQL (hosted
+platform) and checked by strategies each iteration.
 
 Flow:
 1. CLI/Dashboard/Risk Guard writes TeardownRequest to database
@@ -15,6 +15,21 @@ This decoupled design allows multiple triggers:
 - Config: Set `teardown.request = true` in strategy config (hot-reload)
 - Dashboard: Click "Close Strategy" button
 - Risk Guards: Auto-protect triggers when health factor drops
+
+Backend topology (VIB-4049):
+
+- Local SDK keeps using SQLite, keyed by ``TeardownRequest.strategy_id``.
+- Hosted gateway uses PostgreSQL, keyed by ``agent_id``. The Postgres
+  implementation lives in ``platform-plugins/almanak_platform/teardown_store.py``
+  and is loaded via the ``almanak.teardown`` entry point. The dataclass
+  field is still ``strategy_id`` end-to-end; the Postgres backend maps it
+  to the ``agent_id`` column at the write/read boundary using
+  ``framework/deployment/mode.py:agent_id()``.
+
+The Protocols below pin the public surface both backends must implement.
+``TeardownStateManager`` / ``TeardownStateAdapter`` are now backwards-compat
+aliases that point at the SQLite implementations — existing imports keep
+working; new code should depend on the Protocols.
 """
 
 import asyncio
@@ -26,7 +41,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from almanak.framework.teardown.models import (
     EscalationLevel,
@@ -37,6 +52,115 @@ from almanak.framework.teardown.models import (
     TeardownState,
     TeardownStatus,
 )
+
+# ---------------------------------------------------------------------------
+# Public protocols (VIB-4049 PR2)
+# ---------------------------------------------------------------------------
+#
+# These describe the methods the SDK / runner / strategy call against the
+# teardown state backend. Both the SQLite implementation in this module and
+# the Postgres implementation in ``platform-plugins/almanak_platform`` must
+# satisfy them. Mode-aware callers depend on the Protocol — not the concrete
+# class — so the ``is_hosted()`` short-circuits at the call sites can be
+# removed (VIB-4049 PR2 §7).
+
+
+@runtime_checkable
+class TeardownStateManagerProtocol(Protocol):
+    """Public surface of the teardown-request store.
+
+    Captures every method the runner / CLI / dashboard call against the
+    teardown request channel. SQLite and Postgres backends both implement
+    this. Private helpers (``_row_to_request``, ``_resolve_db_path``, etc.)
+    are intentionally excluded — they're implementation details, not part
+    of the contract.
+    """
+
+    def create_request(self, request: TeardownRequest) -> None: ...
+
+    def get_request(self, strategy_id: str) -> TeardownRequest | None: ...
+
+    def get_active_request(self, strategy_id: str) -> TeardownRequest | None: ...
+
+    def get_pending_requests(self) -> list[TeardownRequest]: ...
+
+    def get_all_active_requests(self) -> list[TeardownRequest]: ...
+
+    def get_all_requests(self) -> list[TeardownRequest]: ...
+
+    def update_request(self, request: TeardownRequest) -> None: ...
+
+    def acknowledge_request(self, strategy_id: str) -> TeardownRequest | None: ...
+
+    def mark_started(self, strategy_id: str, total_positions: int = 0) -> TeardownRequest | None: ...
+
+    def update_progress(
+        self,
+        strategy_id: str,
+        positions_closed: int,
+        positions_failed: int = 0,
+        current_phase: TeardownPhase | None = None,
+    ) -> TeardownRequest | None: ...
+
+    def mark_completed(
+        self,
+        strategy_id: str,
+        result: dict | None = None,
+    ) -> TeardownRequest | None: ...
+
+    def mark_failed(self, strategy_id: str, error: str) -> TeardownRequest | None: ...
+
+    def request_cancel(self, strategy_id: str) -> bool: ...
+
+    def mark_cancelled(self, strategy_id: str) -> TeardownRequest | None: ...
+
+    def delete_request(self, strategy_id: str) -> bool: ...
+
+
+@runtime_checkable
+class TeardownStateAdapterProtocol(Protocol):
+    """Public surface of the teardown-execution-state + approval-channel store.
+
+    Same Protocol-as-contract pattern as :class:`TeardownStateManagerProtocol`.
+    Implemented by SQLite locally and Postgres in hosted mode (VIB-4049).
+    """
+
+    async def save_teardown_state(self, state: TeardownState) -> None: ...
+
+    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None: ...
+
+    async def delete_teardown_state(self, teardown_id: str) -> None: ...
+
+    def create_approval_request(
+        self,
+        teardown_id: str,
+        strategy_id: str,
+        level: EscalationLevel | str,
+        request_json: str,
+        expires_at: str,
+    ) -> None: ...
+
+    def get_approval_response(
+        self,
+        teardown_id: str,
+        level: EscalationLevel | str,
+    ) -> str | None: ...
+
+    def write_approval_response(
+        self,
+        teardown_id: str,
+        level: EscalationLevel | str,
+        response_json: str,
+    ) -> bool: ...
+
+    def get_latest_pending_approval(self, strategy_id: str) -> dict[str, Any] | None: ...
+
+    def write_approval_response_by_strategy(
+        self,
+        strategy_id: str,
+        response_json: str,
+    ) -> bool: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +223,17 @@ def _with_retry[T](operation: Callable[[], T], *, description: str) -> T:
     raise last_err
 
 
-class TeardownStateManager:
-    """Manages TeardownRequest persistence in SQLite.
+class SQLiteTeardownStateManager:
+    """SQLite-backed teardown-request store (local SDK).
 
-    Provides CRUD operations for teardown requests, enabling
-    the state-based signaling mechanism for triggering teardowns
-    from multiple sources.
+    Provides CRUD operations for teardown requests, enabling the
+    state-based signaling mechanism for triggering teardowns from
+    multiple sources.
 
     Thread-safe for concurrent access from CLI, dashboard, and strategies.
+    Hosted deployments use :class:`PostgresTeardownStateManager` (loaded via
+    the ``almanak.teardown:postgres`` entry point in ``platform-plugins``).
+    Both implement :class:`TeardownStateManagerProtocol`.
     """
 
     def __init__(self, db_path: str | Path | None = None):
@@ -613,26 +740,15 @@ class TeardownStateManager:
         )
 
 
-# Singleton instance for easy access
-_default_manager: TeardownStateManager | None = None
+# Mode-aware singleton lives in ``almanak/framework/teardown/__init__.py``
+# (VIB-4049 PR2 §4). This module no longer owns ``get_teardown_state_manager``
+# directly — the factory must consult ``framework/deployment/mode.py`` and
+# ``ALMANAK_GATEWAY_DATABASE_URL`` to decide between SQLite and Postgres,
+# which would create a circular import if defined here. See
+# ``framework/teardown/__init__.py:get_teardown_state_manager``.
 
 
-def get_teardown_state_manager(db_path: str | None = None) -> TeardownStateManager:
-    """Get the default TeardownStateManager instance.
-
-    Args:
-        db_path: Optional custom database path
-
-    Returns:
-        TeardownStateManager instance
-    """
-    global _default_manager
-    if _default_manager is None:
-        _default_manager = TeardownStateManager(db_path)
-    return _default_manager
-
-
-class TeardownStateAdapter:
+class SQLiteTeardownStateAdapter:
     """SQLite-backed persistence for TeardownManager state and approval channel.
 
     Implements the ``StateManager`` protocol expected by ``TeardownManager.__init__``
@@ -666,8 +782,10 @@ class TeardownStateAdapter:
         # Fail loudly on invalid types — this path is cross-process state; silently
         # defaulting to CWD on a misconfigured caller would lead to diverging DBs.
         if db_path is not None and not isinstance(db_path, str | Path):
-            raise TypeError(f"TeardownStateAdapter db_path must be str, Path, or None; got {type(db_path).__name__}")
-        self.db_path = TeardownStateManager._resolve_db_path(db_path)
+            raise TypeError(
+                f"SQLiteTeardownStateAdapter db_path must be str, Path, or None; got {type(db_path).__name__}"
+            )
+        self.db_path = SQLiteTeardownStateManager._resolve_db_path(db_path)
         self._init_tables()
 
     # ------------------------------------------------------------------
@@ -1072,3 +1190,17 @@ class TeardownStateAdapter:
             level=pending["level"],
             response_json=response_json,
         )
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat aliases (VIB-4049 PR2)
+# ---------------------------------------------------------------------------
+#
+# Existing callers, tests, and entrypoints reference these by the old names.
+# The concrete SQLite implementations were renamed to make room for the
+# Postgres siblings in ``platform-plugins/almanak_platform/teardown_store.py``;
+# the aliases below keep the public import path stable. Prefer the Protocols
+# (``TeardownStateManagerProtocol`` / ``TeardownStateAdapterProtocol``) in new
+# call sites — they describe the mode-agnostic contract.
+TeardownStateManager = SQLiteTeardownStateManager
+TeardownStateAdapter = SQLiteTeardownStateAdapter

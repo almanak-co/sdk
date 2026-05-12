@@ -1763,23 +1763,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called at the start of each iteration by the runner.
         Returns the request if one exists and is active.
 
-        Hosted mode: the SQLite-backed approval channel doesn't exist —
-        the gateway/Postgres owns the teardown channel and a separate
-        runner-side gateway lookup is the planned path (VIB-3777).
-        Short-circuit to None so we don't construct ``TeardownStateManager``
-        (which would raise ``LocalPathError`` from its shared
-        ``_resolve_db_path`` and emit a per-iteration WARNING). Until
-        VIB-3777 lands, hosted runners only honour strategy-self-signalled
-        teardowns via auto-protect overrides.
+        Mode-agnostic (VIB-4049): the
+        :func:`get_teardown_state_manager` factory returns the SQLite store
+        locally and the Postgres store in hosted mode. The runner just
+        polls the resolved backend; neither this method nor the strategy
+        branches on ``AGENT_ID``.
 
         Returns:
             TeardownRequest if one exists and is active, None otherwise
         """
-        from almanak.framework.deployment import is_hosted
-
-        if is_hosted():
-            return None
-
         # ALM-2705: narrow exception handling so a *missing-table* / init-failure
         # OperationalError surfaces loudly. The pre-fix behaviour of swallowing
         # every Exception under a single warning hid two genuinely-bug-class
@@ -1811,21 +1803,19 @@ class IntentStrategy(StrategyBase[ConfigT]):
         except LocalPathError as e:
             # Benign: no strategy folder resolved (e.g. running in an
             # environment without ALMANAK_STRATEGY_FOLDER and no cwd hint).
-            # Hosted mode short-circuits earlier, so reaching here means a
-            # genuinely local-but-misconfigured caller — log debug and skip.
+            # Local-mode only — hosted Postgres never raises this. Log
+            # debug and skip.
             logger.debug("Skipping teardown request check (no local strategy DB): %s", e)
             return None
 
         except sqlite3.OperationalError as e:
             # Loud + durable: this is the ALM-2705 failure mode. Either the
             # singleton's ``_init_db`` lost a contention race (now retried —
-            # see ``TeardownStateManager._init_db``) or the DB file's schema
-            # is genuinely missing the ``teardown_requests`` table (e.g. a
-            # gateway-pre-created DB the runner never bootstrapped). Emit a
-            # grep-able structured log line and return None so the runner
-            # keeps making risk-reducing progress, but operators can find the
-            # failure post-mortem instead of it being indistinguishable from
-            # "no teardown row exists".
+            # see ``SQLiteTeardownStateManager._init_db``) or the DB file's
+            # schema is genuinely missing the ``teardown_requests`` table
+            # (e.g. a gateway-pre-created DB the runner never bootstrapped).
+            # Emit a grep-able structured log line and return None so the
+            # runner keeps making risk-reducing progress.
             logger.error(
                 "teardown.check_request_failed: strategy_id=%s strategy_class=%s error=%s — "
                 "teardown signal channel is degraded; runner continuing without "
@@ -1851,23 +1841,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def acknowledge_teardown_request(self) -> bool:
         """Acknowledge a pending teardown request.
 
-        Called when the strategy picks up a teardown request
-        and starts processing it.
-
-        Hosted mode no-op (mirrors ``_check_teardown_request``): the local
-        approval channel is unavailable; ack happens against the gateway
-        once VIB-3777 wires the gateway-backed teardown lookup. Returning
-        ``False`` here is consistent with "no local request to acknowledge",
-        which is the truth in hosted mode.
+        Called when the strategy picks up a teardown request and starts
+        processing it. Mode-agnostic (VIB-4049): the factory resolves the
+        right backend, no ``AGENT_ID`` branch here.
 
         Returns:
             True if request was acknowledged, False otherwise
         """
-        from almanak.framework.deployment import is_hosted
-
-        if is_hosted():
-            return False
-
         # ALM-2705: same narrow-exception treatment as ``_check_teardown_request``.
         import sqlite3
 

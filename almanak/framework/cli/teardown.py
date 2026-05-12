@@ -172,10 +172,14 @@ def _reset_teardown_state_singleton() -> None:
     call; if a CLI invocation sets ``ALMANAK_STRATEGY_FOLDER`` after the cache
     was populated (e.g. via a prior import), subsequent calls would otherwise
     hit the wrong DB.
-    """
-    from ..teardown import state_manager as state_manager_module
 
-    state_manager_module._default_manager = None
+    VIB-4049 PR2 moved the singleton from ``state_manager.py`` to
+    ``framework/teardown/__init__.py`` and exposed a documented helper —
+    delegate to it instead of reaching into module internals.
+    """
+    from almanak.framework.teardown import reset_teardown_state_manager
+
+    reset_teardown_state_manager()
 
 
 def _get_teardown_state_manager_or_die():

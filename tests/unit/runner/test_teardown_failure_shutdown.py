@@ -137,7 +137,21 @@ class TestTeardownIntentGenerationFailure:
     """When generate_teardown_intents raises in deployed mode, runner must shut down with ERROR."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_with_error_on_intent_generation_failure(self):
+    async def test_shutdown_with_error_on_intent_generation_failure(self, monkeypatch):
+        # VIB-4049 PR2: hosted-mode runner_teardown.execute_teardown now resolves
+        # the teardown state manager via the mode-aware factory, which raises in
+        # hosted mode unless ``ALMANAK_GATEWAY_DATABASE_URL`` is set AND the
+        # Postgres plugin is installed. The behaviour-under-test is "what
+        # happens when ``generate_teardown_intents`` raises in hosted mode" —
+        # NOT the manager-resolution path — so stub the singleton with a
+        # mock manager that responds to the minimal call surface
+        # (``get_active_request`` / ``mark_failed``) before invoking the runner.
+        from almanak.framework import teardown as teardown_pkg
+
+        stub_manager = MagicMock()
+        stub_manager.get_active_request.return_value = None
+        monkeypatch.setattr(teardown_pkg, "_state_manager", stub_manager)
+
         runner = _make_runner()
         strategy = _make_strategy()
         strategy.generate_teardown_intents.side_effect = RuntimeError("intent gen boom")

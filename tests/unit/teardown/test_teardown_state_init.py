@@ -65,10 +65,19 @@ def _make_request(strategy_id: str = "alm-2705-test") -> TeardownRequest:
 
 @pytest.fixture(autouse=True)
 def _reset_singleton() -> None:
-    """Each test gets a fresh module-level singleton."""
-    state_manager_module._default_manager = None
+    """Each test gets a fresh module-level singleton.
+
+    VIB-4049 PR2 moved the singleton from ``state_manager._default_manager``
+    to ``framework/teardown/__init__.py:_state_manager`` and exposes a
+    public ``reset_teardown_state_manager()`` helper — call it so tests
+    that re-create the manager (or wire one explicitly) start from a clean
+    slate regardless of which other test ran first.
+    """
+    from almanak.framework.teardown import reset_teardown_state_manager
+
+    reset_teardown_state_manager()
     yield
-    state_manager_module._default_manager = None
+    reset_teardown_state_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -363,7 +372,10 @@ class TestShouldTeardownExceptionNarrowing:
             conn.execute("DROP TABLE teardown_requests")
             conn.commit()
         # Wire it as the singleton so _check_teardown_request picks it up.
-        state_manager_module._default_manager = mgr
+        # VIB-4049 PR2: the singleton now lives in framework/teardown/__init__.py.
+        import almanak.framework.teardown as teardown_pkg
+
+        teardown_pkg._state_manager = mgr
 
         caplog.set_level(logging.ERROR, logger="almanak.framework.strategies.intent_strategy")
         stub = _StubStrategy()
@@ -445,22 +457,50 @@ class TestShouldTeardownExceptionNarrowing:
 
 
 class TestAcknowledgeTeardownRequestExceptionNarrowing:
-    def test_hosted_mode_short_circuits_without_db_access(
+    def test_hosted_mode_routes_through_factory_returns_false_when_no_active_request(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Hosted deployments do not use the local teardown channel — the
-        method must early-exit without touching the DB or emitting logs.
+        """VIB-4049 PR2 collapsed the local-only ``is_hosted()`` short-circuit
+        in ``acknowledge_teardown_request`` — hosted mode now resolves the
+        teardown channel through the mode-aware factory (Postgres backend in
+        prod) instead of returning False without touching the DB.
+
+        The original behaviour this test pinned ("hosted skips DB entirely")
+        no longer exists; the *contract* that survived the refactor is the
+        no-active-request branch: hosted ack must still return False without
+        loud log noise. Stub the factory's singleton with a manager that
+        reports "no active request" and assert that contract.
         """
         monkeypatch.setenv("AGENT_ID", "alm-2705-hosted-stub")
+
+        # Wire a stub Postgres-equivalent manager so the factory does not
+        # try to load the real plugin.
+        import almanak.framework.teardown as teardown_pkg
+
+        class _StubManager:
+            def acknowledge_request(self, strategy_id: str):  # noqa: ARG002
+                return None
+
+        teardown_pkg._state_manager = _StubManager()
+
         caplog.set_level(logging.DEBUG, logger="almanak.framework.strategies.intent_strategy")
         stub = _StubStrategy()
 
         result = _acknowledge_teardown_request_for(stub)
 
         assert result is False
-        assert not [r for r in caplog.records if "teardown.ack" in r.getMessage()]
+        loud = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()
+        ]
+        assert loud == [], (
+            "hosted ack with no active request must not log loud — only the "
+            "Postgres path was added in PR2; the benign-empty contract is "
+            f"unchanged: {[r.getMessage() for r in loud]}"
+        )
 
     def test_returns_true_when_active_request_acknowledged(
         self,

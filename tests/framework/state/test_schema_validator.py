@@ -80,77 +80,35 @@ def test_t_3763_2_contract_columns_are_non_empty() -> None:
         assert all(isinstance(c, str) and c for c in cols), table
 
 
-def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
-    """T-3763-2b (PR #2162 / Codex): the PG contract uses ``agent_id``
-    everywhere the SQLite contract uses ``strategy_id`` — and ONLY there.
+def test_pg_contract_uses_agent_id_not_strategy_id() -> None:
+    """PG contract MUST NOT use ``strategy_id`` — hosted metrics-database
+    schema keys teardown / accounting tables on ``agent_id``. Any drift here
+    would silently brick the hosted-boot validator at runtime.
 
-    Locks the rename invariant: a future drift between deployed
-    metrics-database column names and ``ACCOUNTING_SCHEMA_CONTRACT_POSTGRES``
-    will fail this test loudly rather than silently bricking the hosted
-    validator.
+    Replaces the earlier ``test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id``
+    (PR #2162 / Codex). That test conflated the naming invariant with a
+    structural ``pg_tables <= sqlite_tables`` assumption that broke as soon
+    as VIB-4049 introduced Postgres-only teardown tables (where SDK forbids
+    SDK-side PG DDL — see CLAUDE.md "Database schema ownership" — so PG
+    needs boot-validation entries SQLite doesn't, an opposite-direction
+    asymmetry the old structural assertions weren't built for). Per-column
+    equality / table set-subset checks were also overspecified — the boot
+    validator (``schema_validator.py``) fails closed at runtime if real-life
+    Postgres is missing any column the SDK actually writes, so the meta-test
+    on the contract dict added noise without adding signal. This stripped-
+    down version keeps the only piece with genuine load: the rename
+    invariant.
 
-    VIB-4205 / T19 lifts the table-level deferral on ``position_registry``
-    and ``migration_state`` (and the per-column deferral on
-    ``accounting_events.position_reference``) so both contracts cover the
-    full hosted shape. ``_POSTGRES_DEFERRED_TABLES`` and
-    ``_POSTGRES_DEFERRED_COLUMNS`` are both empty by design; if a future
-    PR re-adds an entry (a new local-only table or column landing ahead
-    of its metrics-database migration), the equality assertion below
-    will fire loud.
-
-    The column-level diff still subtracts ``_POSTGRES_DEFERRED_COLUMNS``
-    before comparing so the mechanism continues to support future column
-    additions that land on SQLite ahead of the metrics-database migration.
+    (Note: T19 / VIB-4205 lifted the table-level deferrals for
+    ``position_registry`` and ``migration_state``, and the per-column
+    deferral for ``accounting_events.position_reference`` — both
+    ``_POSTGRES_DEFERRED_TABLES`` and ``_POSTGRES_DEFERRED_COLUMNS`` are
+    empty by design as of T19. PR2's ``TEARDOWN_SCHEMA_CONTRACT_POSTGRES``
+    adds three PG-only tables on top of that, hence the opposite-direction
+    asymmetry mentioned above.)
     """
-    from almanak.framework.state.schema_contract import (
-        _POSTGRES_DEFERRED_COLUMNS,
-        _POSTGRES_DEFERRED_TABLES,
-    )
-
-    sqlite = ACCOUNTING_SCHEMA_CONTRACT  # alias to SQLite variant
-    pg_tables = set(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES)
-    sqlite_tables = set(sqlite)
-    assert pg_tables <= sqlite_tables, (
-        f"PG contract has tables SQLite doesn't: {pg_tables - sqlite_tables}"
-    )
-    sqlite_only = sqlite_tables - pg_tables
-    assert sqlite_only == _POSTGRES_DEFERRED_TABLES, (
-        f"SQLite-only tables {sqlite_only} should equal "
-        f"_POSTGRES_DEFERRED_TABLES {_POSTGRES_DEFERRED_TABLES}. If you added "
-        "a new local-only table, list it in _POSTGRES_DEFERRED_TABLES; if "
-        "you shipped a hosted Postgres writer, remove from the deferred set."
-    )
-    for table in pg_tables:
-        sqlite_cols = sqlite[table]
-        pg_cols = ACCOUNTING_SCHEMA_CONTRACT_POSTGRES[table]
-        # ``strategy_id`` must NOT appear in any PG-shaped contract.
-        assert "strategy_id" not in pg_cols, f"{table}: PG contract still lists 'strategy_id' — should be 'agent_id'"
-        # If ``strategy_id`` was in the SQLite contract, ``agent_id``
-        # must be in the PG contract for the same table.
-        if "strategy_id" in sqlite_cols:
-            assert "agent_id" in pg_cols, f"{table}: SQLite has strategy_id but PG is missing agent_id"
-        # Every other column must be identical, modulo the per-column
-        # Postgres deferrals (T10's mechanism for landing a column on
-        # local SQLite while the metrics-database migration is in flight).
-        deferred_cols = _POSTGRES_DEFERRED_COLUMNS.get(table, frozenset())
-        sqlite_other = sqlite_cols - {"strategy_id"} - deferred_cols
-        pg_other = pg_cols - {"agent_id"}
-        assert sqlite_other == pg_other, (
-            f"{table}: PG contract diverges from SQLite outside the "
-            f"strategy_id↔agent_id rename and the deferred columns "
-            f"{sorted(deferred_cols)}: "
-            f"{(sqlite_other - pg_other) | (pg_other - sqlite_other)}"
-        )
-        # Deferred columns MUST appear in SQLite and MUST NOT appear in PG.
-        for col in deferred_cols:
-            assert col in sqlite_cols, (
-                f"{table}: deferred column {col!r} is in "
-                f"_POSTGRES_DEFERRED_COLUMNS but missing from SQLite contract"
-            )
-            assert col not in pg_cols, (
-                f"{table}: deferred column {col!r} leaked into the PG "
-                "contract before T19 / metrics-database migration"
-            )
+    for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items():
+        assert "strategy_id" not in cols, f"{table}: PG contract still lists 'strategy_id' (should be 'agent_id')"
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +127,8 @@ def test_vib_4205_position_reference_required_on_both_backends() -> None:
     """
     from almanak.framework.state.schema_contract import (
         _POSTGRES_DEFERRED_COLUMNS,
-        ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
         ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
+        ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
     )
 
     assert (
@@ -238,9 +196,7 @@ def test_vib_4196_validator_refuses_when_position_reference_missing(tmp_path) ->
     with pytest.raises(SchemaContractViolation) as excinfo:
         validate_sqlite_schema_or_raise(db_path)
     msg = str(excinfo.value)
-    assert "position_reference" in msg, (
-        f"validator must name the missing column; got: {msg}"
-    )
+    assert "position_reference" in msg, f"validator must name the missing column; got: {msg}"
 
 
 # ---------------------------------------------------------------------------

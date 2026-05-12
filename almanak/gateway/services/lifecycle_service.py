@@ -14,7 +14,14 @@ from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
-_VALID_STATES = {"INITIALIZING", "RUNNING", "PAUSED", "STOPPING", "TERMINATED", "ERROR"}
+# VIB-4049: TEARING_DOWN sits between STOPPING and TERMINATED in the hosted
+# teardown bridge — written by the runner inside ``execute_teardown_via_manager``
+# once unwind starts, replaced by TERMINATED when the unwind succeeds or by
+# ERROR on failure. Platform maps it to ``live_agent_status.TEARDOWN_IN_PROGRESS``
+# so the UI can distinguish "stopping cleanly" from "actively unwinding
+# positions" (the reconciler timeout for TEARDOWN_IN_PROGRESS is the 45-minute
+# teardown SLA, not the 5-minute STOPPING SLA).
+_VALID_STATES = {"INITIALIZING", "RUNNING", "PAUSED", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"}
 _VALID_COMMANDS = {"STOP", "PAUSE", "RESUME"}
 
 
