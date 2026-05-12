@@ -57,6 +57,10 @@ MIGRATED_STRATEGIES = [
         id="accounting-lp-dual",
     ),
     pytest.param(
+        "strategies.accounting.lp_triple.strategy",
+        id="accounting-lp-triple",
+    ),
+    pytest.param(
         "strategies.incubating.sushiswap_v3_base.strategy",
         id="incubating-sushiswap-v3-base",
     ),
