@@ -228,8 +228,20 @@ def handle_swap(
     timestamp = _parse_timestamp(ledger_row.get("timestamp"))
 
     # ── Token / amount fields ────────────────────────────────────────────────
-    token_in = (ledger_row.get("token_in") or "").upper()
-    token_out = (ledger_row.get("token_out") or "").upper()
+    # ``_raw`` preserves the original case from the ledger row — required for
+    # Solana base58 addresses, which are case-sensitive (review feedback on
+    # PR #2250 / VIB-4304). The resolver helper sees the raw value and decides
+    # per-chain whether to lowercase (EVM) or preserve case (Solana) internally.
+    # The uppercased ``token_in`` / ``token_out`` still drive the SwapAccountingEvent
+    # identity hash, FIFO basis-store key, and ``unavailable_reason`` text — those
+    # consumers expect a canonical uppercase form for EVM symbols + the
+    # already-correct-case for Solana base58 (Solana case-corruption in the
+    # downstream paths is a pre-existing concern, tracked separately, not
+    # in scope for VIB-4304).
+    token_in_raw = ledger_row.get("token_in") or ""
+    token_out_raw = ledger_row.get("token_out") or ""
+    token_in = token_in_raw.upper()
+    token_out = token_out_raw.upper()
 
     raw_amount_in = ledger_row.get("amount_in")
     raw_amount_out = ledger_row.get("amount_out")
@@ -271,14 +283,33 @@ def handle_swap(
     # ``Decimal(0)`` placeholder would produce ``$0`` and conflate with a
     # measured zero-USD swap.
     price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
+
+    # VIB-4304: ``price_inputs_json`` is symbol-keyed (e.g. ``"WETH"``)
+    # but several connectors' receipt parsers (Aerodrome confirmed; likely
+    # PancakeSwap, Sushi, Uniswap V3, Curve and others) stamp the contract
+    # **address** into ``swap_amounts.token_in`` / ``token_out``. That
+    # propagates to ``transaction_ledger.token_in`` / ``token_out`` and
+    # then to this handler as ``"0X833589FCD6..."`` — which always misses
+    # the symbol-keyed ``price_oracle``, flipping every confidence
+    # downgrade to ESTIMATED with a misleading "missing prices" reason.
+    #
+    # Resolve address-shaped values to symbol via the token resolver
+    # singleton (same pattern as ``lp_handler`` and ``lending_handler``).
+    # The resolved symbol is used ONLY as the lookup key; the original
+    # ``token_in`` / ``token_out`` strings keep flowing through the
+    # SwapAccountingEvent and the confidence ``unavailable_reason`` so
+    # auditors still see the on-chain address when resolution itself
+    # failed (Empty != zero / no fabricated symbol substitution).
+    token_in_key = _resolve_price_lookup_key(token_in_raw, chain)
+    token_out_key = _resolve_price_lookup_key(token_out_raw, chain)
     # Capture price-presence as separate booleans BEFORE the USD conversion,
     # so the confidence helper can distinguish "no price in
     # price_inputs_json" from "price was present but USD was forced to None
     # because amounts were unmeasured" (Empty != zero propagation).
-    has_price_in = bool(token_in) and token_in in price_oracle
-    has_price_out = bool(token_out) and token_out in price_oracle
-    amount_in_usd = _token_usd(token_in, amount_in, price_oracle) if amount_in is not None else None
-    amount_out_usd = _token_usd(token_out, amount_out, price_oracle) if amount_out is not None else None
+    has_price_in = bool(token_in_key) and token_in_key in price_oracle
+    has_price_out = bool(token_out_key) and token_out_key in price_oracle
+    amount_in_usd = _token_usd(token_in_key, amount_in, price_oracle) if amount_in is not None else None
+    amount_out_usd = _token_usd(token_out_key, amount_out, price_oracle) if amount_out is not None else None
 
     # ── Position key for FIFO lot store ─────────────────────────────────────
     # Swap lots are keyed per-chain per-wallet (not per-protocol) so that a USDC
@@ -379,6 +410,11 @@ def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Decimal]) 
     ``oracle`` dict is the flat ``{SYMBOL_UPPER: Decimal}`` mapping
     produced by :func:`parse_price_inputs` (VIB-3885) — symbol lookup is
     therefore upper-case-only.
+
+    Callers should pass a value already mapped to a symbol via
+    :func:`_resolve_price_lookup_key` (VIB-4304). Passing a raw address
+    here is a no-op price miss, not an error — the lookup just returns
+    ``None`` and the confidence helper reports the gap.
     """
     if not symbol or amount is None:
         return None
@@ -389,6 +425,85 @@ def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Decimal]) 
         return price * amount
     except (ArithmeticError, TypeError):
         return None
+
+
+def _resolve_price_lookup_key(value: str, chain: str) -> str:
+    """Map a ledger ``token_in``/``token_out`` value to a price_oracle key.
+
+    The ledger column carries whatever the receipt parser stamped into
+    ``swap_amounts.token_in`` — for many connectors that is a contract
+    address (e.g. ``"0X833589FCD6...913"`` on Base for USDC). The
+    ``price_inputs_json`` written alongside it is **symbol-keyed**
+    (``{"USDC": {...}, "WETH": {...}}``), so a literal address lookup
+    against the parsed oracle always misses.
+
+    This helper resolves address-shaped values to their canonical
+    symbol via the singleton token resolver (same pattern as
+    ``lp_handler`` and ``lending_handler``). Behaviour:
+
+    - Empty / None-like → returned unchanged (caller emits the missing
+      diagnostic).
+    - Symbol-shaped values (no ``0x`` prefix, not 42-char EVM, not
+      32-44-char Solana base58) → returned unchanged. Callers already
+      upper-cased these earlier; we don't re-touch them.
+    - Address-shaped values → resolved to ``ResolvedToken.symbol``
+      uppercased. On resolver failure (unknown address, no chain
+      context, exception during resolution) the **original** value is
+      returned so the downstream ``has_price_*`` check correctly reports
+      "missing prices: <address>" rather than fabricating a phantom
+      symbol. Empty != zero — never substitute.
+
+    The resolver is a thread-safe singleton; this is a hot path (called
+    twice per SWAP event) so we avoid re-instantiation overhead.
+    """
+    if not value:
+        return value
+    chain_lower = (chain or "").lower().strip()
+    s = value.strip()
+    s_lower = s.lower()
+    # Address-shape detection. EVM: 0x + 40 hex chars (42 total).
+    # Solana: 32-44 base58 chars (no 0x prefix). We pass-through anything
+    # else as a symbol — callers already upper-cased symbols.
+    looks_like_evm = s_lower.startswith("0x") and len(s) == 42
+    looks_like_solana = chain_lower == "solana" and not s_lower.startswith("0x") and 32 <= len(s) <= 44
+    if not (looks_like_evm or looks_like_solana):
+        # Symbol-shaped value — ``price_oracle`` keys are uppercase per
+        # ``parse_price_inputs`` semantics (VIB-3885), so canonicalise here.
+        # Caller previously upper-cased upstream but PR #2250 review feedback
+        # moved that to per-token-type handling so Solana base58 case is
+        # preserved. We restore the canonical uppercase form here for the
+        # symbol pass-through path.
+        return s.upper()
+    # Chain is required for resolution; without it the resolver cannot
+    # disambiguate cross-chain addresses (e.g. USDC on Base vs Arbitrum).
+    if not chain_lower:
+        # Preserve original case for Solana addresses (base58 case-sensitive);
+        # uppercase EVM addresses fall through to the same path but the
+        # downstream ``has_price_*`` check will miss either way without a
+        # chain — the address is the audit-trail text, not the lookup key.
+        return s
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        # EVM: lowercase the address for the resolver's strict regex check.
+        # Solana: pass through verbatim — base58 is case-sensitive and the
+        # resolver expects the exact-as-recorded address.
+        lookup_value = s_lower if looks_like_evm else s
+        # ``skip_gateway=True`` keeps this handler latency-bounded
+        # against the static + memory cache; ``log_errors=False``
+        # silences expected misses for exotic tokens (we fall through
+        # to the original value and the downstream confidence helper
+        # surfaces the gap).
+        info = resolver.resolve(lookup_value, chain=chain_lower, log_errors=False, skip_gateway=True)
+    except Exception:  # noqa: BLE001
+        # Resolver raised (TokenNotFoundError, InvalidTokenAddressError,
+        # or anything else). Fall through to the original value so the
+        # unavailable_reason text preserves the audit trail.
+        return s
+    if info is None or not info.symbol:
+        return s
+    return info.symbol.upper()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

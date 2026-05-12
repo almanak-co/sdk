@@ -816,3 +816,235 @@ class TestReconstructFromEvents:
         replayed = basis.reconstruct_from_events(events)
 
         assert replayed == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VIB-4304: address-keyed token_in / token_out must resolve to symbol before
+# the price_oracle lookup. The ``price_inputs_json`` ledger column is
+# symbol-keyed (``"WETH"``); several connector receipt parsers (Aerodrome
+# confirmed; suspected for PancakeSwap, Sushi, Uniswap V3, Curve) stamp the
+# contract address into ``swap_amounts.token_in``. Without resolution, every
+# SWAP accounting row landed at ESTIMATED with a misleading "missing prices"
+# reason — even when both prices were present (just keyed by symbol).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestSwapAddressKeyedTokenResolution:
+    """VIB-4304: address-keyed token_in / token_out must be resolved to a
+    symbol via the token resolver before lookup against the symbol-keyed
+    ``price_inputs_json``. Failed resolution must fall through cleanly and
+    preserve the original address in ``unavailable_reason`` (Empty != zero —
+    no fabricated symbol substitution).
+    """
+
+    # Real Base mainnet addresses for USDC / WETH — both are in the static
+    # token registry, so the resolver can map them under ``skip_gateway=True``
+    # (no live gateway / no test fixtures needed).
+    _USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    _WETH_BASE = "0x4200000000000000000000000000000000000006"
+
+    def test_handle_swap_address_keyed_token_in_resolves_to_symbol_and_renders_high(self) -> None:
+        """The reproduction case from VIB-4304: an Aerodrome SWAP row whose
+        ``token_in`` / ``token_out`` are stamped as addresses and whose
+        ``price_inputs_json`` is symbol-keyed. Before the fix this rendered
+        ESTIMATED with "missing prices in price_inputs_json:
+        0X833589FCD6... price, 0X4200...0006 price" even though both prices
+        were present. After the fix the addresses resolve to ``USDC`` and
+        ``WETH``, the prices land, and the row renders HIGH with empty
+        ``unavailable_reason`` and non-null USD amounts.
+        """
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in=self._USDC_BASE,
+            amount_in="2",
+            token_out=self._WETH_BASE,
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="base",
+            price_inputs_json=price_json,
+        )
+
+        event = handle_swap(outbox, ledger, FIFOBasisStore())
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.HIGH
+        assert event.unavailable_reason == ""
+        # USD amounts must be priced — 2 * $1 and 0.001 * $2000 = $2 each.
+        assert event.amount_in_usd == Decimal("2.0")
+        assert event.amount_out_usd == Decimal("2.000")
+        # The event still surfaces the ORIGINAL address values on the
+        # ``token_in`` / ``token_out`` fields (uppercased, same as today).
+        # The resolved symbol is used ONLY as the price lookup key — it is
+        # NOT a substitute for the source-of-truth ledger value.
+        assert event.token_in == self._USDC_BASE.upper()
+        assert event.token_out == self._WETH_BASE.upper()
+
+    def test_handle_swap_address_keyed_only_one_side_still_resolves(self) -> None:
+        """A row where one side is an address and the other is a symbol —
+        both legs must still price correctly. Defensive against connectors
+        that mix the two shapes per intent direction.
+        """
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",  # symbol
+            amount_in="2",
+            token_out=self._WETH_BASE,  # address
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="base",
+            price_inputs_json=price_json,
+        )
+
+        event = handle_swap(outbox, ledger, FIFOBasisStore())
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.HIGH
+        assert event.amount_in_usd == Decimal("2.0")
+        assert event.amount_out_usd == Decimal("2.000")
+
+    def test_handle_swap_symbol_keyed_token_in_still_renders_high(self) -> None:
+        """Regression guard: pre-fix behaviour for symbol-keyed ``token_in`` /
+        ``token_out`` must be preserved. This is the baseline that the
+        existing ``test_handle_swap_basic`` exercises — re-asserted here
+        with a Base-chain ledger row so the contract is pinned end-to-end.
+        """
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",
+            amount_in="2",
+            token_out="WETH",
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="base",
+            price_inputs_json=price_json,
+        )
+
+        event = handle_swap(outbox, ledger, FIFOBasisStore())
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.HIGH
+        assert event.amount_in_usd == Decimal("2.0")
+        assert event.amount_out_usd == Decimal("2.000")
+
+    def test_handle_swap_unresolvable_address_falls_through_to_estimated(self) -> None:
+        """Resolver miss → ESTIMATED with the ORIGINAL address in
+        ``unavailable_reason``. Empty != zero — never fabricate a phantom
+        symbol the auditor can't trace back to chain state.
+        """
+        # An address that is NOT in the static registry on Base.
+        unknown_addr = "0x000000000000000000000000000000000000dEAD"
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in=unknown_addr,
+            amount_in="2",
+            token_out="WETH",
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="base",
+            price_inputs_json=price_json,
+        )
+
+        event = handle_swap(outbox, ledger, FIFOBasisStore())
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        # token_out resolves fine → USD amount is computed.
+        assert event.amount_out_usd == Decimal("2.000")
+        # token_in misses → USD amount is None.
+        assert event.amount_in_usd is None
+        # The unavailable_reason names the ORIGINAL token (uppercased
+        # address, same shape as the event.token_in field), not a phantom
+        # symbol nor an empty string.
+        assert "missing prices" in event.unavailable_reason
+        assert unknown_addr.upper() in event.unavailable_reason
+
+    def test_handle_swap_no_chain_falls_through(self) -> None:
+        """Defensive: a ledger row with no ``chain`` cannot be resolved
+        (cross-chain address ambiguity). The handler must fall through to
+        ESTIMATED with the original address rather than raising.
+        """
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in=self._USDC_BASE,
+            amount_in="2",
+            token_out=self._WETH_BASE,
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="",  # missing
+            price_inputs_json=price_json,
+        )
+
+        event = handle_swap(outbox, ledger, FIFOBasisStore())
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        # Both lookups miss → both USD amounts None.
+        assert event.amount_in_usd is None
+        assert event.amount_out_usd is None
+        # Both addresses surface in the unavailable_reason.
+        assert self._USDC_BASE.upper() in event.unavailable_reason
+        assert self._WETH_BASE.upper() in event.unavailable_reason
+
+    def test_resolve_price_lookup_key_helper_pass_through_for_symbol(self) -> None:
+        """Direct unit test for ``_resolve_price_lookup_key``: symbol-shaped
+        inputs must pass through unchanged (no resolver call, no exception)
+        so the existing symbol-keyed code path stays bit-identical.
+        """
+        from almanak.framework.accounting.category_handlers.swap_handler import _resolve_price_lookup_key
+
+        assert _resolve_price_lookup_key("USDC", "base") == "USDC"
+        assert _resolve_price_lookup_key("WETH", "arbitrum") == "WETH"
+        # Empty / whitespace pass through (caller emits its own diagnostic).
+        assert _resolve_price_lookup_key("", "base") == ""
+
+    def test_resolve_price_lookup_key_helper_resolves_address(self) -> None:
+        """Direct unit test: address-shaped inputs resolve to the canonical
+        symbol via the static registry (no gateway needed).
+        """
+        from almanak.framework.accounting.category_handlers.swap_handler import _resolve_price_lookup_key
+
+        # Uppercased EVM address — helper lowercases internally before
+        # passing to the resolver, so this still resolves cleanly.
+        assert _resolve_price_lookup_key(self._USDC_BASE.upper(), "base") == "USDC"
+        assert _resolve_price_lookup_key(self._WETH_BASE.upper(), "base") == "WETH"
+        # Mixed-case EVM (canonical EIP-55 checksum form) must also resolve.
+        assert _resolve_price_lookup_key(self._USDC_BASE, "base") == "USDC"
+        assert _resolve_price_lookup_key(self._WETH_BASE, "base") == "WETH"
+
+    def test_resolve_price_lookup_key_helper_handles_solana_addresses(self) -> None:
+        """PR #2250 review: Solana base58 addresses must reach the resolver
+        with their case preserved.
+
+        Before the review fix, the handler uppercased ``token_in`` /
+        ``token_out`` upstream of ``_resolve_price_lookup_key``. The helper
+        already special-cased EVM (lowercases internally), but Solana
+        base58 is case-sensitive — passing an uppercased base58 to the
+        resolver is semantically a different mint address. After the fix,
+        the handler passes the **raw** (un-uppercased) value through and
+        the helper preserves case for Solana.
+
+        Regression guard: case-preserved Solana address must resolve to
+        the canonical uppercase symbol.
+        """
+        from almanak.framework.accounting.category_handlers.swap_handler import _resolve_price_lookup_key
+
+        # Solana USDC mainnet mint (case-sensitive base58, mixed case).
+        usdc_sol = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        assert _resolve_price_lookup_key(usdc_sol, "solana") == "USDC"
+
+    def test_resolve_price_lookup_key_helper_lowercase_symbol_upcased(self) -> None:
+        """A lowercase / mixed-case symbol input must canonicalise to upper.
+
+        The price_oracle dict (parsed by ``parse_price_inputs``) is uppercase-
+        keyed; a lowercase symbol arriving via the new raw-pass-through path
+        would otherwise miss.
+        """
+        from almanak.framework.accounting.category_handlers.swap_handler import _resolve_price_lookup_key
+
+        assert _resolve_price_lookup_key("usdc", "base") == "USDC"
+        assert _resolve_price_lookup_key("WeTh", "base") == "WETH"
