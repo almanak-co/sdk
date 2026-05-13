@@ -25,8 +25,7 @@ from web3 import Web3
 
 from almanak.framework.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents import SwapIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
 
 # =============================================================================

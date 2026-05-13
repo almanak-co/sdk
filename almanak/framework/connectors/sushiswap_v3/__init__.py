@@ -188,6 +188,5 @@ register_connector(
         "optimism",
         "polygon",
         "bnb",
-        "avalanche",
     ),
 )

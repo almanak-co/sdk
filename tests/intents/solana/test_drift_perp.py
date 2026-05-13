@@ -21,8 +21,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents import PerpCloseIntent, PerpOpenIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent
 from tests.intents.solana.conftest import CHAIN_NAME
 
 

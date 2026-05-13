@@ -18,8 +18,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents import SwapIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,

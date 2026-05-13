@@ -20,8 +20,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.intents import LPCloseIntent, LPOpenIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from tests.intents.solana.conftest import (
     CHAIN_NAME,
     SOLANA_TOKEN_DECIMALS,

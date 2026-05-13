@@ -49,7 +49,7 @@ from almanak.framework.connectors.curvance.receipt_parser import (
     CurvanceEventType,
 )
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
-from almanak.framework.intents import SupplyIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -207,3 +207,289 @@ class TestCurvanceSupplyIntent:
         assert wmon_spent == supplied_wei
 
         print("\nALL SUPPLY CHECKS PASSED")
+
+
+# =============================================================================
+# BORROW / REPAY / WITHDRAW — xfail on Anvil fork (VIB-4307)
+# =============================================================================
+#
+# The same OracleManager CAUTION-breakpoint that prevents the SUPPLY test
+# from exercising borrow paths (see module docstring) also blocks any
+# attempted BORROW/REPAY/WITHDRAW intent test on Anvil. The exact failure
+# surface is:
+#
+# - BORROW: ``_canBorrow`` reverts with ``MarketManager__InsufficientCollateral()``
+#   because ``OracleManager.getPrice`` returns errorCode=1 (CAUTION) due to
+#   adaptor freshness drift on the fork.
+# - REPAY:  same path — the protocol must read the borrow position which
+#   transitively consults the oracle on Monad.
+# - WITHDRAW: ``_canRedeem`` consults the oracle to ensure the user is not
+#   under-collateralised, hitting the same CAUTION breakpoint.
+#
+# The compile / receipt-parse / balance-delta scaffolding below is fully
+# structural — these tests will pass cleanly the day the oracle-freshness
+# workaround lands (e.g. ``anvil_setTime`` aligned to the fork block, or
+# adaptor mocking at the gateway boundary). Until then ``strict=True``
+# ensures we surface the fix immediately via xpass-as-CI-failure.
+
+
+@pytest.mark.monad
+@pytest.mark.borrow
+@pytest.mark.lending
+class TestCurvanceBorrowIntent:
+    """4-layer verification of BORROW against the Curvance WMON-USDC market."""
+
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-4307: Curvance MarketManager._canBorrow reverts with "
+        "InsufficientCollateral() on Monad Anvil forks because OracleManager.getPrice "
+        "returns errorCode=1 (CAUTION) due to adaptor freshness drift (as of 2026-05-12). "
+        "Same fork-state artefact documented for SUPPLY-only coverage in the module "
+        "docstring; verified live on Monad mainnet. Unblock by aligning Anvil "
+        "block.timestamp with the fork block via anvil_setTime, or by mocking the "
+        "oracle at the gateway boundary.",
+        strict=True,
+    )
+    async def test_borrow_usdc_with_wmon_collateral(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle_monad_local: dict[str, Decimal],
+    ) -> None:
+        """Borrow USDC against WMON collateral on Curvance WMON-USDC market."""
+        price_oracle = price_oracle_monad_local
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        wmon_address = tokens["WMON"]
+        usdc_address = tokens["USDC"]
+        wmon_decimals = get_token_decimals(web3, wmon_address)
+        usdc_decimals = get_token_decimals(web3, usdc_address)
+
+        # ~25% LTV using session-scoped oracle prices.
+        wmon_price = price_oracle.get("WMON") or price_oracle.get("MON") or Decimal("2")
+        usdc_price = price_oracle.get("USDC") or Decimal("1")
+        collateral_amount = Decimal("1.0")  # 1 WMON
+        max_borrow_usd = collateral_amount * wmon_price * Decimal("0.25")
+        borrow_amount = max_borrow_usd / usdc_price
+
+        wmon_before = get_token_balance(web3, wmon_address, funded_wallet)
+        usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
+        expected_collateral_wei = int(collateral_amount * Decimal(10**wmon_decimals))
+        assert wmon_before >= expected_collateral_wei, (
+            f"funded_wallet has only {wmon_before} WMON wei, need >= {expected_collateral_wei}"
+        )
+
+        intent = BorrowIntent(
+            protocol="curvance",
+            collateral_token="WMON",
+            collateral_amount=collateral_amount,
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation = compiler.compile(intent)
+        assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
+        assert compilation.action_bundle is not None
+
+        execution_result = await orchestrator.execute(
+            compilation.action_bundle, execution_context
+        )
+        assert execution_result.success, f"Execute failed: {execution_result.error}"
+
+        events = _collect_events(execution_result)
+        borrow_event = _first_event(events, CurvanceEventType.BORROW)
+        assert borrow_event is not None, "Missing Curvance Borrow event"
+        borrowed_assets_wei = int(borrow_event.data["assets"])
+        expected_borrow_wei = int(borrow_amount * Decimal(10**usdc_decimals))
+        assert borrowed_assets_wei == expected_borrow_wei
+
+        wmon_after = get_token_balance(web3, wmon_address, funded_wallet)
+        usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
+        assert wmon_before - wmon_after == expected_collateral_wei
+        assert usdc_after - usdc_before == expected_borrow_wei
+
+
+@pytest.mark.monad
+@pytest.mark.repay
+@pytest.mark.lending
+class TestCurvanceRepayIntent:
+    """4-layer verification of REPAY against the Curvance WMON-USDC market."""
+
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-4307: REPAY depends on a successful BORROW which is blocked by "
+        "the OracleManager CAUTION-breakpoint on Monad Anvil forks (as of 2026-05-12). "
+        "See test_borrow_usdc_with_wmon_collateral for the full rationale; same "
+        "fork-state artefact, same unblock path.",
+        strict=True,
+    )
+    async def test_repay_usdc_after_borrow(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle_monad_local: dict[str, Decimal],
+    ) -> None:
+        """Repay USDC debt with RepayIntent after borrow setup."""
+        price_oracle = price_oracle_monad_local
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_address = tokens["USDC"]
+        usdc_decimals = get_token_decimals(web3, usdc_address)
+
+        wmon_price = price_oracle.get("WMON") or price_oracle.get("MON") or Decimal("2")
+        usdc_price = price_oracle.get("USDC") or Decimal("1")
+        collateral_amount = Decimal("1.0")
+        max_borrow_usd = collateral_amount * wmon_price * Decimal("0.25")
+        borrow_amount = max_borrow_usd / usdc_price
+
+        # Setup: supply + borrow.
+        borrow_intent = BorrowIntent(
+            protocol="curvance",
+            collateral_token="WMON",
+            collateral_amount=collateral_amount,
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        borrow_compile = compiler.compile(borrow_intent)
+        assert borrow_compile.status.value == "SUCCESS"
+        assert borrow_compile.action_bundle is not None
+        borrow_exec = await orchestrator.execute(borrow_compile.action_bundle, execution_context)
+        assert borrow_exec.success, f"Borrow setup failed: {borrow_exec.error}"
+
+        usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
+        repay_amount = borrow_amount / Decimal("2")
+
+        intent = RepayIntent(
+            protocol="curvance",
+            token="USDC",
+            amount=repay_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        repay_compile = compiler.compile(intent)
+        assert repay_compile.status.value == "SUCCESS", (
+            f"Compile failed: {repay_compile.error}"
+        )
+        assert repay_compile.action_bundle is not None
+
+        repay_exec = await orchestrator.execute(repay_compile.action_bundle, execution_context)
+        assert repay_exec.success, f"Execute failed: {repay_exec.error}"
+
+        events = _collect_events(repay_exec)
+        repay_event = _first_event(events, CurvanceEventType.REPAY)
+        assert repay_event is not None, "Missing Curvance Repay event"
+        repaid_wei = int(repay_event.data["assets"])
+        assert repaid_wei > 0
+
+        usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        expected_repay_wei = int(repay_amount * Decimal(10**usdc_decimals))
+        assert usdc_spent == expected_repay_wei
+        assert usdc_spent == repaid_wei
+
+
+@pytest.mark.monad
+@pytest.mark.withdraw
+@pytest.mark.lending
+class TestCurvanceWithdrawIntent:
+    """4-layer verification of WITHDRAW against the Curvance WMON-USDC market."""
+
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-4307: Curvance MarketManager._canRedeem reverts on Monad Anvil "
+        "forks because OracleManager.getPrice returns errorCode=1 (CAUTION) due to "
+        "adaptor freshness drift (as of 2026-05-12). Same fork-state artefact "
+        "documented for BORROW. Unblock by aligning Anvil block.timestamp with the "
+        "fork block via anvil_setTime, or by mocking the oracle at the gateway "
+        "boundary.",
+        strict=True,
+    )
+    async def test_withdraw_wmon_after_supply(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle_monad_local: dict[str, Decimal],
+    ) -> None:
+        """Withdraw a portion of WMON collateral via WithdrawIntent after supply."""
+        price_oracle = price_oracle_monad_local
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        wmon_address = tokens["WMON"]
+        wmon_decimals = get_token_decimals(web3, wmon_address)
+
+        collateral_amount = Decimal("1.0")
+        withdraw_amount = Decimal("0.5")
+
+        # Setup: supply WMON as collateral.
+        supply_intent = SupplyIntent(
+            protocol="curvance",
+            token="WMON",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle, execution_context)
+        assert supply_exec.success, f"Supply setup failed: {supply_exec.error}"
+
+        wmon_before = get_token_balance(web3, wmon_address, funded_wallet)
+
+        intent = WithdrawIntent(
+            protocol="curvance",
+            token="WMON",
+            amount=withdraw_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        withdraw_compile = compiler.compile(intent)
+        assert withdraw_compile.status.value == "SUCCESS", (
+            f"Compile failed: {withdraw_compile.error}"
+        )
+        assert withdraw_compile.action_bundle is not None
+
+        withdraw_exec = await orchestrator.execute(withdraw_compile.action_bundle, execution_context)
+        assert withdraw_exec.success, f"Execute failed: {withdraw_exec.error}"
+
+        events = _collect_events(withdraw_exec)
+        withdraw_event = _first_event(events, CurvanceEventType.WITHDRAW)
+        assert withdraw_event is not None, "Missing Curvance Withdraw event"
+        withdrawn_wei = int(withdraw_event.data["assets"])
+        expected_withdraw_wei = int(withdraw_amount * Decimal(10**wmon_decimals))
+        assert withdrawn_wei == expected_withdraw_wei
+
+        wmon_after = get_token_balance(web3, wmon_address, funded_wallet)
+        wmon_received = wmon_after - wmon_before
+        assert wmon_received == expected_withdraw_wei

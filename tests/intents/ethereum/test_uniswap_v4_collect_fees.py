@@ -23,8 +23,7 @@ from web3 import Web3
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.intents import CollectFeesIntent, LPOpenIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,

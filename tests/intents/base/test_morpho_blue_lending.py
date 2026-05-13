@@ -25,7 +25,7 @@ from almanak.framework.connectors.morpho_blue.receipt_parser import (
 )
 from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
-from almanak.framework.intents import BorrowIntent, RepayIntent, WithdrawIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -564,4 +564,110 @@ class TestMorphoBlueWithdrawCollateralIntent:
             f"Expected borrow_shares=0 after full repay+withdraw, got {position.borrow_shares}"
         )
 
+        print("\nALL CHECKS PASSED")
+
+
+@pytest.mark.base
+@pytest.mark.supply
+@pytest.mark.lending
+class TestMorphoBlueSupplyIntent:
+    """SUPPLY USDC as loan token into the wstETH/USDC market (VIB-4307).
+
+    Uses ``use_as_collateral=False`` so we deposit USDC as loan capital
+    (earning interest from borrowers) rather than as collateral. This is
+    the standard "lending" side of the market — no collateral checks
+    needed, just an approve + supply pair.
+    """
+
+    @pytest.mark.intent(IntentType.SUPPLY)
+    @pytest.mark.asyncio
+    async def test_supply_usdc_as_loan_token(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """Supply USDC as loan token (not collateral) into wstETH/USDC market."""
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_address = tokens["USDC"]
+        usdc_decimals = get_token_decimals(web3, usdc_address)
+        assert usdc_address.lower() == MORPHO_MARKET_INFO["loan_token_address"].lower(), (
+            "Expected market loan token to be USDC"
+        )
+
+        supply_amount = Decimal("1000")  # 1000 USDC
+
+        usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
+        expected_wei = int(supply_amount * Decimal(10**usdc_decimals))
+        assert usdc_before >= expected_wei, (
+            f"funded_wallet has only {usdc_before} USDC wei, need >= {expected_wei}"
+        )
+
+        print(f"\n{'='*80}")
+        print(f"Morpho Blue SUPPLY: {supply_amount} USDC (loan token) on Base")
+        print(f"Market: {MORPHO_MARKET_NAME} ({MORPHO_MARKET_ID[:10]}...)")
+        print(f"{'='*80}")
+        print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
+
+        # Layer 1: Compile
+        intent = SupplyIntent(
+            protocol="morpho_blue",
+            token="USDC",
+            amount=supply_amount,
+            use_as_collateral=False,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+
+        # Layer 2: Execute
+        execution_result = await orchestrator.execute(
+            compilation_result.action_bundle, execution_context
+        )
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: Receipt parse — Supply (loan-token) event
+        events = _collect_morpho_events(execution_result)
+        supply_event = _first_event(events, MorphoBlueEventType.SUPPLY)
+        assert supply_event is not None, (
+            "Expected Supply event in Morpho Blue receipts (loan-token supply)"
+        )
+        assert supply_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+        supplied_wei = _assets_wei(supply_event)
+        assert supplied_wei == expected_wei, (
+            f"Supply event assets must EXACTLY equal supply amount. "
+            f"Expected: {expected_wei}, Got: {supplied_wei}"
+        )
+
+        # Layer 4: Balance delta — exact USDC spent
+        usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        assert usdc_spent == expected_wei, (
+            f"USDC spent must EXACTLY equal supply amount. "
+            f"Expected: {expected_wei}, Got: {usdc_spent}"
+        )
+        assert usdc_spent == supplied_wei
+
+        # On-chain sanity
+        sdk = MorphoBlueSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+        position = sdk.get_position(MORPHO_MARKET_ID, funded_wallet)
+        assert position.supply_shares > 0, (
+            f"Expected supply_shares > 0 after loan-token supply, got {position.supply_shares}"
+        )
+
+        print(f"\nUSDC spent: {format_token_amount(usdc_spent, usdc_decimals)}")
+        print(f"Supply shares: {position.supply_shares}")
         print("\nALL CHECKS PASSED")

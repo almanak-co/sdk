@@ -32,7 +32,7 @@ from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeRecei
 from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -431,3 +431,103 @@ class TestAerodromeLPClose:
             f"WETH returned={format_token_amount(weth_returned, weth_decimals)}, "
             f"LP burned={lp_burned}, LP residual={lp_after_close}"
         )
+
+
+# =============================================================================
+# LP_COLLECT_FEES Tests
+# =============================================================================
+
+
+@pytest.mark.base
+@pytest.mark.lp
+class TestAerodromeLPCollectFees:
+    """Aerodrome (Classic) LP_COLLECT_FEES coverage on Base.
+
+    The Solidly-fork volatile/stable AMM does NOT support standalone
+    LP_COLLECT_FEES — fees auto-compound into pool reserves and are realized
+    only when liquidity is removed (see
+    ``almanak/framework/connectors/aerodrome/permission_hints.py`` —
+    ``supports_standalone_fee_collection`` is unset / False, and the compiler
+    explicitly rejects ``protocol="aerodrome"`` in
+    ``compiler._compile_collect_fees``).
+
+    The contract this test pins:
+
+      * ``CollectFeesIntent(protocol="aerodrome")`` MUST be rejected cleanly at
+        compile time with the documented error message (so the gate sees a
+        proper L1 → L2 boundary).
+      * No transactions are emitted; therefore wallet balances are unchanged
+        (a degenerate but still load-bearing conservation check).
+
+    Standalone fee collection on Aerodrome's Slipstream (CL) variant is
+    covered by ``protocol="aerodrome_slipstream"`` and lives outside this
+    test (different connector key).
+    """
+
+    @pytest.mark.intent(IntentType.LP_COLLECT_FEES)
+    @pytest.mark.asyncio
+    async def test_lp_collect_fees_aerodrome_classic_rejected(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """LP_COLLECT_FEES must be rejected for aerodrome (Solidly fork).
+
+        Aerodrome Classic auto-compounds fees into reserves; the standalone
+        collect path doesn't exist on the V1 Router. The compiler MUST refuse
+        the intent with an error message pointing the caller at the supported
+        alternatives (``LPCloseIntent(collect_fees=True)`` or
+        ``aerodrome_slipstream``).
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+        weth_addr = tokens["WETH"]
+
+        # Record balances before — must be unchanged (no TX should be emitted).
+        usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_before = get_token_balance(web3, weth_addr, funded_wallet)
+
+        # --- Layer 1: Compile must FAIL with the documented error ---
+        intent = CollectFeesIntent(
+            pool=POOL_LABEL,
+            protocol="aerodrome",
+            chain=CHAIN_NAME,
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+
+        # The compiler must reject this with the documented error message.
+        assert compilation_result.status.value != "SUCCESS", (
+            "Aerodrome Classic LP_COLLECT_FEES must be rejected at compile time. "
+            "Solidly-fork pools auto-compound fees; standalone collection is not "
+            "representable in the V1 Router contract surface."
+        )
+        # Compiler must surface a useful error pointing at the supported paths.
+        error_text = (compilation_result.error or "").lower()
+        assert "aerodrome" in error_text and (
+            "lp_close" in error_text or "slipstream" in error_text
+        ), (
+            "Compiler error must guide the caller toward LPCloseIntent(collect_fees=True) "
+            f"or aerodrome_slipstream. Got: {compilation_result.error!r}"
+        )
+
+        # --- Layer 4 (degenerate): no TX emitted ⇒ balances unchanged ---
+        usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_after = get_token_balance(web3, weth_addr, funded_wallet)
+        assert usdc_after == usdc_before, (
+            "Rejected compilation must NOT emit any TX; USDC balance must be unchanged"
+        )
+        assert weth_after == weth_before, (
+            "Rejected compilation must NOT emit any TX; WETH balance must be unchanged"
+        )
+
+        logger.info("LP_COLLECT_FEES aerodrome-classic rejection contract verified")

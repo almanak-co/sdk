@@ -530,7 +530,10 @@ class CollectFeesIntent(BaseIntent):
     This is useful for fee harvesting and auto-compounding strategies that want
     to claim earned fees while keeping their liquidity position open.
 
-    Supported protocols: ``traderjoe_v2``, ``uniswap_v4``, ``aerodrome_slipstream``.
+    Supported protocols: ``traderjoe_v2``, ``uniswap_v4``,
+    ``aerodrome_slipstream``, and every Uniswap-V3 fork
+    (``uniswap_v3``, ``sushiswap_v3``, ``pancakeswap_v3``, ``agni_finance``;
+    see ``connectors.protocol_aliases.UNISWAP_V3_FORKS``).
 
     Aerodrome Classic (``protocol="aerodrome"``, volatile/stable Solidly-fork
     pools) does NOT support standalone fee collection: trading fees auto-compound

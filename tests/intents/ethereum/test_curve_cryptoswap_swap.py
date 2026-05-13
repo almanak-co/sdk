@@ -33,8 +33,7 @@ from almanak.framework.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents import SwapIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, SWAP_MAX_SLIPPAGE, fund_erc20_token, get_token_balance
 
 logger = logging.getLogger(__name__)

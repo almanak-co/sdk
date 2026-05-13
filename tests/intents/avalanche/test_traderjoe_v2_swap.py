@@ -31,8 +31,7 @@ from web3 import Web3
 from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
-from almanak.framework.intents import SwapIntent
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
 
 logger = logging.getLogger(__name__)

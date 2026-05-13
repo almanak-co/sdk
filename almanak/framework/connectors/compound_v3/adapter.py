@@ -102,6 +102,32 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
 }
 
 
+# Default Comet market_id per chain, used by the lending compiler whenever the
+# intent omits ``market_id``. Polygon has no native-USDC Comet — its only
+# deployment is USDC.e (bridged) — so the historical chain-agnostic ``"usdc"``
+# default fails compilation there and also produces an empty Zodiac manifest
+# during permission discovery. Chains absent from this map fall back to
+# ``"usdc"`` for backward compatibility.
+_DEFAULT_MARKET_BY_CHAIN: dict[str, str] = {
+    "ethereum": "usdc",
+    "arbitrum": "usdc",
+    "base": "usdc",
+    "optimism": "usdc",
+    "polygon": "usdc_e",
+}
+
+
+def default_compound_v3_market_for_chain(chain: str) -> str:
+    """Return the canonical Comet ``market_id`` to use on ``chain`` when the
+    caller omits ``intent.market_id``.
+
+    Always returns a key that exists in ``COMPOUND_V3_COMET_ADDRESSES[chain]``
+    when ``chain`` is supported; falls back to ``"usdc"`` for unknown chains
+    so out-of-tree callers see a stable default.
+    """
+    return _DEFAULT_MARKET_BY_CHAIN.get(chain, "usdc")
+
+
 # Compound V3 function selectors
 COMPOUND_V3_SUPPLY_SELECTOR = "0xf2b9fdb8"  # supply(address,uint256)
 COMPOUND_V3_SUPPLY_TO_SELECTOR = "0x4232cd63"  # supplyTo(address,address,uint256)

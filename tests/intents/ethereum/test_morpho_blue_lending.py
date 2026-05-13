@@ -25,7 +25,7 @@ from almanak.framework.connectors.morpho_blue.receipt_parser import (
 )
 from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
-from almanak.framework.intents import BorrowIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -256,3 +256,307 @@ class TestMorphoBlueBorrowIntent:
         usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
         assert usdc_after == usdc_before, "USDC balance must be unchanged after failed borrow"
 
+
+async def _setup_borrow(
+    web3: Web3,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    execution_context: ExecutionContext,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+    collateral_amount: Decimal,
+    borrow_amount: Decimal,
+) -> None:
+    """Helper: supply wstETH collateral and borrow USDC. Asserts success."""
+    intent = BorrowIntent(
+        protocol="morpho_blue",
+        collateral_token="wstETH",
+        collateral_amount=collateral_amount,
+        borrow_token="USDC",
+        borrow_amount=borrow_amount,
+        market_id=MORPHO_MARKET_ID,
+        chain=CHAIN_NAME,
+    )
+    compiler = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        rpc_url=anvil_rpc_url,
+    )
+    result = compiler.compile(intent)
+    assert result.status.value == "SUCCESS", f"Borrow setup compile failed: {result.error}"
+    assert result.action_bundle is not None, "Borrow setup missing action_bundle"
+    exec_result = await orchestrator.execute(result.action_bundle, execution_context)
+    assert exec_result.success, f"Borrow setup execution failed: {exec_result.error}"
+
+
+@pytest.mark.ethereum
+@pytest.mark.repay
+@pytest.mark.lending
+class TestMorphoBlueRepayIntent:
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
+    @pytest.mark.asyncio
+    async def test_repay_usdc_full_after_borrow(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """Repay full USDC debt with repay_full=True after borrowing against wstETH."""
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        wsteth_address = tokens["wstETH"]
+        usdc_address = tokens["USDC"]
+
+        wsteth_decimals = get_token_decimals(web3, wsteth_address)
+        usdc_decimals = get_token_decimals(web3, usdc_address)
+
+        # LTV headroom: 0.1 wstETH (~$350) collateral with 100 USDC borrow = ~29% LTV,
+        # right at but not over the 30% cap in .claude/rules/intent-tests.md §10.
+        collateral_amount = Decimal("0.1")
+        borrow_amount = Decimal("100")
+        # Tighten to ~25% LTV using live price for resilience to price swings.
+        wsteth_price = price_oracle.get("wstETH") or price_oracle.get("WETH") or Decimal("3500")
+        max_borrow_usd = collateral_amount * wsteth_price * Decimal("0.25")
+        if borrow_amount > max_borrow_usd:
+            borrow_amount = max_borrow_usd
+
+        print(f"\n{'='*80}")
+        print(f"Test: Morpho Blue repay_full=True after borrowing {borrow_amount} USDC")
+        print(f"Market: {MORPHO_MARKET_NAME} ({MORPHO_MARKET_ID[:10]}...)")
+        print(f"{'='*80}")
+
+        await _setup_borrow(
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            anvil_rpc_url=anvil_rpc_url,
+            collateral_amount=collateral_amount,
+            borrow_amount=borrow_amount,
+        )
+
+        wsteth_before = get_token_balance(web3, wsteth_address, funded_wallet)
+        usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
+
+        print(f"wstETH before repay: {format_token_amount(wsteth_before, wsteth_decimals)}")
+        print(f"USDC before repay:   {format_token_amount(usdc_before, usdc_decimals)}")
+
+        intent = RepayIntent(
+            protocol="morpho_blue",
+            token="USDC",
+            amount=borrow_amount,
+            repay_full=True,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+
+        execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        parser = MorphoBlueReceiptParser()
+        all_events: list[MorphoBlueEvent] = []
+        for tx_result in execution_result.transaction_results:
+            assert tx_result.receipt is not None, "Expected receipt for executed transaction"
+            parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            assert parse_result.success, f"Receipt parsing failed: {parse_result.error}"
+            all_events.extend(parse_result.events)
+
+        repay_event = _first_event(all_events, MorphoBlueEventType.REPAY)
+        assert repay_event is not None, "Expected Repay event in Morpho Blue receipts"
+        assert repay_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+
+        repaid_assets_wei = _assets_wei(repay_event)
+        assert repaid_assets_wei > 0, "Repay event must report positive assets repaid"
+
+        wsteth_after = get_token_balance(web3, wsteth_address, funded_wallet)
+        usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
+
+        usdc_spent = usdc_before - usdc_after
+        wsteth_delta = abs(wsteth_before - wsteth_after)
+
+        print("\n--- Results ---")
+        print(f"USDC spent (repaid):  {format_token_amount(usdc_spent, usdc_decimals)}")
+        print(f"wstETH change:        {format_token_amount(wsteth_delta, wsteth_decimals)} (expect 0)")
+
+        expected_usdc_wei = int(borrow_amount * Decimal(10**usdc_decimals))
+        assert usdc_spent >= expected_usdc_wei, (
+            "USDC spent must be at least the borrowed amount (includes tiny interest). "
+            f"Expected >= {expected_usdc_wei}, Got: {usdc_spent}"
+        )
+        assert usdc_spent == repaid_assets_wei, (
+            "USDC spent must EXACTLY equal Repay event assets. "
+            f"Expected: {repaid_assets_wei}, Got: {usdc_spent}"
+        )
+        assert wsteth_delta == 0, (
+            "wstETH balance must not change during repay (collateral stays locked). "
+            f"Got wstETH delta: {wsteth_delta}"
+        )
+
+        sdk = MorphoBlueSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+        position = sdk.get_position(MORPHO_MARKET_ID, funded_wallet)
+        assert position.borrow_shares == 0, (
+            f"Expected borrow_shares=0 after repay_full=True, got {position.borrow_shares}"
+        )
+        assert position.collateral > 0, "Collateral must still be present after repay (not withdrawn yet)"
+
+        print("\nALL CHECKS PASSED")
+
+
+@pytest.mark.ethereum
+@pytest.mark.withdraw
+@pytest.mark.lending
+class TestMorphoBlueWithdrawCollateralIntent:
+    @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_wsteth_collateral_after_repay(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """Withdraw wstETH collateral after a full borrow-repay cycle on Ethereum.
+
+        Mirrors the Arbitrum / Base / Polygon WITHDRAW pattern. Coverage gate
+        complete-cycle test: BORROW → REPAY → WITHDRAW exits the position.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        wsteth_address = tokens["wstETH"]
+
+        wsteth_decimals = get_token_decimals(web3, wsteth_address)
+
+        collateral_amount = Decimal("0.1")
+        borrow_amount = Decimal("100")
+        # Tighten to ~25% LTV using live price for resilience to price swings.
+        wsteth_price = price_oracle.get("wstETH") or price_oracle.get("WETH") or Decimal("3500")
+        max_borrow_usd = collateral_amount * wsteth_price * Decimal("0.25")
+        if borrow_amount > max_borrow_usd:
+            borrow_amount = max_borrow_usd
+
+        print(f"\n{'='*80}")
+        print(f"Test: Morpho Blue withdraw {collateral_amount} wstETH collateral after borrow-repay")
+        print(f"Market: {MORPHO_MARKET_NAME} ({MORPHO_MARKET_ID[:10]}...)")
+        print(f"{'='*80}")
+
+        await _setup_borrow(
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
+            execution_context=execution_context,
+            price_oracle=price_oracle,
+            anvil_rpc_url=anvil_rpc_url,
+            collateral_amount=collateral_amount,
+            borrow_amount=borrow_amount,
+        )
+
+        repay_intent = RepayIntent(
+            protocol="morpho_blue",
+            token="USDC",
+            amount=borrow_amount,
+            repay_full=True,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        repay_compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        repay_result = repay_compiler.compile(repay_intent)
+        assert repay_result.status.value == "SUCCESS", f"Repay setup compile failed: {repay_result.error}"
+        assert repay_result.action_bundle is not None, "Repay setup missing action_bundle"
+        repay_exec = await orchestrator.execute(repay_result.action_bundle, execution_context)
+        assert repay_exec.success, f"Repay setup execution failed: {repay_exec.error}"
+
+        wsteth_before = get_token_balance(web3, wsteth_address, funded_wallet)
+        print(f"wstETH before withdraw: {format_token_amount(wsteth_before, wsteth_decimals)}")
+
+        intent = WithdrawIntent(
+            protocol="morpho_blue",
+            token="wstETH",
+            amount=collateral_amount,
+            withdraw_all=False,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+
+        execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        parser = MorphoBlueReceiptParser()
+        all_events: list[MorphoBlueEvent] = []
+        for tx_result in execution_result.transaction_results:
+            assert tx_result.receipt is not None, "Expected receipt for executed transaction"
+            parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            assert parse_result.success, f"Receipt parsing failed: {parse_result.error}"
+            all_events.extend(parse_result.events)
+
+        withdraw_event = _first_event(all_events, MorphoBlueEventType.WITHDRAW_COLLATERAL)
+        assert withdraw_event is not None, "Expected WithdrawCollateral event in Morpho Blue receipts"
+        assert withdraw_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+
+        withdrawn_assets_wei = _assets_wei(withdraw_event)
+        expected_collateral_wei = int(collateral_amount * Decimal(10**wsteth_decimals))
+        assert withdrawn_assets_wei == expected_collateral_wei, (
+            "WithdrawCollateral event assets must EXACTLY equal collateral amount. "
+            f"Expected: {expected_collateral_wei}, Got: {withdrawn_assets_wei}"
+        )
+
+        wsteth_after = get_token_balance(web3, wsteth_address, funded_wallet)
+        wsteth_received = wsteth_after - wsteth_before
+
+        print("\n--- Results ---")
+        print(f"wstETH received: {format_token_amount(wsteth_received, wsteth_decimals)}")
+
+        assert wsteth_received == expected_collateral_wei, (
+            "wstETH received must EXACTLY equal collateral amount. "
+            f"Expected: {expected_collateral_wei}, Got: {wsteth_received}"
+        )
+        assert wsteth_received == withdrawn_assets_wei, (
+            "wstETH received must EXACTLY equal WithdrawCollateral event assets. "
+            f"Expected: {withdrawn_assets_wei}, Got: {wsteth_received}"
+        )
+
+        sdk = MorphoBlueSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+        position = sdk.get_position(MORPHO_MARKET_ID, funded_wallet)
+        assert position.collateral == 0, (
+            f"Expected collateral=0 after withdrawal, got {position.collateral}"
+        )
+        assert position.borrow_shares == 0, (
+            f"Expected borrow_shares=0 after full repay+withdraw, got {position.borrow_shares}"
+        )
+
+        print("\nALL CHECKS PASSED")

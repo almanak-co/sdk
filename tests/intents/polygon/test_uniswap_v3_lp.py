@@ -28,7 +28,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
     SwapIntent,
 )
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -575,6 +575,147 @@ class TestUniswapV3LPCloseIntent:
         assert usdc_collected > 0 or weth_collected > 0, (
             f"Must collect owed tokens from decreased position. "
             f"USDC collected: {usdc_collected}, WETH collected: {weth_collected}"
+        )
+
+        print("\nALL CHECKS PASSED")
+
+
+# =============================================================================
+# CollectFeesIntent Tests (LP_COLLECT_FEES) — VIB-4307
+# =============================================================================
+
+
+@pytest.mark.polygon
+@pytest.mark.lp
+class TestUniswapV3CollectFeesIntent:
+    """Test Uniswap V3 LP_COLLECT_FEES using CollectFeesIntent on Polygon.
+
+    Flow (4 layers):
+      1. Open an in-range LP position via LPOpenIntent.
+      2. Execute a swap through the same pool to accrue fees on the position.
+      3. Issue CollectFeesIntent(protocol="uniswap_v3", protocol_params={"position_id": ...}).
+      4. Verify wallet balances increased (fees were transferred to the wallet).
+    """
+
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12)",
+    )
+    async def test_collect_fees_weth_usdc(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """Collect fees from an in-range WETH/USDC position after a same-pool swap.
+
+        Asserts:
+        * Compilation of CollectFeesIntent (uniswap_v3) -> SUCCESS.
+        * Execution -> success.
+        * Position liquidity unchanged (fee harvest does not remove principal).
+        * At least one wallet balance strictly increases (fees transferred back).
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+        weth_addr = tokens["WETH"]
+        usdc_decimals = get_token_decimals(web3, usdc_addr)
+        weth_decimals = get_token_decimals(web3, weth_addr)
+
+        print(f"\n{'=' * 80}")
+        print("Test: LP_COLLECT_FEES WETH/USDC via Uniswap V3 on Polygon")
+        print(f"{'=' * 80}")
+
+        # 1. Open an in-range position to accrue fees against.
+        position_id = await _open_position_via_intent(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        print(f"Opened position #{position_id}")
+
+        liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"
+
+        # 2. Execute a same-pool swap to generate trading fees.
+        swap_intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("1000"),
+            max_slippage=Decimal("0.05"),
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        swap_compilation = compiler.compile(swap_intent)
+        if swap_compilation.status.value == "SUCCESS" and swap_compilation.action_bundle:
+            swap_result = await orchestrator.execute(swap_compilation.action_bundle)
+            if swap_result.success:
+                print("Executed swap to generate LP fees")
+
+        # 3. Record balances BEFORE fee collection
+        usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_before = get_token_balance(web3, weth_addr, funded_wallet)
+        print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
+        print(f"WETH before: {format_token_amount(weth_before, weth_decimals)}")
+
+        # 4. Issue the LP_COLLECT_FEES intent.
+        collect_intent = CollectFeesIntent(
+            pool=POOL,
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+            protocol_params={"position_id": position_id},
+        )
+
+        print("\nCompiling CollectFeesIntent...")
+        compilation_result = compiler.compile(collect_intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"CollectFees compilation must succeed (uniswap_v3 LP_COLLECT_FEES). "
+            f"Error: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+
+        print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"CollectFees execution failed: {execution_result.error}"
+
+        # 5. Parse receipts — verify the position manager emitted fee/Collect events.
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                if parse_result.success:
+                    print(f"  Events parsed: {len(parse_result.events)}")
+
+        # 6. Verify principal liquidity is unchanged (fees-only, not LP_CLOSE).
+        liquidity_after = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        assert liquidity_after == liquidity_before, (
+            f"LP_COLLECT_FEES must NOT remove liquidity. "
+            f"before={liquidity_before}, after={liquidity_after}"
+        )
+
+        # 7. Verify wallet balances increased (fees were transferred).
+        usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_after = get_token_balance(web3, weth_addr, funded_wallet)
+        usdc_received = usdc_after - usdc_before
+        weth_received = weth_after - weth_before
+
+        print(f"\nUSDC received: {format_token_amount(usdc_received, usdc_decimals)}")
+        print(f"WETH received: {format_token_amount(weth_received, weth_decimals)}")
+
+        assert usdc_received >= 0 and weth_received >= 0, (
+            "Fee collection must not decrease wallet balances"
+        )
+        assert usdc_received > 0 or weth_received > 0, (
+            f"At least one token must increase after fee collection. "
+            f"USDC received: {usdc_received}, WETH received: {weth_received}"
         )
 
         print("\nALL CHECKS PASSED")

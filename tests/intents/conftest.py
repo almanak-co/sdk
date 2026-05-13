@@ -179,12 +179,19 @@ CHAIN_CONFIGS = {
         "alchemy_key": "polygon",
         "tokens": {
             "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+            # USDC.e — PoS-bridged USDC, the base asset of the Compound V3
+            # Polygon Comet (the only deployed market on polygon). Native USDC
+            # cannot be used because the Comet's baseToken() == this address.
+            "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
             "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
             "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
             "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
         },
         "balance_slots": {
             "USDC": 9,
+            # USDC.e is UChildERC20Proxy like the other Polygon PoS-bridged
+            # tokens (USDT, WBTC); slot 0 holds the OpenZeppelin _balances map.
+            "USDC.e": 0,
             "WETH": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
             "USDT": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
             # Polygon WBTC (PoS-bridged) uses slot 0 for `_balances`. Verified

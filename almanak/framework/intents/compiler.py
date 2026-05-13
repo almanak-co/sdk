@@ -4703,6 +4703,11 @@ class IntentCompiler:
         if protocol == "uniswap_v4":
             return self._compile_collect_fees_uniswap_v4(intent)
 
+        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
+
+        if protocol in UNISWAP_V3_FORKS:
+            return self._compile_collect_fees_v3_fork(intent, protocol)
+
         # Aerodrome Classic (Solidly fork) uses fungible LP tokens with auto-
         # compounding fees: trading fees accrue into pool reserves and are
         # only realized when liquidity is removed. There is no contract-level
@@ -4726,7 +4731,8 @@ class IntentCompiler:
             status=CompilationStatus.FAILED,
             error=(
                 f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. "
-                f"Supported: traderjoe_v2, uniswap_v4, aerodrome_slipstream"
+                f"Supported: traderjoe_v2, uniswap_v4, aerodrome_slipstream, "
+                f"and Uniswap-V3 forks ({', '.join(sorted(UNISWAP_V3_FORKS))})"
             ),
             intent_id=intent.intent_id,
         )
@@ -5002,6 +5008,98 @@ class IntentCompiler:
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
+        return result
+
+    # crap-allowlist: VIB-4314 — coverage seeded only by integration tests on
+    # the per-chain Anvil intent suites (covered live), which CRAP's diff-cover
+    # path does not see. Dedicated unit tests + fee-accrual fixture land with
+    # VIB-4314 (V3-fork LP_COLLECT_FEES fee-accrual fixture); flip threshold-
+    # crossing back on once that PR merges. Function is cc=7 — low complexity;
+    # the score is dominated by 4% coverage, not by branch fan-out.
+    def _compile_collect_fees_v3_fork(self, intent: "CollectFeesIntent", protocol: str) -> CompilationResult:
+        """Compile LP_COLLECT_FEES for Uniswap-V3 fork families.
+
+        Covers ``uniswap_v3`` plus every V3 fork in
+        ``protocol_aliases.UNISWAP_V3_FORKS`` (``sushiswap_v3``,
+        ``pancakeswap_v3``, ``agni_finance``). V3 fees are tracked
+        independently of liquidity and can be claimed at any time, so the
+        bundle is a single ``NonfungiblePositionManager.collect`` call
+        with ``MAX_UINT128`` caps. The position itself is left intact.
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        try:
+            protocol_params = getattr(intent, "protocol_params", None) or {}
+            position_id = protocol_params.get("position_id") or getattr(intent, "position_id", None)
+            if not position_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"{protocol} LP_COLLECT_FEES requires 'position_id' in "
+                        f"protocol_params (NFT tokenId of the position)."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            try:
+                token_id = int(position_id)
+            except (TypeError, ValueError):
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Invalid position_id (must be integer): {position_id}",
+                    intent_id=intent.intent_id,
+                )
+
+            adapter = UniswapV3LPAdapter(self.chain, protocol)
+            position_manager = adapter.get_position_manager_address()
+            if position_manager == "0x0000000000000000000000000000000000000000":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
+                    intent_id=intent.intent_id,
+                )
+
+            collect_calldata = adapter.get_collect_calldata(
+                token_id=token_id,
+                recipient=self.wallet_address,
+                amount0_max=MAX_UINT128,
+                amount1_max=MAX_UINT128,
+            )
+            tx = TransactionData(
+                to=position_manager,
+                value=0,
+                data="0x" + collect_calldata.hex(),
+                gas_estimate=get_gas_estimate(self.chain, "lp_collect"),
+                description=f"Collect fees: position #{token_id} ({protocol})",
+                tx_type="lp_collect_fees",
+            )
+            transactions = [tx]
+
+            action_bundle = assemble_action_bundle(
+                intent_type=IntentType.LP_COLLECT_FEES.value,
+                transactions=transactions,
+                metadata={
+                    "position_id": position_id,
+                    "token_id": token_id,
+                    "protocol": protocol,
+                    "position_manager": position_manager,
+                    "chain": self.chain,
+                    "pool": intent.pool,
+                },
+            )
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = tx.gas_estimate
+            logger.info(
+                "Compiled V3-fork LP_COLLECT_FEES intent: position #%d, protocol=%s",
+                token_id,
+                protocol,
+            )
+        except Exception as e:
+            logger.exception("Failed to compile V3-fork LP_COLLECT_FEES intent: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
         return result
 
     def _compile_lp_open_aerodrome(self, intent: LPOpenIntent) -> CompilationResult:

@@ -789,6 +789,42 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyInten
             ),
         ]
 
+    # Compound V3 routes SUPPLY on token-vs-Comet-base match: token==base calls
+    # ``Comet.supply()``, anything else calls ``Comet.supplyCollateral()``. The
+    # manifest needs BOTH selectors. Without a sweep, the single synthetic
+    # SupplyIntent below resolves to whichever path the chain-default USDC
+    # lands on — which is the base path on ethereum/arbitrum/base/optimism (USDC
+    # IS the Comet base there) but the collateral path on polygon (Comet base is
+    # USDC.e, not native USDC). Either way, exactly one of the two selectors
+    # lands on the manifest and the other path reverts on the Safe. Mirrors the
+    # morpho_blue sweep above.
+    if protocol == "compound_v3":
+        comp_tokens = _compound_v3_synthetic_tokens(chain, usdc, hints.synthetic_market_id)
+        comp_base: str = comp_tokens[0]
+        comp_collateral: str | None = comp_tokens[1]
+        comp_market: str | None = comp_tokens[2]
+        out: list[AnyIntent] = [
+            SupplyIntent(  # base-asset path -> Comet.supply()
+                protocol=protocol,
+                token=comp_base,
+                amount=Decimal("100"),
+                chain=chain,
+                market_id=comp_market,
+            )
+        ]
+        if comp_collateral:
+            out.append(
+                SupplyIntent(  # collateral path -> Comet.supplyCollateral()
+                    protocol=protocol,
+                    token=comp_collateral,
+                    amount=Decimal("1"),
+                    chain=chain,
+                    market_id=comp_market,
+                    use_as_collateral=True,
+                )
+            )
+        return out
+
     return [
         SupplyIntent(
             protocol=protocol,
@@ -798,6 +834,38 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyInten
             market_id=hints.synthetic_market_id,
         )
     ]
+
+
+def _compound_v3_synthetic_tokens(
+    chain: str, fallback_usdc: str, hint_market_id: str | None
+) -> tuple[str, str | None, str | None]:
+    """Resolve ``(base_token_address, first_collateral_address, market_id)`` for
+    a chain's primary Compound V3 Comet.
+
+    Falls back to ``fallback_usdc`` for the base and ``None`` for the
+    collateral if the adapter import / lookup fails (off-tree compound_v3
+    refactor protection). Market id resolution mirrors what the lending
+    compiler does at runtime (``intent.market_id`` →
+    ``default_compound_v3_market_for_chain(chain)``).
+    """
+    try:
+        from ..connectors.compound_v3.adapter import (
+            COMPOUND_V3_MARKETS,
+            default_compound_v3_market_for_chain,
+        )
+    except ImportError:
+        return fallback_usdc, None, hint_market_id
+
+    market = hint_market_id or default_compound_v3_market_for_chain(chain)
+    market_cfg = COMPOUND_V3_MARKETS.get(chain, {}).get(market, {})
+    base_token = market_cfg.get("base_token_address") or fallback_usdc
+    collaterals = market_cfg.get("collaterals", {})
+    collateral_token: str | None = None
+    if collaterals:
+        first = next(iter(collaterals.values()), None)
+        if isinstance(first, dict):
+            collateral_token = first.get("address")
+    return base_token, collateral_token, market
 
 
 def _build_withdraw_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
@@ -832,6 +900,24 @@ def _build_withdraw_intents(protocol: str, chain: str, usdc: str) -> list[AnyInt
                 market_id=market_id,
                 is_collateral=False,
             ),
+        ]
+
+    # Compound V3: use the Comet's base token, not the chain default USDC. On
+    # polygon these differ (Comet base = USDC.e, chain default = native USDC),
+    # so the chain-default would compile against a non-base asset and emit
+    # withdrawCollateral selector parameters that don't match real withdraws.
+    if protocol == "compound_v3":
+        comp_tokens = _compound_v3_synthetic_tokens(chain, usdc, hints.synthetic_market_id)
+        base_token = comp_tokens[0]
+        market = comp_tokens[2]
+        return [
+            WithdrawIntent(
+                protocol=protocol,
+                token=base_token,
+                amount=Decimal("50"),
+                chain=chain,
+                market_id=market,
+            )
         ]
 
     return [
@@ -876,6 +962,25 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
             )
         ]
 
+    # Compound V3: borrow_token must match the Comet base (USDC.e on polygon,
+    # not native USDC). Collateral fallback to weth covers ethereum/arbitrum/
+    # base/optimism/polygon — all polygon Comet collaterals include WETH.
+    if protocol == "compound_v3":
+        comp_tokens = _compound_v3_synthetic_tokens(chain, usdc, hints.synthetic_market_id)
+        base_token = comp_tokens[0]
+        market = comp_tokens[2]
+        return [
+            BorrowIntent(
+                protocol=protocol,
+                collateral_token=weth,
+                collateral_amount=Decimal("1"),
+                borrow_token=base_token,
+                borrow_amount=Decimal("100"),
+                chain=chain,
+                market_id=market,
+            )
+        ]
+
     return [
         BorrowIntent(
             protocol=protocol,
@@ -911,6 +1016,22 @@ def _build_repay_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent
                 amount=Decimal("50"),
                 chain=chain,
                 market_id=market_id,
+            )
+        ]
+
+    # Compound V3: repay token must match the Comet base. Same rationale as
+    # WITHDRAW above — polygon's base is USDC.e, not native USDC.
+    if protocol == "compound_v3":
+        comp_tokens = _compound_v3_synthetic_tokens(chain, usdc, hints.synthetic_market_id)
+        base_token = comp_tokens[0]
+        market = comp_tokens[2]
+        return [
+            RepayIntent(
+                protocol=protocol,
+                token=base_token,
+                amount=Decimal("50"),
+                chain=chain,
+                market_id=market,
             )
         ]
 

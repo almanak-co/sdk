@@ -1741,6 +1741,7 @@ def _compile_borrow_compound_v3(
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
+        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -1750,7 +1751,7 @@ def _compile_borrow_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    market = intent.market_id or "usdc"
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
 
     if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
         return CompilationResult(
@@ -3149,6 +3150,7 @@ def _compile_repay_compound_v3(
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
+        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -3158,7 +3160,7 @@ def _compile_repay_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    market = intent.market_id or "usdc"
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
 
     if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
         return CompilationResult(
@@ -4368,9 +4370,10 @@ def _compile_supply_compound_v3(
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
+        default_compound_v3_market_for_chain,
     )
 
-    market = intent.market_id or "usdc"
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
 
     if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
         return CompilationResult(
@@ -5461,6 +5464,7 @@ def _compile_withdraw_compound_v3(
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
+        default_compound_v3_market_for_chain,
     )
 
     result = CompilationResult(
@@ -5470,7 +5474,7 @@ def _compile_withdraw_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = list(initial_warnings)
 
-    market = intent.market_id or "usdc"
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
 
     if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
         return CompilationResult(

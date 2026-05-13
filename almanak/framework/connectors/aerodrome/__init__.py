@@ -147,7 +147,14 @@ register_connector(
         IntentType.SWAP,
         IntentType.LP_OPEN,
         IntentType.LP_CLOSE,
-        IntentType.LP_COLLECT_FEES,
+        # NOTE: LP_COLLECT_FEES is intentionally omitted. Aerodrome Classic
+        # (volatile/stable Solidly-fork pools) auto-compounds fees into pool
+        # reserves and exposes no standalone collect() — see
+        # compiler._compile_collect_fees. Aerodrome Slipstream (CL pools)
+        # does support standalone collect, but ships under the separate
+        # ``protocol="aerodrome_slipstream"`` literal and is not yet a
+        # standalone connector entry. Re-add LP_COLLECT_FEES here only when
+        # a Slipstream-specific connector is registered alongside it.
     ),
     chains=("base",),
 )

@@ -86,19 +86,15 @@ __all__ = [
     "EVENT_NAME_TO_TYPE",
 ]
 
-# Connector registration (VIB-4298). The registry powers the (connector,
-# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
-# and will be consumed by PR 2's intent-test coverage check.
-from almanak.framework.connectors.registry import register_connector  # noqa: E402
-from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
-
-register_connector(
-    name="joelend",
-    intents=(
-        IntentType.SUPPLY,
-        IntentType.BORROW,
-        IntentType.REPAY,
-        IntentType.WITHDRAW,
-    ),
-    chains=("avalanche",),
-)
+# Connector registration intentionally OMITTED (VIB-4307 / VIB-3960).
+#
+# Joe Lend governance wound down every jToken; ``JoeLendAdapter.__init__``
+# raises ``JoeLendDeprecatedError`` and the lending compiler returns
+# CompilationStatus.FAILED for every joelend verb. There is no live on-chain
+# surface left to test, so leaving joelend in ``ConnectorRegistry`` would
+# pin four un-satisfiable (joelend, intent, avalanche) cells in the
+# intent-coverage required-set.
+#
+# The adapter + receipt parser stay (above) so historical receipts can be
+# decoded. Full module removal is tracked in VIB-3963; re-add the
+# ``register_connector(...)`` call only if the protocol is ever revived.
