@@ -10,6 +10,7 @@ Supported chains:
 - Polygon
 - Base
 - Avalanche
+- BNB Chain
 
 Example:
     from almanak.framework.connectors.uniswap_v3 import UniswapV3Adapter, UniswapV3Config
@@ -180,5 +181,6 @@ register_connector(
         "polygon",
         "base",
         "avalanche",
+        "bnb",
     ),
 )

@@ -32,7 +32,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
     SwapIntent,
 )
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -639,6 +639,193 @@ class TestUniswapV3LPCloseIntent:
         assert usdt_collected > 0 or wbnb_collected > 0, (
             f"Must collect owed tokens from decreased position. "
             f"USDT collected: {usdt_collected}, WBNB collected: {wbnb_collected}"
+        )
+
+        print("\nALL CHECKS PASSED")
+
+
+# =============================================================================
+# CollectFeesIntent Tests (LP_COLLECT_FEES) — VIB-4349
+# =============================================================================
+
+
+@pytest.mark.bsc
+@pytest.mark.lp
+class TestUniswapV3CollectFeesIntent:
+    """Test Uniswap V3 LP_COLLECT_FEES using CollectFeesIntent on BNB Chain.
+
+    Flow (4 layers):
+      1. Open an in-range LP position via LPOpenIntent.
+      2. Execute a swap through the same pool to accrue fees on the position.
+      3. Issue CollectFeesIntent(protocol="uniswap_v3", protocol_params={"position_id": ...}).
+      4. Verify wallet balances increased (fees were transferred to the wallet).
+    """
+
+    @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-13)",
+    )
+    async def test_collect_fees_usdt_wbnb(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """Collect fees from an in-range USDT/WBNB position after a same-pool swap.
+
+        Asserts:
+        * Compilation of CollectFeesIntent (uniswap_v3) -> SUCCESS.
+        * Execution -> success.
+        * Receipt parser surfaces a Collect event with positive amounts.
+        * Position liquidity unchanged (fee harvest does not remove principal).
+        * Wallet balance deltas exactly equal parser-extracted Collect amounts
+          (token0/token1 ordered by address: USDT < WBNB on BSC, so
+          amount0=USDT, amount1=WBNB).
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdt_addr = tokens["USDT"]
+        wbnb_addr = tokens["WBNB"]
+        usdt_decimals = get_token_decimals(web3, usdt_addr)
+        wbnb_decimals = get_token_decimals(web3, wbnb_addr)
+
+        print(f"\n{'=' * 80}")
+        print("Test: LP_COLLECT_FEES USDT/WBNB via Uniswap V3 on BNB Chain")
+        print(f"{'=' * 80}")
+
+        # 1. Open an in-range position to accrue fees against.
+        position_id = await _open_position_via_intent(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        print(f"Opened position #{position_id}")
+
+        liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"
+
+        # 2. Execute a same-pool swap to generate trading fees.
+        swap_intent = SwapIntent(
+            from_token="USDT",
+            to_token="WBNB",
+            amount=Decimal("1000"),
+            max_slippage=Decimal("0.05"),
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        swap_compilation = compiler.compile(swap_intent)
+        assert swap_compilation.status.value == "SUCCESS", (
+            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. "
+            f"Error: {swap_compilation.error}"
+        )
+        assert swap_compilation.action_bundle is not None
+        swap_result = await orchestrator.execute(swap_compilation.action_bundle)
+        assert swap_result.success, (
+            f"Fee-accrual swap must execute so LP_COLLECT_FEES runs on a fee-accrued "
+            f"position. Error: {swap_result.error}"
+        )
+        print("Executed swap to generate LP fees")
+
+        # 3. Record balances BEFORE fee collection
+        usdt_before = get_token_balance(web3, usdt_addr, funded_wallet)
+        wbnb_before = get_token_balance(web3, wbnb_addr, funded_wallet)
+        print(f"USDT before: {format_token_amount(usdt_before, usdt_decimals)}")
+        print(f"WBNB before: {format_token_amount(wbnb_before, wbnb_decimals)}")
+
+        # 4. Issue the LP_COLLECT_FEES intent.
+        collect_intent = CollectFeesIntent(
+            pool=POOL,
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+            protocol_params={"position_id": position_id},
+        )
+
+        print("\nCompiling CollectFeesIntent...")
+        compilation_result = compiler.compile(collect_intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"CollectFees compilation must succeed (uniswap_v3 LP_COLLECT_FEES). "
+            f"Error: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+
+        print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"CollectFees execution failed: {execution_result.error}"
+
+        # 5. Parse receipts — Layer 3 strict: COLLECT event amounts > 0.
+        # The V3-fork collect compiler routes `recipient=wallet` directly (no
+        # unwrap), so Collect event amount0/amount1 must equal wallet deltas
+        # exactly (see compiler._compile_collect_fees_v3_fork).
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        parsed_amount0_collected = 0
+        parsed_amount1_collected = 0
+        saw_collect = False
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                receipt_dict = tx_result.receipt.to_dict()
+                parse_result = parser.parse_receipt(receipt_dict)
+                assert parse_result.success, (
+                    f"Receipt parser must succeed on a confirmed receipt; "
+                    f"error={parse_result.error}"
+                )
+                lp_close_data = parser.extract_lp_close_data(receipt_dict)
+                if lp_close_data:
+                    parsed_amount0_collected += lp_close_data.amount0_collected
+                    parsed_amount1_collected += lp_close_data.amount1_collected
+                    saw_collect = True
+
+        assert saw_collect, (
+            "Receipt must contain a Collect event from LP_COLLECT_FEES"
+        )
+        assert parsed_amount0_collected > 0 or parsed_amount1_collected > 0, (
+            f"Parser must report positive collected amounts. "
+            f"amount0={parsed_amount0_collected}, amount1={parsed_amount1_collected}"
+        )
+
+        # 6. Verify principal liquidity is unchanged (fees-only, not LP_CLOSE).
+        liquidity_after = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        assert liquidity_after == liquidity_before, (
+            f"LP_COLLECT_FEES must NOT remove liquidity. "
+            f"before={liquidity_before}, after={liquidity_after}"
+        )
+
+        # 7. Layer 4 strict: wallet deltas exactly equal parsed amounts.
+        # On BSC USDT (0x55d3...) < WBNB (0xbb4C...), so token0=USDT,
+        # token1=WBNB.
+        usdt_after = get_token_balance(web3, usdt_addr, funded_wallet)
+        wbnb_after = get_token_balance(web3, wbnb_addr, funded_wallet)
+        usdt_received = usdt_after - usdt_before
+        wbnb_received = wbnb_after - wbnb_before
+
+        print(f"\nUSDT received: {format_token_amount(usdt_received, usdt_decimals)}")
+        print(f"WBNB received: {format_token_amount(wbnb_received, wbnb_decimals)}")
+
+        if int(usdt_addr, 16) < int(wbnb_addr, 16):
+            parsed_usdt_collected, parsed_wbnb_collected = (
+                parsed_amount0_collected,
+                parsed_amount1_collected,
+            )
+        else:
+            parsed_wbnb_collected, parsed_usdt_collected = (
+                parsed_amount0_collected,
+                parsed_amount1_collected,
+            )
+
+        assert usdt_received == parsed_usdt_collected, (
+            f"USDT wallet delta must exactly equal parsed Collect amount. "
+            f"wallet={usdt_received}, parsed={parsed_usdt_collected}"
+        )
+        assert wbnb_received == parsed_wbnb_collected, (
+            f"WBNB wallet delta must exactly equal parsed Collect amount. "
+            f"wallet={wbnb_received}, parsed={parsed_wbnb_collected}"
         )
 
         print("\nALL CHECKS PASSED")
