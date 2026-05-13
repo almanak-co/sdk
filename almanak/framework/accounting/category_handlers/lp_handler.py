@@ -424,6 +424,160 @@ def _resolve_lp_position_metadata(
     return tick_lower_v, tick_upper_v, liquidity_v, current_tick_v, in_range_v
 
 
+def _compute_lp_impermanent_loss(
+    intent_type_str: str,
+    price_oracle: dict[str, Decimal],
+    prior_open_payload: dict[str, Any] | None,
+    cost_basis_usd: Decimal | None,
+    fees_total_usd: Decimal | None,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Compute ``(il_usd, hodl_value_usd)`` for ``LP_CLOSE``.
+
+    VIB-4319 — restores LP4 emission. The Accountant Test LP4 cell PASSes
+    when any LP_OPEN/LP_CLOSE payload carries a non-null ``il_usd``; pre-fix
+    the LP close handler never wrote the field even though the
+    :class:`LPCloseEventPayload` schema (``payload_schemas.py:319``) and the
+    frozen ``tests/fixtures/accounting/lp/expected_baseline.sqlite``
+    expected it. Restoring emission moves LP4 from XFAIL back to PASS.
+
+    Scope — ``LP_CLOSE`` only, NEVER ``LP_COLLECT_FEES`` (Codex review on
+    PR #2259, 2026-05-13). A fee-collect operation leaves the principal
+    on-chain — ``amount*_collected`` carries fees only (zero principal),
+    so ``cost_basis_usd ≈ fees_total_usd`` and the principal-only V_lp
+    collapses to zero against a full-position V_hodl. The resulting
+    ``il_usd = -V_hodl`` would write a large bogus negative IL into
+    accounting on every fee collection even though no IL has crystallised.
+    IL is realised when principal is unwound; ``LP_COLLECT_FEES`` does not
+    unwind. Future LP_COLLECT_FEES-with-full-close shapes would need their
+    own valuation path, not this one.
+
+    Formula (mirrors ``pnl_attributor.compute_impermanent_loss`` for the
+    legacy ``position_events`` rail at ``framework/observability/
+    pnl_attributor.py:300``)::
+
+        V_hodl    = amount0_open × price0_close + amount1_open × price1_close
+        V_lp      = principal_only at close-time prices
+                  = cost_basis_usd − fees_total_usd
+        il_usd    = V_lp − V_hodl   (negative ⇒ LP lost vs HODL)
+
+    Critical fee-exclusion (Codex review on PR #2259, 2026-05-13)
+    ------------------------------------------------------------
+    ``cost_basis_usd`` on this event is built from
+    ``LPCloseData.amount0_collected`` / ``amount1_collected`` which
+    ``almanak/framework/execution/extracted_data.py:153`` defines as
+    *principal + fees*. Using ``cost_basis_usd`` directly as V_lp would
+    count every dollar of fee income as positive IL — an LP that opened
+    100 USDC and closed 100 principal + 10 fees at $1 would emit
+    ``il_usd = +10`` against a true IL of 0. To recover the principal-
+    only V_lp the handler subtracts ``fees_total_usd`` (computed against
+    the same close-time ``price_oracle`` by
+    ``_compute_lp_realized_pnl_and_fees``) BEFORE the IL subtraction.
+    This keeps fee income exclusively on the ``fees_total_usd`` /
+    ``realized_pnl_usd`` surfaces — never silently aliased into IL.
+
+    Fail-closed contracts (CLAUDE.md "Empty ≠ Zero")
+    ------------------------------------------------
+    Returns ``(None, None)``:
+
+      - Outside ``LP_CLOSE`` (LP_OPEN has no IL; ``LP_COLLECT_FEES``
+        leaves principal on-chain — see scope note above).
+      - No prior OPEN payload (cannot recover entry amounts).
+      - Either entry amount is ``None`` (data integrity issue —
+        :class:`LPOpenEventPayload` requires both ``amount0`` /
+        ``amount1`` as :class:`Decimal` per ``payload_schemas.py:287``,
+        so ``None`` is a parse failure rather than a single-sided
+        position; single-sided LP OPENs land as ``Decimal("0")``).
+      - Close-time oracle lacks a price for any non-zero entry leg
+        (V_hodl unmeasurable).
+
+    Returns ``(None, hodl_value_usd)`` — IL itself is unmeasurable but
+    the HODL anchor is fully measurable so operators triaging "why is
+    il_usd null?" can still see V_hodl:
+
+      - ``cost_basis_usd`` is ``None`` (principal recovered at close was
+        unpriced — typically due to ``assumed_decimals``).
+      - ``fees_total_usd`` is ``None`` (parser emitted no measurable
+        fees in USD on at least one leg). Without a separable fee
+        amount we CANNOT extract the principal portion from
+        ``cost_basis_usd`` — the alternative of "assume fees were zero"
+        violates Empty ≠ Zero and is exactly the bug Codex flagged.
+
+    Returns ``(Decimal("0"), …)`` only when V_lp == V_hodl exactly —
+    that is a measured zero IL, not a fabricated one.
+
+    ``price_oracle`` keys are upper-case symbols (per
+    ``parse_price_inputs`` contract). ``token0`` / ``token1`` are pulled
+    from the prior OPEN payload so they match the entry token symbols
+    regardless of any re-ordering done at the close handler's
+    ``_resolve_lp_tokens`` step.
+    """
+    if intent_type_str != "LP_CLOSE":
+        return None, None
+    if not prior_open_payload:
+        return None, None
+
+    amount0_open = _safe_decimal(prior_open_payload.get("amount0"))
+    amount1_open = _safe_decimal(prior_open_payload.get("amount1"))
+    # Either leg ``None`` ⇒ data integrity issue. :class:`LPOpenEventPayload`
+    # requires both ``amount0`` / ``amount1`` as ``Decimal`` (see
+    # ``payload_schemas.py:287``), so ``None`` here is a parse failure, not a
+    # single-sided position. Single-sided LP OPENs land as ``Decimal("0")``
+    # and proceed normally — the zero leg contributes nothing to V_hodl and
+    # its missing price is irrelevant. Computing a partial V_hodl against a
+    # full ``cost_basis_usd`` would emit a misleading ``il_usd`` (gemini
+    # review on PR #2259, 2026-05-13).
+    if amount0_open is None or amount1_open is None:
+        return None, None
+
+    token0_open = (prior_open_payload.get("token0") or "").upper()
+    token1_open = (prior_open_payload.get("token1") or "").upper()
+
+    price0 = price_oracle.get(token0_open) if token0_open else None
+    price1 = price_oracle.get(token1_open) if token1_open else None
+
+    # Fail-closed per CLAUDE.md "Empty ≠ Zero": any non-zero entry leg
+    # missing a close-time price ⇒ V_hodl is unmeasurable, return both
+    # ``None``. Single-sided positions (one entry amount == 0) tolerate
+    # the missing price on the zero leg because its contribution is
+    # mathematically zero.
+    if amount0_open is not None and amount0_open != 0 and price0 is None:
+        return None, None
+    if amount1_open is not None and amount1_open != 0 and price1 is None:
+        return None, None
+
+    hodl = Decimal("0")
+    if amount0_open is not None and price0 is not None:
+        hodl += amount0_open * price0
+    if amount1_open is not None and price1 is not None:
+        hodl += amount1_open * price1
+
+    if not hodl.is_finite():
+        return None, None
+
+    if cost_basis_usd is None:
+        # HODL anchor is still useful even without V_lp; IL itself is
+        # unmeasurable.
+        return None, hodl
+
+    # Codex review fix — fail closed on unmeasured fees rather than
+    # silently substitute zero. Without ``fees_total_usd`` we cannot back
+    # the fee portion out of ``cost_basis_usd`` (which is
+    # principal + fees per ``LPCloseData.amount*_collected`` semantics)
+    # to recover the principal-only V_lp, so any il_usd we emit would
+    # double-count fees as IL gain. ``fees_total_usd == Decimal("0")`` is
+    # the legitimate "measured zero fees" case (default
+    # ``LPCloseData.fees0/fees1 = 0`` priced against any oracle yields
+    # exactly zero) and proceeds as ``V_lp == cost_basis_usd``.
+    if fees_total_usd is None:
+        return None, hodl
+
+    v_lp_principal_only = cost_basis_usd - fees_total_usd
+    il_usd = v_lp_principal_only - hodl
+    if not il_usd.is_finite():
+        return None, hodl
+    return il_usd, hodl
+
+
 def _compute_lp_realized_pnl_and_fees(
     intent_type_str: str,
     fees0: Decimal | None,
@@ -718,6 +872,29 @@ def handle_lp(
         cost_basis_usd=cost_basis_usd,
     )
 
+    # VIB-4319 — IL diagnostic on ``LP_CLOSE`` ONLY (Codex review on
+    # PR #2259: ``LP_COLLECT_FEES`` leaves principal on-chain so the IL
+    # math collapses to a bogus negative — see
+    # ``_compute_lp_impermanent_loss`` scope note). Same fail-closed
+    # contract as ``_compute_lp_realized_pnl_and_fees``: missing prior
+    # OPEN, either entry leg ``None`` (data integrity), missing close-time
+    # price on a non-zero entry leg, OR missing ``fees_total_usd``
+    # (cannot separate principal from fees in ``cost_basis_usd``) ⇒
+    # ``il_usd = None`` (Empty ≠ Zero). ``hodl_value_usd`` is reported
+    # independently so the dashboard can render V_hodl even when V_lp is
+    # unpriced. ``fees_total_usd`` MUST be threaded in because
+    # ``cost_basis_usd`` is built from ``amount*_collected`` which carries
+    # principal + fees per ``LPCloseData`` semantics — see
+    # ``_compute_lp_impermanent_loss`` docstring for the fee-exclusion
+    # math.
+    il_usd, hodl_value_usd = _compute_lp_impermanent_loss(
+        intent_type_str=intent_type_str,
+        price_oracle=price_oracle,
+        prior_open_payload=prior_open_payload,
+        cost_basis_usd=cost_basis_usd,
+        fees_total_usd=fees_total_usd,
+    )
+
     # VIB-4262: mirror LP token flow into the chain+wallet basis pool so a
     # follow-up SWAP that disposes the LP-returned tokens can compute
     # realized_pnl_usd. LP_OPEN drains, LP_CLOSE / LP_COLLECT_FEES record.
@@ -763,6 +940,8 @@ def handle_lp(
         liquidity=liquidity_v,
         current_tick=current_tick_v,
         in_range=in_range_v,
+        il_usd=il_usd,
+        hodl_value_usd=hodl_value_usd,
     )
 
 

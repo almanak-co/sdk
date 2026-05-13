@@ -65,6 +65,8 @@
         "liquidity": null,
         "current_tick": null,
         "in_range": null,
+        "il_usd": null,
+        "hodl_value_usd": null,
         "schema_version": 1,
         "primitive_version": 1
       }
@@ -97,6 +99,8 @@
         "liquidity": null,
         "current_tick": null,
         "in_range": null,
+        "il_usd": null,
+        "hodl_value_usd": null,
         "schema_version": 1,
         "primitive_version": 1
       }

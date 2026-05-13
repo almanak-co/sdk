@@ -1846,3 +1846,574 @@ class TestHandleLpWalletBasisHooks:
         assert result is not None
         # No lots minted because swap_wallet_key couldn't resolve.
         assert len(basis._lots) == 0
+
+
+class TestLpImpermanentLoss:
+    """VIB-4319 — ``LP_CLOSE`` (only) emits ``il_usd`` and
+    ``hodl_value_usd`` so the Accountant Test LP4 cell can move from XFAIL
+    back to PASS. ``il_usd = (cost_basis_usd − fees_total_usd) − V_hodl``
+    (negative ⇒ LP lost vs HODL). The frozen baseline at
+    ``tests/fixtures/accounting/lp/expected_baseline.sqlite`` and the
+    matching schema field at ``payload_schemas.py:LPCloseEventPayload``
+    expected this field; the LP close handler pre-fix never emitted it.
+
+    ``LP_COLLECT_FEES`` is deliberately excluded (Codex review on
+    PR #2259): a fee-collect leaves principal on-chain so the IL math
+    collapses to ``-V_hodl``. See ``_compute_lp_impermanent_loss`` scope
+    note.
+    """
+
+    @staticmethod
+    def _close_inputs(
+        *,
+        prices: dict[str, str],
+        prior_open: dict[str, Any] | None,
+        amount0_collected_raw: str = "120000000",  # USDC (6 dec) 120 USDC
+        amount1_collected_raw: str = "40000000000000000",  # WETH (18 dec) 0.04
+        fees0_raw: str | None = "0",
+        fees1_raw: str | None = "0",
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build outbox + ledger rows with a typed ``LPCloseData`` payload.
+
+        Production close events ALWAYS carry typed ``lp_close_data`` so the
+        IL math has explicit ``fees0`` / ``fees1`` to back out of
+        ``amount*_collected`` (which carry principal + fees per
+        ``execution/extracted_data.py:153``). Tests must mirror that shape
+        or they exercise an ambiguous fallback path the writer never sees.
+
+        ``fees{0,1}_raw=None`` drops the field entirely so the typed dict
+        omits it — useful for the "unmeasured fees fail-closed" tests.
+        """
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        lp_close_data: dict[str, Any] = {
+            "_type": "LPCloseData",
+            "amount0_collected": amount0_collected_raw,
+            "amount1_collected": amount1_collected_raw,
+            "liquidity_removed": "1",
+        }
+        if fees0_raw is not None:
+            lp_close_data["fees0"] = fees0_raw
+        if fees1_raw is not None:
+            lp_close_data["fees1"] = fees1_raw
+        extracted = json.dumps({"lp_close_data": lp_close_data})
+
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+            price_inputs_json=json.dumps(prices),
+        )
+        return outbox, ledger
+
+    @staticmethod
+    def _patch_token_resolver(monkeypatch, decimals: dict[str, int]) -> None:
+        """Inject a token resolver that returns the supplied decimals map.
+
+        Required because the typed ``lp_close_data`` path resolves token
+        decimals via :func:`get_token_resolver` to scale raw integers to
+        human-decimal Decimals.
+        """
+        from unittest.mock import patch
+
+        mock_resolver = MagicMock()
+
+        def _resolve(token: str, chain: str = ""):
+            if token in decimals:
+                ti = MagicMock()
+                ti.decimals = decimals[token]
+                return ti
+            return None
+
+        mock_resolver.resolve = MagicMock(side_effect=_resolve)
+        monkeypatch.setattr(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            lambda: mock_resolver,
+        )
+
+    def test_lp_close_emits_il_and_hodl_against_prior_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """V_hodl = entry amounts at close-time prices; il = V_lp − V_hodl."""
+        # Entry: 100 USDC ($1) + 0.05 WETH ($2000) = $200.
+        # Close: prices move to USDC=$1, WETH=$3000 → V_hodl = 100 + 0.05*3000 = $250.
+        # Recovered (principal only, zero fees): 120 USDC + 0.04 WETH at close
+        # prices = $240 = V_lp. IL = 240 − 250 = −$10 (LP underperformed HODL).
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="120000000",  # 120 USDC
+            amount1_collected_raw="40000000000000000",  # 0.04 WETH
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.cost_basis_usd == Decimal("240.00")
+        assert result.fees_total_usd == Decimal("0")
+        assert result.hodl_value_usd == Decimal("250.00")
+        assert result.il_usd == Decimal("-10.00")
+
+    def test_lp_close_il_zero_when_prices_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Measured zero IL — prices identical to entry, LP recovered exactly entry value.
+
+        Per CLAUDE.md ``Empty ≠ Zero``: ``Decimal("0")`` here is a MEASURED
+        zero, distinct from ``None`` for "unmeasured".
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "250.0",
+        }
+        # Close recovers identical entry amounts at identical prices: V_lp == V_hodl == 250.
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="100000000",  # 100 USDC
+            amount1_collected_raw="50000000000000000",  # 0.05 WETH
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.hodl_value_usd == Decimal("250.00")
+        assert result.il_usd == Decimal("0")
+
+    def test_lp_close_without_prior_open_emits_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No prior OPEN ⇒ cannot recover entry amounts ⇒ both IL fields are None."""
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=None,
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=None)
+
+        assert result is not None
+        assert result.il_usd is None
+        assert result.hodl_value_usd is None
+
+    def test_lp_close_missing_close_price_returns_none_not_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per CLAUDE.md ``Empty ≠ Zero``: missing close-time price for a
+        non-zero entry leg returns ``None`` for both IL and HODL — not a
+        fabricated zero. This is the same fail-closed contract as
+        ``compute_lp_cost_basis``.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        # WETH price absent from close-time oracle.
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00"},
+            prior_open=prior_open,
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.il_usd is None
+        assert result.hodl_value_usd is None
+
+    def test_lp_close_unmeasured_v_lp_still_reports_hodl(self) -> None:
+        """When ``cost_basis_usd`` (V_lp) is unmeasured (e.g. assumed
+        decimals) but V_hodl is fully measurable, emit ``hodl_value_usd``
+        anyway. Operators triaging "why is il_usd null?" can still see
+        the HODL anchor.
+        """
+        from unittest.mock import patch
+
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        # Force the close handler down the ``assumed_decimals`` path so
+        # cost_basis_usd is skipped. Use the extracted-data resolver miss
+        # technique (resolver returns None → assumed_decimals = True).
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "120000000",
+                "amount1_collected": "40000000000000000",
+                "fees0": "0",
+                "fees1": "0",
+                "liquidity_removed": "1",
+            }
+        })
+
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+        )
+
+        mock_resolver = MagicMock(resolve=MagicMock(return_value=None))
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
+            result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        # assumed_decimals fired ⇒ cost_basis_usd is None.
+        assert result.cost_basis_usd is None
+        # V_hodl is still measurable from prior_open amounts + close-time prices.
+        assert result.hodl_value_usd == Decimal("250.00")
+        # IL is None because V_lp is None.
+        assert result.il_usd is None
+
+    def test_lp_open_does_not_emit_il(self) -> None:
+        """IL is only defined at unwind; LP_OPEN must not fabricate a value."""
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="100.0",
+            amount_out="0.05",
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=None)
+
+        assert result is not None
+        assert result.event_type == LPEventType.LP_OPEN.value
+        assert result.il_usd is None
+        assert result.hodl_value_usd is None
+
+    def test_il_round_trips_through_to_payload_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Serializer round-trip: a non-None ``il_usd`` survives ``to_payload_json``
+        and re-parses back to the same Decimal. Without this contract, the
+        Accountant Test LP4 cell — which reads via ``json_extract(payload_json,
+        '$.il_usd')`` — would still see NULL even though the handler computed
+        a value. Same round-trip discipline applies to ``hodl_value_usd``.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="120000000",  # 120 USDC
+            amount1_collected_raw="40000000000000000",  # 0.04 WETH
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+        assert result is not None
+
+        payload = json.loads(result.to_payload_json())
+        # Decimal precision can vary depending on whether the math went
+        # through cost_basis_usd subtraction (4dp) or pure leg arithmetic
+        # (2dp). Compare semantically by re-parsing the JSON-encoded
+        # string back to Decimal.
+        assert Decimal(payload["il_usd"]) == Decimal("-10")
+        assert Decimal(payload["hodl_value_usd"]) == Decimal("250")
+
+    def test_il_round_trips_none_through_to_payload_json(self) -> None:
+        """A None ``il_usd`` must serialize as JSON null (NOT the string "None"
+        or absent), so the read-side ``json_extract`` returns SQL NULL and
+        the LP4 cell correctly classifies the event as "not yet computed".
+        """
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=None,
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=None)
+        assert result is not None
+
+        payload = json.loads(result.to_payload_json())
+        # The key must be PRESENT (so json_extract returns NULL, not
+        # "field not found"), but its value must be JSON null.
+        assert "il_usd" in payload
+        assert payload["il_usd"] is None
+        assert "hodl_value_usd" in payload
+        assert payload["hodl_value_usd"] is None
+
+    def test_il_usd_excludes_fee_income(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Codex review on PR #2259 (2026-05-13): ``cost_basis_usd`` is built
+        from ``amount*_collected`` which carries principal + fees per
+        ``LPCloseData`` semantics. Without subtracting ``fees_total_usd``
+        first, fee income gets silently aliased into IL — an LP that
+        opened 100 USDC + 0.05 WETH and closed with $10 fee income at
+        prices unchanged from entry emits ``il_usd = +10`` against a
+        true IL of 0.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        # Entry: 100 USDC ($1) + 0.05 WETH ($2000) = $200.
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        # Close at identical prices. Collected: 100 USDC principal + 10 USDC
+        # fees on token0, 0.05 WETH principal + 0 WETH fees on token1.
+        # cost_basis_usd (principal+fees) = 110*1 + 0.05*2000 = 210.
+        # fees_total_usd = 10*1 + 0*2000 = 10.
+        # principal-only V_lp = 210 − 10 = 200 = V_hodl. True IL = 0.
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "2000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="110000000",  # 110 USDC (100 principal + 10 fees)
+            amount1_collected_raw="50000000000000000",  # 0.05 WETH principal
+            fees0_raw="10000000",  # 10 USDC fees
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        # Sanity-check the building blocks: V_lp gross-of-fees = 210;
+        # fees_total_usd = 10; V_hodl = 200.
+        assert result.cost_basis_usd == Decimal("210.00")
+        assert result.fees_total_usd == Decimal("10.00")
+        assert result.hodl_value_usd == Decimal("200.00")
+        # The bug under fix: il_usd MUST be 0 (true IL), NOT +10 (which is
+        # what the pre-fix formula would have emitted by counting fee
+        # income as positive IL gain).
+        assert result.il_usd == Decimal("0"), (
+            "il_usd is computed gross of fees — fee income is leaking into IL. "
+            "See _compute_lp_impermanent_loss docstring (Codex review)."
+        )
+
+    def test_il_usd_none_when_fees_unmeasured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review on PR #2259 (2026-05-13): when ``fees_total_usd`` is
+        ``None`` (parser emitted no measurable fees in USD) we CANNOT
+        extract the principal-only V_lp from ``cost_basis_usd``. Per
+        CLAUDE.md "Empty ≠ Zero" we MUST fail closed — return
+        ``il_usd=None`` — rather than silently substitute ``fees=0``
+        which would over-credit principal_only V_lp and produce a wrong
+        IL number. ``hodl_value_usd`` is still emitted because it depends
+        only on prior_open amounts + close-time prices (principal-side).
+
+        Production trigger for ``fees_total_usd is None``: an LP_CLOSE
+        without typed ``lp_close_data`` falls through ``_resolve_lp_amounts``
+        to the ledger-string fallback at ``lp_handler.py:179`` where
+        ``fees0`` / ``fees1`` come back as ``None``. The next call to
+        ``compute_lp_cost_basis(None, None, ...)`` then returns ``None``
+        per the "both legs None" branch in ``lp_accounting.py:230``.
+        """
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        # Build a close ledger row WITHOUT typed lp_close_data so the
+        # handler hits the fallback path that returns fees0=fees1=None.
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="120.0",  # cost_basis_usd path: 120*1 + 0.04*3000 = 240
+            amount_out="0.04",
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+            extracted_data_json="",  # no typed lp_close_data ⇒ fees come back None
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        # cost_basis_usd is computable via the fallback (ledger strings + oracle).
+        assert result.cost_basis_usd == Decimal("240.00")
+        # But fees are unmeasured ⇒ fees_total_usd is None.
+        assert result.fees_total_usd is None
+        # Empty ≠ Zero: il_usd MUST be None (we cannot back out the fee
+        # portion). Pre-fix this branch would have emitted il_usd = -10
+        # (treating fees as zero), which is wrong.
+        assert result.il_usd is None, (
+            "il_usd MUST fail closed when fees_total_usd is None — "
+            "fabricating fees=0 violates Empty ≠ Zero (Codex review)."
+        )
+        # hodl_value_usd is principal-side and stays measurable.
+        assert result.hodl_value_usd == Decimal("250.00")
+
+    def test_il_usd_none_on_lp_collect_fees(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P1 on PR #2259 (2026-05-13): ``LP_COLLECT_FEES`` leaves the
+        principal on-chain — ``amount*_collected`` carries fees only with zero
+        principal, so ``cost_basis_usd ≈ fees_total_usd`` and the principal-
+        only V_lp collapses to ~0. Without this guard the helper would emit
+        ``il_usd = -V_hodl`` (a large bogus negative) into accounting on
+        every fee collection, even though no IL has crystallised. IL is
+        realised when principal is unwound; LP_COLLECT_FEES does not unwind.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        # Prior LP_OPEN: 100 USDC + 0.05 WETH ($200 at $1 / $2000).
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+        }
+        # Fee-collect event: amount*_collected = fees only (no principal
+        # unwound). Production LP_COLLECT_FEES shape per VIB-3494.
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_COLLECT_FEES",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "10000000",  # 10 USDC (= fees0)
+                "amount1_collected": "5000000000000000",  # 0.005 WETH (= fees1)
+                "fees0": "10000000",
+                "fees1": "5000000000000000",
+                "liquidity_removed": "0",
+            }
+        })
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_COLLECT_FEES",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "2000.00"}),
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+
+        assert result is not None
+        # Pre-fix this would have emitted il_usd ≈ -200 (= 0 − V_hodl_200).
+        # Post-fix LP_COLLECT_FEES is OUT OF SCOPE for IL emission.
+        assert result.il_usd is None, (
+            "LP_COLLECT_FEES must NOT emit il_usd — principal is still on-chain "
+            "so IL is not realised. Pre-fix this leaked a bogus -V_hodl number."
+        )
+        assert result.hodl_value_usd is None, (
+            "hodl_value_usd is reserved for events where the helper actually "
+            "runs the IL pipeline (LP_CLOSE only)."
+        )
+
+    def test_il_usd_none_when_either_entry_amount_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gemini review on PR #2259 (2026-05-13): :class:`LPOpenEventPayload`
+        requires both ``amount0`` and ``amount1`` as ``Decimal`` (see
+        ``payload_schemas.py:287``). A ``None`` on either leg is a parse
+        failure, NOT a single-sided position (single-sided LP OPENs land as
+        ``Decimal("0")``). Computing a partial V_hodl against a full
+        ``cost_basis_usd`` would emit a misleading ``il_usd``. Fail closed.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        # amount1 unparseable ⇒ data integrity issue. Pre-fix the helper
+        # would have computed hodl from amount0 alone (partial V_hodl) and
+        # subtracted it from a full cost_basis_usd.
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": None,  # parse failure
+            "cost_basis_usd": "200.0",
+        }
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "2000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="100000000",  # 100 USDC
+            amount1_collected_raw="50000000000000000",  # 0.05 WETH
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+        assert result is not None
+        assert result.il_usd is None, (
+            "Either-leg-None entry amount must fail closed — partial V_hodl "
+            "against full cost_basis_usd produces a misleading IL."
+        )
+        assert result.hodl_value_usd is None

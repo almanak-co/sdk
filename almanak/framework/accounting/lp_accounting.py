@@ -70,6 +70,21 @@ class LPAccountingEvent:
         liquidity: int | None = None,
         current_tick: int | None = None,
         in_range: bool | None = None,
+        # VIB-4319 — impermanent-loss diagnostic stamped on LP_CLOSE /
+        # LP_COLLECT_FEES events. ``il_usd = V_lp_at_close − V_hodl_at_close``
+        # where ``V_lp`` is the USD value of the principal recovered at
+        # close-time prices (this event's freshly-computed
+        # ``cost_basis_usd``) and ``V_hodl`` is the USD value of the
+        # entry amounts re-priced at the same close-time oracle. Negative
+        # = LP lost vs HODL. Persisted ``None`` when the prior OPEN
+        # payload is missing or when the close-time oracle lacks a
+        # non-zero leg's price (Empty ≠ Zero — never substitute 0 for
+        # "unmeasured"). LP_OPEN leaves both fields ``None`` because IL is
+        # only defined at unwind. Diagnostic only — NOT added to
+        # ``realized_pnl_usd``; ``cost_basis_usd`` already reflects the
+        # post-IL on-chain outcome.
+        il_usd: Decimal | None = None,
+        hodl_value_usd: Decimal | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -92,6 +107,8 @@ class LPAccountingEvent:
         self.liquidity = liquidity
         self.current_tick = current_tick
         self.in_range = in_range
+        self.il_usd = il_usd
+        self.hodl_value_usd = hodl_value_usd
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -139,6 +156,17 @@ class LPAccountingEvent:
                 "liquidity": self.liquidity,
                 "current_tick": self.current_tick,
                 "in_range": self.in_range,
+                # VIB-4319 — impermanent-loss diagnostic (V_lp − V_hodl) and
+                # the V_hodl reference value used to compute it, both at
+                # close-time oracle prices. Populated on LP_CLOSE /
+                # LP_COLLECT_FEES when the prior OPEN payload and a
+                # close-time price for every non-zero entry leg are
+                # available; ``None`` otherwise (Empty ≠ Zero — the
+                # Accountant Test LP4 cell PASSes on any non-null value
+                # and a fabricated zero would lie about an unmeasured
+                # quantity).
+                "il_usd": _enc(self.il_usd),
+                "hodl_value_usd": _enc(self.hodl_value_usd),
                 "schema_version": self.schema_version,
                 "primitive_version": self.primitive_version,
             }
