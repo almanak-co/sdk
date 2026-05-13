@@ -19,6 +19,9 @@ Supported chains:
 - Polygon
 - Base
 - Avalanche
+- BNB
+- Mantle
+- X Layer
 
 Example:
     from almanak.framework.connectors.aave_v3 import AaveV3Adapter, AaveV3Config
@@ -165,5 +168,8 @@ register_connector(
         "polygon",
         "base",
         "avalanche",
+        "bnb",
+        "mantle",
+        "xlayer",
     ),
 )
