@@ -65,5 +65,6 @@ register_connector(
         "polygon",
         "base",
         "avalanche",
+        "bnb",
     ),
 )
