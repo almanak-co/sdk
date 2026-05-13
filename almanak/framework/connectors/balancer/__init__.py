@@ -15,6 +15,7 @@ Supported chains:
 - Optimism
 - Polygon
 - Base
+- Avalanche
 
 Example:
     from almanak.framework.connectors.balancer import BalancerFlashLoanAdapter, BalancerFlashLoanConfig
@@ -74,5 +75,6 @@ register_connector(
         "optimism",
         "polygon",
         "base",
+        "avalanche",
     ),
 )

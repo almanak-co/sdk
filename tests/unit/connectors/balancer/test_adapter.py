@@ -175,7 +175,7 @@ class TestBalancerVaultAddresses:
 
     def test_supported_chains(self) -> None:
         """Test that all expected chains are supported."""
-        expected_chains = {"ethereum", "arbitrum", "optimism", "polygon", "base"}
+        expected_chains = {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"}
         actual_chains = set(BALANCER_VAULT_ADDRESSES.keys())
         assert expected_chains == actual_chains
 

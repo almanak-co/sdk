@@ -23,6 +23,7 @@ Contract addresses:
 - Optimism: 0xBA12222222228d8Ba445958a75a0704d566BF2C8
 - Polygon: 0xBA12222222228d8Ba445958a75a0704d566BF2C8
 - Base: 0xBA12222222228d8Ba445958a75a0704d566BF2C8
+- Avalanche: 0xBA12222222228d8Ba445958a75a0704d566BF2C8
 """
 
 import logging
@@ -42,6 +43,7 @@ BALANCER_VAULT_ADDRESSES: dict[str, str] = {
     "optimism": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
     "polygon": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
     "base": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+    "avalanche": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
 }
 
 # Function selector for flashLoan(address,address[],uint256[],bytes)
@@ -64,7 +66,7 @@ class BalancerFlashLoanConfig:
     """Configuration for Balancer flash loan adapter.
 
     Attributes:
-        chain: Target blockchain (ethereum, arbitrum, optimism, polygon, base)
+        chain: Target blockchain (ethereum, arbitrum, optimism, polygon, base, avalanche)
         wallet_address: Address executing the flash loan
     """
 
