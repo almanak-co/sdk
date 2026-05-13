@@ -54,6 +54,17 @@ def _mock_aave_response(
     )
 
 
+def _mock_emode_response(category: int = 0) -> str:
+    """Build a hex string matching getUserEMode() ABI return (1 uint256 word).
+
+    VIB-4213: ``read_aave_account_state`` now performs a secondary eth_call to
+    ``Pool.getUserEMode(user)`` to populate ``e_mode_category``. Test mocks
+    that previously enumerated only the primary ``getUserAccountData`` response
+    must include this follow-up word (one per state capture).
+    """
+    return "0x" + _encode_word(category)
+
+
 def _mock_morpho_position_response(supply_shares: int, borrow_shares: int, collateral: int) -> str:
     return "0x" + _encode_word(supply_shares) + _encode_word(borrow_shares) + _encode_word(collateral)
 
@@ -138,9 +149,16 @@ class TestAaveBeforeStatePopulatedFromPreExecutionRead:
             health_factor_e18=int(1.87 * 1e18),
         )
 
-        # Pre-read then post-read: two successive eth_call() calls
+        # Pre-read then post-read. VIB-4213: each state capture now does TWO
+        # eth_calls (getUserAccountData + getUserEMode), so the side_effect list
+        # is [pre_account, pre_emode, post_account, post_emode].
         gateway = MagicMock()
-        gateway.eth_call.side_effect = [before_response, after_response]
+        gateway.eth_call.side_effect = [
+            before_response,
+            _mock_emode_response(0),
+            after_response,
+            _mock_emode_response(0),
+        ]
 
         intent = _make_aave_supply_intent("SUPPLY")
 

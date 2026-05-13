@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # ─── Aave V3 Pool.getUserAccountData(address user) ────────────────────────────
 # Selector: keccak256("getUserAccountData(address)")[:4] = 0xbf92857c
 _AAVE_GET_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
+# Selector: keccak256("getUserEMode(address)")[:4] = 0xeddf1b79
+# VIB-4213: per-user efficiency-mode category (uint256; values 0..255 with
+# 0 = no e-mode). Required by the Tier-2 Aave V3 registry identity tuple
+# (VIB-4214) and by the L4 principal/interest split. NOT in getUserAccountData
+# — needs its own call.
+_AAVE_GET_USER_EMODE_SELECTOR = "0xeddf1b79"
 _AAVE_USD_SCALE = Decimal("1e8")  # 8-decimal USD base unit
 _AAVE_HF_SCALE = Decimal("1e18")  # 1.0 HF = 1e18
 
@@ -74,12 +80,21 @@ _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DEL
 
 @dataclass
 class AaveAccountState:
-    """Post-execution account summary from Pool.getUserAccountData."""
+    """Post-execution account summary from Pool.getUserAccountData + Pool.getUserEMode.
+
+    VIB-4213 (T27) added the bottom two fields. `e_mode_category` comes from a
+    second eth_call to ``Pool.getUserEMode(user)``; `interest_rate_mode` is the
+    intent-layer rate mode threaded through by ``_capture_aave_v3_pre_state``
+    for BORROW/REPAY intents. Both are ``None`` when unmeasured — never
+    fabricated zero (Empty ≠ Zero, AGENTS.md §Accounting).
+    """
 
     collateral_usd: Decimal
     debt_usd: Decimal
     health_factor: Decimal  # normalised (1.0 = healthy)
     liquidation_threshold_bps: int  # e.g. 8500 → 85 %
+    e_mode_category: int | None = None  # 0..255; 0 = no e-mode. None = read failed.
+    interest_rate_mode: str | None = None  # intent-layer Literal value; None for SUPPLY/WITHDRAW.
 
 
 def _pad_address(address: str) -> str:
@@ -101,15 +116,66 @@ def _gateway_eth_call(gateway_client: Any, chain: str, to: str, data: str) -> st
         return None
 
 
+def read_aave_user_emode(
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    pool_address: str,
+) -> int | None:
+    """Read Aave V3 ``Pool.getUserEMode(user)`` and return the category (uint8 range).
+
+    VIB-4213 — required for the Tier-2 Aave V3 registry identity tuple. A USDC
+    supply inside e-mode category 1 (stables) has different LTV/LT than a USDC
+    supply outside e-mode, so the registry MUST disambiguate.
+
+    Returns:
+        - ``int`` (0..255) when the call succeeds. ``0`` is a real, valid value
+          meaning "user is not in any e-mode category" — distinct from ``None``.
+        - ``None`` when the gateway call fails, returns empty/malformed hex, the
+          chain has no configured Aave V3 pool, or the decoded value lies
+          outside the documented uint8 range (Aave V3 e-mode category ids are
+          stored as uint8). Empty ≠ Zero (AGENTS.md §Accounting).
+    """
+    calldata = _AAVE_GET_USER_EMODE_SELECTOR + _pad_address(wallet_address)
+    hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata)
+    if not hex_data:
+        return None
+    # gemini review: lowercase before stripping the `0x` prefix so an uppercase
+    # `0X` response (rare but legal eth_call output) is handled robustly.
+    raw = hex_data.lower().replace("0x", "")
+    if len(raw) < 64:  # need at least one uint256 word
+        return None
+    try:
+        value = _decode_word(raw, 0)
+    except ValueError:
+        logger.debug("read_aave_user_emode: non-hex word for chain=%s", chain, exc_info=True)
+        return None
+    # Aave V3 stores category ids as uint8 (CategoryId in EModeLogic.sol). Anything
+    # outside that range is a sign the eth_call response was the wrong shape — a
+    # mock that reused the getUserAccountData hex, a misconfigured pool address,
+    # or a future protocol change we should investigate before trusting.
+    if not 0 <= value <= 255:
+        logger.debug(
+            "read_aave_user_emode: decoded value %d outside uint8 range for chain=%s",
+            value,
+            chain,
+        )
+        return None
+    return value
+
+
 def read_aave_account_state(
     gateway_client: Any,
     chain: str,
     wallet_address: str,
 ) -> AaveAccountState | None:
-    """Read Aave V3 Pool.getUserAccountData for *wallet_address* via gateway.
+    """Read Aave V3 Pool.getUserAccountData (+ getUserEMode, VIB-4213) for *wallet_address*.
 
     Returns normalised USD values and a 1e18-normalised health factor, or None
-    if the gateway call fails.
+    if the primary ``getUserAccountData`` call fails. The secondary e-mode read
+    is best-effort: when it fails the rest of the state still populates, with
+    ``e_mode_category=None`` so the consumer can distinguish "no e-mode" (0)
+    from "unmeasured" (None).
 
     getUserAccountData returns:
       [0] totalCollateralBase  (uint256, 1e8 USD)
@@ -118,6 +184,9 @@ def read_aave_account_state(
       [3] currentLiquidationThreshold (uint256, bps, e.g. 8500)
       [4] ltv                  (uint256, bps) -- not used
       [5] healthFactor         (uint256, 1e18)
+
+    getUserEMode returns:
+      uint256 category (0 = no e-mode; 1..255 = a configured category id).
     """
     try:
         from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
@@ -131,7 +200,9 @@ def read_aave_account_state(
         if not hex_data:
             return None
 
-        raw = hex_data.replace("0x", "")
+        # gemini review: lowercase before stripping so an uppercase `0X` prefix
+        # is handled robustly (consistent with read_aave_user_emode).
+        raw = hex_data.lower().replace("0x", "")
         if len(raw) < 6 * 64:  # expect ≥ 6 words
             return None
 
@@ -142,11 +213,15 @@ def read_aave_account_state(
         # Cap unrealistically large HF (empty position → max sentinel)
         health_factor = min(Decimal(hf_raw) / _AAVE_HF_SCALE, Decimal("999999"))
 
+        # VIB-4213: best-effort e-mode read. None on failure; never fabricated 0.
+        e_mode_category = read_aave_user_emode(gateway_client, chain, wallet_address, pool_address)
+
         return AaveAccountState(
             collateral_usd=collateral_usd,
             debt_usd=debt_usd,
             health_factor=health_factor,
             liquidation_threshold_bps=liquidation_threshold_bps,
+            e_mode_category=e_mode_category,
         )
     except Exception:
         logger.debug("read_aave_account_state failed", exc_info=True)
@@ -561,16 +636,39 @@ def read_compound_v3_account_state(  # noqa: C901
 
 def _capture_aave_v3_pre_state(
     *,
-    intent: Any,  # noqa: ARG001 — registry-uniform signature
+    intent: Any,
     chain: str,
     wallet_address: str,
     gateway_client: Any,
     price_oracle: dict | None,  # noqa: ARG001 — registry-uniform signature
 ) -> AaveAccountState | None:
-    """Aave V3 pre-state arm of capture_lending_pre_state."""
+    """Aave V3 pre-state arm of capture_lending_pre_state.
+
+    VIB-4213: threads the intent's ``interest_rate_mode`` (BORROW/REPAY only)
+    onto the returned ``AaveAccountState`` so it lands in pre_state_json /
+    post_state_json. SUPPLY/WITHDRAW intents have no rate mode at the Aave
+    collateral side — the field stays ``None``.
+    """
     aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
     if aave_state is None:
         logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
+        return None
+
+    intent_type_str = _intent_type_value(intent).upper()
+    if intent_type_str in {"BORROW", "REPAY"}:
+        rate_mode = getattr(intent, "interest_rate_mode", None)
+        if rate_mode is not None:
+            # InterestRateMode is a ``Literal["variable"]`` at the intent layer.
+            # str() handles both the Literal value and any future enum.
+            aave_state.interest_rate_mode = str(rate_mode)
+        else:
+            # codex review: when the intent leaves ``interest_rate_mode`` unset,
+            # ``compiler_lending.py`` will dispatch the BORROW/REPAY with
+            # ``AAVE_VARIABLE_RATE_MODE`` (stable mode is deprecated on Aave V3).
+            # Surface the rate mode the on-chain tx will actually carry so
+            # registry/PnL consumers see the real rate mode, not ``null``.
+            aave_state.interest_rate_mode = "variable"
+
     return aave_state
 
 
@@ -857,7 +955,7 @@ def lending_state_to_dict(
     Returns ``None`` when ``state`` is ``None`` so callers can fall through
     to the wallet-balances-only path without fabricating zeros.
 
-    Schema (Accounting-AttemptNo17 §3 D3):
+    Schema (Accounting-AttemptNo17 §3 D3, extended by VIB-4213 §Aave V3):
     ```json
     {
         "protocol": "aave_v3",
@@ -865,12 +963,19 @@ def lending_state_to_dict(
         "debt_usd": "8200.00",
         "health_factor": "1.882",
         "liquidation_threshold_bps": 8500,
+        "e_mode_category": 0,
+        "interest_rate_mode": "variable",
         "lltv": "0.86"
     }
     ```
 
     All numeric fields are stringified Decimals — the handler parses with
     ``Decimal(str(post_state["..."]))`` so JSON round-trip is loss-free.
+
+    VIB-4213: ``e_mode_category`` (Aave V3) and ``interest_rate_mode`` (Aave V3,
+    BORROW/REPAY only) are emitted as JSON ``null`` when unmeasured. Empty ≠
+    Zero: a measured ``e_mode_category == 0`` (user not in any e-mode) is
+    distinguishable from ``null`` (read failed).
     """
     if state is None:
         return None
@@ -881,6 +986,16 @@ def lending_state_to_dict(
     out["health_factor"] = str(state.health_factor) if state.health_factor is not None else None
     if isinstance(state, AaveAccountState):
         out["liquidation_threshold_bps"] = int(state.liquidation_threshold_bps)
+        # VIB-4213: e_mode_category is ``int | None`` — emit None (JSON null) when
+        # the secondary getUserEMode read failed; emit the raw int otherwise
+        # (including ``0`` which means "user is not in any e-mode category").
+        # Dataclass typing guarantees this is already int | None — no cast needed
+        # (gemini review).
+        out["e_mode_category"] = state.e_mode_category
+        # VIB-4213: interest_rate_mode is ``str | None`` — set on BORROW/REPAY
+        # intents only. SUPPLY/WITHDRAW intents (and the post-state path) leave
+        # it None. Emit JSON null in that case.
+        out["interest_rate_mode"] = state.interest_rate_mode
     elif isinstance(state, MorphoBlueAccountState):
         out["lltv"] = str(state.lltv)
         # Morpho Blue: lltv IS the liquidation threshold; surface it in bps too

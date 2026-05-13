@@ -268,8 +268,14 @@ def test_capture_lending_state_safe_aave_calls_gateway():
     assert out.debt_usd == Decimal("8200.00")
     assert out.liquidation_threshold_bps == 8500
     assert out.health_factor == Decimal("1.882")
-    # The gateway WAS called — the populate path is exercised, not silently skipped.
-    assert len(gateway.calls) == 1
+    # The gateway WAS called — the populate path is exercised, not silently
+    # skipped. VIB-4213 adds a second eth_call for `Pool.getUserEMode` so
+    # `e_mode_category` lands in pre/post_state_json; the count is now 2.
+    assert len(gateway.calls) == 2
+    # First call selector is `getUserAccountData` (0xbf92857c).
+    assert gateway.calls[0][2].startswith("0xbf92857c")
+    # Second call selector is `getUserEMode` (0xeddf1b79, VIB-4213).
+    assert gateway.calls[1][2].startswith("0xeddf1b79")
 
 
 def test_lending_handler_reads_runner_serialized_post_state():
