@@ -148,7 +148,9 @@ class ResultEnricher:
         # === DEX / AMM ===
         "SWAP": ["swap_amounts", "protocol_fees"],
         # === Liquidity Providing ===
-        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "bin_ids", "protocol_fees", "lp_open_data"],
+        # NOTE: Do NOT re-add bin_ids here without first migrating LPOpenData per
+        # VIB-4320 follow-up. TJ V2 bin_ids is in EXTRACTION_SPECS_BY_PROTOCOL.
+        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "protocol_fees", "lp_open_data"],
         "LP_CLOSE": [
             "lp_close_data",
             "amount0_collected",
@@ -158,7 +160,9 @@ class ResultEnricher:
             "protocol_fees",
         ],
         # === LP Fee Collection ===
-        "LP_COLLECT_FEES": ["fees0", "fees1", "bin_ids", "protocol_fees"],
+        # NOTE: Do NOT re-add bin_ids here without first migrating LPOpenData per
+        # VIB-4320 follow-up. TJ V2 bin_ids is in EXTRACTION_SPECS_BY_PROTOCOL.
+        "LP_COLLECT_FEES": ["fees0", "fees1", "protocol_fees"],
         # === Lending ===
         # Singular forms used by EVM parsers (Aave, Morpho, etc.)
         # Plural forms used by Solana parsers (Jupiter Lend, Kamino)
@@ -217,6 +221,65 @@ class ResultEnricher:
         # === No-Op ===
         "HOLD": [],  # No extraction needed
     }
+
+    # VIB-4320 — Per-protocol overlay appended onto the generic ``EXTRACTION_SPECS``
+    # for protocol-specific fields that are not implemented by every parser. Keeps
+    # the generic spec protocol-neutral (no Uniswap-V3 / PancakeSwap-V3 warnings
+    # for ``bin_ids``) while preserving the flat ``extracted_data["bin_ids"]``
+    # contract for TraderJoe V2 consumers (LPPositionTracker + leveraged_lp demo).
+    #
+    # Overlay semantics: ``_merge_spec_with_overlay`` appends overlay fields at the
+    # tail of the base spec with order-preserving dedup. Base fields always come
+    # first; ``protocol=None`` returns the base spec unchanged.
+    #
+    # Follow-up VIB-4344 — Uniswap/PancakeSwap V3 ``LP_COLLECT_FEES`` still warns
+    # for ``fees0`` / ``fees1`` because those parsers do not implement
+    # ``extract_fees0`` / ``extract_fees1`` yet; the right fix is to implement
+    # them (not move them into per-protocol overlays). Out of scope for VIB-4320.
+    EXTRACTION_SPECS_BY_PROTOCOL: dict[str, dict[str, list[str]]] = {
+        "traderjoe_v2": {
+            "LP_OPEN": ["bin_ids"],
+            "LP_COLLECT_FEES": ["bin_ids"],
+        },
+    }
+
+    @staticmethod
+    def _canonicalise_protocol(protocol: str | None, context: Any) -> str | None:
+        """Normalize a protocol alias (e.g. ``trader-joe-v2``) to canonical form.
+
+        ``ReceiptParserRegistry.get`` already normalises aliases internally;
+        we mirror that here so the overlay lookup (`EXTRACTION_SPECS_BY_PROTOCOL`)
+        sees the same key. ``None`` / empty input passes through unchanged.
+        """
+        if not protocol:
+            return protocol
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
+
+        return normalize_protocol(str(getattr(context, "chain", "") or ""), protocol)
+
+    @staticmethod
+    def _merge_spec_with_overlay(intent_type: str, protocol: str | None) -> list[str]:
+        """Return effective extraction spec for (intent_type, protocol).
+
+        Base = ``EXTRACTION_SPECS[intent_type]``. Overlay (if any) is appended
+        at the tail with order-preserving dedup. Base fields always come first.
+
+        ``protocol`` is expected to be already canonicalised via
+        ``normalize_protocol(chain, protocol)`` by the caller (see ``enrich``).
+        Passing a raw alias here would silently miss the overlay and was the
+        regression Codex flagged on PR #2269.
+        """
+        base = list(ResultEnricher.EXTRACTION_SPECS.get(intent_type, []))
+        if protocol is None:
+            return base
+        overlay = ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.get(protocol, {}).get(intent_type, [])
+        merged = list(base)
+        seen = set(base)
+        for field in overlay:
+            if field not in seen:
+                merged.append(field)
+                seen.add(field)
+        return merged
 
     def __init__(
         self,
@@ -297,9 +360,11 @@ class ResultEnricher:
             logger.debug(f"Enrichment skipped: no extraction spec for intent type '{intent_type}'")
             return result
 
-        # Get extraction spec
-        spec = self.EXTRACTION_SPECS[intent_type]
-        if not spec:
+        # Get extraction spec. The merged spec (base + per-protocol overlay) is
+        # computed once ``protocol`` is resolved below; for now we only need to
+        # short-circuit on the protocol-neutral HOLD case where base is empty.
+        base_spec = self.EXTRACTION_SPECS[intent_type]
+        if not base_spec:
             return result  # No fields to extract (e.g., HOLD)
 
         # VIB-3706: Off-chain extraction for Polymarket CLOB orders.
@@ -330,6 +395,17 @@ class ResultEnricher:
             bridge_name = bundle_metadata.get("bridge")
             if bridge_name:
                 protocol = str(bridge_name).lower()
+
+        # VIB-4320: canonicalise the protocol so the overlay lookup uses the
+        # same key ``ReceiptParserRegistry.get`` would resolve to. See
+        # ``_canonicalise_protocol`` for the alias-mapping rationale.
+        protocol = self._canonicalise_protocol(protocol, context)
+
+        # VIB-4320: merge generic spec with per-protocol overlay. Base fields
+        # always come first; overlay fields (e.g. TraderJoe V2 ``bin_ids``)
+        # are appended at the tail. ``protocol=None`` returns the base spec
+        # unchanged, preserving today's behaviour for unresolvable protocols.
+        spec = self._merge_spec_with_overlay(intent_type, protocol)
 
         # VIB-3706: When off-chain extraction has already populated some
         # fields (PREDICTION_BUY/SELL CLOB path), we still want to fall

@@ -810,3 +810,486 @@ class TestExpectedOutPlumbing:
         )
         assert enriched.swap_amounts is not None
         assert enriched.swap_amounts.slippage_bps is None
+
+
+# ===========================================================================
+# VIB-4320 — Per-protocol extraction-spec overlay
+# ===========================================================================
+
+
+@dataclass
+class _LpExecResult:
+    """ExecutionResult shape rich enough for LP_OPEN / LP_COLLECT_FEES paths.
+
+    The base ``_FakeExecResult`` above only carries SWAP-relevant fields; the
+    enricher's ``_attach_to_result`` reads ``result.<field>`` for typed fields
+    (position_id, lp_close_data, bridge_data) and ``result.extracted_data``
+    for everything else, including ``bin_ids``. Mirror the production
+    dataclass shape so the per-protocol overlay regression tests can route
+    through the real enricher path.
+    """
+
+    success: bool = True
+    transaction_results: list = field(default_factory=list)
+    position_id: int | None = None
+    tick_lower: int | None = None
+    tick_upper: int | None = None
+    liquidity: int | None = None
+    lp_open_data: Any = None
+    lp_close_data: Any = None
+    bridge_data: Any = None
+    swap_amounts: SwapAmounts | None = None
+    protocol_fees: Any = None
+    bin_ids: list[int] | None = None
+    fees0: Any = None
+    fees1: Any = None
+    extracted_data: dict = field(default_factory=dict)
+    extraction_warnings: list = field(default_factory=list)
+
+
+class _PinnedRegistry:
+    """Registry stub that always returns a single pinned parser instance.
+
+    Avoids touching the global ``_default_registry`` between tests.
+    """
+
+    def __init__(self, parser: Any) -> None:
+        self._parser = parser
+
+    def get(self, protocol, chain=None, **kwargs):  # noqa: ARG002
+        return self._parser
+
+
+def _bin_warning_present(warnings_: list[str], field_name: str) -> bool:
+    """True iff any warning mentions ``'<field_name>'`` (SUPPORTED_EXTRACTIONS shape)."""
+    needle = f"'{field_name}'"
+    return any(needle in w for w in warnings_)
+
+
+class TestExtractionSpecPerProtocolOverlay:
+    """VIB-4320 — per-protocol extraction-spec overlay.
+
+    Generic ``EXTRACTION_SPECS`` is protocol-neutral; TJ-V2-only fields like
+    ``bin_ids`` live in ``EXTRACTION_SPECS_BY_PROTOCOL`` and are appended onto
+    the merged spec only when the resolved protocol matches.
+    """
+
+    # ----- 1. Uniswap V3 LP_OPEN no longer emits the bin_ids capability warning.
+
+    def test_uniswap_v3_lp_open_no_bin_ids_warning(self) -> None:
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            UniswapV3ReceiptParser,
+        )
+
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="uniswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="uniswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for uniswap_v3 LP_OPEN: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 2. PancakeSwap V3 LP_OPEN no longer emits the bin_ids warning.
+
+    def test_pancakeswap_v3_lp_open_no_bin_ids_warning(self) -> None:
+        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+            PancakeSwapV3ReceiptParser,
+        )
+
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="pancakeswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="pancakeswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for pancakeswap_v3 LP_OPEN: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 3. Uniswap V3 LP_COLLECT_FEES: no bin_ids warning;
+    #         fees0/fees1 warnings still fire (VIB-4344 follow-up).
+
+    def test_uniswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            UniswapV3ReceiptParser,
+        )
+
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_COLLECT_FEES", protocol="uniswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="uniswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for uniswap_v3 LP_COLLECT_FEES: "
+            f"{enriched.extraction_warnings}"
+        )
+        # fees0 / fees1 are genuinely unsupported on Uniswap V3 today (VIB-4344
+        # follow-up). Their SUPPORTED_EXTRACTIONS warning must still fire so
+        # the fee-harvest gap stays visible until the extractors are
+        # implemented; merely moving them into the overlay would silence the
+        # signal without fixing the underlying gap.
+        assert _bin_warning_present(enriched.extraction_warnings, "fees0"), (
+            f"Expected fees0 warning still fires: {enriched.extraction_warnings}"
+        )
+        assert _bin_warning_present(enriched.extraction_warnings, "fees1"), (
+            f"Expected fees1 warning still fires: {enriched.extraction_warnings}"
+        )
+
+    # ----- 4. PancakeSwap V3 LP_COLLECT_FEES: no bin_ids warning.
+
+    def test_pancakeswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
+        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+            PancakeSwapV3ReceiptParser,
+        )
+
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_COLLECT_FEES", protocol="pancakeswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="pancakeswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for pancakeswap_v3 LP_COLLECT_FEES: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 5. TraderJoe V2 LP_OPEN still extracts bin_ids into extracted_data,
+    #         AND the bin_ids warning does NOT fire (TJ V2 parser does not
+    #         declare SUPPORTED_EXTRACTIONS — the capability check skips when
+    #         the parser omits the declaration).
+
+    def test_traderjoe_v2_lp_open_still_extracts_bin_ids_into_extracted_data(self) -> None:
+        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+            EVENT_TOPICS,
+            TraderJoeV2ReceiptParser,
+        )
+
+        wallet = "0x" + "11" * 20
+        pool = "0x" + "22" * 20
+        bin_ids = [8388607, 8388608, 8388609]
+
+        # ABI encoding for DepositedToBins data — mirror tests/unit/connectors/
+        # traderjoe_v2/test_traderjoe_v2_receipt_parser_extras.py::_bins_data
+        def _uint256_hex(value: int) -> str:
+            return f"{value:064x}"
+
+        ids_offset_hex = _uint256_hex(0x40)
+        amounts_offset = 0x40 + 32 + len(bin_ids) * 32
+        amounts_offset_hex = _uint256_hex(amounts_offset)
+        ids_len_hex = _uint256_hex(len(bin_ids))
+        ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
+        amounts_len_hex = _uint256_hex(0)
+        data_hex = (
+            "0x"
+            + ids_offset_hex
+            + amounts_offset_hex
+            + ids_len_hex
+            + ids_elements
+            + amounts_len_hex
+        )
+
+        topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
+        deposit_log = {
+            "topics": [EVENT_TOPICS["DepositedToBins"], topic_addr, topic_addr],
+            "address": pool,
+            "data": data_hex,
+            "logIndex": 0,
+        }
+
+        parser = TraderJoeV2ReceiptParser()
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(
+            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
+        )
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="traderjoe_v2")
+        context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.extracted_data.get("bin_ids") == bin_ids, (
+            f"TJ V2 bin_ids missing from extracted_data: {enriched.extracted_data}"
+        )
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for traderjoe_v2 LP_OPEN: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 6. LPPositionTracker._extract_bin_ids reads the enriched result.
+
+    def test_lp_position_tracker_captures_bin_ids_after_enrichment(self) -> None:
+        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+            EVENT_TOPICS,
+            TraderJoeV2ReceiptParser,
+        )
+        from almanak.framework.strategies.lp_position_tracker import LPPositionTracker
+
+        wallet = "0x" + "11" * 20
+        pool = "0x" + "22" * 20
+        bin_ids = [8388607, 8388608, 8388609]
+
+        def _uint256_hex(value: int) -> str:
+            return f"{value:064x}"
+
+        ids_offset_hex = _uint256_hex(0x40)
+        amounts_offset_hex = _uint256_hex(0x40 + 32 + len(bin_ids) * 32)
+        ids_len_hex = _uint256_hex(len(bin_ids))
+        ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
+        amounts_len_hex = _uint256_hex(0)
+        data_hex = (
+            "0x"
+            + ids_offset_hex
+            + amounts_offset_hex
+            + ids_len_hex
+            + ids_elements
+            + amounts_len_hex
+        )
+        topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
+        deposit_log = {
+            "topics": [EVENT_TOPICS["DepositedToBins"], topic_addr, topic_addr],
+            "address": pool,
+            "data": data_hex,
+            "logIndex": 0,
+        }
+
+        parser = TraderJoeV2ReceiptParser()
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(
+            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
+        )
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="traderjoe_v2")
+        context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        captured = LPPositionTracker._extract_bin_ids(enriched)
+        assert captured == bin_ids, (
+            f"LPPositionTracker did not pick up bin_ids from enriched result: "
+            f"captured={captured} expected={bin_ids} "
+            f"extracted_data={enriched.extracted_data}"
+        )
+
+    # ----- 6b. TraderJoe V2 LP_COLLECT_FEES (nitpick from CodeRabbit on PR #2269).
+
+    def test_traderjoe_v2_lp_collect_fees_still_extracts_bin_ids_into_extracted_data(
+        self,
+    ) -> None:
+        """LP_COLLECT_FEES emits ``WithdrawnFromBins`` (fees are withdrawn from
+        bins), so the overlay must keep ``bin_ids`` extraction wired for this
+        intent type the same way LP_OPEN does."""
+        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+            EVENT_TOPICS,
+            TraderJoeV2ReceiptParser,
+        )
+
+        wallet = "0x" + "11" * 20
+        pool = "0x" + "22" * 20
+        bin_ids = [8388607, 8388608, 8388609]
+
+        def _uint256_hex(value: int) -> str:
+            return f"{value:064x}"
+
+        ids_offset_hex = _uint256_hex(0x40)
+        amounts_offset_hex = _uint256_hex(0x40 + 32 + len(bin_ids) * 32)
+        ids_len_hex = _uint256_hex(len(bin_ids))
+        ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
+        amounts_len_hex = _uint256_hex(0)
+        data_hex = (
+            "0x"
+            + ids_offset_hex
+            + amounts_offset_hex
+            + ids_len_hex
+            + ids_elements
+            + amounts_len_hex
+        )
+        topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
+        withdraw_log = {
+            "topics": [EVENT_TOPICS["WithdrawnFromBins"], topic_addr, topic_addr],
+            "address": pool,
+            "data": data_hex,
+            "logIndex": 0,
+        }
+
+        parser = TraderJoeV2ReceiptParser()
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(
+            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[withdraw_log]))]
+        )
+        intent = _FakeIntent(intent_type="LP_COLLECT_FEES", protocol="traderjoe_v2")
+        context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.extracted_data.get("bin_ids") == bin_ids, (
+            f"TJ V2 bin_ids missing from extracted_data on LP_COLLECT_FEES: "
+            f"{enriched.extracted_data}"
+        )
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for traderjoe_v2 LP_COLLECT_FEES: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 6c. Protocol aliases must canonicalise into the overlay (Codex P2 fix).
+
+    def test_traderjoe_v2_alias_normalized_for_overlay_lookup(self) -> None:
+        """``ReceiptParserRegistry.get`` normalises aliases like
+        ``trader-joe-v2`` to ``traderjoe_v2``. The overlay lookup must do the
+        same — otherwise an aliased intent gets the base spec, ``extract_bin_ids``
+        is never invoked, and downstream LP close/fee collection cannot reuse
+        the captured bins. Regression guard for the Codex P2 finding on PR #2269.
+        """
+        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+            EVENT_TOPICS,
+            TraderJoeV2ReceiptParser,
+        )
+
+        wallet = "0x" + "11" * 20
+        pool = "0x" + "22" * 20
+        bin_ids = [4242, 4243]
+
+        def _uint256_hex(value: int) -> str:
+            return f"{value:064x}"
+
+        ids_offset_hex = _uint256_hex(0x40)
+        amounts_offset_hex = _uint256_hex(0x40 + 32 + len(bin_ids) * 32)
+        ids_len_hex = _uint256_hex(len(bin_ids))
+        ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
+        amounts_len_hex = _uint256_hex(0)
+        data_hex = (
+            "0x"
+            + ids_offset_hex
+            + amounts_offset_hex
+            + ids_len_hex
+            + ids_elements
+            + amounts_len_hex
+        )
+        topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
+        deposit_log = {
+            "topics": [EVENT_TOPICS["DepositedToBins"], topic_addr, topic_addr],
+            "address": pool,
+            "data": data_hex,
+            "logIndex": 0,
+        }
+
+        parser = TraderJoeV2ReceiptParser()
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(
+            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
+        )
+        # Use a non-canonical alias on both intent and context.
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="trader-joe-v2")
+        context = _FakeContext(chain="avalanche", protocol="trader-joe-v2")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.extracted_data.get("bin_ids") == bin_ids, (
+            "Aliased TraderJoe V2 protocol must still flow through the overlay "
+            f"and populate bin_ids; got: {enriched.extracted_data}"
+        )
+        assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
+            f"Unexpected bin_ids warning for aliased traderjoe_v2: "
+            f"{enriched.extraction_warnings}"
+        )
+
+    # ----- 7. Pure unit test of _merge_spec_with_overlay.
+
+    def test_overlay_merge_dedup_and_order(self) -> None:
+        # (a) unknown protocol returns base unchanged.
+        base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
+        merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "no_such_protocol")
+        assert merged == base
+        # (b) overlay fields append at the tail.
+        merged_tj = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
+        assert merged_tj[: len(base)] == base, "base fields must come first"
+        assert merged_tj[-1] == "bin_ids", "overlay field appended at tail"
+        # (c) duplicates collapse — overlay containing a field already in base
+        # must not duplicate it. Drive this by temporarily extending the
+        # overlay class attribute and restoring it.
+        saved = ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.get("__test__", None)
+        try:
+            ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test__"] = {
+                # ``position_id`` is already in base LP_OPEN spec — must dedup.
+                "LP_OPEN": ["position_id", "bin_ids", "position_id"],
+            }
+            merged_dedup = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "__test__")
+            assert merged_dedup.count("position_id") == 1
+            assert merged_dedup.count("bin_ids") == 1
+            # base ordering must be preserved verbatim
+            assert merged_dedup[: len(base)] == base
+        finally:
+            if saved is None:
+                ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.pop("__test__", None)
+            else:
+                ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test__"] = saved
+        # (d) protocol=None returns base.
+        merged_none = ResultEnricher._merge_spec_with_overlay("LP_OPEN", None)
+        assert merged_none == base
+
+    # ----- 8. Forward-compat guard: a parser that declares
+    #         SUPPORTED_EXTRACTIONS with Uniswap-V3-style fields under
+    #         protocol="sushiswap_v3" must not emit any bin_ids / fees0 /
+    #         fees1 warning once the per-protocol overlay is in place. If
+    #         SushiSwap V3 (or any V3 fork) standardises on
+    #         SUPPORTED_EXTRACTIONS later, this catches a regression where
+    #         the generic spec silently reintroduces bin_ids.
+
+    def test_sushiswap_v3_lp_open_no_warning_when_supported_extractions_declared(self) -> None:
+        class _SyntheticV3Parser:
+            """A SushiSwap-V3-style parser that DOES declare SUPPORTED_EXTRACTIONS.
+
+            Mirrors the Uniswap V3 declaration shape so we can assert the
+            overlay still suppresses bin_ids for protocols that have not
+            implemented it.
+            """
+
+            SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+                {
+                    "position_id",
+                    "swap_amounts",
+                    "tick_lower",
+                    "tick_upper",
+                    "liquidity",
+                    "lp_open_data",
+                    "lp_close_data",
+                    "protocol_fees",
+                }
+            )
+
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            def parse_receipt(self, receipt: Any) -> Any:  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+        parser = _SyntheticV3Parser()
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="sushiswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="sushiswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        # Spec is the generic LP_OPEN — overlay only adds ``bin_ids`` for
+        # ``traderjoe_v2``. The synthetic V3 parser declares everything in
+        # base spec, so no SUPPORTED_EXTRACTIONS warning for any field.
+        for field_name in ("bin_ids", "fees0", "fees1"):
+            assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
+                f"Unexpected {field_name!r} warning for sushiswap_v3 LP_OPEN: "
+                f"{enriched.extraction_warnings}"
+            )
