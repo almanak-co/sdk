@@ -9,6 +9,7 @@ Supported chains:
 - Optimism
 - Polygon
 - Base
+- Avalanche
 
 Example:
     from almanak.framework.connectors.uniswap_v3 import UniswapV3Adapter, UniswapV3Config
@@ -178,5 +179,6 @@ register_connector(
         "optimism",
         "polygon",
         "base",
+        "avalanche",
     ),
 )
