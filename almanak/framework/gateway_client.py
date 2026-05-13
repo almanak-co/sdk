@@ -277,6 +277,7 @@ class GatewayClient:
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
+        self._teardown_stub: gateway_pb2_grpc.TeardownServiceStub | None = None
         # T24 / VIB-4210: PositionService stub for `ax positions reconcile`.
         self._position_stub: gateway_pb2_grpc.PositionServiceStub | None = None
         self._gateway_health_stub: gateway_pb2_grpc.HealthStub | None = None
@@ -383,6 +384,13 @@ class GatewayClient:
         return self._lifecycle_stub
 
     @property
+    def teardown(self) -> gateway_pb2_grpc.TeardownServiceStub:
+        """Get TeardownService stub. Raises if not connected."""
+        if self._teardown_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._teardown_stub
+
+    @property
     def position(self) -> gateway_pb2_grpc.PositionServiceStub:
         """Get PositionService stub (T24 / VIB-4210). Raises if not connected.
 
@@ -447,6 +455,9 @@ class GatewayClient:
         # Initialize Lifecycle service stub
         self._lifecycle_stub = gateway_pb2_grpc.LifecycleServiceStub(self._channel)
 
+        # Initialize Teardown service stub
+        self._teardown_stub = gateway_pb2_grpc.TeardownServiceStub(self._channel)
+
         # Initialize Position service stub (T24 / VIB-4210)
         self._position_stub = gateway_pb2_grpc.PositionServiceStub(self._channel)
 
@@ -476,6 +487,7 @@ class GatewayClient:
             self._polymarket_stub = None
             self._enso_stub = None
             self._lifecycle_stub = None
+            self._teardown_stub = None
             self._position_stub = None
             logger.info("Disconnected from gateway")
 

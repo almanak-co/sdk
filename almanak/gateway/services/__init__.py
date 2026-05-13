@@ -14,6 +14,7 @@ This package contains the gRPC service implementations for the gateway:
 - EnsoService: Enso Finance routing API proxy
 - TokenService: Unified token resolution and on-chain metadata discovery
 - LifecycleService: Agent state and command management (V2 deployment)
+- TeardownService: Hosted teardown state access through the gateway boundary
 - PositionService: On-chain reconciliation of position_registry (T24 / VIB-4210)
 """
 
@@ -30,6 +31,7 @@ from almanak.gateway.services.position_service import PositionServiceServicer
 from almanak.gateway.services.rpc_service import RpcServiceServicer
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
 from almanak.gateway.services.state_service import StateServiceServicer
+from almanak.gateway.services.teardown_service import TeardownServiceServicer
 from almanak.gateway.services.token_service import TokenServiceServicer
 
 __all__ = [
@@ -40,6 +42,7 @@ __all__ = [
     "StateServiceServicer",
     "ExecutionServiceServicer",
     "LifecycleServiceServicer",
+    "TeardownServiceServicer",
     "ObserveServiceServicer",
     "RpcServiceServicer",
     "IntegrationServiceServicer",

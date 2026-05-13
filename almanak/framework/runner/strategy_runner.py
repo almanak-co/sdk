@@ -5113,6 +5113,11 @@ class StrategyRunner:
         try:
             should_teardown = strategy.should_teardown()
         except Exception as e:
+            from ..deployment import is_hosted
+
+            if is_hosted():
+                logger.error(f"Error checking hosted teardown status for {strategy_id}: {e}")
+                raise
             logger.warning(f"Error checking teardown status for {strategy_id}: {e}")
             return None
 
@@ -5125,48 +5130,26 @@ class StrategyRunner:
                 strategy.acknowledge_teardown_request()
                 logger.info(f"Acknowledged teardown request for {strategy_id}")
             except Exception as e:  # noqa: BLE001
+                from ..deployment import is_hosted
+
+                if is_hosted():
+                    logger.error(f"Failed to acknowledge hosted teardown request: {e}")
+                    raise
                 logger.warning(f"Failed to acknowledge teardown request: {e}")
 
-        # Import TeardownMode here to avoid circular imports
-        from ..deployment import is_hosted
+        # Import TeardownMode here to avoid circular imports.
         from ..local_paths import LocalPathError
-        from ..teardown import TeardownMode, get_teardown_state_manager
+        from ..teardown import TeardownMode, get_teardown_state_manager_for_runtime
 
-        # Get the requested teardown mode from the request. The local
-        # teardown state manager is SQLite-backed (VIB-3761) and only
-        # exists in local mode; in hosted mode the teardown channel
-        # lives in the gateway/Postgres, so the helper raises
-        # ``LocalPathError``.
-        #
-        # KNOWN GAP — hosted-mode operator-mode lookup not yet wired
-        # (VIB-3810, follow-up to PR #1977): a hosted-mode runner has
-        # no in-process path to read the operator's chosen teardown
-        # mode, so we default to ``SOFT`` (graceful). When the
-        # ``should_teardown()`` strategy hook fires in hosted mode,
-        # that's almost always a strategy-self-signalled graceful
-        # unwind — SOFT is the right default for that case. The gap
-        # is a hosted-mode HARD/emergency request from the dashboard
-        # API: it lands in Postgres but the runner does not read
-        # there yet. Logging at WARNING so the gap is visible in
-        # production logs until the gateway-backed lookup is added.
-        #
-        # In *local* mode, a ``LocalPathError`` here is genuinely
-        # unexpected (path-helper misconfiguration); re-raise so the
-        # operator sees it rather than silently downgrading to SOFT.
+        # Read the operator-selected mode from the same runtime channel used
+        # by ``should_teardown``: SQLite in local mode, gateway in hosted mode.
+        # In local mode, a ``LocalPathError`` is a path-helper misconfiguration;
+        # re-raise so the operator sees it rather than silently downgrading.
         try:
-            manager = get_teardown_state_manager()
+            manager = get_teardown_state_manager_for_runtime(gateway_client=self._get_gateway_client())
             request = manager.get_active_request(strategy_id)
         except LocalPathError:
-            if not is_hosted():
-                raise
-            logger.warning(
-                "_check_teardown_requested[%s]: hosted mode — local teardown "
-                "state manager unavailable. Defaulting to SOFT mode "
-                "(gateway-backed lookup not yet wired, so HARD requests made "
-                "via the dashboard API do not reach hosted runners).",
-                strategy_id,
-            )
-            request = None
+            raise
         mode = request.mode if request else TeardownMode.SOFT
 
         logger.info(f"Teardown requested for {strategy_id} (mode={mode.value})")

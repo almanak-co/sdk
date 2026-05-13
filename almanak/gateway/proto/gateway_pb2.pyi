@@ -8674,6 +8674,616 @@ class WriteAgentCommandResponse(_message.Message):
 Global___WriteAgentCommandResponse: _TypeAlias = WriteAgentCommandResponse  # noqa: Y015
 
 @_typing.final
+class CreateTeardownRequestRequest(_message.Message):
+    """--- TeardownService Messages ---"""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    REQUEST_JSON_FIELD_NUMBER: _builtins.int
+    request_json: _builtins.str
+    """JSON-encoded TeardownRequest.to_dict()"""
+    def __init__(
+        self,
+        *,
+        request_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["request_json", b"request_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CreateTeardownRequestRequest: _TypeAlias = CreateTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class CreateTeardownRequestResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CreateTeardownRequestResponse: _TypeAlias = CreateTeardownRequestResponse  # noqa: Y015
+
+@_typing.final
+class GetTeardownRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetTeardownRequestRequest: _TypeAlias = GetTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class GetActiveTeardownRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetActiveTeardownRequestRequest: _TypeAlias = GetActiveTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class GetTeardownRequestResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    REQUEST_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    request_json: _builtins.str
+    """JSON-encoded TeardownRequest.to_dict()"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        request_json: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "found", b"found", "request_json", b"request_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetTeardownRequestResponse: _TypeAlias = GetTeardownRequestResponse  # noqa: Y015
+
+@_typing.final
+class ListTeardownRequestsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    REQUESTS_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def requests_json(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """JSON-encoded TeardownRequest.to_dict()"""
+
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        requests_json: _abc.Iterable[_builtins.str] | None = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "requests_json", b"requests_json", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ListTeardownRequestsResponse: _TypeAlias = ListTeardownRequestsResponse  # noqa: Y015
+
+@_typing.final
+class UpdateTeardownRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    REQUEST_JSON_FIELD_NUMBER: _builtins.int
+    request_json: _builtins.str
+    """JSON-encoded TeardownRequest.to_dict()"""
+    def __init__(
+        self,
+        *,
+        request_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["request_json", b"request_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpdateTeardownRequestRequest: _TypeAlias = UpdateTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class AckTeardownRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AckTeardownRequestRequest: _TypeAlias = AckTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class MarkTeardownStartedRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    TOTAL_POSITIONS_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    total_positions: _builtins.int
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        total_positions: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "total_positions", b"total_positions"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkTeardownStartedRequest: _TypeAlias = MarkTeardownStartedRequest  # noqa: Y015
+
+@_typing.final
+class UpdateTeardownProgressRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    POSITIONS_CLOSED_FIELD_NUMBER: _builtins.int
+    POSITIONS_FAILED_FIELD_NUMBER: _builtins.int
+    CURRENT_PHASE_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    positions_closed: _builtins.int
+    positions_failed: _builtins.int
+    current_phase: _builtins.str
+    """Optional TeardownPhase value"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        positions_closed: _builtins.int = ...,
+        positions_failed: _builtins.int = ...,
+        current_phase: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["current_phase", b"current_phase", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpdateTeardownProgressRequest: _TypeAlias = UpdateTeardownProgressRequest  # noqa: Y015
+
+@_typing.final
+class MarkTeardownCompletedRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    RESULT_JSON_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    result_json: _builtins.str
+    """Optional JSON object"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        result_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["result_json", b"result_json", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkTeardownCompletedRequest: _TypeAlias = MarkTeardownCompletedRequest  # noqa: Y015
+
+@_typing.final
+class MarkTeardownFailedRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    error_message: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        error_message: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error_message", b"error_message", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkTeardownFailedRequest: _TypeAlias = MarkTeardownFailedRequest  # noqa: Y015
+
+@_typing.final
+class MarkTeardownCancelledRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkTeardownCancelledRequest: _TypeAlias = MarkTeardownCancelledRequest  # noqa: Y015
+
+@_typing.final
+class RequestTeardownCancelRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RequestTeardownCancelRequest: _TypeAlias = RequestTeardownCancelRequest  # noqa: Y015
+
+@_typing.final
+class DeleteTeardownRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DeleteTeardownRequestRequest: _TypeAlias = DeleteTeardownRequestRequest  # noqa: Y015
+
+@_typing.final
+class TeardownRequestMutationResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    FOUND_FIELD_NUMBER: _builtins.int
+    REQUEST_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    found: _builtins.bool
+    request_json: _builtins.str
+    """JSON-encoded TeardownRequest.to_dict()"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        found: _builtins.bool = ...,
+        request_json: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "found", b"found", "request_json", b"request_json", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TeardownRequestMutationResponse: _TypeAlias = TeardownRequestMutationResponse  # noqa: Y015
+
+@_typing.final
+class BoolMutationResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    VALUE_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    value: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        value: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "value", b"value"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___BoolMutationResponse: _TypeAlias = BoolMutationResponse  # noqa: Y015
+
+@_typing.final
+class SaveTeardownStateRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STATE_JSON_FIELD_NUMBER: _builtins.int
+    state_json: _builtins.str
+    """JSON-encoded TeardownState"""
+    def __init__(
+        self,
+        *,
+        state_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["state_json", b"state_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveTeardownStateRequest: _TypeAlias = SaveTeardownStateRequest  # noqa: Y015
+
+@_typing.final
+class SaveTeardownStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveTeardownStateResponse: _TypeAlias = SaveTeardownStateResponse  # noqa: Y015
+
+@_typing.final
+class LoadTeardownStateRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LoadTeardownStateRequest: _TypeAlias = LoadTeardownStateRequest  # noqa: Y015
+
+@_typing.final
+class LoadTeardownStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    STATE_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    state_json: _builtins.str
+    """JSON-encoded TeardownState"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        state_json: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "found", b"found", "state_json", b"state_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LoadTeardownStateResponse: _TypeAlias = LoadTeardownStateResponse  # noqa: Y015
+
+@_typing.final
+class DeleteTeardownStateRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TEARDOWN_ID_FIELD_NUMBER: _builtins.int
+    teardown_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        teardown_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["teardown_id", b"teardown_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DeleteTeardownStateRequest: _TypeAlias = DeleteTeardownStateRequest  # noqa: Y015
+
+@_typing.final
+class DeleteTeardownStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DeleteTeardownStateResponse: _TypeAlias = DeleteTeardownStateResponse  # noqa: Y015
+
+@_typing.final
+class CreateApprovalRequestRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TEARDOWN_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    LEVEL_FIELD_NUMBER: _builtins.int
+    REQUEST_JSON_FIELD_NUMBER: _builtins.int
+    EXPIRES_AT_FIELD_NUMBER: _builtins.int
+    teardown_id: _builtins.str
+    strategy_id: _builtins.str
+    level: _builtins.str
+    request_json: _builtins.str
+    expires_at: _builtins.str
+    """ISO 8601"""
+    def __init__(
+        self,
+        *,
+        teardown_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        level: _builtins.str = ...,
+        request_json: _builtins.str = ...,
+        expires_at: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["expires_at", b"expires_at", "level", b"level", "request_json", b"request_json", "strategy_id", b"strategy_id", "teardown_id", b"teardown_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CreateApprovalRequestRequest: _TypeAlias = CreateApprovalRequestRequest  # noqa: Y015
+
+@_typing.final
+class CreateApprovalRequestResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CreateApprovalRequestResponse: _TypeAlias = CreateApprovalRequestResponse  # noqa: Y015
+
+@_typing.final
+class GetApprovalResponseRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TEARDOWN_ID_FIELD_NUMBER: _builtins.int
+    LEVEL_FIELD_NUMBER: _builtins.int
+    teardown_id: _builtins.str
+    level: _builtins.str
+    def __init__(
+        self,
+        *,
+        teardown_id: _builtins.str = ...,
+        level: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["level", b"level", "teardown_id", b"teardown_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetApprovalResponseRequest: _TypeAlias = GetApprovalResponseRequest  # noqa: Y015
+
+@_typing.final
+class GetApprovalResponseResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    RESPONSE_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    response_json: _builtins.str
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        response_json: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "found", b"found", "response_json", b"response_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetApprovalResponseResponse: _TypeAlias = GetApprovalResponseResponse  # noqa: Y015
+
+@_typing.final
+class WriteApprovalResponseRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TEARDOWN_ID_FIELD_NUMBER: _builtins.int
+    LEVEL_FIELD_NUMBER: _builtins.int
+    RESPONSE_JSON_FIELD_NUMBER: _builtins.int
+    teardown_id: _builtins.str
+    level: _builtins.str
+    response_json: _builtins.str
+    def __init__(
+        self,
+        *,
+        teardown_id: _builtins.str = ...,
+        level: _builtins.str = ...,
+        response_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["level", b"level", "response_json", b"response_json", "teardown_id", b"teardown_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteApprovalResponseRequest: _TypeAlias = WriteApprovalResponseRequest  # noqa: Y015
+
+@_typing.final
+class GetLatestPendingApprovalRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLatestPendingApprovalRequest: _TypeAlias = GetLatestPendingApprovalRequest  # noqa: Y015
+
+@_typing.final
+class GetLatestPendingApprovalResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    APPROVAL_JSON_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    approval_json: _builtins.str
+    """JSON object with teardown_id, level, strategy_id, request_json, created_at, expires_at"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        approval_json: _builtins.str = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["approval_json", b"approval_json", "error", b"error", "found", b"found"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLatestPendingApprovalResponse: _TypeAlias = GetLatestPendingApprovalResponse  # noqa: Y015
+
+@_typing.final
+class WriteApprovalResponseByStrategyRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    RESPONSE_JSON_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    response_json: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        response_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["response_json", b"response_json", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteApprovalResponseByStrategyRequest: _TypeAlias = WriteApprovalResponseByStrategyRequest  # noqa: Y015
+
+@_typing.final
 class GeckoTerminalOHLCVRequest(_message.Message):
     """=============================================================================
     GeckoTerminal Integration Messages

@@ -5631,6 +5631,1038 @@ class LifecycleService(object):
             _registered_method=True)
 
 
+class TeardownServiceStub(object):
+    """=============================================================================
+    TeardownService - hosted teardown state routing (V2 deployment)
+    =============================================================================
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.CreateTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/CreateTeardownRequest',
+                request_serializer=gateway__pb2.CreateTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CreateTeardownRequestResponse.FromString,
+                _registered_method=True)
+        self.GetTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetTeardownRequest',
+                request_serializer=gateway__pb2.GetTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetTeardownRequestResponse.FromString,
+                _registered_method=True)
+        self.GetActiveTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetActiveTeardownRequest',
+                request_serializer=gateway__pb2.GetActiveTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetTeardownRequestResponse.FromString,
+                _registered_method=True)
+        self.GetPendingTeardownRequests = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetPendingTeardownRequests',
+                request_serializer=gateway__pb2.Empty.SerializeToString,
+                response_deserializer=gateway__pb2.ListTeardownRequestsResponse.FromString,
+                _registered_method=True)
+        self.GetAllActiveTeardownRequests = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetAllActiveTeardownRequests',
+                request_serializer=gateway__pb2.Empty.SerializeToString,
+                response_deserializer=gateway__pb2.ListTeardownRequestsResponse.FromString,
+                _registered_method=True)
+        self.GetAllTeardownRequests = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetAllTeardownRequests',
+                request_serializer=gateway__pb2.Empty.SerializeToString,
+                response_deserializer=gateway__pb2.ListTeardownRequestsResponse.FromString,
+                _registered_method=True)
+        self.UpdateTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/UpdateTeardownRequest',
+                request_serializer=gateway__pb2.UpdateTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.AcknowledgeTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/AcknowledgeTeardownRequest',
+                request_serializer=gateway__pb2.AckTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.MarkTeardownStarted = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/MarkTeardownStarted',
+                request_serializer=gateway__pb2.MarkTeardownStartedRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.UpdateTeardownProgress = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/UpdateTeardownProgress',
+                request_serializer=gateway__pb2.UpdateTeardownProgressRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.MarkTeardownCompleted = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/MarkTeardownCompleted',
+                request_serializer=gateway__pb2.MarkTeardownCompletedRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.MarkTeardownFailed = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/MarkTeardownFailed',
+                request_serializer=gateway__pb2.MarkTeardownFailedRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.RequestTeardownCancel = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/RequestTeardownCancel',
+                request_serializer=gateway__pb2.RequestTeardownCancelRequest.SerializeToString,
+                response_deserializer=gateway__pb2.BoolMutationResponse.FromString,
+                _registered_method=True)
+        self.MarkTeardownCancelled = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/MarkTeardownCancelled',
+                request_serializer=gateway__pb2.MarkTeardownCancelledRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TeardownRequestMutationResponse.FromString,
+                _registered_method=True)
+        self.DeleteTeardownRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/DeleteTeardownRequest',
+                request_serializer=gateway__pb2.DeleteTeardownRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.BoolMutationResponse.FromString,
+                _registered_method=True)
+        self.SaveTeardownState = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/SaveTeardownState',
+                request_serializer=gateway__pb2.SaveTeardownStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveTeardownStateResponse.FromString,
+                _registered_method=True)
+        self.LoadTeardownState = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/LoadTeardownState',
+                request_serializer=gateway__pb2.LoadTeardownStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.LoadTeardownStateResponse.FromString,
+                _registered_method=True)
+        self.DeleteTeardownState = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/DeleteTeardownState',
+                request_serializer=gateway__pb2.DeleteTeardownStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DeleteTeardownStateResponse.FromString,
+                _registered_method=True)
+        self.CreateApprovalRequest = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/CreateApprovalRequest',
+                request_serializer=gateway__pb2.CreateApprovalRequestRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CreateApprovalRequestResponse.FromString,
+                _registered_method=True)
+        self.GetApprovalResponse = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetApprovalResponse',
+                request_serializer=gateway__pb2.GetApprovalResponseRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetApprovalResponseResponse.FromString,
+                _registered_method=True)
+        self.WriteApprovalResponse = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/WriteApprovalResponse',
+                request_serializer=gateway__pb2.WriteApprovalResponseRequest.SerializeToString,
+                response_deserializer=gateway__pb2.BoolMutationResponse.FromString,
+                _registered_method=True)
+        self.GetLatestPendingApproval = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/GetLatestPendingApproval',
+                request_serializer=gateway__pb2.GetLatestPendingApprovalRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetLatestPendingApprovalResponse.FromString,
+                _registered_method=True)
+        self.WriteApprovalResponseByStrategy = channel.unary_unary(
+                '/almanak.gateway.proto.TeardownService/WriteApprovalResponseByStrategy',
+                request_serializer=gateway__pb2.WriteApprovalResponseByStrategyRequest.SerializeToString,
+                response_deserializer=gateway__pb2.BoolMutationResponse.FromString,
+                _registered_method=True)
+
+
+class TeardownServiceServicer(object):
+    """=============================================================================
+    TeardownService - hosted teardown state routing (V2 deployment)
+    =============================================================================
+
+    """
+
+    def CreateTeardownRequest(self, request, context):
+        """Request half (teardown_requests).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTeardownRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetActiveTeardownRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPendingTeardownRequests(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAllActiveTeardownRequests(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAllTeardownRequests(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateTeardownRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AcknowledgeTeardownRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkTeardownStarted(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateTeardownProgress(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkTeardownCompleted(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkTeardownFailed(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RequestTeardownCancel(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkTeardownCancelled(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteTeardownRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SaveTeardownState(self, request, context):
+        """Adapter half (teardown_execution_state + teardown_approvals).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LoadTeardownState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteTeardownState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateApprovalRequest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetApprovalResponse(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WriteApprovalResponse(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLatestPendingApproval(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WriteApprovalResponseByStrategy(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_TeardownServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'CreateTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateTeardownRequest,
+                    request_deserializer=gateway__pb2.CreateTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.CreateTeardownRequestResponse.SerializeToString,
+            ),
+            'GetTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTeardownRequest,
+                    request_deserializer=gateway__pb2.GetTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.GetTeardownRequestResponse.SerializeToString,
+            ),
+            'GetActiveTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetActiveTeardownRequest,
+                    request_deserializer=gateway__pb2.GetActiveTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.GetTeardownRequestResponse.SerializeToString,
+            ),
+            'GetPendingTeardownRequests': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPendingTeardownRequests,
+                    request_deserializer=gateway__pb2.Empty.FromString,
+                    response_serializer=gateway__pb2.ListTeardownRequestsResponse.SerializeToString,
+            ),
+            'GetAllActiveTeardownRequests': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAllActiveTeardownRequests,
+                    request_deserializer=gateway__pb2.Empty.FromString,
+                    response_serializer=gateway__pb2.ListTeardownRequestsResponse.SerializeToString,
+            ),
+            'GetAllTeardownRequests': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAllTeardownRequests,
+                    request_deserializer=gateway__pb2.Empty.FromString,
+                    response_serializer=gateway__pb2.ListTeardownRequestsResponse.SerializeToString,
+            ),
+            'UpdateTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateTeardownRequest,
+                    request_deserializer=gateway__pb2.UpdateTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'AcknowledgeTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.AcknowledgeTeardownRequest,
+                    request_deserializer=gateway__pb2.AckTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'MarkTeardownStarted': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkTeardownStarted,
+                    request_deserializer=gateway__pb2.MarkTeardownStartedRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'UpdateTeardownProgress': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateTeardownProgress,
+                    request_deserializer=gateway__pb2.UpdateTeardownProgressRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'MarkTeardownCompleted': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkTeardownCompleted,
+                    request_deserializer=gateway__pb2.MarkTeardownCompletedRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'MarkTeardownFailed': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkTeardownFailed,
+                    request_deserializer=gateway__pb2.MarkTeardownFailedRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'RequestTeardownCancel': grpc.unary_unary_rpc_method_handler(
+                    servicer.RequestTeardownCancel,
+                    request_deserializer=gateway__pb2.RequestTeardownCancelRequest.FromString,
+                    response_serializer=gateway__pb2.BoolMutationResponse.SerializeToString,
+            ),
+            'MarkTeardownCancelled': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkTeardownCancelled,
+                    request_deserializer=gateway__pb2.MarkTeardownCancelledRequest.FromString,
+                    response_serializer=gateway__pb2.TeardownRequestMutationResponse.SerializeToString,
+            ),
+            'DeleteTeardownRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteTeardownRequest,
+                    request_deserializer=gateway__pb2.DeleteTeardownRequestRequest.FromString,
+                    response_serializer=gateway__pb2.BoolMutationResponse.SerializeToString,
+            ),
+            'SaveTeardownState': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveTeardownState,
+                    request_deserializer=gateway__pb2.SaveTeardownStateRequest.FromString,
+                    response_serializer=gateway__pb2.SaveTeardownStateResponse.SerializeToString,
+            ),
+            'LoadTeardownState': grpc.unary_unary_rpc_method_handler(
+                    servicer.LoadTeardownState,
+                    request_deserializer=gateway__pb2.LoadTeardownStateRequest.FromString,
+                    response_serializer=gateway__pb2.LoadTeardownStateResponse.SerializeToString,
+            ),
+            'DeleteTeardownState': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteTeardownState,
+                    request_deserializer=gateway__pb2.DeleteTeardownStateRequest.FromString,
+                    response_serializer=gateway__pb2.DeleteTeardownStateResponse.SerializeToString,
+            ),
+            'CreateApprovalRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateApprovalRequest,
+                    request_deserializer=gateway__pb2.CreateApprovalRequestRequest.FromString,
+                    response_serializer=gateway__pb2.CreateApprovalRequestResponse.SerializeToString,
+            ),
+            'GetApprovalResponse': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetApprovalResponse,
+                    request_deserializer=gateway__pb2.GetApprovalResponseRequest.FromString,
+                    response_serializer=gateway__pb2.GetApprovalResponseResponse.SerializeToString,
+            ),
+            'WriteApprovalResponse': grpc.unary_unary_rpc_method_handler(
+                    servicer.WriteApprovalResponse,
+                    request_deserializer=gateway__pb2.WriteApprovalResponseRequest.FromString,
+                    response_serializer=gateway__pb2.BoolMutationResponse.SerializeToString,
+            ),
+            'GetLatestPendingApproval': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLatestPendingApproval,
+                    request_deserializer=gateway__pb2.GetLatestPendingApprovalRequest.FromString,
+                    response_serializer=gateway__pb2.GetLatestPendingApprovalResponse.SerializeToString,
+            ),
+            'WriteApprovalResponseByStrategy': grpc.unary_unary_rpc_method_handler(
+                    servicer.WriteApprovalResponseByStrategy,
+                    request_deserializer=gateway__pb2.WriteApprovalResponseByStrategyRequest.FromString,
+                    response_serializer=gateway__pb2.BoolMutationResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.TeardownService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.TeardownService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class TeardownService(object):
+    """=============================================================================
+    TeardownService - hosted teardown state routing (V2 deployment)
+    =============================================================================
+
+    """
+
+    @staticmethod
+    def CreateTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/CreateTeardownRequest',
+            gateway__pb2.CreateTeardownRequestRequest.SerializeToString,
+            gateway__pb2.CreateTeardownRequestResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetTeardownRequest',
+            gateway__pb2.GetTeardownRequestRequest.SerializeToString,
+            gateway__pb2.GetTeardownRequestResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetActiveTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetActiveTeardownRequest',
+            gateway__pb2.GetActiveTeardownRequestRequest.SerializeToString,
+            gateway__pb2.GetTeardownRequestResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPendingTeardownRequests(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetPendingTeardownRequests',
+            gateway__pb2.Empty.SerializeToString,
+            gateway__pb2.ListTeardownRequestsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAllActiveTeardownRequests(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetAllActiveTeardownRequests',
+            gateway__pb2.Empty.SerializeToString,
+            gateway__pb2.ListTeardownRequestsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAllTeardownRequests(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetAllTeardownRequests',
+            gateway__pb2.Empty.SerializeToString,
+            gateway__pb2.ListTeardownRequestsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/UpdateTeardownRequest',
+            gateway__pb2.UpdateTeardownRequestRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AcknowledgeTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/AcknowledgeTeardownRequest',
+            gateway__pb2.AckTeardownRequestRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkTeardownStarted(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/MarkTeardownStarted',
+            gateway__pb2.MarkTeardownStartedRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateTeardownProgress(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/UpdateTeardownProgress',
+            gateway__pb2.UpdateTeardownProgressRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkTeardownCompleted(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/MarkTeardownCompleted',
+            gateway__pb2.MarkTeardownCompletedRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkTeardownFailed(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/MarkTeardownFailed',
+            gateway__pb2.MarkTeardownFailedRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RequestTeardownCancel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/RequestTeardownCancel',
+            gateway__pb2.RequestTeardownCancelRequest.SerializeToString,
+            gateway__pb2.BoolMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkTeardownCancelled(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/MarkTeardownCancelled',
+            gateway__pb2.MarkTeardownCancelledRequest.SerializeToString,
+            gateway__pb2.TeardownRequestMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteTeardownRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/DeleteTeardownRequest',
+            gateway__pb2.DeleteTeardownRequestRequest.SerializeToString,
+            gateway__pb2.BoolMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveTeardownState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/SaveTeardownState',
+            gateway__pb2.SaveTeardownStateRequest.SerializeToString,
+            gateway__pb2.SaveTeardownStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LoadTeardownState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/LoadTeardownState',
+            gateway__pb2.LoadTeardownStateRequest.SerializeToString,
+            gateway__pb2.LoadTeardownStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteTeardownState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/DeleteTeardownState',
+            gateway__pb2.DeleteTeardownStateRequest.SerializeToString,
+            gateway__pb2.DeleteTeardownStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateApprovalRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/CreateApprovalRequest',
+            gateway__pb2.CreateApprovalRequestRequest.SerializeToString,
+            gateway__pb2.CreateApprovalRequestResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetApprovalResponse(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetApprovalResponse',
+            gateway__pb2.GetApprovalResponseRequest.SerializeToString,
+            gateway__pb2.GetApprovalResponseResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WriteApprovalResponse(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/WriteApprovalResponse',
+            gateway__pb2.WriteApprovalResponseRequest.SerializeToString,
+            gateway__pb2.BoolMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLatestPendingApproval(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/GetLatestPendingApproval',
+            gateway__pb2.GetLatestPendingApprovalRequest.SerializeToString,
+            gateway__pb2.GetLatestPendingApprovalResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WriteApprovalResponseByStrategy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.TeardownService/WriteApprovalResponseByStrategy',
+            gateway__pb2.WriteApprovalResponseByStrategyRequest.SerializeToString,
+            gateway__pb2.BoolMutationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class PositionServiceStub(object):
     """=============================================================================
     PositionService — on-chain reconciliation of position_registry (T24 / VIB-4210).

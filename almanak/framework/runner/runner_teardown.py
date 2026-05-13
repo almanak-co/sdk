@@ -375,16 +375,14 @@ async def execute_teardown(  # noqa: C901
     Returns:
         IterationResult with teardown status
     """
-    from ..teardown import get_teardown_state_manager
+    from ..teardown import get_teardown_state_manager_for_runtime
     from .runner_models import IterationResult, IterationStatus
 
     strategy_id = strategy.strategy_id
-    # Both modes have a real cross-process teardown channel now (VIB-4049):
-    # SQLite locally, Postgres in hosted mode. The factory returns the
-    # right backend; any error here is a genuine misconfiguration (e.g.
-    # local strategy folder unresolvable, hosted DB URL unreachable) and
-    # should propagate.
-    manager: Any = get_teardown_state_manager()
+    # Both modes have a real cross-process teardown channel: SQLite locally,
+    # gateway-backed in hosted mode. Any error here is a genuine
+    # misconfiguration and should propagate.
+    manager: Any = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
     request: Any = manager.get_active_request(strategy_id)
 
     # Step T1: Create market snapshot (SAME as normal decide() path)

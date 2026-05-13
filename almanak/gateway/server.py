@@ -48,6 +48,7 @@ from almanak.gateway.services import (
     RpcServiceServicer,
     SimulationServiceServicer,
     StateServiceServicer,
+    TeardownServiceServicer,
     TokenServiceServicer,
 )
 from almanak.gateway.timeline import get_timeline_store
@@ -215,6 +216,7 @@ class GatewayServer:
         self._enso_servicer: EnsoServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
+        self._teardown_servicer: TeardownServiceServicer | None = None
         # T24 / VIB-4210: PositionService for reconciliation control-plane RPC.
         # Holds in-process references to state_servicer + rpc_servicer for
         # registry reads + chain enumeration (ADR §4 algorithm steps 3–4).
@@ -411,6 +413,9 @@ class GatewayServer:
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
         gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
 
+        self._teardown_servicer = TeardownServiceServicer(settings=self.settings)
+        gateway_pb2_grpc.add_TeardownServiceServicer_to_server(self._teardown_servicer, self.server)
+
         # T24 / VIB-4210: PositionService — control-plane reconciliation RPC.
         # Holds cross-servicer references for in-process chain enumeration
         # (RpcServiceServicer) + registry reads/writes (StateServiceServicer).
@@ -426,7 +431,7 @@ class GatewayServer:
 
         logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
         logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
-        logger.debug("Registered Dashboard, Token, Lifecycle, and Position services")
+        logger.debug("Registered Dashboard, Token, Lifecycle, Teardown, and Position services")
 
     # ------------------------------------------------------------------
     # Phase 11 helper: market service warmup

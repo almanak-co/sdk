@@ -2919,6 +2919,198 @@ message WriteAgentCommandResponse {
 }
 
 // =============================================================================
+// TeardownService - hosted teardown state routing (V2 deployment)
+// =============================================================================
+
+service TeardownService {
+  // Request half (teardown_requests).
+  rpc CreateTeardownRequest(CreateTeardownRequestRequest) returns (CreateTeardownRequestResponse);
+  rpc GetTeardownRequest(GetTeardownRequestRequest) returns (GetTeardownRequestResponse);
+  rpc GetActiveTeardownRequest(GetActiveTeardownRequestRequest) returns (GetTeardownRequestResponse);
+  rpc GetPendingTeardownRequests(Empty) returns (ListTeardownRequestsResponse);
+  rpc GetAllActiveTeardownRequests(Empty) returns (ListTeardownRequestsResponse);
+  rpc GetAllTeardownRequests(Empty) returns (ListTeardownRequestsResponse);
+  rpc UpdateTeardownRequest(UpdateTeardownRequestRequest) returns (TeardownRequestMutationResponse);
+  rpc AcknowledgeTeardownRequest(AckTeardownRequestRequest) returns (TeardownRequestMutationResponse);
+  rpc MarkTeardownStarted(MarkTeardownStartedRequest) returns (TeardownRequestMutationResponse);
+  rpc UpdateTeardownProgress(UpdateTeardownProgressRequest) returns (TeardownRequestMutationResponse);
+  rpc MarkTeardownCompleted(MarkTeardownCompletedRequest) returns (TeardownRequestMutationResponse);
+  rpc MarkTeardownFailed(MarkTeardownFailedRequest) returns (TeardownRequestMutationResponse);
+  rpc RequestTeardownCancel(RequestTeardownCancelRequest) returns (BoolMutationResponse);
+  rpc MarkTeardownCancelled(MarkTeardownCancelledRequest) returns (TeardownRequestMutationResponse);
+  rpc DeleteTeardownRequest(DeleteTeardownRequestRequest) returns (BoolMutationResponse);
+
+  // Adapter half (teardown_execution_state + teardown_approvals).
+  rpc SaveTeardownState(SaveTeardownStateRequest) returns (SaveTeardownStateResponse);
+  rpc LoadTeardownState(LoadTeardownStateRequest) returns (LoadTeardownStateResponse);
+  rpc DeleteTeardownState(DeleteTeardownStateRequest) returns (DeleteTeardownStateResponse);
+  rpc CreateApprovalRequest(CreateApprovalRequestRequest) returns (CreateApprovalRequestResponse);
+  rpc GetApprovalResponse(GetApprovalResponseRequest) returns (GetApprovalResponseResponse);
+  rpc WriteApprovalResponse(WriteApprovalResponseRequest) returns (BoolMutationResponse);
+  rpc GetLatestPendingApproval(GetLatestPendingApprovalRequest) returns (GetLatestPendingApprovalResponse);
+  rpc WriteApprovalResponseByStrategy(WriteApprovalResponseByStrategyRequest) returns (BoolMutationResponse);
+}
+
+// --- TeardownService Messages ---
+
+message CreateTeardownRequestRequest {
+  string request_json = 1; // JSON-encoded TeardownRequest.to_dict()
+}
+
+message CreateTeardownRequestResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetTeardownRequestRequest {
+  string strategy_id = 1;
+}
+
+message GetActiveTeardownRequestRequest {
+  string strategy_id = 1;
+}
+
+message GetTeardownRequestResponse {
+  bool found = 1;
+  string request_json = 2; // JSON-encoded TeardownRequest.to_dict()
+  string error = 3;
+}
+
+message ListTeardownRequestsResponse {
+  bool success = 1;
+  repeated string requests_json = 2; // JSON-encoded TeardownRequest.to_dict()
+  string error = 3;
+}
+
+message UpdateTeardownRequestRequest {
+  string request_json = 1; // JSON-encoded TeardownRequest.to_dict()
+}
+
+message AckTeardownRequestRequest {
+  string strategy_id = 1;
+}
+
+message MarkTeardownStartedRequest {
+  string strategy_id = 1;
+  int32 total_positions = 2;
+}
+
+message UpdateTeardownProgressRequest {
+  string strategy_id = 1;
+  int32 positions_closed = 2;
+  int32 positions_failed = 3;
+  string current_phase = 4; // Optional TeardownPhase value
+}
+
+message MarkTeardownCompletedRequest {
+  string strategy_id = 1;
+  string result_json = 2; // Optional JSON object
+}
+
+message MarkTeardownFailedRequest {
+  string strategy_id = 1;
+  string error_message = 2;
+}
+
+message MarkTeardownCancelledRequest {
+  string strategy_id = 1;
+}
+
+message RequestTeardownCancelRequest {
+  string strategy_id = 1;
+}
+
+message DeleteTeardownRequestRequest {
+  string strategy_id = 1;
+}
+
+message TeardownRequestMutationResponse {
+  bool success = 1;
+  bool found = 2;
+  string request_json = 3; // JSON-encoded TeardownRequest.to_dict()
+  string error = 4;
+}
+
+message BoolMutationResponse {
+  bool success = 1;
+  bool value = 2;
+  string error = 3;
+}
+
+message SaveTeardownStateRequest {
+  string state_json = 1; // JSON-encoded TeardownState
+}
+
+message SaveTeardownStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message LoadTeardownStateRequest {
+  string strategy_id = 1;
+}
+
+message LoadTeardownStateResponse {
+  bool found = 1;
+  string state_json = 2; // JSON-encoded TeardownState
+  string error = 3;
+}
+
+message DeleteTeardownStateRequest {
+  string teardown_id = 1;
+}
+
+message DeleteTeardownStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message CreateApprovalRequestRequest {
+  string teardown_id = 1;
+  string strategy_id = 2;
+  string level = 3;
+  string request_json = 4;
+  string expires_at = 5; // ISO 8601
+}
+
+message CreateApprovalRequestResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetApprovalResponseRequest {
+  string teardown_id = 1;
+  string level = 2;
+}
+
+message GetApprovalResponseResponse {
+  bool found = 1;
+  string response_json = 2;
+  string error = 3;
+}
+
+message WriteApprovalResponseRequest {
+  string teardown_id = 1;
+  string level = 2;
+  string response_json = 3;
+}
+
+message GetLatestPendingApprovalRequest {
+  string strategy_id = 1;
+}
+
+message GetLatestPendingApprovalResponse {
+  bool found = 1;
+  string approval_json = 2; // JSON object with teardown_id, level, strategy_id, request_json, created_at, expires_at
+  string error = 3;
+}
+
+message WriteApprovalResponseByStrategyRequest {
+  string strategy_id = 1;
+  string response_json = 2;
+}
+
+// =============================================================================
 // GeckoTerminal Integration Messages
 // =============================================================================
 

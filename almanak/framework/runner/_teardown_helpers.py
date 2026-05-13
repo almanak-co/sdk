@@ -158,15 +158,11 @@ async def fetch_positions_or_fallback(
 def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tuple[Any, Any | None]:
     """Instantiate the teardown state adapter and ``TeardownManager``.
 
-    Both backends supply teardown_execution_state + approval-channel
-    persistence via the mode-aware factory (VIB-4049): SQLite locally,
-    Postgres in hosted mode (loaded through the
-    ``almanak.teardown:postgres_adapter`` entry point). Returns the pair
-    ``(teardown_manager, teardown_state_adapter)``.
+    Runtime persistence is SQLite in local mode and gateway-backed in hosted
+    mode. Returns the pair ``(teardown_manager, teardown_state_adapter)``.
 
     Prefer an explicit DB path from the StateManager when it's a real
-    filesystem path (SQLite only). The Postgres backend ignores the
-    SQLite path and reads ``ALMANAK_GATEWAY_DATABASE_URL`` from the env.
+    filesystem path (SQLite only).
 
     VIB-3773: builds a :class:`TeardownRunnerHelpers` bag and threads it
     into the manager so per-intent commit + pre/post snapshot bracket
@@ -174,16 +170,14 @@ def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tu
     teardown lane bypasses every accounting writer (the original April-29
     silent-failure class).
     """
-    from almanak.gateway.core.settings import GatewaySettings
-
-    from ..teardown import create_teardown_state_adapter
+    from ..teardown import create_teardown_state_adapter_for_runtime
     from ..teardown.runner_helpers import build_runner_helpers
     from ..teardown.teardown_manager import TeardownManager
 
     _raw_db_path = getattr(state_manager, "db_path", None)
     _adapter_db_path = _raw_db_path if isinstance(_raw_db_path, str | _Path) else None
-    teardown_state_adapter = create_teardown_state_adapter(
-        database_url=GatewaySettings().database_url or None,
+    teardown_state_adapter = create_teardown_state_adapter_for_runtime(
+        gateway_client=runner._get_gateway_client(),
         sqlite_path=_adapter_db_path,
     )
 
@@ -373,18 +367,17 @@ async def execute_and_verify(
     # approval channel through the same Protocol (VIB-4049), so the
     # callback wires the same way in both modes.
     #
-    # If a manual teardown reaches this point without an adapter (e.g. the
-    # hosted factory failed to load the Postgres plugin and a caller swallowed
-    # the error), we must NOT silently downgrade the request — slippage
-    # escalation has to be gated by operator consent. Fail fast instead.
+    # If a manual teardown reaches this point without an adapter, we must NOT
+    # silently downgrade the request — slippage escalation has to be gated by
+    # operator consent. Fail fast instead.
     approval_callback = None
     if not is_auto_mode:
         if teardown_state_adapter is None:
             raise RuntimeError(
                 "Manual teardown requires a teardown state adapter for the operator "
                 "approval channel — refusing to proceed without slippage-escalation gating. "
-                "Check that ALMANAK_GATEWAY_DATABASE_URL is set in hosted mode, or that "
-                "the strategy folder is resolvable in local mode."
+                "Check that the hosted gateway is reachable, or that the strategy folder "
+                "is resolvable in local mode."
             )
         approval_callback = _make_approval_callback(runner, teardown_state_adapter)
 

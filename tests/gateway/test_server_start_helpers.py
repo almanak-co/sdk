@@ -371,6 +371,7 @@ class TestBuildReflectionServiceNames:
             "almanak.gateway.proto.EnsoService",
             "almanak.gateway.proto.TokenService",
             "almanak.gateway.proto.LifecycleService",
+            "almanak.gateway.proto.TeardownService",
         ):
             assert expected in names
 

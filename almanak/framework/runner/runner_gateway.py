@@ -41,11 +41,12 @@ def get_gateway_client(runner: Any) -> Any | None:
     if isinstance(runner.execution_orchestrator, GatewayExecutionOrchestrator):
         return runner.execution_orchestrator._client
 
-    # Gateway-backed MultiChainOrchestrator stores gateway client directly
-    if hasattr(runner.execution_orchestrator, "_gateway_client"):
-        client = runner.execution_orchestrator._gateway_client
-        if client is not None:
-            return client
+    # Gateway-backed MultiChainOrchestrator stores gateway client directly.
+    # Read from the instance dict so a generic MagicMock orchestrator does not
+    # fabricate a gateway client via dynamic attribute access.
+    client = getattr(runner.execution_orchestrator, "__dict__", {}).get("_gateway_client")
+    if client is not None:
+        return client
 
     # Legacy multi-chain mode: check per-chain executors for a gateway client
     if runner._is_multi_chain and hasattr(runner.execution_orchestrator, "_executors"):
@@ -347,20 +348,21 @@ def lifecycle_handle_stop(runner: Any, strategy_id: str, strategy: Any) -> None:
 
     Shared by both the normal STOP path and the STOP-while-paused path.
 
-    Both modes write the teardown request through the mode-aware
-    :func:`almanak.framework.teardown.get_teardown_state_manager` factory —
-    local SDK lands the row in SQLite, hosted lands it in Postgres
-    (VIB-4049). The next iteration's ``_check_teardown_request`` picks it
-    up, runs teardown intents, then shuts the runner down. STOP no longer
-    bypasses unwind in hosted mode; the platform owns the teardown lane
-    end-to-end now.
+    Local mode keeps writing to the strategy SQLite DB. Hosted mode routes the
+    same request through the gateway so the strategy container never receives
+    database credentials. The next iteration's ``_check_teardown_request``
+    picks it up, runs teardown intents, then shuts the runner down.
     """
-    from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
+    from almanak.framework.teardown import (
+        TeardownMode,
+        TeardownRequest,
+        get_teardown_state_manager_for_runtime,
+    )
 
     runner._lifecycle_write_state(strategy_id, "STOPPING")
 
     try:
-        manager = get_teardown_state_manager()
+        manager = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
         teardown_request = TeardownRequest(
             strategy_id=strategy_id,
             mode=TeardownMode.SOFT,

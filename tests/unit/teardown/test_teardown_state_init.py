@@ -29,7 +29,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -462,43 +462,41 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """VIB-4049 PR2 collapsed the local-only ``is_hosted()`` short-circuit
-        in ``acknowledge_teardown_request`` — hosted mode now resolves the
-        teardown channel through the mode-aware factory (Postgres backend in
-        prod) instead of returning False without touching the DB.
+        """Hosted mode resolves the teardown channel through the mode-aware
+        runtime factory instead of returning False without touching the
+        backend.
 
         The original behaviour this test pinned ("hosted skips DB entirely")
         no longer exists; the *contract* that survived the refactor is the
         no-active-request branch: hosted ack must still return False without
-        loud log noise. Stub the factory's singleton with a manager that
-        reports "no active request" and assert that contract.
+        loud log noise. Stub the factory with a manager that reports "no
+        active request" and assert that contract.
         """
         monkeypatch.setenv("AGENT_ID", "alm-2705-hosted-stub")
 
-        # Wire a stub Postgres-equivalent manager so the factory does not
-        # try to load the real plugin.
+        # Wire a stub gateway-equivalent manager so the factory does not
+        # require a live gRPC connection.
         import almanak.framework.teardown as teardown_pkg
 
         class _StubManager:
             def acknowledge_request(self, strategy_id: str):  # noqa: ARG002
                 return None
 
-        teardown_pkg._state_manager = _StubManager()
+        factory = MagicMock(return_value=_StubManager())
+        monkeypatch.setattr(teardown_pkg, "get_teardown_state_manager_for_runtime", factory)
 
         caplog.set_level(logging.DEBUG, logger="almanak.framework.strategies.intent_strategy")
         stub = _StubStrategy()
+        stub._gateway_client = object()  # type: ignore[attr-defined]
 
         result = _acknowledge_teardown_request_for(stub)
 
         assert result is False
-        loud = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()
-        ]
+        factory.assert_called_once_with(gateway_client=stub._gateway_client)
+        loud = [r for r in caplog.records if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()]
         assert loud == [], (
             "hosted ack with no active request must not log loud — only the "
-            "Postgres path was added in PR2; the benign-empty contract is "
+            "gateway path was added; the benign-empty contract is "
             f"unchanged: {[r.getMessage() for r in loud]}"
         )
 
@@ -531,11 +529,7 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         result = _acknowledge_teardown_request_for(stub)
 
         assert result is False
-        loud = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()
-        ]
+        loud = [r for r in caplog.records if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()]
         assert loud == [], f"unexpected loud logs on benign path: {[r.getMessage() for r in loud]}"
 
     def test_local_path_error_is_benign_debug_only(
@@ -562,11 +556,7 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         result = _acknowledge_teardown_request_for(stub)
 
         assert result is False
-        loud = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()
-        ]
+        loud = [r for r in caplog.records if r.levelno >= logging.WARNING and "teardown.ack" in r.getMessage()]
         assert loud == [], f"LocalPathError must not log loud: {[r.getMessage() for r in loud]}"
 
     def test_operational_error_logs_loud_structured_marker(

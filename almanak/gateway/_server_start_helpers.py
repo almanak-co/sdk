@@ -478,5 +478,6 @@ def build_reflection_service_names() -> tuple[str, ...]:
         "almanak.gateway.proto.EnsoService",
         "almanak.gateway.proto.TokenService",
         "almanak.gateway.proto.LifecycleService",
+        "almanak.gateway.proto.TeardownService",
         reflection.SERVICE_NAME,
     )

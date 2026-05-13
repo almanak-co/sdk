@@ -16,16 +16,13 @@ Core invariants (never violated):
 - Post-execution verification
 - Resumable state across restarts
 
-Backend topology (VIB-4049):
+Backend topology:
 
 - Local SDK: SQLite, keyed by ``TeardownRequest.strategy_id``.
-- Hosted platform: PostgreSQL, keyed by ``agent_id`` (mapped from
+- Hosted strategy runtime: gateway gRPC, with PostgreSQL access kept inside
+  the gateway process.
+- Hosted gateway process: PostgreSQL, keyed by ``agent_id`` (mapped from
   ``strategy_id`` at the write/read boundary in the Postgres backend).
-
-The factory below picks the right backend based on
-``framework/deployment/mode.py:is_hosted()`` plus the platform-injected
-``ALMANAK_GATEWAY_DATABASE_URL``. Callers do NOT branch on the mode
-themselves — they call :func:`get_teardown_state_manager` and trust it.
 """
 
 from __future__ import annotations
@@ -116,8 +113,10 @@ __all__ = [
     "TeardownStateManagerProtocol",
     "TeardownStateAdapterProtocol",
     "get_teardown_state_manager",
+    "get_teardown_state_manager_for_runtime",
     "create_teardown_state_manager",
     "create_teardown_state_adapter",
+    "create_teardown_state_adapter_for_runtime",
     "reset_teardown_state_manager",
     # Post-conditions (VIB-3742)
     "ClosureCheckResult",
@@ -129,15 +128,12 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Factory + singleton (VIB-4049 PR2 §4)
+# Direct backend factories + local singleton
 # ---------------------------------------------------------------------------
 #
-# Mirrors the lifecycle store's pattern (``gateway/lifecycle/__init__.py``).
-# The factory is the ONE place that decides between SQLite and Postgres; every
-# call site reads ``get_teardown_state_manager()`` and gets the right backend
-# for the mode. The four ``is_hosted()`` short-circuits at the legacy call
-# sites (runner_gateway / intent_strategy / _teardown_helpers) are collapsed
-# in PR2 §7 — they all now go through this factory.
+# ``create_*`` are direct backend constructors used by gateway internals and
+# local tooling. Hosted strategy runtime code must use the ``*_for_runtime``
+# helpers below so it never sees the gateway's database URL.
 
 _DB_URL_ENV_VAR = "ALMANAK_GATEWAY_DATABASE_URL"
 
@@ -146,15 +142,11 @@ def create_teardown_state_manager(
     database_url: str | None = None,
     sqlite_path: str | Path | None = None,
 ) -> TeardownStateManagerProtocol:
-    """Factory for the teardown-request store.
+    """Factory for a direct teardown-request store.
 
     Picks the Postgres backend when ``database_url`` is set, regardless of
-    whether ``is_hosted()`` reports hosted mode. This matches the locked
-    VIB-4049 design: dashboards, API processes, and Postgres test fixtures
-    all need to share the teardown store with the runner — gating on
-    ``is_hosted()`` would let those local-but-Postgres processes silently
-    write to SQLite while the runner reads Postgres, dropping requests on
-    the floor.
+    whether ``is_hosted()`` reports hosted mode. Gateway internals, dashboards,
+    API processes, and Postgres test fixtures all need this direct store.
 
     When ``is_hosted()`` is true but ``database_url`` is unset, this raises:
     hosted mode REQUIRES the Postgres backend, and silently falling back to
@@ -206,10 +198,8 @@ def create_teardown_state_adapter(
 ) -> TeardownStateAdapterProtocol:
     """Factory for the teardown-execution-state + approval-channel store.
 
-    Same mode + entry-point pattern as :func:`create_teardown_state_manager`,
-    but resolves the sibling plugin
-    ``almanak.teardown:postgres_adapter`` so the platform package can choose to
-    publish the two halves as separate classes.
+    Same entry-point pattern as :func:`create_teardown_state_manager`, but
+    resolves the sibling plugin ``almanak.teardown:postgres_adapter``.
     """
     from almanak.framework.deployment import is_hosted
 
@@ -255,27 +245,61 @@ _state_manager_lock = threading.Lock()
 def get_teardown_state_manager(
     db_path: str | Path | None = None,
 ) -> TeardownStateManagerProtocol:
-    """Return the singleton teardown state manager for the current mode.
+    """Return the singleton local teardown state manager.
 
     Thread-safe via double-checked locking. The ``db_path`` argument is
-    honoured only on the first call (and only in local SQLite mode). In
-    hosted mode the factory consults :func:`is_hosted` plus
-    ``ALMANAK_GATEWAY_DATABASE_URL`` (read via :class:`GatewaySettings`,
-    the canonical env boundary — ``_DB_URL_ENV_VAR`` is retained only for
-    error-message text) — the path argument is ignored.
+    honoured only on the first call. Hosted strategy runtime code should call
+    :func:`get_teardown_state_manager_for_runtime`; this helper intentionally
+    has no access to the gateway database URL.
     """
-    from almanak.gateway.core.settings import GatewaySettings
-
     global _state_manager
     if _state_manager is None:
         with _state_manager_lock:
             if _state_manager is None:
-                database_url = GatewaySettings().database_url or None
                 _state_manager = create_teardown_state_manager(
-                    database_url=database_url,
+                    database_url=None,
                     sqlite_path=db_path,
                 )
     return _state_manager
+
+
+def get_teardown_state_manager_for_runtime(
+    gateway_client: object | None = None,
+    db_path: str | Path | None = None,
+) -> TeardownStateManagerProtocol:
+    """Return the teardown request store for strategy runtime code.
+
+    Hosted strategy containers must route through the gateway so the Postgres
+    DSN stays out of the strategy process. Local mode keeps the existing
+    SQLite behaviour.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        if gateway_client is None:
+            raise RuntimeError("Hosted teardown state requires a connected gateway client")
+        from almanak.framework.teardown.gateway_client import GatewayTeardownStateManager
+
+        return GatewayTeardownStateManager(gateway_client)  # type: ignore[arg-type]
+
+    return get_teardown_state_manager(db_path=db_path)
+
+
+def create_teardown_state_adapter_for_runtime(
+    gateway_client: object | None = None,
+    sqlite_path: str | Path | None = None,
+) -> TeardownStateAdapterProtocol:
+    """Return the teardown execution-state adapter for strategy runtime code."""
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        if gateway_client is None:
+            raise RuntimeError("Hosted teardown execution state requires a connected gateway client")
+        from almanak.framework.teardown.gateway_client import GatewayTeardownStateAdapter
+
+        return GatewayTeardownStateAdapter(gateway_client)  # type: ignore[arg-type]
+
+    return create_teardown_state_adapter(database_url=None, sqlite_path=sqlite_path)
 
 
 def reset_teardown_state_manager() -> None:

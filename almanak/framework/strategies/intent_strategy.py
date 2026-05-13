@@ -1763,11 +1763,8 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called at the start of each iteration by the runner.
         Returns the request if one exists and is active.
 
-        Mode-agnostic (VIB-4049): the
-        :func:`get_teardown_state_manager` factory returns the SQLite store
-        locally and the Postgres store in hosted mode. The runner just
-        polls the resolved backend; neither this method nor the strategy
-        branches on ``AGENT_ID``.
+        Local mode reads the strategy SQLite DB. Hosted mode routes through
+        the gateway so the strategy process never needs database credentials.
 
         Returns:
             TeardownRequest if one exists and is active, None otherwise
@@ -1784,12 +1781,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
         # running its next risk-reducing iteration.
         import sqlite3
 
+        from almanak.framework.deployment import is_hosted
         from almanak.framework.local_paths import LocalPathError
 
         try:
-            from almanak.framework.teardown import get_teardown_state_manager
+            from almanak.framework.teardown import get_teardown_state_manager_for_runtime
 
-            manager = get_teardown_state_manager()
+            manager = get_teardown_state_manager_for_runtime(gateway_client=getattr(self, "_gateway_client", None))
             strategy_id = self._strategy_id or self.STRATEGY_NAME
 
             request = manager.get_active_request(strategy_id)
@@ -1801,14 +1799,17 @@ class IntentStrategy(StrategyBase[ConfigT]):
             return request
 
         except LocalPathError as e:
+            if is_hosted():
+                raise
             # Benign: no strategy folder resolved (e.g. running in an
             # environment without ALMANAK_STRATEGY_FOLDER and no cwd hint).
-            # Local-mode only — hosted Postgres never raises this. Log
-            # debug and skip.
+            # Local-mode only. Log debug and skip.
             logger.debug("Skipping teardown request check (no local strategy DB): %s", e)
             return None
 
         except sqlite3.OperationalError as e:
+            if is_hosted():
+                raise
             # Loud + durable: this is the ALM-2705 failure mode. Either the
             # singleton's ``_init_db`` lost a contention race (now retried —
             # see ``SQLiteTeardownStateManager._init_db``) or the DB file's
@@ -1827,6 +1828,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
             return None
 
         except Exception as e:  # noqa: BLE001 — catch-all for unexpected channel failures
+            if is_hosted():
+                logger.error(
+                    "teardown.check_request_unexpected_error: type=%s error=%s",
+                    type(e).__name__,
+                    e,
+                )
+                raise
             # Genuinely unexpected: not a path problem, not a DB schema/lock
             # issue. Keep the runner alive (same rationale as above) but log
             # at WARNING with the exception type so future incidents are
@@ -1842,8 +1850,8 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """Acknowledge a pending teardown request.
 
         Called when the strategy picks up a teardown request and starts
-        processing it. Mode-agnostic (VIB-4049): the factory resolves the
-        right backend, no ``AGENT_ID`` branch here.
+        processing it. Local mode writes the strategy SQLite DB; hosted mode
+        routes through the gateway.
 
         Returns:
             True if request was acknowledged, False otherwise
@@ -1851,22 +1859,27 @@ class IntentStrategy(StrategyBase[ConfigT]):
         # ALM-2705: same narrow-exception treatment as ``_check_teardown_request``.
         import sqlite3
 
+        from almanak.framework.deployment import is_hosted
         from almanak.framework.local_paths import LocalPathError
 
         try:
-            from almanak.framework.teardown import get_teardown_state_manager
+            from almanak.framework.teardown import get_teardown_state_manager_for_runtime
 
-            manager = get_teardown_state_manager()
+            manager = get_teardown_state_manager_for_runtime(gateway_client=getattr(self, "_gateway_client", None))
             strategy_id = self._strategy_id or self.STRATEGY_NAME
 
             request = manager.acknowledge_request(strategy_id)
             return request is not None
 
         except LocalPathError as e:
+            if is_hosted():
+                raise
             logger.debug("Skipping teardown ack (no local strategy DB): %s", e)
             return False
 
         except sqlite3.OperationalError as e:
+            if is_hosted():
+                raise
             logger.error(
                 "teardown.ack_request_failed: strategy_id=%s strategy_class=%s error=%s — "
                 "teardown signal channel is degraded; ack skipped this iteration",
@@ -1877,6 +1890,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
             return False
 
         except Exception as e:  # noqa: BLE001
+            if is_hosted():
+                logger.error(
+                    "teardown.ack_request_unexpected_error: type=%s error=%s",
+                    type(e).__name__,
+                    e,
+                )
+                raise
             logger.warning(
                 "teardown.ack_request_unexpected_error: type=%s error=%s",
                 type(e).__name__,
