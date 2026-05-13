@@ -631,6 +631,216 @@ async def _ensure_native_gas_in_teardown_oracle(
     return oracle
 
 
+def _augment_intent_tokens_with_address_resolution(intent: Any, symbol_tokens: list[str], chain: str) -> list[str]:
+    """Augment ``symbol_tokens`` with address-shaped intent fields resolved to symbols.
+
+    ``_extract_tokens_from_intent`` filters out addresses via
+    ``token_extraction._is_symbol`` (anything starting with ``"0x"`` is
+    dropped). Several connectors (Aerodrome confirmed) stamp contract
+    addresses into intent token fields instead of symbols, so the symbol-
+    only path leaves their teardown price stash un-topped-off — re-creating
+    the VIB-4318 symptom for any connector that uses addresses.
+
+    This helper walks ``TOKEN_FIELDS`` (and ``callback_intents`` for
+    FlashLoanIntent) on the intent, isolates address-shaped values, and
+    resolves them to canonical symbols via the singleton
+    :class:`TokenResolver` with ``skip_gateway=True`` — the same pattern
+    :func:`almanak.framework.accounting.category_handlers.swap_handler._resolve_price_lookup_key`
+    (VIB-4304) uses on the read-side. Unresolvable addresses are silently
+    dropped (Empty ≠ Zero — never fabricate a symbol).
+
+    Returns a deduplicated list preserving ``symbol_tokens`` order, with
+    newly-resolved address symbols appended after the symbol-shaped ones.
+    """
+    from .token_extraction import MAX_CALLBACK_DEPTH, TOKEN_FIELDS
+
+    chain_lower = (chain or "").lower().strip()
+
+    def _walk(node: Any, depth: int, sink: list[str]) -> None:
+        if depth > MAX_CALLBACK_DEPTH:
+            return
+        _get = node.get if isinstance(node, dict) else (lambda k, d=None: getattr(node, k, d))
+        for field in TOKEN_FIELDS:
+            val = _get(field)
+            if isinstance(val, str) and val.strip():
+                sink.append(val.strip())
+        callbacks = _get("callback_intents")
+        if callbacks and isinstance(callbacks, list):
+            for cb in callbacks:
+                _walk(cb, depth + 1, sink)
+
+    raw_values: list[str] = []
+    _walk(intent, 0, raw_values)
+
+    resolved: list[str] = []
+    for raw in raw_values:
+        s_lower = raw.lower()
+        looks_like_evm = s_lower.startswith("0x") and len(raw) == 42
+        looks_like_solana = chain_lower == "solana" and not s_lower.startswith("0x") and 32 <= len(raw) <= 44
+        if not (looks_like_evm or looks_like_solana):
+            # Symbol-shaped — already covered by ``symbol_tokens``. Skip.
+            continue
+        if not chain_lower:
+            # Cross-chain disambiguation requires a chain. Empty ≠ Zero:
+            # drop rather than guess.
+            continue
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            token_resolver = get_token_resolver()
+            lookup_value = s_lower if looks_like_evm else raw
+            info = token_resolver.resolve(lookup_value, chain=chain_lower, log_errors=False, skip_gateway=True)
+        except Exception:  # noqa: BLE001 — best-effort
+            continue
+        if info is None or not info.symbol:
+            continue
+        resolved.append(info.symbol.upper())
+
+    # Dedupe preserving first-seen order; symbol_tokens already deduplicated
+    # upstream by ``extract_token_symbols``.
+    return list(dict.fromkeys([*symbol_tokens, *resolved]))
+
+
+async def _ensure_intent_tokens_in_teardown_oracle(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    intent: Any,
+    oracle: dict | None,
+) -> dict | None:
+    """Merge intent-token prices into the teardown price-oracle stash (VIB-4318).
+
+    The pre-teardown bracket stashes ``runner._teardown_price_oracle`` from
+    the priced ``PortfolioSnapshot``'s ``token_prices``, which only covers
+    assets HELD at pre-teardown time (USDC + USDT in the
+    ``loop_lp_diff-aave_v3-uniswap_v3`` smoking-gun). A teardown intent whose
+    ``token_in`` is a non-stable token that is NOT held pre-teardown — e.g.
+    a swap WETH → USDC that consolidates LP-returned WETH back to stablecoin
+    after the LP_CLOSE — has no WETH price in the stash, so:
+
+      - ``transaction_ledger.price_inputs_json`` lands without WETH;
+      - ``swap_handler`` correctly fails closed at
+        :file:`almanak/framework/accounting/category_handlers/swap_handler.py:285`
+        (per VIB-3886) and writes ``amount_in_usd=NULL`` with
+        ``unavailable_reason="missing prices in price_inputs_json: WETH price"``;
+      - the corresponding ``accounting_events.payload_json`` carries
+        asymmetric ``amount_in_usd=NULL`` / ``amount_out_usd=<priced>``
+        which fails G1 (money-trail SWAP USD coverage) and bumps
+        ``Σ_swaps_usd_null_count`` on G6.
+
+    The fix is at the teardown ledger-write layer: extract the intent's
+    token set and merge close-time prices into the stash via
+    ``runner.price_oracle.get_aggregated_price`` (same gateway-routed source
+    the iteration lane uses at
+    :file:`strategy_runner.py:_build_single_chain_price_oracle`). The
+    iteration lane already does this through ``market.price(...)`` pre-fetch;
+    the teardown lane has no per-iteration ``market`` so we go directly
+    through ``runner.price_oracle``.
+
+    Mutates ``oracle`` in place AND returns it (matches
+    :func:`_ensure_native_gas_in_teardown_oracle`'s mutate-and-return
+    pattern). The pre-teardown stash entries WIN on collision so a HIGH-
+    confidence portfolio_valuer quote is never overwritten by a STALE /
+    ESTIMATED gateway-aggregated quote. This is the same precedence as
+    :meth:`StrategyRunner._merge_oracle_for_ledger`.
+
+    Best-effort: a failure on any single token is logged at DEBUG and the
+    remaining tokens still get fetched. Returns the oracle untouched (or
+    ``None`` if it was ``None``) only when there is genuinely no work
+    to do — empty token set, missing chain, missing
+    ``runner.price_oracle``.
+
+    Empty ≠ Zero (CLAUDE.md): a token whose ``get_aggregated_price`` returns
+    ``None`` (price unknown) is NOT inserted with a fabricated zero. The
+    swap_handler then keeps its fail-closed behaviour for that leg, which
+    is the correct outcome — the bug we are fixing is "WETH price was
+    AVAILABLE but never queried", not "WETH price was unavailable".
+    """
+    if not intent:
+        return oracle
+    chain = getattr(strategy, "chain", None) or getattr(runner.config, "chain", "")
+    if not chain:
+        return oracle
+
+    price_oracle_obj = getattr(runner, "price_oracle", None)
+    if price_oracle_obj is None or not hasattr(price_oracle_obj, "get_aggregated_price"):
+        return oracle
+
+    try:
+        from .runner_models import _extract_tokens_from_intent
+
+        tokens = _extract_tokens_from_intent(intent)
+        # gemini review on PR #2260 (2026-05-13): ``_extract_tokens_from_intent``
+        # only returns symbol-shaped values — ``_is_symbol`` filters out
+        # contract addresses. Some connectors (Aerodrome confirmed; likely
+        # PancakeSwap, Sushi, Curve and others) populate intent token fields
+        # with addresses rather than symbols. Without address-to-symbol
+        # resolution those connectors silently skip the top-off and the
+        # VIB-4318 fix only covers symbol-based connectors. Mirror
+        # ``swap_handler._resolve_price_lookup_key`` (skip_gateway=True)
+        # so the address legs also land in ``price_inputs_json`` correctly
+        # keyed by canonical symbol.
+        tokens = _augment_intent_tokens_with_address_resolution(intent, tokens, chain)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug(
+            "teardown intent-token oracle merge: token extraction failed for %s: %s",
+            getattr(intent, "intent_type", "?"),
+            exc,
+        )
+        return oracle
+
+    if not tokens:
+        return oracle
+
+    # Initialise the stash if it was ``None`` AND we have at least one
+    # intent token to price. Mutate-in-place (matches
+    # :func:`_ensure_native_gas_in_teardown_oracle`); returning ``None``
+    # would propagate to ``commit_teardown_intent``'s
+    # ``price_oracle=teardown_price_oracle`` argument and the ledger writer
+    # would skip ``price_inputs_json`` entirely — defeating the fix.
+    merged: dict = oracle if oracle is not None else {}
+
+    # Treat already-present symbols (case-insensitive) as authoritative —
+    # see method docstring on the collision-precedence rule. Matches the
+    # native-gas helper's case-insensitive membership probe at
+    # :func:`_ensure_native_gas_in_teardown_oracle`.
+    def _already_present(sym: str) -> bool:
+        return any(key in merged for key in (sym, sym.upper(), sym.lower()))
+
+    for token in tokens:
+        if not token or _already_present(token):
+            continue
+
+        try:
+            result = await price_oracle_obj.get_aggregated_price(token, "USD", chain=chain)
+        except Exception as exc:  # noqa: BLE001 — best-effort top-off
+            logger.debug(
+                "teardown intent-token oracle merge failed for chain=%s symbol=%s: %s",
+                chain,
+                token,
+                exc,
+            )
+            continue
+
+        price = getattr(result, "price", None)
+        if price is None:
+            # Empty ≠ Zero: a missing price stays missing — never fabricate.
+            continue
+        timestamp = getattr(result, "timestamp", None)
+        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+        confidence_attr = getattr(result, "confidence", None)
+        confidence_str = str(confidence_attr or "ESTIMATED").upper()
+        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+            confidence_str = "ESTIMATED"
+        merged[token] = {
+            "price_usd": str(price),
+            "oracle_source": getattr(result, "source", "") or "gateway",
+            "fetched_at": fetched_at,
+            "confidence": confidence_str,
+        }
+
+    return merged or None
+
+
 @dataclass(frozen=True)
 class TeardownSnapshotOutcome:
     """Outcome of a single pre- or post-teardown snapshot bracket.

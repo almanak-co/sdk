@@ -223,7 +223,31 @@ async def commit_teardown_intent(
         # token_prices on ``runner._teardown_price_oracle`` after re-shaping
         # to the build_ledger_entry contract. Without this, every teardown
         # row landed with empty ``price_inputs_json`` and ``gas_usd``.
-        teardown_price_oracle = getattr(runner, "_teardown_price_oracle", None)
+        #
+        # VIB-4318 — the pre-teardown stash only contains assets HELD at
+        # pre-teardown time. A teardown intent whose token_in is a non-stable
+        # token that is NOT yet in the wallet (e.g. a swap WETH → USDC that
+        # consolidates LP-returned WETH back to stablecoin after the
+        # LP_CLOSE) has no WETH price in the stash, so the ledger row's
+        # ``price_inputs_json`` lands WITHOUT WETH and the SWAP handler's
+        # fail-closed contract (VIB-3886) leaves
+        # ``accounting_events.payload_json.amount_in_usd=NULL`` even though
+        # the close-time WETH price was available on the gateway. Merge
+        # intent-token prices into the stash BEFORE the ledger write so
+        # every priced token the intent touches lands on the row. The
+        # merge updates ``runner._teardown_price_oracle`` in place so
+        # subsequent teardown intents in the same loop benefit (the
+        # post-teardown bracket clears the stash so an iteration after
+        # teardown never reads stale teardown prices).
+        from ._run_loop_helpers import _ensure_intent_tokens_in_teardown_oracle
+
+        runner._teardown_price_oracle = await _ensure_intent_tokens_in_teardown_oracle(
+            runner,
+            strategy,
+            intent,
+            getattr(runner, "_teardown_price_oracle", None),
+        )
+        teardown_price_oracle = runner._teardown_price_oracle
 
         # VIB-3918: build pre/post state dicts from the per-intent balance
         # captures so ``transaction_ledger.pre_state_json`` and

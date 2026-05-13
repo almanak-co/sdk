@@ -698,3 +698,403 @@ async def test_vib3934_lending_post_capture_failure_never_propagates(
     assert outcome.ledger_entry_id == "ledger-1"
     runner._write_ledger_entry.assert_awaited_once()
     runner._write_outbox_and_fire_processor.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# VIB-4318 — intent-token prices merged into the teardown ledger oracle
+# ---------------------------------------------------------------------------
+
+
+def _make_swap_intent(*, from_token: str, to_token: str) -> SimpleNamespace:
+    """SwapIntent shape consumed by ``_extract_tokens_from_intent``."""
+    return SimpleNamespace(
+        intent_type=SimpleNamespace(value="SWAP"),
+        protocol="uniswap_v3",
+        chain="arbitrum",
+        from_token=from_token,
+        to_token=to_token,
+    )
+
+
+def _make_price_oracle(
+    quotes: dict[str, str | None],
+    *,
+    source: str = "gateway",
+    confidence: str = "HIGH",
+) -> MagicMock:
+    """Build a fake :class:`PriceOracle` whose ``get_aggregated_price`` returns
+    a structured result for each symbol in ``quotes``. ``None`` value ⇒ the
+    oracle returns a result with ``price=None`` (price unknown — should NOT
+    be inserted per Empty ≠ Zero).
+    """
+    calls: list[dict] = []
+
+    async def _get_aggregated_price(symbol: str, quote: str, *, chain: str):
+        calls.append({"symbol": symbol, "quote": quote, "chain": chain})
+        if symbol not in quotes:
+            raise KeyError(f"no quote for {symbol}")
+        return SimpleNamespace(
+            price=quotes[symbol],
+            source=source,
+            confidence=confidence,
+            timestamp=None,
+        )
+
+    oracle = MagicMock(name="PriceOracle")
+    oracle.get_aggregated_price = AsyncMock(side_effect=_get_aggregated_price)
+    oracle._calls = calls  # expose for assertions
+    return oracle
+
+
+@pytest.mark.asyncio
+async def test_vib4318_intent_token_merged_into_teardown_ledger_oracle(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """Smoking-gun row from the VIB-4316 matrix: teardown WETH→USDC swap on
+    ``loop_lp_diff`` left ``transaction_ledger.price_inputs_json`` without
+    WETH because the pre-teardown stash only contained held assets
+    (USDC + USDT). The merge helper fetches WETH at close-time and merges
+    it into the stash before the ledger write, so the ledger row carries
+    every price the SWAP handler needs.
+    """
+    runner = _make_runner(live_mode=True)
+    # Pre-teardown stash carries USDC + USDT (held assets) but NOT WETH.
+    runner._teardown_price_oracle = {
+        "USDC": {
+            "price_usd": "1.0",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+        "USDT": {
+            "price_usd": "1.0",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+    runner.price_oracle = _make_price_oracle({"WETH": "2295.62"})
+
+    intent = _make_swap_intent(from_token="WETH", to_token="USDC")
+    result = _make_execution_result(tx_hash="0xweth_swap")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318",
+    )
+
+    assert outcome.accounting_degraded is False
+    assert outcome.ledger_entry_id == "ledger-1"
+    runner._write_ledger_entry.assert_awaited_once()
+
+    # WETH is now present in the stash AND in the price_oracle passed to
+    # _write_ledger_entry, alongside the pre-existing USDC / USDT.
+    assert "WETH" in runner._teardown_price_oracle
+    assert runner._teardown_price_oracle["WETH"]["price_usd"] == "2295.62"
+    assert "USDC" in runner._teardown_price_oracle
+    assert "USDT" in runner._teardown_price_oracle
+    passed_oracle = runner._write_ledger_entry.await_args.kwargs["price_oracle"]
+    assert "WETH" in passed_oracle
+
+
+@pytest.mark.asyncio
+async def test_vib4318_pre_teardown_quote_wins_on_collision(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """A HIGH-confidence pre-teardown ``portfolio_valuer`` quote is NOT
+    overwritten by a STALE gateway-aggregated quote on the same symbol.
+    Same precedence as :meth:`StrategyRunner._merge_oracle_for_ledger`.
+    """
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = {
+        "USDC": {
+            "price_usd": "1.0",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+    # If our helper queried USDC, the gateway would return a wrong / stale
+    # quote. The assertion is that the helper does NOT overwrite the
+    # pre-teardown entry on collision.
+    runner.price_oracle = _make_price_oracle(
+        {"USDC": "0.99"}, source="gateway", confidence="STALE"
+    )
+
+    intent = _make_swap_intent(from_token="USDC", to_token="USDT")
+    result = _make_execution_result(tx_hash="0xusdc_usdt")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-collision",
+    )
+
+    # The pre-teardown HIGH-confidence quote is preserved.
+    assert runner._teardown_price_oracle["USDC"]["price_usd"] == "1.0"
+    assert runner._teardown_price_oracle["USDC"]["oracle_source"] == "portfolio_valuer"
+    assert runner._teardown_price_oracle["USDC"]["confidence"] == "HIGH"
+
+
+@pytest.mark.asyncio
+async def test_vib4318_unknown_price_not_fabricated_as_zero(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """Empty ≠ Zero (CLAUDE.md): when the gateway has no quote for a token,
+    the helper MUST NOT insert a fabricated zero. The SWAP handler then
+    keeps its fail-closed behaviour for that leg — which is correct, since
+    "price was genuinely unavailable" is a different signal from "price
+    was available but never queried".
+    """
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = {
+        "USDC": {
+            "price_usd": "1.0",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+    # Gateway returns price=None for the unknown token.
+    runner.price_oracle = _make_price_oracle({"XYZ": None})
+
+    intent = _make_swap_intent(from_token="XYZ", to_token="USDC")
+    result = _make_execution_result(tx_hash="0xxyz_swap")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-unknown",
+    )
+
+    # XYZ was queried (proving the helper tried), but NOT inserted.
+    assert any(c["symbol"] == "XYZ" for c in runner.price_oracle._calls)
+    assert "XYZ" not in runner._teardown_price_oracle
+
+
+@pytest.mark.asyncio
+async def test_vib4318_gateway_failure_does_not_block_ledger_write(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """A gateway error on intent-token price fetch is logged at DEBUG and
+    the teardown ledger row still lands (degraded-but-continue per
+    VIB-3773). The pre-teardown stash is preserved.
+    """
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = {
+        "USDC": {
+            "price_usd": "1.0",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+
+    async def _boom(symbol: str, quote: str, *, chain: str):
+        raise ConnectionError("gateway dropped")
+
+    runner.price_oracle = MagicMock()
+    runner.price_oracle.get_aggregated_price = AsyncMock(side_effect=_boom)
+
+    intent = _make_swap_intent(from_token="WETH", to_token="USDC")
+    result = _make_execution_result(tx_hash="0xboom")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-boom",
+    )
+
+    # The ledger write still succeeded — the merge helper never raises.
+    assert outcome.ledger_entry_id == "ledger-1"
+    # The pre-teardown stash is untouched on every-token-failure.
+    assert runner._teardown_price_oracle["USDC"]["price_usd"] == "1.0"
+    assert "WETH" not in runner._teardown_price_oracle
+
+
+@pytest.mark.asyncio
+async def test_vib4318_none_stash_initialised_when_intent_tokens_priced(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """When the pre-teardown bracket failed (stash starts as ``None``) but
+    the gateway can quote at least one intent token, the merge helper
+    must initialise the stash so the ledger row carries
+    ``price_inputs_json`` instead of empty.
+
+    Without this, returning ``None`` early on a ``None`` input would
+    propagate to the ledger writer and defeat the fix.
+    """
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = None
+    runner.price_oracle = _make_price_oracle({"WETH": "2300.0", "USDC": "1.0"})
+
+    intent = _make_swap_intent(from_token="WETH", to_token="USDC")
+    result = _make_execution_result(tx_hash="0xnone_stash")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-none-stash",
+    )
+
+    assert runner._teardown_price_oracle is not None
+    assert "WETH" in runner._teardown_price_oracle
+    assert "USDC" in runner._teardown_price_oracle
+
+
+@pytest.mark.asyncio
+async def test_vib4318_address_shaped_intent_tokens_resolved_to_symbols(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """gemini review on PR #2260 (2026-05-13): some connectors (Aerodrome
+    confirmed) populate intent token fields with CONTRACT ADDRESSES rather
+    than symbols. ``_extract_tokens_from_intent`` filters those out via
+    ``_is_symbol`` (anything starting with ``"0x"`` is dropped), so the
+    symbol-only loop never fetches a price for them — the original
+    VIB-4318 fix would silently regress for any address-based connector.
+
+    The address-resolution helper resolves address-shaped intent fields
+    to symbols via the singleton :class:`TokenResolver` (skip_gateway=True)
+    and merges the resolved symbol into the teardown stash so the ledger
+    row carries a SYMBOL-keyed ``price_inputs_json`` for the downstream
+    ``swap_handler`` lookup.
+    """
+    # Base USDC (well-known 6-decimal address) — guaranteed in the static
+    # token resolver so ``skip_gateway=True`` resolves it without a gateway.
+    usdc_base_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = {
+        "WETH": {
+            "price_usd": "2295.62",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+    runner.price_oracle = _make_price_oracle({"USDC": "1.0"})
+
+    # Aerodrome-style intent: ``to_token`` is an ADDRESS, not a symbol.
+    # Override the swap intent's chain to ``base`` so the resolver can
+    # disambiguate the USDC address (USDC exists on multiple chains).
+    intent = SimpleNamespace(
+        intent_type=SimpleNamespace(value="SWAP"),
+        protocol="aerodrome",
+        chain="base",
+        from_token="WETH",
+        to_token=usdc_base_address,
+    )
+    # Strategy's chain is what the merge helper reads — point it at Base.
+    fake_strategy.chain = "base"
+
+    result = _make_execution_result(tx_hash="0xaerodrome_swap")
+    context = SimpleNamespace(protocol="aerodrome", chain="base")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-address-resolution",
+    )
+
+    assert outcome.accounting_degraded is False
+    # The address resolved to ``USDC`` and the price was fetched + merged.
+    # Pre-fix the helper would have skipped the address leg entirely and
+    # ``USDC`` would NOT appear in the stash.
+    assert "USDC" in runner._teardown_price_oracle, (
+        "Address-shaped intent token must resolve to its symbol and land "
+        "in the stash — otherwise the ledger row's price_inputs_json is "
+        "missing the close-side leg."
+    )
+    assert runner._teardown_price_oracle["USDC"]["price_usd"] == "1.0"
+    # Pre-existing WETH quote is preserved.
+    assert runner._teardown_price_oracle["WETH"]["price_usd"] == "2295.62"
+    # The gateway was queried by SYMBOL, not by address — keys are canonical.
+    queried_symbols = {call["symbol"] for call in runner.price_oracle._calls}
+    assert "USDC" in queried_symbols
+    assert usdc_base_address not in queried_symbols
+    assert usdc_base_address.upper() not in queried_symbols
+
+
+@pytest.mark.asyncio
+async def test_vib4318_unresolvable_address_dropped_not_fabricated(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """Empty ≠ Zero: an address that the local token resolver cannot resolve
+    (no entry in the static catalogue) must be SILENTLY DROPPED, not
+    substituted with the raw address as a phantom symbol. Mirrors
+    ``swap_handler._resolve_price_lookup_key``'s fall-through semantics —
+    the downstream ``has_price_*`` check then correctly reports
+    "missing prices: <address>" rather than fabricating a symbol that
+    never appears in any ``price_inputs_json``.
+    """
+    unknown_address = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+
+    runner = _make_runner(live_mode=True)
+    runner._teardown_price_oracle = {
+        "WETH": {
+            "price_usd": "2295.62",
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": "2026-05-12T00:00:00+00:00",
+            "confidence": "HIGH",
+        },
+    }
+    # price_oracle would raise KeyError on any symbol query — the
+    # assertion is that no such query happens for the unresolvable address.
+    runner.price_oracle = _make_price_oracle({})
+
+    intent = SimpleNamespace(
+        intent_type=SimpleNamespace(value="SWAP"),
+        protocol="aerodrome",
+        chain="base",
+        from_token="WETH",
+        to_token=unknown_address,
+    )
+    fake_strategy.chain = "base"
+
+    result = _make_execution_result(tx_hash="0xunknown_address")
+    context = SimpleNamespace(protocol="aerodrome", chain="base")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib4318-unknown-address",
+    )
+
+    assert outcome.accounting_degraded is False
+    # Empty ≠ Zero — no phantom-keyed entry inserted.
+    assert unknown_address not in runner._teardown_price_oracle
+    assert unknown_address.upper() not in runner._teardown_price_oracle
+    # WETH (symbol leg) was still attempted but the existing pre-teardown
+    # quote on WETH is authoritative, so the helper short-circuits the
+    # symbol leg via the case-insensitive _already_present check.
+    queried_symbols = {call["symbol"] for call in runner.price_oracle._calls}
+    # The unresolvable address must NOT have hit the gateway as a phantom symbol.
+    assert unknown_address not in queried_symbols
+    assert unknown_address.upper() not in queried_symbols
