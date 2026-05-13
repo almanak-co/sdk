@@ -21,8 +21,15 @@ logger = logging.getLogger(__name__)
 # so the UI can distinguish "stopping cleanly" from "actively unwinding
 # positions" (the reconciler timeout for TEARDOWN_IN_PROGRESS is the 45-minute
 # teardown SLA, not the 5-minute STOPPING SLA).
-_VALID_STATES = {"INITIALIZING", "RUNNING", "PAUSED", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"}
-_VALID_COMMANDS = {"STOP", "PAUSE", "RESUME"}
+#
+# VIB-4281: PAUSED/PAUSE/RESUME retired from the lifecycle vocabulary. The
+# three-action UX model is Stop (terminate the pod, leave positions on-chain) /
+# Teardown (unwind positions then exit) / Emergency Stop (kubectl delete,
+# bypasses the state guard). Historical `agent_state` rows may still hold
+# `PAUSED` for read-back; the gateway just no longer accepts it as a write
+# target or as an incoming command.
+_VALID_STATES = {"INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"}
+_VALID_COMMANDS = {"STOP"}
 
 
 class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):

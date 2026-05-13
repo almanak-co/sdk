@@ -2,10 +2,11 @@
 
 Tests cover:
 - STOP command state machine: RUNNING -> STOPPING -> TERMINATED
-- Full state machine: PAUSE/RESUME/STOP flow via store API
-- STOP while paused state transitions
+- STOP -> TEARING_DOWN -> TERMINATED via the hosted teardown bridge
 - ERROR state with error messages
 - Heartbeat during lifecycle transitions
+
+VIB-4281: PAUSE / RESUME / PAUSED are no longer part of the lifecycle vocabulary.
 """
 
 import pytest
@@ -51,45 +52,19 @@ class TestStopCommandLifecycle:
         store.write_state(agent_id, "TERMINATED")
         assert store.read_state(agent_id).state == "TERMINATED"
 
-    def test_pause_resume_stop_flow(self, store):
-        """Full PAUSE -> RESUME -> STOP lifecycle flow."""
+    def test_stop_teardown_terminated_flow(self, store):
+        """STOP routes through STOPPING -> TEARING_DOWN -> TERMINATED."""
         agent_id = "test-agent-2"
 
         store.write_state(agent_id, "RUNNING")
-
-        # PAUSE
-        store.write_command(agent_id, "PAUSE", "operator")
-        cmd = store.read_pending_command(agent_id)
-        store.ack_command(cmd.id)
-        store.write_state(agent_id, "PAUSED")
-        assert store.read_state(agent_id).state == "PAUSED"
-
-        # RESUME
-        store.write_command(agent_id, "RESUME", "operator")
-        cmd = store.read_pending_command(agent_id)
-        store.ack_command(cmd.id)
-        store.write_state(agent_id, "RUNNING")
-        assert store.read_state(agent_id).state == "RUNNING"
 
         # STOP
         store.write_command(agent_id, "STOP", "operator")
         cmd = store.read_pending_command(agent_id)
         store.ack_command(cmd.id)
         store.write_state(agent_id, "STOPPING")
-        store.write_state(agent_id, "TERMINATED")
-        assert store.read_state(agent_id).state == "TERMINATED"
-
-    def test_stop_while_paused(self, store):
-        """STOP command while agent is PAUSED."""
-        agent_id = "test-agent-3"
-
-        store.write_state(agent_id, "PAUSED")
-
-        # STOP while paused
-        store.write_command(agent_id, "STOP", "operator")
-        cmd = store.read_pending_command(agent_id)
-        store.ack_command(cmd.id)
-        store.write_state(agent_id, "STOPPING")
+        # Hosted teardown bridge writes TEARING_DOWN once unwind starts.
+        store.write_state(agent_id, "TEARING_DOWN")
         store.write_state(agent_id, "TERMINATED")
         assert store.read_state(agent_id).state == "TERMINATED"
 
@@ -116,8 +91,8 @@ class TestStopCommandLifecycle:
         assert state.iteration_count == 5
 
         # Heartbeat after state change still works
-        store.write_state(agent_id, "PAUSED")
+        store.write_state(agent_id, "STOPPING")
         store.heartbeat(agent_id)
         # Note: heartbeat doesn't change state, only timestamp and count
         state = store.read_state(agent_id)
-        assert state.state == "PAUSED"
+        assert state.state == "STOPPING"

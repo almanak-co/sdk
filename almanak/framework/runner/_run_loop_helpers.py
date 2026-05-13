@@ -1160,47 +1160,33 @@ async def handle_lifecycle_command(
     strategy_id: str,
     command: str | None,
 ) -> None:
-    """Route a polled lifecycle command (STOP / PAUSE / RESUME).
+    """Route a polled lifecycle command.
 
     ``STOP``: delegate to ``_lifecycle_handle_stop`` (which will call
     ``request_shutdown`` itself — the outer loop drains on the next
     iteration).
 
-    ``PAUSE``: write PAUSED state, send a last position heartbeat, then
-    enter an inner loop that sends heartbeats at
-    ``config.lifecycle_poll_interval`` while waiting for ``RESUME``.
-    ``STOP`` received during pause also calls ``_lifecycle_handle_stop``
-    and exits the inner loop. ``_shutdown_requested`` (set externally by
-    signal handler) also exits the inner loop.
+    VIB-4281: ``PAUSE`` / ``RESUME`` have been retired. The runner accepts
+    only ``STOP``; the platform's pause/resume endpoints return 410 Gone and
+    the UI funnels users through Stop / Teardown / Emergency Stop instead.
+    A legacy queued ``PAUSE`` / ``RESUME`` (e.g. a row written just before
+    the platform deploy that lands during the migration window) is dropped
+    with a WARNING log — silently mapping it to ``STOP`` would invoke
+    teardown and unwind positions, breaking the old "PAUSE = don't touch
+    positions" semantic.
     """
     if command == "STOP":
         logger.info("Received STOP command for %s", strategy_id)
         runner._lifecycle_handle_stop(strategy_id, strategy)
         return
 
-    if command != "PAUSE":
-        return
-
-    logger.info("Received PAUSE command for %s", strategy_id)
-    runner._lifecycle_write_state(strategy_id, "PAUSED")
-    runner._gateway_update_status(strategy_id, "PAUSED")
-    # Preserve position snapshot so the dashboard doesn't lose it during pause
-    runner._gateway_heartbeat(strategy_id, positions=runner._collect_position_snapshot(strategy))
-    # Wait for RESUME command (send heartbeats so operator sees liveness)
-    while not runner._shutdown_requested:
-        runner._lifecycle_heartbeat(strategy_id)
-        resume_cmd = runner._lifecycle_poll_command(strategy_id)
-        if resume_cmd == "RESUME":
-            logger.info("Received RESUME command for %s", strategy_id)
-            runner._lifecycle_write_state(strategy_id, "RUNNING")
-            runner._gateway_update_status(strategy_id, "RUNNING")
-            runner._gateway_heartbeat(strategy_id, positions=runner._collect_position_snapshot(strategy))
-            break
-        if resume_cmd == "STOP":
-            logger.info("Received STOP command while paused for %s", strategy_id)
-            runner._lifecycle_handle_stop(strategy_id, strategy)
-            break
-        await asyncio.sleep(runner.config.lifecycle_poll_interval)
+    if command in ("PAUSE", "RESUME"):
+        logger.warning(
+            "Received retired lifecycle command %s for %s; ignoring (VIB-4281). "
+            "If this came from an operator action, the platform should have rejected it at the API edge.",
+            command,
+            strategy_id,
+        )
 
 
 # =============================================================================

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### BREAKING — VIB-4281 Retired PAUSE / RESUME lifecycle commands
+
+The `PAUSE` and `RESUME` lifecycle commands have been removed from the gateway's
+`LifecycleService`. The runner accepts only `STOP`; the V2 platform's pause and
+resume endpoints return `410 Gone`. The three-action UX model is **Stop** (kill
+pod, leave positions, hits `/v2/agent/terminate`), **Teardown** (unwind then
+exit, hits `/v2/agent/stop`), and **Emergency Stop** (`kubectl delete`).
+
+The `PAUSED` state is no longer in the gateway's writable vocabulary, but
+historical `agent_state` rows still readable for backwards compatibility.
+
+Local SDK behaviour: `almanak strat pause` / `almanak strat resume` CLI surfaces
+that route through the lifecycle channel will now error with
+`INVALID_ARGUMENT`. Use `almanak strat stop` instead; a future PR will remove
+the broken CLI surfaces.
+
+Migration guidance:
+- Restart a stopped strategy with `restartAgent` / `/v2/agent/restart`
+  (cached-image redeploy). Stop + Restart reconstructs the same in-memory
+  state from `metrics_db` rows.
+
 ### BREAKING — VIB-4062 Unified MarketSnapshot
 
 The two `MarketSnapshot` classes that have silently diverged since the

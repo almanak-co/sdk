@@ -53,6 +53,7 @@ can preserve them):
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -850,12 +851,12 @@ class TestFirstIterationErrorDoesNotCrashLoop:
 
 
 # =============================================================================
-# Lifecycle poll commands (PAUSE / STOP / RESUME)
+# Lifecycle poll commands (STOP only — PAUSE/RESUME retired in VIB-4281)
 # =============================================================================
 
 
 class TestLifecycleCommands:
-    """Pin routing for STOP and PAUSE/RESUME lifecycle commands."""
+    """Pin routing for the STOP lifecycle command."""
 
     @pytest.mark.asyncio
     async def test_stop_command_calls_handle_stop(self):
@@ -878,58 +879,41 @@ class TestLifecycleCommands:
         assert runner._lifecycle_handle_stop.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_pause_then_resume_keeps_loop_alive(self):
-        """PAUSE blocks in an inner while; RESUME releases it; loop then sleeps + exits."""
+    async def test_pause_command_is_ignored(self, caplog):
+        """VIB-4281: PAUSE is no longer in the command vocabulary. Even if the
+        gateway returned one (legacy queued row, misconfigured caller), the
+        runner must not pause — it should drop the command and keep iterating,
+        and log a WARNING so operators see the dropped command.
+        """
         runner = _make_runner()
         strategy = _make_strategy()
-        # First outer iteration command is PAUSE; inside the pause loop the
-        # first poll returns RESUME.
-        commands = iter(["PAUSE", "RESUME"])
-
-        def poll(sid):
-            return next(commands, None)
-
-        runner._lifecycle_poll_command = MagicMock(side_effect=poll)
+        runner._lifecycle_poll_command = MagicMock(side_effect=["PAUSE", None, None])
+        runner._lifecycle_handle_stop = MagicMock()
         runner.run_iteration = AsyncMock(return_value=_make_result())
 
-        await asyncio.wait_for(
-            runner.run_loop(strategy, interval_seconds=0, max_iterations=1),
-            timeout=5,
-        )
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.runner._run_loop_helpers"):
+            await asyncio.wait_for(
+                runner.run_loop(strategy, interval_seconds=0, max_iterations=2),
+                timeout=5,
+            )
 
-        # After RESUME, run_loop writes RUNNING via _lifecycle_write_state.
-        running_writes = [
+        runner._lifecycle_handle_stop.assert_not_called()
+        # The loop must have completed the second iteration — i.e. PAUSE didn't
+        # short-circuit the run.
+        assert runner.run_iteration.await_count >= 2
+        # No PAUSED state should ever be written.
+        paused_writes = [
             c
             for c in runner._lifecycle_write_state.call_args_list
-            if len(c.args) >= 2 and c.args[1] == "RUNNING"
+            if len(c.args) >= 2 and c.args[1] == "PAUSED"
         ]
-        # Startup RUNNING + post-RESUME RUNNING.
-        assert len(running_writes) >= 2
-
-    @pytest.mark.asyncio
-    async def test_pause_then_stop_inside_pause_invokes_handle_stop(self):
-        """STOP received while paused must trigger _lifecycle_handle_stop."""
-        runner = _make_runner()
-        strategy = _make_strategy()
-        commands = iter(["PAUSE", "STOP"])
-
-        def poll(sid):
-            return next(commands, None)
-
-        runner._lifecycle_poll_command = MagicMock(side_effect=poll)
-
-        def handle_stop(sid, strat):
-            runner.request_shutdown()
-
-        runner._lifecycle_handle_stop = MagicMock(side_effect=handle_stop)
-        runner.run_iteration = AsyncMock(return_value=_make_result())
-
-        await asyncio.wait_for(
-            runner.run_loop(strategy, interval_seconds=0, max_iterations=5),
-            timeout=5,
+        assert paused_writes == []
+        # Operator visibility for the dropped command.
+        assert any(
+            "retired lifecycle command PAUSE" in record.message
+            for record in caplog.records
+            if record.levelname == "WARNING"
         )
-
-        assert runner._lifecycle_handle_stop.call_count == 1
 
 
 # =============================================================================

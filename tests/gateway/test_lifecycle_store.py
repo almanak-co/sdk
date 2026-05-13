@@ -89,7 +89,7 @@ class TestSQLiteLifecycleStoreState:
 
     def test_state_transitions(self, store):
         """Test full lifecycle state machine."""
-        transitions = ["INITIALIZING", "RUNNING", "PAUSED", "RUNNING", "STOPPING", "TERMINATED"]
+        transitions = ["INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED"]
         for state_name in transitions:
             store.write_state("agent-1", state_name)
             state = store.read_state("agent-1")
@@ -102,7 +102,7 @@ class TestSQLiteLifecycleStoreState:
 
     def test_write_state_without_running_version_preserves_existing_value(self, store):
         store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
-        store.write_state("agent-1", "PAUSED")
+        store.write_state("agent-1", "STOPPING")
         state = store.read_state("agent-1")
         assert state.running_almanak_version == "2.15.1rc16"
 
@@ -120,13 +120,19 @@ class TestSQLiteLifecycleStoreState:
 
 
 class TestSQLiteLifecycleStoreCommands:
-    """Tests for command CRUD operations."""
+    """Tests for command CRUD operations.
+
+    Note: the store is intentionally vocabulary-agnostic — only the
+    LifecycleService servicer validates command strings against
+    ``_VALID_COMMANDS``. These tests exercise raw round-trip behaviour
+    and use STOP exclusively (VIB-4281 retired PAUSE / RESUME).
+    """
 
     def test_write_and_read_command(self, store):
-        store.write_command("agent-1", "PAUSE", "operator@example.com")
+        store.write_command("agent-1", "STOP", "operator@example.com")
         cmd = store.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "PAUSE"
+        assert cmd.command == "STOP"
         assert cmd.issued_by == "operator@example.com"
 
     def test_ack_command(self, store):
@@ -141,14 +147,15 @@ class TestSQLiteLifecycleStoreCommands:
         assert store.read_pending_command("agent-1") is None
 
     def test_multiple_commands_returns_latest(self, store):
-        store.write_command("agent-1", "PAUSE", "admin")
-        store.write_command("agent-1", "RESUME", "admin")
+        store.write_command("agent-1", "STOP", "admin")
+        store.write_command("agent-1", "STOP", "admin-2")
         cmd = store.read_pending_command("agent-1")
-        assert cmd.command == "RESUME"  # Most recent (highest id)
+        assert cmd.command == "STOP"
+        assert cmd.issued_by == "admin-2"  # Most recent (highest id)
 
     def test_ack_leaves_other_commands(self, store):
         """Acking one command doesn't affect others."""
-        store.write_command("agent-1", "PAUSE", "admin")
+        store.write_command("agent-1", "STOP", "admin")
         store.write_command("agent-2", "STOP", "admin")
 
         cmd1 = store.read_pending_command("agent-1")
@@ -161,10 +168,10 @@ class TestSQLiteLifecycleStoreCommands:
 
     def test_command_fields(self, store):
         """Verify all fields are correctly stored and retrieved."""
-        store.write_command("agent-1", "RESUME", "dashboard-user@test.com")
+        store.write_command("agent-1", "STOP", "dashboard-user@test.com")
         cmd = store.read_pending_command("agent-1")
         assert cmd.agent_id == "agent-1"
-        assert cmd.command == "RESUME"
+        assert cmd.command == "STOP"
         assert cmd.issued_by == "dashboard-user@test.com"
         assert cmd.issued_at is not None
         assert cmd.processed_at is None
@@ -180,7 +187,7 @@ class TestSQLiteLifecycleStorePersistence:
         store1 = SQLiteLifecycleStore(db_path=db_path)
         store1.initialize()
         store1.write_state("agent-1", "RUNNING")
-        store1.write_command("agent-1", "PAUSE", "admin")
+        store1.write_command("agent-1", "STOP", "admin")
         store1.close()
 
         store2 = SQLiteLifecycleStore(db_path=db_path)
@@ -191,7 +198,7 @@ class TestSQLiteLifecycleStorePersistence:
 
         cmd = store2.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "PAUSE"
+        assert cmd.command == "STOP"
         store2.close()
 
     def test_idempotent_initialize(self, store):
@@ -254,7 +261,7 @@ class TestSQLiteLifecycleStoreThreadSafety:
                 errors.append(e)
 
         threads = [
-            threading.Thread(target=state_writer, args=(f"agent-{i}", ["RUNNING", "PAUSED", "RUNNING"]))
+            threading.Thread(target=state_writer, args=(f"agent-{i}", ["RUNNING", "STOPPING", "RUNNING"]))
             for i in range(5)
         ]
         for t in threads:

@@ -149,12 +149,12 @@ class TestLifecycleServiceHeartbeat:
 class TestLifecycleServiceReadCommand:
     @pytest.mark.asyncio
     async def test_read_command_found(self, service, store, mock_context):
-        store.write_command("agent-1", "PAUSE", "operator@test.com")
+        store.write_command("agent-1", "STOP", "operator@test.com")
 
         request = gateway_pb2.ReadAgentCommandRequest(agent_id="agent-1")
         response = await service.ReadCommand(request, mock_context)
         assert response.found is True
-        assert response.command == "PAUSE"
+        assert response.command == "STOP"
         assert response.issued_by == "operator@test.com"
         assert response.command_id > 0
 
@@ -184,7 +184,7 @@ class TestLifecycleServiceWriteCommand:
     async def test_write_command_success(self, service, store, mock_context):
         request = gateway_pb2.WriteAgentCommandRequest(
             agent_id="agent-1",
-            command="PAUSE",
+            command="STOP",
             issued_by="dashboard-user",
         )
         response = await service.WriteCommand(request, mock_context)
@@ -193,8 +193,32 @@ class TestLifecycleServiceWriteCommand:
         # Verify command was written
         cmd = store.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "PAUSE"
+        assert cmd.command == "STOP"
         assert cmd.issued_by == "dashboard-user"
+
+    @pytest.mark.asyncio
+    async def test_write_command_rejects_pause(self, service, mock_context):
+        """VIB-4281: PAUSE is no longer in _VALID_COMMANDS."""
+        request = gateway_pb2.WriteAgentCommandRequest(
+            agent_id="agent-1",
+            command="PAUSE",
+            issued_by="dashboard-user",
+        )
+        response = await service.WriteCommand(request, mock_context)
+        assert response.success is False
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+    @pytest.mark.asyncio
+    async def test_write_command_rejects_resume(self, service, mock_context):
+        """VIB-4281: RESUME is no longer in _VALID_COMMANDS."""
+        request = gateway_pb2.WriteAgentCommandRequest(
+            agent_id="agent-1",
+            command="RESUME",
+            issued_by="dashboard-user",
+        )
+        response = await service.WriteCommand(request, mock_context)
+        assert response.success is False
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
 
 # ---- Input validation (INVALID_ARGUMENT) ----
@@ -226,11 +250,23 @@ class TestLifecycleServiceInputValidation:
 
     @pytest.mark.asyncio
     async def test_write_state_accepts_all_valid_states(self, service, store, mock_context):
-        """All documented valid states are accepted without INVALID_ARGUMENT."""
-        for state in ("INITIALIZING", "RUNNING", "PAUSED", "STOPPING", "TERMINATED", "ERROR"):
+        """All documented valid states are accepted without INVALID_ARGUMENT.
+
+        VIB-4281 removed ``PAUSED`` from the writable vocabulary; historical rows
+        may still hold the value but the gateway no longer accepts new writes.
+        """
+        for state in ("INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"):
             request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-v", state=state)
             response = await service.WriteState(request, mock_context)
             assert response.success is True, f"State {state} should be accepted"
+
+    @pytest.mark.asyncio
+    async def test_write_state_rejects_paused(self, service, mock_context):
+        """VIB-4281: PAUSED is no longer in _VALID_STATES."""
+        request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-1", state="PAUSED")
+        response = await service.WriteState(request, mock_context)
+        assert response.success is False
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
     async def test_read_state_empty_agent_id(self, service, mock_context):

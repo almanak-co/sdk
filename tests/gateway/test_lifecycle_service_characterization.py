@@ -367,7 +367,7 @@ class TestWriteCommand:
         )
         store.write_command.assert_not_called()
 
-    @pytest.mark.parametrize("command", ["STOP", "PAUSE", "RESUME"])
+    @pytest.mark.parametrize("command", ["STOP"])
     @pytest.mark.asyncio
     async def test_each_valid_command_accepted(self, service, store, context, command):
         request = gateway_pb2.WriteAgentCommandRequest(
@@ -379,6 +379,21 @@ class TestWriteCommand:
             agent_id="agt-1", command=command, issued_by="op@team",
         )
         assert_set_code_not_called(context)
+
+    @pytest.mark.parametrize("command", ["PAUSE", "RESUME"])
+    @pytest.mark.asyncio
+    async def test_retired_commands_rejected(self, service, store, context, command):
+        """VIB-4281: PAUSE / RESUME no longer accepted."""
+        request = gateway_pb2.WriteAgentCommandRequest(
+            agent_id="agt-1", command=command, issued_by="op@team",
+        )
+        response = await service.WriteCommand(request, context)
+        assert_grpc_error(
+            context, response,
+            expected_status=grpc.StatusCode.INVALID_ARGUMENT,
+            error_substring="invalid command",
+        )
+        store.write_command.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_backend_exception_returns_internal_error(self, service, store, context):

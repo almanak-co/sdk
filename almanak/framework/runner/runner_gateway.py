@@ -131,7 +131,7 @@ def deregister_from_gateway(runner: Any, strategy_id: str) -> None:
 def gateway_update_status(runner: Any, strategy_id: str, status: str) -> None:
     """Update instance status in the gateway registry (non-heartbeat).
 
-    Used to flip status to PAUSED/RUNNING on pause/resume so that
+    Used to flip status (e.g. INACTIVE on shutdown) so that
     strat list / strat status reflects the correct state.
     Non-fatal: catches all exceptions.
     """
@@ -261,7 +261,7 @@ except Exception:
     _REPORTED_ALMANAK_VERSION = None
 
 # Process-lifetime cache: hosted V2 runs one strategy per process, so reporting
-# once per agent avoids rewriting the same package version on pause/resume loops.
+# once per agent avoids rewriting the same package version on every RUNNING write.
 _RUNNING_VERSION_REPORTED_AGENT_IDS: set[str] = set()
 
 
@@ -313,7 +313,7 @@ def lifecycle_heartbeat(runner: Any, agent_id: str) -> None:
 def lifecycle_poll_command(runner: Any, agent_id: str) -> str | None:
     """Poll for pending command from LifecycleStore.
 
-    Returns command string (PAUSE, RESUME, STOP) or None.
+    Returns command string (STOP) or None.
     The command is acknowledged only after it is returned so that callers
     can apply side-effects before the ack.  If the process crashes between
     read and ack the command will be re-delivered on the next poll.
