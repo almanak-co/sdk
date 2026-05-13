@@ -1,11 +1,11 @@
-"""Production-grade BridgeIntent tests for the Across bridge on Arbitrum.
+"""Production-grade BridgeIntent tests for the Across bridge on Ethereum.
 
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for a
-USDC bridge from Arbitrum to Optimism via Across Protocol V3:
+USDC bridge from Ethereum to Arbitrum via Across Protocol V3:
 
-1. Create BridgeIntent for USDC arbitrum -> optimism
+1. Create BridgeIntent for USDC ethereum -> arbitrum
 2. Compile to ActionBundle via IntentCompiler (approve + depositV3 on SpokePool)
-3. Execute on an Arbitrum Anvil fork via ExecutionOrchestrator
+3. Execute on an Ethereum Anvil fork via ExecutionOrchestrator
 4. Parse the deposit receipt: verify FundsDeposited event + ERC-20 Transfer
    from wallet -> SpokePool
 5. Verify balance deltas on the source chain
@@ -17,7 +17,7 @@ Layer coverage on Anvil (single source-chain fork):
 
 - Layer 1 (compilation): verified on-chain-independent (runs locally).
   The compiled depositV3 calldata is decoded and destinationChainId is
-  asserted to match Optimism (10) -- this catches a compiler bug that
+  asserted to match Arbitrum (42161) -- this catches a compiler bug that
   silently routes to the wrong chain even when every other assertion
   would still pass.
 - Layer 2 (execution): verified against the source-chain deposit tx
@@ -36,7 +36,7 @@ Layer coverage on Anvil (single source-chain fork):
   EXACTLY the bridge amount. Source-chain approve is asserted to have run.
 
 To run:
-    uv run pytest tests/intents/arbitrum/test_across_bridge.py -v -s
+    uv run pytest tests/intents/ethereum/test_across_bridge.py -v -s
 """
 
 import time
@@ -93,15 +93,16 @@ def _sync_anvil_time_to_wall_clock(web3: Web3) -> int:
         assert not mine_resp.get("error"), f"evm_mine failed: {mine_resp['error']}"
     return wall_clock_ts
 
+
 # =============================================================================
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "arbitrum"
-ARBITRUM_CHAIN_ID = 42161
-DEST_CHAIN = "optimism"
+CHAIN_NAME = "ethereum"
+ETHEREUM_CHAIN_ID = 1
+DEST_CHAIN = "arbitrum"
 # Ethereum mainnet chain IDs used by Across' cross-chain routing.
-OPTIMISM_CHAIN_ID = 10
+ARBITRUM_CHAIN_ID = 42161
 
 # Standard EVM event topics
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -110,8 +111,8 @@ ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 #   "uint32,uint32,uint32,bytes32,bytes32,bytes32,bytes)"
 # )
 # Emitted by Across SpokePool V3.5+ (the upgraded bytes32 variant of the old
-# `V3FundsDeposited(address,...)` event). The Arbitrum SpokePool at
-# 0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A emits this topic on depositV3()
+# `V3FundsDeposited(address,...)` event). The Ethereum SpokePool at
+# 0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5 emits this topic on depositV3()
 # calls; the legacy `V3FundsDeposited` topic is no longer emitted.
 ACROSS_FUNDS_DEPOSITED_TOPIC = "0x32ed1a409ef04c7b0227189c3a103dc5ac10e775a15b785dcc510201f7c25ad3"
 
@@ -121,22 +122,22 @@ ACROSS_FUNDS_DEPOSITED_TOPIC = "0x32ed1a409ef04c7b0227189c3a103dc5ac10e775a15b78
 # =============================================================================
 
 
-@pytest.mark.arbitrum
+@pytest.mark.ethereum
 @pytest.mark.bridge
 class TestAcrossBridgeIntent:
     """Across Protocol bridge tests exercising BridgeIntent end-to-end.
 
-    These tests verify the full BridgeIntent flow on an Arbitrum Anvil fork:
+    These tests verify the full BridgeIntent flow on an Ethereum Anvil fork:
     - BridgeIntent creation with proper parameters
     - IntentCompiler generates approve + Across depositV3 transactions
-    - Transactions execute successfully against the real Arbitrum SpokePool
+    - Transactions execute successfully against the real Ethereum SpokePool
     - Receipt contains the expected FundsDeposited event + Transfer
     - Source-chain USDC balance decreases by the bridged amount
     """
 
     @pytest.mark.intent(IntentType.BRIDGE)
     @pytest.mark.asyncio
-    async def test_bridge_usdc_arbitrum_to_optimism_using_intent(  # noqa: layers
+    async def test_bridge_usdc_ethereum_to_arbitrum_using_intent(  # noqa: layers
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -144,7 +145,7 @@ class TestAcrossBridgeIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ) -> None:
-        """Bridge USDC Arbitrum -> Optimism via Across using BridgeIntent.
+        """Bridge USDC Ethereum -> Arbitrum via Across using BridgeIntent.
 
         # noqa: layers -- Bridges don't ship a dedicated ReceiptParser; Layer 3
         # is satisfied by direct event-topic decoding (FundsDeposited +
@@ -152,9 +153,9 @@ class TestAcrossBridgeIntent:
         # documented in the module docstring.
 
         Flow:
-        1. Create BridgeIntent for USDC arbitrum -> optimism
+        1. Create BridgeIntent for USDC ethereum -> arbitrum
         2. Compile via IntentCompiler (approve + depositV3 on SpokePool)
-        3. Execute via ExecutionOrchestrator on Arbitrum Anvil fork
+        3. Execute via ExecutionOrchestrator on Ethereum Anvil fork
         4. Parse the deposit receipt: verify FundsDeposited event + Transfer
         5. Verify source-chain USDC balance decreased by exact bridge amount
         """
@@ -162,24 +163,24 @@ class TestAcrossBridgeIntent:
         usdc_addr = tokens["USDC"]
 
         in_decimals = get_token_decimals(web3, usdc_addr)
-        assert in_decimals == 6, f"Arbitrum USDC is 6 decimals, got {in_decimals}"
+        assert in_decimals == 6, f"Ethereum USDC is 6 decimals, got {in_decimals}"
 
         # Small amount (well under SpokePool min transfer and Across API limits
         # for non-exclusive routes).
         bridge_amount = Decimal("5")  # 5 USDC
 
-        spoke_pool_addr = ACROSS_SPOKE_POOL_ADDRESSES[ARBITRUM_CHAIN_ID]
+        spoke_pool_addr = ACROSS_SPOKE_POOL_ADDRESSES[ETHEREUM_CHAIN_ID]
         spoke_pool_checksummed = Web3.to_checksum_address(spoke_pool_addr)
 
         # Snap the fork's block timestamp to wall clock before the Across
         # adapter fetches a quote -- see _sync_anvil_time_to_wall_clock
-        # docstring. Without this, the Arbitrum SpokePool reverts with
+        # docstring. Without this, the Ethereum SpokePool reverts with
         # InvalidQuoteTimestamp() (selector 0xf722177f) in CI, where the
         # fork's block timestamp can sit far behind wall clock.
         synced_ts = _sync_anvil_time_to_wall_clock(web3)
 
         print(f"\n{'='*80}")
-        print("Test: USDC Arbitrum -> Optimism bridge via Across BridgeIntent")
+        print("Test: USDC Ethereum -> Arbitrum bridge via Across BridgeIntent")
         print(f"{'='*80}")
         print(f"Bridge amount:   {bridge_amount} USDC")
         print(f"SpokePool addr:  {spoke_pool_addr}")
@@ -240,7 +241,7 @@ class TestAcrossBridgeIntent:
                 f"Unexpected leading tx_type={tx_type}; expected approve/approve_reset. Full list: {tx_types}"
             )
 
-        # Deposit destination must be the Across Arbitrum SpokePool
+        # Deposit destination must be the Across Ethereum SpokePool
         deposit_tx = bundle.transactions[-1]
         assert deposit_tx["to"].lower() == spoke_pool_addr.lower(), (
             f"Deposit must target SpokePool {spoke_pool_addr}, got {deposit_tx['to']}"
@@ -253,7 +254,7 @@ class TestAcrossBridgeIntent:
         # Decode the destinationChainId from the depositV3 calldata. Across
         # routes entirely on this field -- asserting metadata alone reads back
         # what the compiler wrote; asserting the calldata catches a compiler
-        # bug that translates "optimism" to the wrong chain id. depositV3
+        # bug that translates "arbitrum" to the wrong chain id. depositV3
         # signature ordering (see across/adapter.py _build_depositv3_calldata):
         #   [depositor, recipient, inputToken, outputToken,
         #    inputAmount, outputAmount, destinationChainId, ...]
@@ -261,8 +262,8 @@ class TestAcrossBridgeIntent:
         # selector, i.e. bytes [4 + 32*6 : 4 + 32*7] = [196:228].
         deposit_calldata = bytes.fromhex(deposit_tx["data"].removeprefix("0x"))
         encoded_dest_chain_id = int.from_bytes(deposit_calldata[196:228], "big")
-        assert encoded_dest_chain_id == OPTIMISM_CHAIN_ID, (
-            f"depositV3 calldata must encode destinationChainId={OPTIMISM_CHAIN_ID} (Optimism), "
+        assert encoded_dest_chain_id == ARBITRUM_CHAIN_ID, (
+            f"depositV3 calldata must encode destinationChainId={ARBITRUM_CHAIN_ID} (Arbitrum), "
             f"got {encoded_dest_chain_id}"
         )
 
