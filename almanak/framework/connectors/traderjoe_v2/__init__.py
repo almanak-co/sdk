@@ -140,5 +140,5 @@ register_connector(
         IntentType.LP_OPEN,
         IntentType.LP_CLOSE,
     ),
-    chains=("avalanche", "arbitrum"),
+    chains=("avalanche", "arbitrum", "bnb"),
 )

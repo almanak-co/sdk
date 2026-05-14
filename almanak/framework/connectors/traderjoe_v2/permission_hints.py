@@ -162,19 +162,41 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
 PERMISSION_HINTS = PermissionHints(
     supports_standalone_fee_collection=True,
     static_permissions=_build_static_permissions(),
-    # Synthetic SWAP discovery defaults to ``(USDC, WETH)`` but TraderJoe V2 on
-    # Ethereum has no usable WETH/USDC liquidity at any bin step at the current
-    # fork block — the only liquid TJv2 pair on Ethereum is USDT/USDC bin_step=1
-    # (LBPair ``0x47B1CEC2D2370E11B049c73aB6732F03E920C71a``, verified 2026-05-14).
-    # Without this override, ``get_swap_quote`` raises ``DivisionByZero`` because
-    # ``getSwapOut`` returns ``amount_out=0`` against an empty pool, the
-    # synthetic compile aborts, and the LBRouter swap selector never lands in
-    # the generated manifest — every real TJv2 SWAP on Ethereum then fails
-    # ``ConditionViolation`` at ``execTransactionWithRole``. Mirror Curve's
-    # approach (issue #1903) and pin a known-liquid pair per chain. Other
-    # chains keep the default ``(USDC, WETH)`` pair, which compiles fine.
+    # Synthetic SWAP discovery defaults to ``(USDC, WETH)``, but TraderJoe V2
+    # on several chains has no usable liquidity at that pair and the synthetic
+    # compile aborts before the LBRouter swap selector lands in the generated
+    # manifest — every real TJv2 SWAP on those chains then fails
+    # ``ConditionViolation`` (0xd0a9bf58) at ``execTransactionWithRole``.
+    # Pin a known-liquid pair per chain.
+    #
+    # * ``ethereum``: WETH/USDC has no liquidity at any bin step at the current
+    #   fork block — the only liquid TJv2 pair on Ethereum is USDT/USDC
+    #   bin_step=1 (LBPair ``0x47B1CEC2D2370E11B049c73aB6732F03E920C71a``,
+    #   verified 2026-05-14). ``get_swap_quote`` otherwise raises
+    #   ``DivisionByZero`` because ``getSwapOut`` returns ``amount_out=0``
+    #   against an empty pool. (VIB-4378.)
+    # * ``bsc`` / ``bnb``: The framework's chain-default pair on bsc resolves
+    #   to (USDC, WETH-bridged) which has no TJv2 LBPair — the canonical
+    #   liquid pair is (USDT, WBNB). Registered under both ``"bsc"`` (the
+    #   SDK canonical name, used by the compiler and intent runtime) AND
+    #   ``"bnb"`` (the user-facing alias used by ConnectorRegistry /
+    #   ``almanak ax`` / CLI surfaces). The lookup in
+    #   ``synthetic_intents._build_swap_intents`` is a literal
+    #   ``dict.get(chain)`` against whatever string the caller passes, with
+    #   no alias normalisation upstream — omitting either key would leave
+    #   the corresponding call site falling back to the default and
+    #   silently emit an empty manifest. (VIB-4376.) Mirrors the
+    #   sushiswap_v3 bsc override pattern from #1902.
     synthetic_swap_pair={
         "ethereum": ("USDT", "USDC"),
+        "bsc": (
+            "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
+            "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+        ),
+        "bnb": (
+            "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
+            "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+        ),
     },
     selector_labels={
         _TRADERJOE_ADD_LIQUIDITY_SELECTOR: "addLiquidity(LiquidityParameters)",
