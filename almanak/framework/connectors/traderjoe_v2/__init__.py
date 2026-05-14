@@ -15,6 +15,7 @@ Key Concepts:
 
 Supported chains:
 - Avalanche (Chain ID: 43114)
+- Arbitrum One (Chain ID: 42161)
 
 Example:
     from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
@@ -139,5 +140,5 @@ register_connector(
         IntentType.LP_OPEN,
         IntentType.LP_CLOSE,
     ),
-    chains=("avalanche",),
+    chains=("avalanche", "arbitrum"),
 )

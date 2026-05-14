@@ -5251,19 +5251,51 @@ class IntentCompiler:
         """Auto-detect a TraderJoe V2 bin step by probing the SDK.
 
         Iterates common bin steps (20, 25, 15, 10, 50, 5, 100, 1) and returns
-        the first one with a pool. Preserves the exact error strings pinned
-        by ``test_compiler_traderjoe_v2_swap``:
+        the first one with a pool that is not fully empty (at least one
+        reserve > 0). The liquidity gate (VIB-4374) reflects
+        ``blueprints/05-connectors.md``'s Pool Selection Policy: "do not
+        assume a single fee tier has viable liquidity in both directions."
+        On arbitrum, several common pairs (e.g. WETH/USDC) have a
+        ``(0, 0)`` bin_step=25 pool ahead of a liquid bin_step=15 pool,
+        so a pool-existence-only probe would build a swap guaranteed to
+        revert at execution. The gate matches ``validate_traderjoe_pool``'s
+        definition of "empty" (both reserves zero) so pools with usable
+        one-sided liquidity remain selectable — the quote path will still
+        fail closed on zero output for the requested direction.
+
+        Preserves the exact error strings pinned by
+        ``test_compiler_traderjoe_v2_swap``:
             - "Failed to probe TraderJoe V2 pool for bin_step={bs}: {exc}"
             - "No TraderJoe V2 pool found for {X}/{Y} on {chain}. Tried bin
               steps: [...]. The pair may not have a Liquidity Book pool."
         """
         bin_step_order = [20, 25, 15, 10, 50, 5, 100, 1]
+
+        def _pool_has_liquidity(pool_address: str) -> bool:
+            # Fail-open: if reserve probing fails or returns non-numeric
+            # values (e.g. unit-test MagicMocks, RPC flakes, ABI drift), we
+            # cannot prove the pool is empty. Accept the candidate and let
+            # downstream ``validate_traderjoe_pool`` surface zero-liquidity
+            # cases without regressing call sites that genuinely have a
+            # live pool. Only reject when *both* reserves are zero —
+            # matches ``validate_traderjoe_pool``'s empty-pool definition
+            # (``reserve_x == 0 and reserve_y == 0``) so we don't skip
+            # pools with usable one-sided liquidity, where the quote path
+            # can still ask the router whether the requested direction
+            # has output liquidity and fail closed if it doesn't.
+            try:
+                info = tj_adapter.sdk.get_pool_info(pool_address)
+                return int(info.reserve_x or 0) > 0 or int(info.reserve_y or 0) > 0
+            except Exception:  # noqa: BLE001 — fail-open: keep iterating
+                return True
+
         found_bin_step, broken_bs, unexpected_exc = probe_traderjoe_bin_step(
             probe=tj_adapter.sdk.get_pool_address,
             token_a=swap_from_token.address,
             token_b=swap_to_token.address,
             not_found_exception=pool_not_found_exc,
             candidates=tuple(bin_step_order),
+            is_liquid=_pool_has_liquidity,
         )
         if unexpected_exc is not None:
             return CompilationResult(

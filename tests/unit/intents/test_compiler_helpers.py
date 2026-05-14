@@ -645,6 +645,113 @@ class TestProbeTraderjoeBinStep:
                 not_found_exception=_FakePoolNotFound,
             )
 
+    # ---- is_liquid liquidity gate (VIB-4374) --------------------------------
+
+    def test_is_liquid_skips_empty_pools(self) -> None:
+        """When is_liquid returns False, the candidate is treated like not-found
+        and the probe iterates to the next bin step.
+
+        Mirrors arbitrum TJv2 WETH/USDC where bin_step=25 returns a pool address
+        with zero reserves and bin_step=15 returns the live pool.
+        """
+        # Each candidate returns a distinct pool address so the liquidity gate
+        # can be expressed as a function of the address rather than the step.
+        addresses = {20: None, 25: "0xEMPTY", 15: "0xLIVE", 10: "0xALSO_LIVE"}
+
+        def probe(_a: str, _b: str, bs: int) -> str:
+            addr = addresses[bs]
+            if addr is None:
+                raise _FakePoolNotFound("no pool")
+            return addr
+
+        liquid_addresses = {"0xLIVE", "0xALSO_LIVE"}
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25, 15, 10),
+            is_liquid=lambda addr: addr in liquid_addresses,
+        )
+        assert found == 15
+        assert broken is None
+        assert exc is None
+
+    def test_is_liquid_none_means_no_liquid_pool(self) -> None:
+        """All candidates exist but none pass the liquidity gate -> (None, None, None)."""
+
+        def probe(_a: str, _b: str, _bs: int) -> str:
+            return "0xEMPTY"
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25),
+            is_liquid=lambda _addr: False,
+        )
+        assert found is None
+        assert broken is None
+        assert exc is None
+
+    def test_is_liquid_first_match_wins(self) -> None:
+        """When the first existing pool is liquid, no later candidate is probed."""
+        calls: list[int] = []
+
+        def probe(_a: str, _b: str, bs: int) -> str:
+            calls.append(bs)
+            return "0xLIVE"
+
+        found, _, _ = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25, 15),
+            is_liquid=lambda _addr: True,
+        )
+        assert found == 20
+        assert calls == [20]
+
+    def test_is_liquid_rejects_non_callable(self) -> None:
+        with pytest.raises(TypeError):
+            probe_traderjoe_bin_step(
+                probe=lambda *_a: None,
+                token_a="0xA",
+                token_b="0xB",
+                not_found_exception=_FakePoolNotFound,
+                is_liquid="not-callable",  # type: ignore[arg-type]
+            )
+
+    def test_is_liquid_exception_reports_broken_bin_step(self) -> None:
+        """Exceptions raised by ``is_liquid`` are reshaped like a probe exception:
+        ``found=None``, ``broken=<current step>``, ``exc=<raised error>``.
+
+        Pins the return contract so a future refactor can't silently downgrade
+        a liquidity-probe failure into a continue-loop that hides the cause.
+        """
+
+        def probe(_a: str, _b: str, _bs: int) -> str:
+            return "0xLIVE"
+
+        def is_liquid(_addr: str) -> bool:
+            raise RuntimeError("reserve read failed")
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25),
+            is_liquid=is_liquid,
+        )
+        assert found is None
+        assert broken == 20
+        assert isinstance(exc, RuntimeError)
+        assert "reserve read failed" in str(exc)
+
 
 # ---------------------------------------------------------------------------
 # normalise_gateway_or_rpc  (Phase 6B.5)

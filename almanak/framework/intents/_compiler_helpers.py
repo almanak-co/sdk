@@ -395,8 +395,9 @@ def probe_traderjoe_bin_step(
     token_b: str,
     not_found_exception: type[BaseException],
     candidates: tuple[int, ...] = (20, 25, 15, 10, 50, 5, 100, 1),
+    is_liquid: object | None = None,
 ) -> tuple[int | None, int | None, BaseException | None]:
-    """Find the first TraderJoe V2 bin step with an existing pool for a pair.
+    """Find the first TraderJoe V2 bin step with an existing (liquid) pool for a pair.
 
     Calls ``probe(token_a, token_b, bin_step)`` for each candidate in order
     and returns the first bin step whose probe succeeds. The caller is
@@ -404,6 +405,17 @@ def probe_traderjoe_bin_step(
     reports "found" vs "not found" and bubbles unexpected exceptions back
     (along with the bin step that broke) so the caller can attach
     protocol-specific context.
+
+    Liquidity-aware mode (VIB-4374): when ``is_liquid`` is supplied, the
+    returned pool address is additionally screened by ``is_liquid(addr)``.
+    A False return means "pool exists but has no usable liquidity" — the
+    probe iterates past it like the not-found case. This mirrors the
+    blueprint's Pool Selection Policy for V3-style swaps (do not assume a
+    single fee tier has viable liquidity in both directions) and matches
+    the failure mode observed on arbitrum TJv2 WETH/USDC, where the first
+    autodetected bin_step is an empty pool while bin_step=15 is the live
+    one. ``is_liquid`` is optional to preserve existing callers that have
+    no cheap way to probe reserves.
 
     Args:
         probe: Callable invoked as ``probe(token_a, token_b, bin_step)``.
@@ -418,19 +430,28 @@ def probe_traderjoe_bin_step(
             the connector-specific exception.
         candidates: Tuple of bin steps to probe, in preference order. The
             default mirrors the order used by the compiler (popular first).
+        is_liquid: Optional callable invoked as ``is_liquid(pool_address)``
+            after a successful pool lookup. Return True to accept the
+            candidate, False to iterate past as if it were not found.
+            Exceptions raised here are treated like an unexpected probe
+            failure and reported via the ``(None, bs, exc)`` return shape.
 
     Returns:
         ``(bin_step, None, None)`` on success. ``(None, None, None)`` when
-        every candidate raised ``not_found_exception``. ``(None, bs, exc)``
-        when candidate ``bs`` raised an unexpected exception — the caller
-        converts this into a ``FAILED`` ``CompilationResult`` naming the
-        broken bin step.
+        every candidate raised ``not_found_exception`` (or was screened out
+        by ``is_liquid``). ``(None, bs, exc)`` when candidate ``bs`` raised
+        an unexpected exception — the caller converts this into a ``FAILED``
+        ``CompilationResult`` naming the broken bin step.
     """
     if not callable(probe):
         raise TypeError("probe must be callable")
+    if is_liquid is not None and not callable(is_liquid):
+        raise TypeError("is_liquid must be callable when provided")
     for bin_step in candidates:
         try:
-            probe(token_a, token_b, bin_step)
+            pool_address = probe(token_a, token_b, bin_step)
+            if is_liquid is not None and not is_liquid(pool_address):
+                continue
             return bin_step, None, None
         except not_found_exception:
             continue
