@@ -526,6 +526,8 @@ def _make_strategy():
     strat._loop_state = "idle"
     strat._loop_count = 0
     strat._current_leverage = Decimal("1.0")
+    strat._total_borrowed = Decimal("0")
+    strat._total_collateral = Decimal("0")
     return strat
 
 
@@ -747,6 +749,8 @@ def _make_strategy_live_decide():
     strat._loop_state = "idle"
     strat._loop_count = 0
     strat._current_leverage = Decimal("1.0")
+    strat._total_borrowed = Decimal("0")
+    strat._total_collateral = Decimal("0")
     return strat
 
 

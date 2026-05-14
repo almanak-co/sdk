@@ -12,10 +12,11 @@ This creates leveraged long ETH exposure. Profit if WETH appreciates faster
 than the USDC borrow cost. Aave V3 Mantle collateral: WETH (80.5% LTV), WMNT (40% LTV).
 Borrowable: USDC, USDT0, USDe, GHO.
 
-Teardown unwinds in reverse: repay all debt, withdraw all collateral.
+Teardown unwinds the loop safely: withdraw a collateral slice first, swap it
+to the debt token, repay all debt, then withdraw the remaining collateral.
 
 Usage:
-    almanak strat run -d strategies/demo/aave_loop_mantle --network anvil --once
+    uv run almanak strat run -d almanak/demo_strategies/aave_loop_mantle --network anvil --interval 15
 """
 
 import logging
@@ -32,7 +33,7 @@ from almanak.framework.utils.log_formatters import format_token_amount_human
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown import PositionInfo, TeardownMode, TeardownPositionSummary
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
 
 @almanak_strategy(
@@ -96,6 +97,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
         self._pending_supply_amount = Decimal("0")  # Amount to supply in current loop
         self._last_borrow_amount = Decimal("0")  # Last borrow amount for swap step
         self._supply_price_usd = Decimal("1")  # Updated each decide() for position USD reporting
+        self._borrow_price_usd = Decimal("1")
 
         logger.info(
             f"AaveLoopMantle initialized: "
@@ -118,18 +120,10 @@ class AaveLoopMantleStrategy(IntentStrategy):
                 f"borrowed={self._total_borrowed} {self.borrow_token}"
             )
 
-        # Get prices for borrow calculations
-        try:
-            supply_price = Decimal(str(market.price(self.supply_token)))
-            borrow_price = Decimal(str(market.price(self.borrow_token)))
-            self._supply_price_usd = supply_price
-        except (ValueError, KeyError) as e:
-            return Intent.hold(reason=f"Price data unavailable: {e}")
-
-        if supply_price <= 0 or borrow_price <= 0:
-            return Intent.hold(
-                reason=f"Invalid price(s): {self.supply_token}={supply_price}, {self.borrow_token}={borrow_price}"
-            )
+        prices = self._read_prices(market)
+        if not isinstance(prices, tuple):
+            return prices
+        supply_price, borrow_price = prices
 
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
@@ -231,6 +225,21 @@ class AaveLoopMantleStrategy(IntentStrategy):
             self._state = revert_to
 
         return Intent.hold(reason=f"Waiting (state={self._state}, loop={self._current_loop})")
+
+    def _read_prices(self, market: MarketSnapshot) -> tuple[Decimal, Decimal] | Intent:
+        try:
+            supply_price = Decimal(str(market.price(self.supply_token)))
+            borrow_price = Decimal(str(market.price(self.borrow_token)))
+        except (ValueError, KeyError) as e:
+            return Intent.hold(reason=f"Price data unavailable: {e}")
+
+        self._supply_price_usd = supply_price
+        self._borrow_price_usd = borrow_price
+        if supply_price <= 0 or borrow_price <= 0:
+            return Intent.hold(
+                reason=f"Invalid price(s): {self.supply_token}={supply_price}, {self.borrow_token}={borrow_price}"
+            )
+        return supply_price, borrow_price
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         intent_type = intent.intent_type.value
@@ -334,6 +343,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
             "total_borrowed": str(self._total_borrowed),
             "pending_supply_amount": str(self._pending_supply_amount),
             "last_borrow_amount": str(self._last_borrow_amount),
+            "borrow_price_usd": str(self._borrow_price_usd),
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -351,6 +361,40 @@ class AaveLoopMantleStrategy(IntentStrategy):
             self._pending_supply_amount = Decimal(str(state["pending_supply_amount"]))
         if "last_borrow_amount" in state:
             self._last_borrow_amount = Decimal(str(state["last_borrow_amount"]))
+        if "borrow_price_usd" in state:
+            self._borrow_price_usd = Decimal(str(state["borrow_price_usd"]))
+
+    def _convert_token_amount(
+        self,
+        *,
+        amount: Decimal,
+        from_token: str,
+        to_token: str,
+        market: MarketSnapshot | None,
+    ) -> Decimal:
+        if amount <= 0 or from_token == to_token:
+            return amount
+
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception:  # noqa: BLE001
+                snapshot = None
+
+        if snapshot is not None:
+            from_price = Decimal(str(snapshot.price(from_token)))
+            to_price = Decimal(str(snapshot.price(to_token)))
+        else:
+            from_price = self._borrow_price_usd if from_token == self.borrow_token else self._supply_price_usd
+            to_price = self._borrow_price_usd if to_token == self.borrow_token else self._supply_price_usd
+
+        if from_price <= 0 or to_price <= 0:
+            raise ValueError(
+                f"Teardown cannot convert {amount} {from_token} to {to_token}: "
+                f"oracle price unavailable (from={from_price}, to={to_price})"
+            )
+        return amount * from_price / to_price
 
     # -- Teardown --
 
@@ -360,7 +404,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
-        positions: list["PositionInfo"] = []
+        positions: list[PositionInfo] = []
 
         if self._total_supplied > 0:
             positions.append(
@@ -393,43 +437,62 @@ class AaveLoopMantleStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
-        """Unwind the loop: get borrow_token, repay debt, then withdraw collateral.
+        """Unwind the loop with the required leveraged-loop sequence.
 
-        After a completed loop the borrowed asset has been swapped back into
-        supply_token and re-supplied. The wallet holds supply_token (from the
-        last swap) but not the borrow_token needed for repayment. Step 0 swaps
-        the wallet's supply_token into borrow_token so the repay can succeed.
+        After looping, the debt token has been swapped into ``supply_token`` and
+        re-supplied, so the wallet usually has no liquid token to repay with.
+        The safe order is:
+          1. Withdraw enough collateral to buy the debt token.
+          2. Swap that collateral into the debt token.
+          3. Repay the debt with ``repay_full=True``.
+          4. Withdraw the remaining collateral.
         """
         from almanak.framework.teardown import TeardownMode
 
         intents = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
 
-        # Step 0: Swap wallet's supply_token -> borrow_token to fund repayment.
-        # After looping, the wallet holds supply_token (last swap output) but no
-        # borrow_token. Swap it all so repay_full=True can source the full debt.
-        if self._total_borrowed > 0 and self._current_loop > 0:
+        if self._total_borrowed > 0:
+            collateral_for_repay = self._convert_token_amount(
+                amount=self._total_borrowed * Decimal("1.10"),
+                from_token=self.borrow_token,
+                to_token=self.supply_token,
+                market=market,
+            )
+
+            # Step 1: Withdraw a collateral slice first. Swapping before this
+            # reverts because the loop has re-supplied the collateral token.
+            intents.append(
+                Intent.withdraw(
+                    token=self.supply_token,
+                    amount=collateral_for_repay,
+                    protocol="aave_v3",
+                    chain=self.chain,
+                )
+            )
+
+            # Step 2: Swap the withdrawn slice into the debt token.
             intents.append(
                 Intent.swap(
                     from_token=self.supply_token,
                     to_token=self.borrow_token,
-                    amount="all",
+                    amount=collateral_for_repay,
                     max_slippage=max_slippage,
+                    chain=self.chain,
                 )
             )
 
-        # Step 1: Repay all borrowed borrow_token (e.g. USDC)
-        if self._total_borrowed > 0:
+            # Step 3: Repay all borrowed borrow_token (e.g. USDC).
             intents.append(
                 Intent.repay(
                     token=self.borrow_token,
-                    amount=self._total_borrowed,
                     protocol="aave_v3",
                     repay_full=True,
+                    chain=self.chain,
                 )
             )
 
-        # Step 2: Withdraw all supplied supply_token (e.g. WETH)
+        # Step 4: Withdraw all remaining supply_token (e.g. WETH).
         if self._total_supplied > 0:
             intents.append(
                 Intent.withdraw(

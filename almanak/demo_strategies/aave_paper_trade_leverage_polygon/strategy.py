@@ -33,9 +33,8 @@ from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
-from almanak.framework.market import PriceUnavailableError
 from almanak.framework.intents import Intent
-from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import MarketSnapshot, PriceUnavailableError
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
 
@@ -67,7 +66,7 @@ TRANSITIONAL_STATES = {SUPPLYING, BORROWING, SWAPPING}
     tags=["demo", "paper-trading", "lending", "swap", "aave-v3", "uniswap-v3", "polygon", "backtesting"],
     supported_chains=["polygon"],
     supported_protocols=["aave_v3", "uniswap_v3"],
-    intent_types=["SUPPLY", "BORROW", "SWAP", "HOLD"],
+    intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="polygon",
 )
 class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):

@@ -1412,50 +1412,101 @@ def _get_template_teardown(
         )
 
     def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
-        """Generate intents to close all positions.
+        """Generate intents to safely unwind the looped position.
 
         Teardown goal: {teardown_comment}
 
-        Priority order: repay borrow first (frees collateral), then withdraw.
+        Order matters for leveraged loops. Each loop iteration has supplied the
+        borrowed token back as collateral, so at teardown time the wallet
+        holds NO debt token and a plain ``REPAY(all)`` would revert. The safe
+        sequence sources the debt token from the deposited collateral first:
+
+          1. WITHDRAW a slice of collateral (sized at 110% of outstanding debt
+             converted via oracle prices to cover swap slippage).
+          2. SWAP that slice into the debt token.
+          3. REPAY the full outstanding debt.
+          4. WITHDRAW all remaining collateral.
+          5. SWAP residual collateral back to the debt/quote token.
         """
         from almanak.framework.teardown import TeardownMode
 
         intents: list[Intent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
-        # 1. Repay borrow (if active -- after looping, borrows exist in any non-IDLE state)
-        has_borrows = (
-            self._loop_state in (LendingLoopState.BORROWED, LendingLoopState.MONITORING)
-            or self._loop_count > 0
-        )
-        if has_borrows:
+        if self._total_borrowed > Decimal("0"):
+            # Oracle is required to size the debt-funding slice. Falling back to
+            # a heuristic would either revert on-chain or strand collateral, so
+            # raise loudly instead. Production teardown always passes ``market``;
+            # ``create_market_snapshot`` is a best-effort fallback for tests.
+            snapshot = market
+            if snapshot is None:
+                snapshot = self.create_market_snapshot()
+            borrow_price = Decimal(str(snapshot.price(self.borrow_token)))
+            collateral_price = Decimal(str(snapshot.price(self.collateral_token)))
+            if borrow_price <= 0 or collateral_price <= 0:
+                raise ValueError(
+                    "Teardown cannot size the unwind slice without oracle prices "
+                    "for {{!r}} / {{!r}} (got collateral={{}}, borrow={{}})".format(
+                        self.collateral_token,
+                        self.borrow_token,
+                        collateral_price,
+                        borrow_price,
+                    )
+                )
+
+            collateral_slice = (
+                self._total_borrowed * Decimal("1.10") * borrow_price
+            ) / collateral_price
+
+            # Step 1: withdraw the slice. A bare ``amount=`` (not ``withdraw_all``)
+            # keeps the rest of the position intact until step 4.
+            slice_kwargs = {{
+                "protocol": self.lending_protocol,
+                "token": self.collateral_token,
+                "amount": collateral_slice,
+            }}
+            if self.lending_market:
+                slice_kwargs["market_id"] = self.lending_market
+            intents.append(Intent.withdraw(**slice_kwargs))
+
+            # Step 2: swap the slice into the debt token so the repay has funds.
+            intents.append(
+                Intent.swap(
+                    from_token=self.collateral_token,
+                    to_token=self.borrow_token,
+                    amount=collateral_slice,
+                    max_slippage=max_slippage,
+                )
+            )
+
+            # Step 3: repay the full outstanding debt. Protocol implementations
+            # interpret ``repay_full=True`` as "use exact outstanding shares"
+            # which avoids dust-leftover repay-then-repay loops.
             repay_kwargs = {{
                 "protocol": self.lending_protocol,
                 "token": self.borrow_token,
-                "amount": "all",
+                "repay_full": True,
             }}
             if self.lending_market:
                 repay_kwargs["market_id"] = self.lending_market
             intents.append(Intent.repay(**repay_kwargs))
 
-        # 2. Withdraw collateral (if supplied -- in any non-initial-IDLE state or after looping)
-        has_supply = (
-            self._loop_state
-            in (LendingLoopState.SUPPLIED, LendingLoopState.BORROWED, LendingLoopState.MONITORING)
-            or self._loop_count > 0
-        )
-        if has_supply:
-            withdraw_kwargs = {{
+        # Step 4: withdraw whatever collateral is left (the slice from step 1
+        # has already left the lending pool; this empties the remainder).
+        if self._total_collateral > Decimal("0"):
+            final_kwargs = {{
                 "protocol": self.lending_protocol,
                 "token": self.collateral_token,
                 "amount": "all",
+                "withdraw_all": True,
             }}
             if self.lending_market:
-                withdraw_kwargs["market_id"] = self.lending_market
-            intents.append(Intent.withdraw(**withdraw_kwargs))
+                final_kwargs["market_id"] = self.lending_market
+            intents.append(Intent.withdraw(**final_kwargs))
 
-        # 3. Swap collateral back to stable if any supply/borrow existed
-        if has_borrows or has_supply:
+        # Step 5: swap residual collateral back to the debt/quote token so the
+        # wallet ends up in a single, accountable position.
+        if self._total_collateral > Decimal("0") or self._total_borrowed > Decimal("0"):
             intents.append(
                 Intent.swap(
                     from_token=self.collateral_token,
@@ -2088,7 +2139,15 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         # State machine: IDLE -> SUPPLIED -> BORROWED -> (check leverage) -> IDLE or MONITORING
         self._loop_state = LendingLoopState.IDLE
         self._loop_count = 0
-        self._current_leverage = Decimal("1.0")"""
+        self._current_leverage = Decimal("1.0")
+
+        # Position totals tracked in on_intent_executed(). The teardown lane
+        # uses these to size the unwind slice: without them the safe leveraged-
+        # loop unwind (withdraw slice -> swap to debt -> repay_full -> withdraw
+        # rest) degenerates back to repay-then-withdraw, which reverts because
+        # the loop re-supplied the debt token and the wallet holds collateral.
+        self._total_borrowed = Decimal("0")
+        self._total_collateral = Decimal("0")"""
 
     elif template == StrategyTemplate.BASIS_TRADE:
         return """
@@ -2499,9 +2558,15 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        if intent_type.value == "SUPPLY":\n'
             "            self._loop_state = LendingLoopState.SUPPLIED\n"
+            '            supply_amt = getattr(intent, "amount", None)\n'
+            "            if isinstance(supply_amt, Decimal):\n"
+            "                self._total_collateral += supply_amt\n"
             '            logger.info(f"Supply confirmed (loop {self._loop_count + 1}) -> supplied")\n'
             '        elif intent_type.value == "BORROW":\n'
             "            self._loop_state = LendingLoopState.BORROWED\n"
+            '            borrow_amt = getattr(intent, "amount", None)\n'
+            "            if isinstance(borrow_amt, Decimal):\n"
+            "                self._total_borrowed += borrow_amt\n"
             '            logger.info(f"Borrow confirmed (loop {self._loop_count + 1}) -> borrowed")\n'
             '        elif intent_type.value == "SWAP":\n'
             "            # In MONITORING state, a SWAP is the collateral->debt unwind that\n"
@@ -2533,10 +2598,14 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            # log lines are accurate and the monitoring path shows the new state.\n"
             '            repay_full = bool(getattr(intent, "repay_full", False))\n'
             "            if repay_full:\n"
+            '                self._total_borrowed = Decimal("0")\n'
             '                self._current_leverage = Decimal("1.0")\n'
             "                self._loop_state = LendingLoopState.MONITORING\n"
             '                logger.info("Full repay confirmed -- leverage reset to 1.0x")\n'
             "            else:\n"
+            '                repay_amt = getattr(intent, "amount", None)\n'
+            "                if isinstance(repay_amt, Decimal):\n"
+            '                    self._total_borrowed = max(Decimal("0"), self._total_borrowed - repay_amt)\n'
             "                # Partial repay: conservatively shave ~25% off the estimate\n"
             "                # (the HF guard sizes partial repays at partial_repay_pct of debt).\n"
             "                self._current_leverage = max(\n"
@@ -2546,6 +2615,18 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "                logger.info(\n"
             '                    f"Partial repay confirmed -- leverage ~{self._current_leverage:.2f}x"\n'
             "                )\n"
+            '        elif intent_type.value == "WITHDRAW":\n'
+            "            # WITHDRAW fires only from teardown. Track the recovered collateral\n"
+            "            # so the post-recovery swap-back step can be skipped when nothing\n"
+            "            # remains. withdraw_all=True clears the counter; a typed amount\n"
+            "            # subtracts and clamps at zero.\n"
+            '            withdraw_all = bool(getattr(intent, "withdraw_all", False))\n'
+            '            withdraw_amt = getattr(intent, "amount", None)\n'
+            '            if withdraw_all or withdraw_amt == "all":\n'
+            '                self._total_collateral = Decimal("0")\n'
+            "            elif isinstance(withdraw_amt, Decimal):\n"
+            '                self._total_collateral = max(Decimal("0"), self._total_collateral - withdraw_amt)\n'
+            '            logger.info(f"Withdraw confirmed -- collateral remaining: {self._total_collateral}")\n'
             "\n"
             "    def get_persistent_state(self):\n"
             '        """Save loop state and leverage tracking."""\n'
@@ -2555,6 +2636,8 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '            "loop_state": self._loop_state,\n'
             '            "loop_count": self._loop_count,\n'
             '            "current_leverage": str(self._current_leverage),\n'
+            '            "total_borrowed": str(self._total_borrowed),\n'
+            '            "total_collateral": str(self._total_collateral),\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
@@ -2570,6 +2653,8 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '            self._loop_count = state.get("loop_count", 0)\n'
             '            cl = state.get("current_leverage", "1.0")\n'
             "            self._current_leverage = Decimal(str(cl))\n"
+            '            self._total_borrowed = Decimal(str(state.get("total_borrowed", "0")))\n'
+            '            self._total_collateral = Decimal(str(state.get("total_collateral", "0")))\n'
             "\n"
         )
 
@@ -3385,10 +3470,29 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
         },
     ),
     StrategyTemplate.LENDING_LOOP: _TemplateTestSpec(
-        state_fields=("_loop_state", "_loop_count", "_current_leverage"),
+        state_fields=(
+            "_loop_state",
+            "_loop_count",
+            "_current_leverage",
+            "_total_borrowed",
+            "_total_collateral",
+        ),
         has_callbacks=True,
         has_teardown_intents=True,
-        position_setup=('strategy._loop_state = "borrowed"\n        strategy._loop_count = 1'),
+        # Inject totals so the buffered-slice teardown has something to size,
+        # and stub ``create_market_snapshot`` so the no-``market``-arg call
+        # path used by the auto-rendered teardown tests still resolves oracle
+        # prices. The real production caller (TeardownManager) always passes
+        # ``market`` -- this is a test-only safety net.
+        position_setup=(
+            'strategy._loop_state = "borrowed"\n'
+            "        strategy._loop_count = 1\n"
+            '        strategy._total_borrowed = Decimal("100")\n'
+            '        strategy._total_collateral = Decimal("0.5")\n'
+            "        _lending_loop_snapshot = MagicMock()\n"
+            '        _lending_loop_snapshot.price.return_value = Decimal("1")\n'
+            "        strategy.create_market_snapshot = lambda: _lending_loop_snapshot"
+        ),
         transitions=(
             _StateTransition(
                 name="supply_idle_to_supplied",
@@ -3411,6 +3515,8 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
             "loop_state": "monitoring",
             "loop_count": 2,
             "current_leverage": "2.19",
+            "total_borrowed": "120.50",
+            "total_collateral": "0.85",
         },
     ),
     StrategyTemplate.BASIS_TRADE: _TemplateTestSpec(
@@ -3933,11 +4039,35 @@ class Test{class_name}Teardown:
 '''
 
 
+def _fmt_state_fields_tuple(fields: tuple[str, ...]) -> str:
+    """Render ``fields`` as a Python tuple literal that fits the 120-col line budget.
+
+    For short tuples emits a single line (matches the pre-existing format); for
+    longer ones breaks across lines so generated tests stay lint-clean even as
+    new state fields get added to a template.
+    """
+    single = repr(fields)
+    if len(single) <= 60:
+        return single
+    inner = "\n".join(f"                {f!r}," for f in fields)
+    return f"(\n{inner}\n            )"
+
+
+def _fmt_persistent_sample(sample: dict[str, object]) -> str:
+    """Same idea as ``_fmt_state_fields_tuple`` but for the persistence sample."""
+    single = repr(sample)
+    if len(single) <= 60:
+        return single
+    items = "\n".join(f"            {k!r}: {v!r}," for k, v in sample.items())
+    return f"{{\n{items}\n        }}"
+
+
 def _render_callback_tests(
     class_name: str,
     spec: "_TemplateTestSpec",
 ) -> str:
     """State machine transition tests driven by the template's transition spec."""
+    state_fields_block = _fmt_state_fields_tuple(spec.state_fields)
     param_entries: list[str] = []
     for t in spec.transitions:
         param_entries.append(
@@ -4011,7 +4141,7 @@ class Test{class_name}StateMachine:
         are detected, not silently passed.
         """
         tracked_fields = [
-            f for f in {spec.state_fields!r} if hasattr(strategy, f)
+            f for f in {state_fields_block} if hasattr(strategy, f)
         ]
         before = {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
 
@@ -4035,6 +4165,7 @@ def _render_persistence_tests(
 ) -> str:
     """get_persistent_state() / load_persistent_state() round-trip tests."""
     sample = spec.persistent_state_sample or {}
+    sample_block = _fmt_persistent_sample(sample)
     return f'''
 # ---------------------------------------------------------------------------
 # Persistence: get_persistent_state / load_persistent_state round-trip
@@ -4063,7 +4194,7 @@ class Test{class_name}Persistence:
         This is the lifecycle the runner performs on restart. A break here
         means the strategy will 'forget' open positions after a crash.
         """
-        sample = {sample!r}
+        sample = {sample_block}
         # Seed the current instance with the sample state
         strategy.load_persistent_state(sample)
 

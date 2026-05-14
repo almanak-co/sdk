@@ -11,7 +11,7 @@ mantle
 ```bash
 almanak strat demo --name aave_loop_mantle
 cd aave_loop_mantle
-almanak strat run --network anvil --once
+uv run almanak strat run --network anvil --interval 15
 ```
 
 ## Configuration

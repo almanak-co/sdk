@@ -11,7 +11,7 @@ ethereum
 ```bash
 almanak strat demo --name morpho_looping
 cd morpho_looping
-almanak strat run --network anvil --once
+uv run almanak strat run --network anvil --interval 15
 ```
 
 ## Configuration

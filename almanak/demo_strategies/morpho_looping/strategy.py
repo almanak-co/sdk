@@ -55,11 +55,8 @@ For safety with leverage, maintain HF > 1.5 (this strategy targets 1.8)
 
 USAGE:
 ------
-    # Run once (execute one loop iteration)
-    python -m almanak.cli.run --strategy demo_morpho_looping --once
-
-    # Run continuously (monitor and rebalance)
-    python -m almanak.cli.run --strategy demo_morpho_looping
+    # Run continuously so the full multi-step loop can complete
+    uv run almanak strat run -d almanak/demo_strategies/morpho_looping --network anvil --interval 15
 
     # Test on Anvil
     python strategies/demo/morpho_looping/run_anvil.py
@@ -669,55 +666,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                 )
 
             elif intent_type == "SWAP":
-                swap_from_token = getattr(intent, "from_token", None)
-                swap_to_token = getattr(intent, "to_token", None)
-                raw_amount = getattr(intent, "amount", None)
-                is_wallet_collateral_swap = swap_from_token == self.collateral_token and swap_to_token == "USDC"
-                is_loop_swap = not is_wallet_collateral_swap
-                realized_swap_output = self._extract_swap_output_amount(result)
-                if is_wallet_collateral_swap:
-                    if raw_amount == "all":
-                        self._pending_wallet_collateral = Decimal("0")
-                    elif isinstance(raw_amount, Decimal):
-                        self._pending_wallet_collateral = max(
-                            Decimal("0"), self._pending_wallet_collateral - raw_amount
-                        )
-                self._loop_state = "swapped"
-                if is_loop_swap:
-                    if realized_swap_output is not None:
-                        self._pending_swap_amount = realized_swap_output
-                    else:
-                        # Fail closed: if the executed collateral output is unavailable,
-                        # do not reuse the pre-swap borrowed-token amount for the next supply.
-                        self._pending_swap_amount = Decimal("0")
-                    # Increment loop counters here (not in _handle_swapped_state) to
-                    # prevent double-counting if a subsequent supply fails.
-                    self._loops_completed += 1
-                    self._current_loop += 1
-                    logger.info(
-                        f"Swap successful - Loop {self._current_loop} swap complete; "
-                        f"next collateral amount: {self._pending_swap_amount} {self.collateral_token}"
-                    )
-                else:
-                    logger.info(
-                        f"Swap successful - {swap_from_token} -> {swap_to_token}; "
-                        f"wallet pending swap: {self._pending_wallet_collateral} {self.collateral_token}"
-                    )
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.POSITION_MODIFIED,
-                        description=f"Swapped {swap_from_token} to {swap_to_token}",
-                        strategy_id=self.strategy_id,
-                        details={
-                            "action": "swap",
-                            "from_token": swap_from_token,
-                            "to_token": swap_to_token,
-                            "loop": self._loops_completed,
-                            "pending_wallet_collateral": str(self._pending_wallet_collateral),
-                        },
-                    )
-                )
+                self._handle_successful_swap(intent, result)
 
             elif intent_type in ("WITHDRAW", "WITHDRAW_COLLATERAL"):
                 # Track withdrawn collateral separately from on-chain collateral so a
@@ -792,6 +741,66 @@ class MorphoLoopingStrategy(IntentStrategy):
                 f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
             )
             self._loop_state = revert_to
+
+    def _handle_successful_swap(self, intent: Intent, result: Any) -> None:
+        swap_from_token = getattr(intent, "from_token", None)
+        swap_to_token = getattr(intent, "to_token", None)
+        raw_amount = getattr(intent, "amount", None)
+        is_wallet_collateral_swap = (
+            swap_from_token == self.collateral_token and swap_to_token == self.borrow_token
+        )
+
+        if is_wallet_collateral_swap:
+            self._mark_wallet_collateral_swapped(raw_amount)
+        else:
+            self._record_loop_swap_output(result)
+
+        self._loop_state = "swapped"
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.POSITION_MODIFIED,
+                description=f"Swapped {swap_from_token} to {swap_to_token}",
+                strategy_id=self.strategy_id,
+                details={
+                    "action": "swap",
+                    "from_token": swap_from_token,
+                    "to_token": swap_to_token,
+                    "loop": self._loops_completed,
+                    "pending_wallet_collateral": str(self._pending_wallet_collateral),
+                },
+            )
+        )
+
+    def _mark_wallet_collateral_swapped(self, raw_amount: Any) -> None:
+        if raw_amount == "all":
+            self._pending_wallet_collateral = Decimal("0")
+        elif isinstance(raw_amount, Decimal):
+            self._pending_wallet_collateral = max(
+                Decimal("0"), self._pending_wallet_collateral - raw_amount
+            )
+        logger.info(
+            f"Swap successful - {self.collateral_token} -> {self.borrow_token}; "
+            f"wallet pending swap: {self._pending_wallet_collateral} {self.collateral_token}"
+        )
+
+    def _record_loop_swap_output(self, result: Any) -> None:
+        realized_swap_output = self._extract_swap_output_amount(result)
+        if realized_swap_output is not None:
+            self._pending_swap_amount = realized_swap_output
+        else:
+            # Fail closed: if the executed collateral output is unavailable,
+            # do not reuse the pre-swap borrowed-token amount for the next supply.
+            self._pending_swap_amount = Decimal("0")
+
+        # Increment loop counters here (not in _handle_swapped_state) to
+        # prevent double-counting if a subsequent supply fails.
+        self._loops_completed += 1
+        self._current_loop += 1
+        logger.info(
+            f"Swap successful - Loop {self._current_loop} swap complete; "
+            f"next collateral amount: {self._pending_swap_amount} {self.collateral_token}"
+        )
 
     def _emit_state_change(self, old_state: str, new_state: str) -> None:
         """Emit a state change event to the timeline."""
@@ -884,6 +893,50 @@ class MorphoLoopingStrategy(IntentStrategy):
             f"state={self._loop_state}, HF={self._current_health_factor}"
         )
 
+    def _convert_token_amount(
+        self,
+        *,
+        amount: Decimal,
+        from_token: str,
+        to_token: str,
+        market: MarketSnapshot | None,
+    ) -> Decimal:
+        if amount <= 0 or from_token == to_token:
+            return amount
+
+        # Resolve a snapshot. If the caller didn't pass one (production teardown
+        # always does; tests sometimes don't), fall back to creating one. A
+        # failure here is upgraded to a typed ValueError so the operator sees
+        # "oracle issue" instead of a raw web3/RPC traceback.
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception as exc:  # noqa: BLE001 — surface as a clean teardown error
+                raise ValueError(
+                    f"Teardown cannot convert {amount} {from_token} to {to_token}: "
+                    f"market snapshot unavailable ({type(exc).__name__}: {exc})"
+                ) from exc
+
+        # ``price()`` itself can raise for tokens missing from the snapshot
+        # (e.g. a market built without the right indicator subscription). Treat
+        # that the same way: a clear ValueError beats a propagated KeyError.
+        try:
+            from_price = Decimal(str(snapshot.price(from_token)))
+            to_price = Decimal(str(snapshot.price(to_token)))
+        except Exception as exc:  # noqa: BLE001 — surface as a clean teardown error
+            raise ValueError(
+                f"Teardown cannot convert {amount} {from_token} to {to_token}: "
+                f"oracle price lookup failed ({type(exc).__name__}: {exc})"
+            ) from exc
+
+        if from_price <= 0 or to_price <= 0:
+            raise ValueError(
+                f"Teardown cannot convert {amount} {from_token} to {to_token}: "
+                f"oracle price unavailable (from={from_price}, to={to_price})"
+            )
+        return amount * from_price / to_price
+
     # =========================================================================
     # TEARDOWN INTERFACE
     # =========================================================================
@@ -949,11 +1002,12 @@ class MorphoLoopingStrategy(IntentStrategy):
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:  # noqa: F821
         """Generate intents to unwind the looped position.
 
-        Teardown order (CRITICAL for safety):
-        1. SWAP: Swap any remaining borrow tokens to repay
-        2. REPAY: Repay all borrowed amount (frees collateral)
-        3. WITHDRAW_COLLATERAL: Withdraw all collateral
-        4. SWAP: Optionally swap collateral to stable
+        Teardown order (CRITICAL for leveraged loops):
+        1. WITHDRAW_COLLATERAL: Withdraw enough collateral to source debt token
+        2. SWAP: Swap withdrawn collateral to the debt token
+        3. REPAY: Repay all borrowed amount (frees collateral)
+        4. WITHDRAW_COLLATERAL: Withdraw all remaining collateral
+        5. SWAP: Optionally swap recovered collateral to the debt token
 
         Args:
             mode: TeardownMode.SOFT (graceful) or TeardownMode.HARD (emergency)
@@ -961,22 +1015,54 @@ class MorphoLoopingStrategy(IntentStrategy):
         Returns:
             List of intents in correct execution order
         """
-        intents = []
+        from almanak.framework.teardown import TeardownMode
 
-        # Step 1: Repay all borrowed amount
+        intents = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.swap_slippage
+
         if self._total_borrowed > 0:
+            collateral_for_repay = self._convert_token_amount(
+                amount=self._total_borrowed * Decimal("1.10"),
+                from_token=self.borrow_token,
+                to_token=self.collateral_token,
+                market=market,
+            )
+
+            # Step 1: Withdraw a collateral slice first. The loop has supplied
+            # the collateral, so there is usually nothing liquid to swap yet.
+            intents.append(
+                Intent.withdraw(
+                    protocol="morpho_blue",
+                    token=self.collateral_token,
+                    amount=collateral_for_repay,
+                    market_id=self.market_id,
+                    chain=self.chain,
+                )
+            )
+
+            # Step 2: Swap that slice into the debt token.
+            intents.append(
+                Intent.swap(
+                    from_token=self.collateral_token,
+                    to_token=self.borrow_token,
+                    amount=collateral_for_repay,
+                    max_slippage=max_slippage,
+                    chain=self.chain,
+                )
+            )
+
+            # Step 3: Repay all borrowed amount.
             intents.append(
                 Intent.repay(
                     protocol="morpho_blue",
                     token=self.borrow_token,
-                    amount=self._total_borrowed,
                     repay_full=True,
                     market_id=self.market_id,  # Required for Morpho Blue
                     chain=self.chain,
                 )
             )
 
-        # Step 2: Withdraw all collateral
+        # Step 4: Withdraw all remaining collateral.
         if self._total_collateral > 0:
             intents.append(
                 Intent.withdraw(
@@ -989,14 +1075,15 @@ class MorphoLoopingStrategy(IntentStrategy):
                 )
             )
 
-        # Step 3: Swap collateral already in the wallet, plus anything that will be
-        # withdrawn by the preceding WITHDRAW intent, back to USDC.
+        # Step 5: Swap collateral already in the wallet, plus anything that will
+        # be withdrawn by the final WITHDRAW intent, back to the debt token.
         if self._pending_wallet_collateral > 0 or self._total_collateral > 0:
             intents.append(
                 Intent.swap(
                     from_token=self.collateral_token,
-                    to_token="USDC",
+                    to_token=self.borrow_token,
                     amount="all",
+                    max_slippage=max_slippage,
                     chain=self.chain,
                 )
             )

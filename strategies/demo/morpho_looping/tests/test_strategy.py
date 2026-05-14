@@ -296,12 +296,21 @@ class TestTeardown:
         strategy._total_collateral = Decimal("3.0")
         strategy._total_borrowed = Decimal("5000")
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        market = MagicMock()
+        market.price.side_effect = lambda token: {
+            "USDC": Decimal("1"),
+            "wstETH": Decimal("3400"),
+        }[token]
 
-        assert len(intents) == 3
-        assert intents[0].intent_type.value == "REPAY"
-        assert intents[1].intent_type.value == "WITHDRAW"
-        assert intents[2].intent_type.value == "SWAP"
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
+
+        assert [intent.intent_type.value for intent in intents] == [
+            "WITHDRAW",
+            "SWAP",
+            "REPAY",
+            "WITHDRAW",
+            "SWAP",
+        ]
 
     def test_generate_teardown_intents_wallet_collateral_only(self, strategy: MorphoLoopingStrategy) -> None:
         from almanak.framework.teardown import TeardownMode
