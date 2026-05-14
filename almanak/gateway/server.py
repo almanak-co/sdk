@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 # underlying TCP connectors finalize cleanup before the event loop exits.
 _AIOHTTP_SHUTDOWN_GRACE_SECONDS = 0.25
 
+# States the SDK / gateway own — written by the strategy runner or by the
+# gateway itself once a pod is past the deploy phase. Mirror of
+# ``LifecycleServiceServicer._VALID_STATES``; kept local so Phase 14 can
+# skip its INITIALIZING write whenever the row is already in one of these
+# (prevents a sidecar-only restart from regressing a healthy RUNNING agent).
+_SDK_OWNED_STATES = frozenset({"INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"})
+
 
 class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
     """Custom Health servicer that adds RegisterChains RPC.
@@ -336,6 +343,54 @@ class GatewayServer:
         # Phase 13: flip SERVING (VIB-2413)
         await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
         logger.info("Gateway marked SERVING (warmup complete)")
+
+        # Phase 14: announce INITIALIZING in hosted mode (strategy-pod only).
+        # Moves the agent out of V2_DEPLOYING as soon as the pod is reachable,
+        # so the platform UI can light up step 4 ("Initializing agent") before
+        # the strategy container has finished booting. Gated on
+        # ``lifecycle_writer`` so the dashboard-pod gateway never participates
+        # — see ``GatewaySettings.lifecycle_writer``.
+        await self._announce_initializing(lifecycle_store)
+
+    async def _announce_initializing(self, lifecycle_store: Any) -> None:
+        """Write ``INITIALIZING`` to ``agent_state`` for this pod's AGENT_ID.
+
+        No-op outside hosted mode, and no-op when ``lifecycle_writer`` is
+        false — both pods of an agent run this code path, but only the
+        strategy-pod gateway is configured to write.
+
+        Skips the write when the row is already in any state the SDK itself
+        owns (RUNNING, STOPPING, TEARING_DOWN, TERMINATED, ERROR,
+        INITIALIZING). A K8s native-sidecar gateway can restart on its own
+        while the strategy container keeps running healthily; without this
+        guard such a restart would clobber RUNNING back to INITIALIZING, and
+        because the SDK runner only writes RUNNING at strategy-process
+        startup (``_run_loop_helpers.py``), the row would stay regressed
+        until the platform reconciler escalated to ``V2_DEPLOY_FAILED``.
+
+        Best-effort: read or write failures are logged and swallowed; the
+        SDK runner's later ``RUNNING`` write covers the canonical signal.
+        """
+        from almanak.framework.deployment.mode import agent_id, is_hosted
+
+        if not is_hosted() or not self.settings.lifecycle_writer:
+            return
+        aid = agent_id()
+        if aid is None:
+            return
+        try:
+            current = await asyncio.to_thread(lifecycle_store.read_state, aid)
+            if current is not None and current.state in _SDK_OWNED_STATES:
+                logger.debug(
+                    "Skipping INITIALIZING announce for agent %s — state already %s (SDK-owned)",
+                    aid,
+                    current.state,
+                )
+                return
+            await asyncio.to_thread(lifecycle_store.write_state, aid, "INITIALIZING")
+            logger.info("Announced INITIALIZING state for agent %s", aid)
+        except Exception:
+            logger.exception("Failed to announce INITIALIZING state for agent %s", aid)
 
     # ------------------------------------------------------------------
     # Phase 7 helper: servicer registration

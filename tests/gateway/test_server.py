@@ -1,7 +1,7 @@
 """Tests for gateway gRPC server."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
@@ -229,3 +229,126 @@ async def test_serving_deferred_until_after_warmup():
     )
 
     await server.stop()
+
+
+# ---------------------------------------------------------------------------
+# _announce_initializing — ALM-2732 follow-up
+#
+# Both pods of a hosted V2 agent (strategy + dashboard) ship the same gateway
+# image with the same AGENT_ID. Only the strategy-pod gateway is configured
+# with ``lifecycle_writer=True`` and should write INITIALIZING; the dashboard
+# pod must stay read-only for lifecycle state so it doesn't clobber RUNNING.
+# ---------------------------------------------------------------------------
+
+
+def _make_state_row(state: str):
+    """Build a minimal stand-in for an ``AgentState`` row returned by read_state."""
+    row = MagicMock()
+    row.state = state
+    return row
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_writes_when_hosted_and_writer(monkeypatch):
+    """Strategy-pod gateway writes INITIALIZING on first boot (no existing row)."""
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+    store.read_state.return_value = None  # fresh deploy
+
+    await server._announce_initializing(store)
+
+    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_writes_when_row_is_platform_state(monkeypatch):
+    """V2_DEPLOYING / V2_PREPARING are platform-owned — gateway advances them."""
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+    store.read_state.return_value = _make_state_row("V2_DEPLOYING")
+
+    await server._announce_initializing(store)
+
+    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_state", ["RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR", "INITIALIZING"])
+async def test_announce_initializing_skips_when_sdk_owned_state(monkeypatch, existing_state):
+    """Gateway sidecar restart while strategy is healthy must NOT regress the row.
+
+    Codex P2 regression guard: a K8s native sidecar can restart on its own while
+    the main container keeps running, and the SDK runner only writes RUNNING at
+    process startup. Without this skip, a sidecar-only restart would clobber
+    RUNNING → INITIALIZING and the reconciler would escalate to V2_DEPLOY_FAILED.
+    """
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+    store.read_state.return_value = _make_state_row(existing_state)
+
+    await server._announce_initializing(store)
+
+    store.write_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_noop_when_not_writer(monkeypatch):
+    """Dashboard-pod gateway must not write — flag defaults to False."""
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False)
+    server = GatewayServer(settings)
+    store = MagicMock()
+
+    await server._announce_initializing(store)
+
+    store.read_state.assert_not_called()
+    store.write_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_noop_when_local(monkeypatch):
+    """Local mode (AGENT_ID unset) never writes — local SDK owns its own state."""
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+
+    await server._announce_initializing(store)
+
+    store.read_state.assert_not_called()
+    store.write_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_swallows_write_errors(monkeypatch):
+    """A failed write must not raise — the SDK's later RUNNING write supersedes."""
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+    store.read_state.return_value = None
+    store.write_state.side_effect = RuntimeError("db down")
+
+    await server._announce_initializing(store)  # must not raise
+
+    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+
+
+@pytest.mark.asyncio
+async def test_announce_initializing_swallows_read_errors(monkeypatch):
+    """A read failure short-circuits cleanly without raising."""
+    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
+    server = GatewayServer(settings)
+    store = MagicMock()
+    store.read_state.side_effect = RuntimeError("db down")
+
+    await server._announce_initializing(store)  # must not raise
+
+    store.write_state.assert_not_called()

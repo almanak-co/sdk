@@ -158,6 +158,17 @@ class GatewaySettings(BaseSettings):
     # explicitly. Hosted mode (``AGENT_ID`` set) ignores this field entirely.
     standalone: bool = False
 
+    # ALM-2732 follow-up: distinguishes the strategy-pod gateway (writer) from
+    # the dashboard-pod gateway (reader). Both pods ship the same image with
+    # the same AGENT_ID and metrics_db credentials, so a startup write to
+    # ``agent_state`` from both would race — the late writer would clobber
+    # whatever the strategy has already reported. Only the strategy-pod
+    # gateway gets ``ALMANAK_GATEWAY_LIFECYCLE_WRITER=true``; the dashboard-
+    # pod gateway leaves it at the default and stays explicitly read-only
+    # for lifecycle state. Local mode ignores this field — the local SDK is
+    # always its own writer.
+    lifecycle_writer: bool = False
+
     model_config = {
         "env_prefix": "ALMANAK_GATEWAY_",
         # Intentionally no ``env_file`` — the dotenv boundary lives in
