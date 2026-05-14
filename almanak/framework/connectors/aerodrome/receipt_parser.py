@@ -41,7 +41,16 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 EVENT_TOPICS: dict[str, str] = {
-    "Swap": "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+    # Aerodrome / Velodrome V2 (Solidly fork) Pool emits:
+    #   Swap(address indexed sender, address indexed to,
+    #        uint256 amount0In, uint256 amount1In,
+    #        uint256 amount0Out, uint256 amount1Out)
+    # keccak256 of that signature is 0xb3e277... NOT 0xd78ad95f...
+    # (the latter is Uniswap V2's Swap signature, which has `to` as the
+    # last unindexed param). _decode_swap_data already assumes the Solidly
+    # fork layout (sender + to both indexed); only the topic hash was off.
+    # Fix surfaced by tests/intents/optimism/test_aerodrome_swap.py (VIB-4389).
+    "Swap": "0xb3e2773606abfd36b5bd91394b3a54d1398336c65005baf7bf7a05efeffaf75b",
     "SwapCL": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
     "Burn": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",

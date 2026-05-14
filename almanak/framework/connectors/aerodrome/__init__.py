@@ -156,5 +156,11 @@ register_connector(
         # standalone connector entry. Re-add LP_COLLECT_FEES here only when
         # a Slipstream-specific connector is registered alongside it.
     ),
+    # Optimism support (Velodrome V2 alias) is intentionally NOT declared here
+    # yet: the intent-coverage gate enforces every (connector, intent, chain)
+    # triple, and aerodrome declares SWAP + LP_OPEN + LP_CLOSE. VIB-4389 covers
+    # SWAP × optimism; LP coverage lands separately via VIB-4390 (PR #2318).
+    # That sister PR owns the chains=("base", "optimism") flip once both
+    # SWAP and LP tests exist together.
     chains=("base",),
 )

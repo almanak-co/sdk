@@ -268,10 +268,17 @@ class TestPancakeSwapV3Events:
 
 
 class TestAerodromeEvents:
-    """Validate Aerodrome event topics (Uniswap V2-style AMM)."""
+    """Validate Aerodrome event topics (Solidly-fork AMM, NOT Uniswap V2).
+
+    Aerodrome/Velodrome V2 emits sender and to as *indexed* params (topics),
+    so the canonical signature is Swap(address,address,uint256,uint256,uint256,uint256).
+    Uniswap V2 puts 'to' last and unindexed: Swap(address,uint256,uint256,uint256,uint256,address).
+    The two signatures produce different keccak256 hashes. Corrected in VIB-4389.
+    """
 
     AERODROME_SIGNATURES = {
-        "Swap": "Swap(address,uint256,uint256,uint256,uint256,address)",
+        # Solidly-fork: sender(indexed), to(indexed), amount0In, amount1In, amount0Out, amount1Out
+        "Swap": "Swap(address,address,uint256,uint256,uint256,uint256)",
         "Mint": "Mint(address,uint256,uint256)",
         "Burn": "Burn(address,uint256,uint256,address)",
         "Sync": "Sync(uint112,uint112)",

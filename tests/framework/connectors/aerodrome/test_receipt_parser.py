@@ -17,7 +17,7 @@ def create_swap_log(sender, to, amount0_in, amount1_in, amount0_out, amount1_out
     return {
         "address": POOL_ADDRESS,
         "topics": [
-            "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+            "0xb3e2773606abfd36b5bd91394b3a54d1398336c65005baf7bf7a05efeffaf75b",
             f"0x000000000000000000000000{sender[2:].lower()}",
             f"0x000000000000000000000000{to[2:].lower()}",
         ],
@@ -478,6 +478,6 @@ class TestAerodromeReceiptParser:
     def test_backward_compatibility(self):
         parser = AerodromeReceiptParser()
 
-        swap_topic = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+        swap_topic = "0xb3e2773606abfd36b5bd91394b3a54d1398336c65005baf7bf7a05efeffaf75b"
         assert parser.is_aerodrome_event(swap_topic) is True
         assert parser.get_event_type(swap_topic) == AerodromeEventType.SWAP
