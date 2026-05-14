@@ -859,6 +859,23 @@ TRADERJOE_V2_LBPAIRS: dict[str, list[dict[str, str | int]]] = {
             "address": "0x69f1216cB2905bf0852f74624D5Fa7b5FC4dA710",
         },
     ],
+    # BSC WBNB/USDT LBPair (bin_step=15) — the WBNB/USDT pair whose active bin
+    # tracks live market price on the LBFactory at
+    # ``0x8e42f2F4101563bF679975178e880FD87d3eFd4e``. Address verified on-chain
+    # via ``LBFactory.getLBPairInformation(WBNB, USDT, 15)`` against the BSC
+    # public RPC. Token X = WBNB, token Y = USDT (both 18-decimal, Binance-Peg
+    # USDT). The active bin's implied price (~$546) matches market for the
+    # 2026-05-14 fork block; other bin steps either revert with zero reserves
+    # (bs=25) or imply prices an order of magnitude off (bs=50/100), so bs=15
+    # is the only viable choice on BSC. See VIB-4377.
+    "bsc": [
+        {
+            "tokenX": "WBNB",
+            "tokenY": "USDT",
+            "bin_step": 15,
+            "address": "0xf258929a659F68ace4732e36F626d6D1544878aC",
+        },
+    ],
 }
 
 
