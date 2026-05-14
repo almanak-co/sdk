@@ -572,6 +572,450 @@ class TestHandleLpOpen:
         # Hard invariant: never the descriptor.
         assert "/" not in result.pool_address
 
+    def test_vib4396_lp_open_reads_pool_address_from_receipt(self) -> None:
+        """VIB-4396 — when the runner stamps a descriptor in BOTH the
+        position_key tail AND market_id (the live regression trigger), the
+        accounting writer must recover the on-chain pool address from the
+        receipt parser's ``lp_open_data.pool_address`` (VIB-3893).
+
+        Live evidence on Arbitrum WETH/USDC 0.05%: the pool is
+        ``0xc6962004f452be9203591991d15f6b388e09e8d0``; the runner wrote
+        ``"weth/usdc/500"`` to ``market_id``; the receipt parser's
+        ``lp_open_data.pool_address`` carried the real address. Pre-fix,
+        ``accounting_events.pool_address`` ended up as the descriptor.
+        """
+        led_id = str(uuid.uuid4())
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            # Same live bug: market_id also carries the descriptor.
+            market_id="weth/usdc/500",
+        )
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5_487_862,
+                "pool_address": real_pool,
+                "amount0": "871720086157647",
+                "amount1": "2402098",
+                "tick_lower": -201_280,
+                "tick_upper": -197_220,
+                "liquidity": "476588196908",
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.pool_address == real_pool
+        # Hard invariant from VIB-4274 — never the descriptor.
+        assert "/" not in result.pool_address
+
+    def test_vib4396_lp_close_uses_receipt_pool_address(self) -> None:
+        """LP_CLOSE: the receipt parser populates ``lp_close_data.pool_address``
+        (VIB-3940) from the Burn event's emitter (= the pool). When that's
+        present, the handler should prefer it over any descriptor in
+        ``market_id`` — same rationale as VIB-4396 OPEN-side.
+        """
+        led_id = str(uuid.uuid4())
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            market_id="weth/usdc/500",
+        )
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "871720086157647",
+                "amount1_collected": "2402098",
+                "fees0": "0",
+                "fees1": "0",
+                "pool_address": real_pool,
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.pool_address == real_pool
+        assert "/" not in result.pool_address
+
+    def test_vib4396_lp_close_falls_back_to_prior_open_pool_address(self) -> None:
+        """LP_CLOSE without a receipt-side ``lp_close_data.pool_address``
+        (pre-VIB-3940 parser, or fee-only collect with no Burn) must fall
+        back to the prior OPEN payload's ``pool_address``.
+
+        This keeps the bookkeeping coherent across the OPEN → CLOSE lifecycle
+        when only the OPEN-side receipt carried the canonical address.
+        """
+        led_id = str(uuid.uuid4())
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            market_id="weth/usdc/500",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json="",
+        )
+        prior_open = {"pool_address": real_pool}
+
+        result = handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.pool_address == real_pool
+
+    def test_vib4396_lp_close_recovers_from_semantic_grouping_key(self) -> None:
+        """When the prior OPEN payload itself was written under the
+        pre-VIB-4396 regime (``pool_address`` = descriptor), recover the
+        canonical address from ``position_reference.semantic_grouping_key``
+        (= ``"chain:0xpool"``). Closes the migration window for in-flight
+        OPENs whose accounting rows already carry the descriptor leak.
+        """
+        led_id = str(uuid.uuid4())
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            market_id="weth/usdc/500",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json="",
+        )
+        # Prior OPEN's payload carries the descriptor (pre-fix data) AND
+        # the position_reference (always written correctly via VIB-4262).
+        prior_open = {
+            "pool_address": "weth/usdc/500",
+            "position_reference": {
+                "semantic_grouping_key": f"arbitrum:{real_pool}",
+            },
+        }
+
+        result = handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.pool_address == real_pool
+
+    def test_vib4396_market_id_descriptor_rejected_when_no_receipt(self) -> None:
+        """No receipt, no prior payload, position_key tail is a descriptor,
+        market_id is a descriptor — every source is descriptor-shaped, so the
+        handler must drop the event rather than stamp a descriptor into
+        ``pool_address``. This is the strict fail-closed lower bound that
+        guarantees a descriptor cannot leak via any path.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            market_id="weth/usdc/500",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+        )
+
+        assert handle_lp(outbox_row, ledger_row) is None
+
+    def test_vib4396_classic_aerodrome_solidly_descriptor_accepted(self) -> None:
+        """Codex P1 on PR #2289 — classic Aerodrome (Solidly fork) LPs have
+        no on-chain pool address surfaced through the receipt parser path.
+
+        The runner stamps ``TOKEN0/TOKEN1/{stable|volatile}`` into BOTH
+        ``position_key`` tail and ``market_id`` because that descriptor IS
+        the only stable position identifier the protocol surfaces — there
+        is no NPM-managed pool address. Prior to the Codex catch, the
+        new ``_clean`` filter rejected ALL slash-containing values, so
+        every classic-Aerodrome LP_OPEN was dropped before reaching the
+        accounting layer (silent regression — events vanish entirely).
+
+        The post-fix contract: a slash-containing value whose last segment
+        is alphabetic (``stable``/``volatile``) is a canonical Solidly
+        descriptor — accept. A slash-containing value whose last segment
+        is numeric (V3 fee tier like ``500``) is a V3 descriptor — reject.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:usdc/dai/stable",
+            market_id="usdc/dai/stable",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",
+            token_out="DAI",
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None, (
+            "classic Aerodrome LP_OPEN must NOT be dropped — the "
+            "Solidly-style descriptor IS the canonical pool identifier"
+        )
+        assert result.pool_address == "usdc/dai/stable"
+
+    def test_vib4396_classic_aerodrome_volatile_descriptor_accepted(self) -> None:
+        """Symmetric Codex P1 guard for the ``volatile`` pool variant."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:weth/usdc/volatile",
+            market_id="weth/usdc/volatile",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="WETH",
+            token_out="USDC",
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.pool_address == "weth/usdc/volatile"
+
+    def test_vib4396_extracted_data_dict_fallback_path(self) -> None:
+        """gemini HIGH on PR #2289 — ``deserialize_extracted_data`` returns
+        a plain dict (with ``_type`` re-added) when dataclass reconstruction
+        fails, e.g. when a writer-side schema mismatch trips
+        ``_reconstruct_dataclass`` (``ledger.py:943-945``). The resolver
+        must read ``pool_address`` from either path — the original
+        implementation used ``getattr`` only, which silently returned ``""``
+        for the dict fallback and dropped the chain-extracted pool address
+        on the floor.
+
+        Simulated here by passing a payload with an unrecognised ``_type``
+        — the deserialiser leaves it as a dict (the documented fallback).
+        """
+        led_id = str(uuid.uuid4())
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+            market_id="weth/usdc/500",
+        )
+        # Unrecognised ``_type`` forces the dict fallback in
+        # ``deserialize_extracted_data``.
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "UnknownVariant",
+                "pool_address": real_pool,
+                "amount0": "1",
+                "amount1": "1",
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None, (
+            "dict-fallback ``lp_open_data`` must still surface "
+            "pool_address — gemini HIGH on PR #2289"
+        )
+        assert result.pool_address == real_pool
+
+    def test_vib4396_round_trip_open_close_pool_address_matches(self) -> None:
+        """VIB-4396 round-trip — the OPEN's ``pool_address`` and the matching
+        CLOSE's ``pool_address`` MUST be identical so downstream lot-matching
+        reconciles them as the same logical position. This is the actual
+        operator-trust invariant the resolver fix exists to produce; the
+        priority-by-priority unit tests above verify each source in
+        isolation but never prove the OPEN↔CLOSE pairing.
+
+        Live regression scenario: runner stamps the descriptor in
+        ``market_id`` AND ``position_key`` for both the OPEN and the CLOSE
+        (as it does on Uniswap V3 today). Pre-fix, OPEN landed with the
+        descriptor and CLOSE landed with the on-chain address (because the
+        close-side resolver hit a different code path) → lot matching
+        silently broke. Post-fix, both sides resolve to the canonical
+        on-chain address.
+        """
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        position_key = "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500"
+
+        # OPEN side — receipt-side priority 1.
+        open_id = str(uuid.uuid4())
+        open_outbox = _make_outbox_row(
+            open_id,
+            intent_type="LP_OPEN",
+            position_key=position_key,
+            market_id="weth/usdc/500",
+        )
+        open_extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5_487_862,
+                "pool_address": real_pool,
+                "amount0": "871720086157647",
+                "amount1": "2402098",
+                "tick_lower": -201_280,
+                "tick_upper": -197_220,
+                "liquidity": "476588196908",
+            }
+        })
+        open_ledger = _make_ledger_row(
+            open_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=open_extracted,
+        )
+        open_event = handle_lp(open_outbox, open_ledger)
+
+        # CLOSE side — receipt-side priority 1 (VIB-3940).
+        close_id = str(uuid.uuid4())
+        close_outbox = _make_outbox_row(
+            close_id,
+            intent_type="LP_CLOSE",
+            position_key=position_key,
+            market_id="weth/usdc/500",
+        )
+        close_extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "871720086157647",
+                "amount1_collected": "2402098",
+                "fees0": "0",
+                "fees1": "0",
+                "pool_address": real_pool,
+            }
+        })
+        close_ledger = _make_ledger_row(
+            close_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=close_extracted,
+        )
+        close_event = handle_lp(close_outbox, close_ledger)
+
+        assert open_event is not None
+        assert close_event is not None
+        assert open_event.pool_address == close_event.pool_address == real_pool
+        # Hard invariant: descriptor never reaches the payload on either side.
+        assert "/" not in open_event.pool_address
+        assert "/" not in close_event.pool_address
+
+    def test_vib4396_round_trip_open_receipt_close_via_prior_open_matches(self) -> None:
+        """Mixed-priority round-trip — OPEN resolves via receipt (priority 1),
+        CLOSE resolves via prior-OPEN payload (priority 2, e.g. pre-VIB-3940
+        parser path or fee-only collect with no Burn event). Both sides
+        MUST still produce identical ``pool_address``.
+        """
+        real_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        position_key = "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500"
+
+        # OPEN — receipt priority 1.
+        open_id = str(uuid.uuid4())
+        open_outbox = _make_outbox_row(
+            open_id,
+            intent_type="LP_OPEN",
+            position_key=position_key,
+            market_id="weth/usdc/500",
+        )
+        open_extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5_487_862,
+                "pool_address": real_pool,
+                "amount0": "1",
+                "amount1": "1",
+                "tick_lower": -100,
+                "tick_upper": 100,
+                "liquidity": "1",
+            }
+        })
+        open_ledger = _make_ledger_row(
+            open_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            extracted_data_json=open_extracted,
+        )
+        open_event = handle_lp(open_outbox, open_ledger)
+
+        # CLOSE — no receipt extraction; recover via prior_open_payload.
+        close_id = str(uuid.uuid4())
+        close_outbox = _make_outbox_row(
+            close_id,
+            intent_type="LP_CLOSE",
+            position_key=position_key,
+            market_id="weth/usdc/500",
+        )
+        close_ledger = _make_ledger_row(
+            close_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            extracted_data_json="",
+        )
+        assert open_event is not None
+        prior_open_payload = {"pool_address": open_event.pool_address}
+        close_event = handle_lp(
+            close_outbox, close_ledger, prior_open_payload=prior_open_payload,
+        )
+
+        assert close_event is not None
+        assert open_event.pool_address == close_event.pool_address == real_pool
+
     def test_vib3893_lp_open_propagates_tick_metadata_and_in_range(self) -> None:
         """VIB-3893 — tick_lower/upper/liquidity/current_tick from
         ``lp_open_data`` and derived ``in_range`` end up on the

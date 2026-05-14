@@ -192,27 +192,158 @@ def _parse_lp_timestamp(raw_ts: Any) -> datetime:
         return datetime.now(UTC)
 
 
-def _resolve_lp_pool_address(outbox_row: dict[str, Any], position_key: str) -> str | None:
-    """Resolve the pool address from the position_key tail or fall back to market_id.
+def _clean_pool_address_candidate(value: Any) -> str:
+    """Allow bare addresses + Solidly-style descriptors; reject V3 fee tiers.
 
-    V3-style position keys carry a token-pair-fee descriptor tail (e.g.
-    ``"USDC/WETH/500"``) instead of a pool address. Detect that shape (presence
-    of ``"/"``) and prefer ``outbox_row["market_id"]`` when present. Non-V3 keys
-    (Aerodrome, SushiSwap V2, …) end in a real address and are used directly.
+    Heuristic:
+
+    - Empty / whitespace → ``""``.
+    - No ``/`` → bare identifier, accept (VIB-4396-followup will tighten
+      this to ``0x[0-9a-fA-F]{40}``).
+    - Has ``/`` AND the last segment is purely numeric → V3 fee-tier
+      descriptor (``weth/usdc/500``). Reject (VIB-4274 / VIB-4396).
+    - Otherwise the slash-bearing value is a canonical Solidly-style
+      descriptor (``TOKEN0/TOKEN1/stable|volatile``) — the only stable
+      position identifier classic Aerodrome surfaces. Accept (Codex P1
+      on PR #2289).
+
+    KNOWN LIMITATION — Uniswap V4 (VIB-4426):
+        V4 uses descriptors of the form ``WETH/USDC/3000`` (numeric
+        last segment = fee tier) and there is NO per-pool contract
+        address (singleton ``PoolManager``; pools identified by hashed
+        ``PoolKey``). The descriptor IS the canonical V4 position
+        identifier — same architectural shape as classic Aerodrome /
+        Velodrome — but it is rejected by the numeric-tail rule above.
+        Result: every V4 LP_OPEN / LP_CLOSE / LP_COLLECT_FEES event
+        currently returns ``None`` from ``_resolve_lp_pool_address``
+        and is dropped by ``handle_lp`` with a structured warning log.
+
+        Pre-VIB-4396 behaviour on ``main`` wrote the descriptor into
+        ``pool_address`` but lot-matching could never reconcile it
+        (zero V4 LP accounting tests existed and still don't); the
+        post-VIB-4396 dropping is an observable regression vs the
+        silently-wrong pre-state.
+
+        VIB-4426 tracks the proper end-to-end V4 LP accounting fix:
+        plumb protocol context into this filter (or have the V4
+        receipt parser emit a PoolKey hash), add unit + Accountant
+        Test fixture coverage, and ship as one E2E integration. Do
+        NOT add a quick V4 carve-out here — protocol-aware filtering
+        is a design call that needs proper coverage to land safely.
     """
-    tail = _pool_address_from_position_key(position_key)
-    if tail and "/" in tail:
-        pool_address = outbox_row.get("market_id") or ""
-    else:
-        pool_address = tail or outbox_row.get("market_id") or ""
-    if not pool_address:
-        logger.warning(
-            "LP handler: cannot resolve pool address from position_key=%r or market_id=%r; dropping event",
-            position_key,
-            outbox_row.get("market_id"),
-        )
-        return None
-    return pool_address
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" not in text:
+        return text
+    last_segment = text.rsplit("/", 1)[-1].strip()
+    if not last_segment:
+        return ""
+    if last_segment.isdigit():
+        return ""
+    return text
+
+
+def _typed_pool_address(typed: Any) -> str:
+    """Return ``typed.pool_address`` whether ``typed`` is an object or dict.
+
+    ``deserialize_extracted_data`` returns the dataclass when
+    reconstruction succeeds and falls back to a dict (with ``_type``
+    re-added) on failure (``ledger.py:_reconstruct_dataclass``). Both
+    paths must be honoured here or we silently drop the chain-extracted
+    ``pool_address`` (gemini HIGH on PR #2289).
+    """
+    if typed is None:
+        return ""
+    if isinstance(typed, dict):
+        return str(typed.get("pool_address") or "")
+    return str(getattr(typed, "pool_address", "") or "")
+
+
+def _resolve_lp_pool_address(
+    *,
+    outbox_row: dict[str, Any],
+    position_key: str,
+    extracted: dict[str, Any] | None = None,
+    prior_open_payload: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve the on-chain pool address for an LP accounting event.
+
+    Priority order (chain-data first, descriptor last):
+
+    1. **Receipt extraction (current event).** The receipt parser stamps
+       ``lp_open_data.pool_address`` (VIB-3893) and
+       ``lp_close_data.pool_address`` (VIB-3940) on the on-chain Mint/Burn
+       emitter, which IS the canonical V3 pool address. Sourced from chain
+       data — most reliable.
+    2. **Prior LP_OPEN payload (LP_CLOSE / LP_COLLECT_FEES).** When the
+       close-side receipt didn't re-emit the pool address, reuse the
+       OPEN-side ``payload.pool_address``. If that historical row was
+       written under the pre-VIB-4396 regime (descriptor leaked into
+       ``pool_address``), fall through to the position_reference's
+       ``semantic_grouping_key`` (= ``"chain:0xpool"``) for the canonical
+       address.
+    3. **Position-key tail.** V2-family / classic-AMM keys end in either
+       a bare pool address (``lp:aerodrome:base:<wallet>:0xpool``) or in a
+       canonical Solidly-style descriptor (``TOKEN0/TOKEN1/stable`` or
+       ``TOKEN0/TOKEN1/volatile``) — the latter is the only stable
+       position identifier available for classic Aerodrome (no NPM, no
+       on-chain pool address surfaced at the receipt layer). V3-style
+       keys end in a numeric fee-tier descriptor (e.g. ``weth/usdc/500``)
+       — VIB-4274 rejects those tails outright.
+       ``_clean_pool_address_candidate`` permits the Solidly descriptor
+       shape and rejects V3 fee-tier descriptors.
+    4. **outbox_row.market_id.** Same ``_clean_pool_address_candidate``
+       rules: bare address or Solidly descriptor accepted; V3 fee-tier
+       descriptor rejected (the live VIB-4396 trigger).
+
+    Returns ``None`` only when every source is empty / descriptor-shaped —
+    the caller drops the event with a warning.
+    """
+    # 1) Receipt-extracted pool_address — chain data, most reliable.
+    extracted_map = extracted or {}
+    for key in ("lp_open_data", "lp_close_data"):
+        candidate = _clean_pool_address_candidate(_typed_pool_address(extracted_map.get(key)))
+        if candidate:
+            return candidate
+
+    # 2) Prior LP_OPEN payload fallback (LP_CLOSE / LP_COLLECT_FEES).
+    if prior_open_payload:
+        candidate = _clean_pool_address_candidate(prior_open_payload.get("pool_address"))
+        if candidate:
+            return candidate
+        # Legacy OPEN payloads stamped the descriptor — recover the
+        # canonical address from semantic_grouping_key (``"chain:0xpool"``
+        # today, but ``rsplit(":", 1)[-1]`` is robust to additional
+        # ``:``-delimited prefixes the writer may add later — gemini medium
+        # on PR #2289).
+        pos_ref = prior_open_payload.get("position_reference") or {}
+        sgk = str(pos_ref.get("semantic_grouping_key") or "").strip()
+        if sgk and ":" in sgk:
+            candidate = _clean_pool_address_candidate(sgk.rsplit(":", 1)[-1])
+            if candidate:
+                return candidate
+
+    # 3) Position-key tail — bare address (Aerodrome v2 / V2 family) or
+    # Solidly-style descriptor (classic Aerodrome). V3 numeric fee tiers
+    # are rejected by ``_clean_pool_address_candidate``.
+    candidate = _clean_pool_address_candidate(_pool_address_from_position_key(position_key))
+    if candidate:
+        return candidate
+
+    # 4) outbox_row.market_id, subject to the same
+    # _clean_pool_address_candidate rules.
+    candidate = _clean_pool_address_candidate(outbox_row.get("market_id"))
+    if candidate:
+        return candidate
+
+    logger.warning(
+        "LP handler: cannot resolve pool address from receipt, prior payload, "
+        "position_key=%r, or market_id=%r; dropping event",
+        position_key,
+        outbox_row.get("market_id"),
+    )
+    return None
 
 
 def _resolve_lp_tokens(ledger_row: dict[str, Any], position_key: str) -> tuple[str, str]:
@@ -799,15 +930,19 @@ def handle_lp(
         return None
 
     position_key = outbox_row.get("position_key") or ""
-    pool_address = _resolve_lp_pool_address(outbox_row, position_key)
+    extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
+    pool_address = _resolve_lp_pool_address(
+        outbox_row=outbox_row,
+        position_key=position_key,
+        extracted=extracted,
+        prior_open_payload=prior_open_payload,
+    )
     if pool_address is None:
         return None
 
     timestamp = _parse_lp_timestamp(ledger_row.get("timestamp"))
     token0, token1 = _resolve_lp_tokens(ledger_row, position_key)
     chain = ledger_row.get("chain") or ""
-
-    extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
 
     amount0, amount1, fees0, fees1, assumed_decimals = _resolve_lp_amounts(
         extracted=extracted,
