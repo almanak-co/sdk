@@ -59,15 +59,13 @@ To run:
     uv run pytest tests/intents/avalanche/test_uniswap_v4_collect_fees.py -v -s
 """
 
-import json as _json
-import urllib.request
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
-from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
+from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, UniswapV4SDK
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
@@ -149,43 +147,71 @@ SWAP_MAX_SLIPPAGE = Decimal("0.10")
 # =============================================================================
 
 
-def _fetch_avax_price() -> Decimal:
-    """Fetch live AVAX USD price from CoinGecko for compiler price oracle.
+def _derive_avax_price_from_slot0(anvil_rpc_url: str) -> Decimal:
+    """Derive AVAX/USD price from the V4 pool's sqrtPriceX96 at fork time.
 
-    The session-scoped avalanche price oracle covers ERC20 tokens declared
-    in ``CHAIN_CONFIGS[avalanche]["tokens"]`` (USDC, WAVAX, USDT, USDC.e,
-    USDT.e) but the LP_OPEN / counter-swap compiler code paths look up
-    the native ``AVAX`` symbol specifically (``_resolve_token`` returns
-    address(0) but the price_oracle.get("AVAX") lookup still happens for
-    slippage / liquidity estimation hints). Falls back to a low-but-
-    realistic price if CoinGecko is unreachable so the price-impact
-    guard stays satisfied -- mirrors the same pattern in the Polygon
-    VIB-4365 sibling.
+    Reads the on-chain sqrtPriceX96 from the Avalanche V4 StateView for
+    the ``(NATIVE_AVAX, USDC, 3000, 60, 0x0)`` pool.  The fork block is
+    pinned (``ANVIL_FORK_BLOCK_AVALANCHE``), so this value is constant
+    across CI runs and immune to live-price drift — eliminating the
+    VIB-4427 flake.
+
+    Conversion: ``price_usdc_per_avax = (sqrtPriceX96 / 2**96)**2
+                 * 10**(avax_decimals - usdc_decimals)``
+    (18 - 6 = 12, USDC is currency1 / token1).
+
+    Falls back to a hard-coded fork-block snapshot price (~9.77 USDC/AVAX,
+    verified 2026-05-14 by the VIB-4366 swap test) if the StateView call
+    reverts — this makes the test fail-safe on infra issues while keeping
+    the price anchored to the fork block rather than the live market.
     """
+    tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+    usdc_addr = tokens["USDC"]
+
+    sdk = UniswapV4SDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+    pool_key = sdk.compute_pool_key(
+        token0=NATIVE_CURRENCY,  # address(0) for native AVAX (currency0)
+        token1=usdc_addr,
+        fee=3000,
+        tick_spacing=60,
+        hooks=NATIVE_CURRENCY,
+    )
+
     try:
-        req = urllib.request.Request(
-            "https://api.coingecko.com/api/v3/simple/price?"
-            "ids=avalanche-2&vs_currencies=usd",
-            headers={"User-Agent": "almanak-sdk-tests"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-            data = _json.loads(resp.read().decode())
-        return Decimal(str(data["avalanche-2"]["usd"]))
-    except Exception:
-        return Decimal("10.00")
+        sqrt_price = sdk.get_pool_sqrt_price(pool_key, rpc_url=anvil_rpc_url)
+    except Exception:  # noqa: BLE001 — fall through to fork-block snapshot on any RPC/decode failure
+        sqrt_price = None
+    if sqrt_price is None or sqrt_price == 0:
+        # Hard-coded fork-block snapshot (VIB-4427): ~9.77 USDC/AVAX
+        # verified 2026-05-14 via the VIB-4366 swap test (sqrtPriceX96=2.477e23).
+        return Decimal("9.77")
+
+    # sqrtPriceX96 represents sqrt(token1/token0) in Q96 fixed-point.
+    # token0 = native AVAX (18 dec), token1 = USDC (6 dec).
+    # raw_ratio = (sqrtPriceX96 / 2**96)**2  ->  USDC_raw_units / AVAX_raw_units
+    # human price (USDC per AVAX) = raw_ratio * 10**(18 - 6)
+    raw_ratio = (Decimal(sqrt_price) / Decimal(2**96)) ** 2
+    avax_price = raw_ratio * Decimal(10 ** (18 - 6))
+    return avax_price
 
 
 def _build_price_oracle_with_native(
     price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
 ) -> dict[str, Decimal]:
     """Return price oracle augmented with AVAX / WAVAX prices.
+
+    Derives the AVAX price from the pinned fork-block sqrtPriceX96
+    (VIB-4427) instead of a live CoinGecko fetch to eliminate the
+    live-oracle ↔ fork-block coupling that causes the flaky
+    V4TooLittleReceived revert.
 
     The session-scoped oracle already prices WAVAX (it's in
     CHAIN_CONFIGS), so we honor that for WAVAX and only add an explicit
     AVAX entry. Doing both makes the test resilient to either symbol
     being looked up by the LP_OPEN / SwapIntent compile paths.
     """
-    avax_price = _fetch_avax_price()
+    avax_price = _derive_avax_price_from_slot0(anvil_rpc_url)
     return {
         **price_oracle,
         "AVAX": avax_price,
@@ -372,7 +398,8 @@ class TestUniswapV4CollectFeesIntent:
 
         # Inject AVAX prices into the session-scoped oracle so the V4
         # compiler's slippage protection can compute against native AVAX.
-        prices_with_native = _build_price_oracle_with_native(price_oracle)
+        # Price is derived from the fork-pinned sqrtPriceX96 (VIB-4427).
+        prices_with_native = _build_price_oracle_with_native(price_oracle, anvil_rpc_url)
 
         # Fail-fast funding check: surface infra/fixture funding regressions
         # before LP_OPEN / counter-swap runs and produces a less-actionable error.
@@ -661,6 +688,7 @@ class TestUniswapV4CollectFeesIntent:
         web3: Web3,
         funded_wallet: str,
         price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
     ):
         """V4 LP_COLLECT_FEES requires ``position_id`` in protocol_params.
 
@@ -687,7 +715,7 @@ class TestUniswapV4CollectFeesIntent:
         wavax_before = get_token_balance(web3, wavax_addr, funded_wallet)
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
 
-        prices_with_native = _build_price_oracle_with_native(price_oracle)
+        prices_with_native = _build_price_oracle_with_native(price_oracle, anvil_rpc_url)
 
         collect_intent = CollectFeesIntent(
             pool=LP_POOL,

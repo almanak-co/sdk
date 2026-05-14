@@ -37,8 +37,10 @@ hooks=0x0)`` pool key.
 The native MATIC/USDC pool at fee=3000 / ts=60 was verified initialized
 on Polygon mainnet 2026-05-14 via direct StateView.getSlot0(bytes32)
 against PoolManager 0x67366782... with sqrtPriceX96 ~ 2.47e22
-(tick=-299649, corresponding to ~$0.107 USDC/MATIC) and liquidity
-~ 2.09e18 -- ample depth for the small amounts the test uses. Native
+(tick=-299649, corresponding to ~$0.0974 USDC/MATIC; math:
+raw_ratio=(2.47e22/2**96)**2≈9.74e-14, human=9.74e-14*1e12≈0.0974)
+and liquidity ~ 2.09e18 -- ample depth for the small amounts the test
+uses. Native
 MATIC/USDC pools at fee=500 / ts=10 (liq ~ 1.07e17) and fee=10000 /
 ts=200 (liq ~ 1.03e15) are also initialized; the 3000 tier is selected
 to match the Base / Optimism sibling pattern (tick spacing 60).
@@ -61,15 +63,13 @@ To run:
     uv run pytest tests/intents/polygon/test_uniswap_v4_collect_fees.py -v -s
 """
 
-import json as _json
-import urllib.request
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
-from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
+from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, UniswapV4SDK
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
@@ -126,7 +126,7 @@ SWAP_TOKEN1_SYMBOL = "USDC"
 # against the very large pool.
 LP_AMOUNT_MATIC = Decimal("500")
 LP_AMOUNT_USDC = Decimal("500")
-# Narrow tick range that brackets the current pool price (~$0.107
+# Narrow tick range that brackets the current pool price (~$0.0974
 # USDC/MATIC at the polygon mainnet fork-block time -- on-chain tick
 # ~-299649). The range must include the spot price so the position is
 # in-range and accrues fees from the counter-swap. A wider range
@@ -154,35 +154,66 @@ SWAP_MAX_SLIPPAGE = Decimal("0.10")
 # =============================================================================
 
 
-def _fetch_matic_price() -> Decimal:
-    """Fetch live MATIC USD price from CoinGecko for compiler price oracle.
+def _derive_matic_price_from_slot0(anvil_rpc_url: str) -> Decimal:
+    """Derive MATIC/USD price from the V4 pool's sqrtPriceX96 at fork time.
 
-    The session-scoped polygon price oracle covers ERC20 tokens declared in
-    ``CHAIN_CONFIGS[polygon]["tokens"]`` (USDC, USDC.e, WETH, USDT, WBTC)
-    but not the native MATIC / POL / WMATIC symbol. V4 LP_OPEN and SWAP
-    both need a MATIC price to compute slippage protection and tick
-    range. Falls back to a low-but-realistic price if CoinGecko is
-    unreachable so the price-impact guard stays satisfied -- mirrors the
-    same pattern in ``test_uniswap_swap.py:test_swap_native_matic_to_usdc_using_intent``.
+    Reads the on-chain sqrtPriceX96 from the Polygon V4 StateView for
+    the ``(NATIVE_MATIC, USDC, 3000, 60, 0x0)`` pool.  The fork block is
+    pinned, so this value is constant across CI runs and immune to live-price
+    drift — eliminating the VIB-4427 flake.
+
+    Conversion: ``price_usdc_per_matic = (sqrtPriceX96 / 2**96)**2
+                 * 10**(matic_decimals - usdc_decimals)``
+    (18 - 6 = 12, USDC is currency1 / token1).
+
+    Falls back to a hard-coded fork-block snapshot price (~$0.0974 USDC/MATIC,
+    math-consistent with sqrtPriceX96 ~ 2.47e22 verified 2026-05-14 via
+    direct StateView.getSlot0 query) if the StateView call reverts or raises.
     """
+    tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+    usdc_addr = tokens["USDC"]
+
+    sdk = UniswapV4SDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+    pool_key = sdk.compute_pool_key(
+        token0=NATIVE_CURRENCY,  # address(0) for native MATIC (currency0)
+        token1=usdc_addr,
+        fee=3000,
+        tick_spacing=60,
+        hooks=NATIVE_CURRENCY,
+    )
+
     try:
-        req = urllib.request.Request(
-            "https://api.coingecko.com/api/v3/simple/price?"
-            "ids=polygon-ecosystem-token&vs_currencies=usd",
-            headers={"User-Agent": "almanak-sdk-tests"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-            data = _json.loads(resp.read().decode())
-        return Decimal(str(data["polygon-ecosystem-token"]["usd"]))
-    except Exception:
-        return Decimal("0.20")
+        sqrt_price = sdk.get_pool_sqrt_price(pool_key, rpc_url=anvil_rpc_url)
+    except Exception:  # noqa: BLE001 — fall through to fork-block snapshot on any RPC/decode failure
+        sqrt_price = None
+    if sqrt_price is None or sqrt_price == 0:
+        # Hard-coded fork-block snapshot (VIB-4427): ~$0.0974 USDC/MATIC
+        # Math: sqrtPriceX96~2.47e22 verified 2026-05-14 via StateView.getSlot0
+        # (tick=-299649). raw_ratio=(2.47e22/2**96)**2≈9.74e-14; human price
+        # =9.74e-14*10**(18-6)≈0.0974 USDC/MATIC.
+        return Decimal("0.0974")
+
+    # sqrtPriceX96 represents sqrt(token1/token0) in Q96 fixed-point.
+    # token0 = native MATIC (18 dec), token1 = USDC (6 dec).
+    # raw_ratio = (sqrtPriceX96 / 2**96)**2  ->  USDC_raw_units / MATIC_raw_units
+    # human price (USDC per MATIC) = raw_ratio * 10**(18 - 6)
+    raw_ratio = (Decimal(sqrt_price) / Decimal(2**96)) ** 2
+    matic_price = raw_ratio * Decimal(10 ** (18 - 6))
+    return matic_price
 
 
 def _build_price_oracle_with_native(
     price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
 ) -> dict[str, Decimal]:
-    """Return price oracle augmented with MATIC / POL / WMATIC prices."""
-    matic_price = _fetch_matic_price()
+    """Return price oracle augmented with MATIC / POL / WMATIC prices.
+
+    Derives the MATIC price from the pinned fork-block sqrtPriceX96
+    (VIB-4427) instead of a live CoinGecko fetch to eliminate the
+    live-oracle ↔ fork-block coupling that causes the flaky
+    V4TooLittleReceived revert.
+    """
+    matic_price = _derive_matic_price_from_slot0(anvil_rpc_url)
     return {
         **price_oracle,
         "MATIC": matic_price,
@@ -373,7 +404,8 @@ class TestUniswapV4CollectFeesIntent:
 
         # Inject MATIC prices into the session-scoped oracle so the V4
         # compiler's slippage protection can compute against native MATIC.
-        prices_with_native = _build_price_oracle_with_native(price_oracle)
+        # Price is derived from the fork-pinned sqrtPriceX96 (VIB-4427).
+        prices_with_native = _build_price_oracle_with_native(price_oracle, anvil_rpc_url)
 
         # Fail-fast funding check: surface infra/fixture funding regressions
         # before LP_OPEN / counter-swap runs and produces a less-actionable error.
@@ -644,6 +676,7 @@ class TestUniswapV4CollectFeesIntent:
         web3: Web3,
         funded_wallet: str,
         price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
     ):
         """V4 LP_COLLECT_FEES requires ``position_id`` in protocol_params.
 
@@ -670,7 +703,7 @@ class TestUniswapV4CollectFeesIntent:
         weth_before = get_token_balance(web3, weth_addr, funded_wallet)
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
 
-        prices_with_native = _build_price_oracle_with_native(price_oracle)
+        prices_with_native = _build_price_oracle_with_native(price_oracle, anvil_rpc_url)
 
         collect_intent = CollectFeesIntent(
             pool=LP_POOL,
