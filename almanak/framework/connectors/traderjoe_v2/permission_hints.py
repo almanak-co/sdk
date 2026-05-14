@@ -162,6 +162,20 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
 PERMISSION_HINTS = PermissionHints(
     supports_standalone_fee_collection=True,
     static_permissions=_build_static_permissions(),
+    # Synthetic SWAP discovery defaults to ``(USDC, WETH)`` but TraderJoe V2 on
+    # Ethereum has no usable WETH/USDC liquidity at any bin step at the current
+    # fork block — the only liquid TJv2 pair on Ethereum is USDT/USDC bin_step=1
+    # (LBPair ``0x47B1CEC2D2370E11B049c73aB6732F03E920C71a``, verified 2026-05-14).
+    # Without this override, ``get_swap_quote`` raises ``DivisionByZero`` because
+    # ``getSwapOut`` returns ``amount_out=0`` against an empty pool, the
+    # synthetic compile aborts, and the LBRouter swap selector never lands in
+    # the generated manifest — every real TJv2 SWAP on Ethereum then fails
+    # ``ConditionViolation`` at ``execTransactionWithRole``. Mirror Curve's
+    # approach (issue #1903) and pin a known-liquid pair per chain. Other
+    # chains keep the default ``(USDC, WETH)`` pair, which compiles fine.
+    synthetic_swap_pair={
+        "ethereum": ("USDT", "USDC"),
+    },
     selector_labels={
         _TRADERJOE_ADD_LIQUIDITY_SELECTOR: "addLiquidity(LiquidityParameters)",
         _TRADERJOE_REMOVE_LIQUIDITY_SELECTOR: "removeLiquidity(address,address,uint16,uint256,uint256,uint256[],uint256[],address,uint256)",
