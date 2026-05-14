@@ -588,17 +588,33 @@ class IntentCompiler:
     def _get_chain_rpc_url(self) -> str | None:
         """Get RPC URL for the current chain.
 
-        If rpc_url is set on the compiler, use it. Otherwise, check if a managed
-        Anvil fork is running (via ANVIL_{CHAIN}_PORT env var set by managed.py),
-        and use that. Finally, fall back to the gateway's RPC provider.
+        When a connected gateway client is available, return ``None``: every
+        downstream consumer (``validate_v3_pool``, the pool slot0 fetch, adapter
+        configs) routes eth_calls through the gateway, so resolving a direct RPC
+        URL here is dead weight. It also emits the misleading "free public RPC"
+        log noise that has confused Infra into believing the strategy container
+        has a network bypass — the strategy container holds no RPC credentials
+        by design (gateway-boundary rule), so resolution always falls through to
+        public RPC even when the gateway is correctly configured. See VIB-4429.
+
+        Otherwise: if rpc_url is set on the compiler, use it. Otherwise, check if
+        a managed Anvil fork is running (via ANVIL_{CHAIN}_PORT env var set by
+        managed.py), and use that. Finally, fall back to the gateway's RPC
+        provider.
 
         This is needed for protocol adapters (like Aerodrome, TraderJoe, Pendle)
         that need to make direct RPC calls for pool queries when the compiler is
-        using gateway mode (rpc_url=None).
+        running without a connected gateway (local dev / Anvil).
 
         Returns:
             RPC URL string or None if not available.
         """
+        # Gateway-first: a connected gateway client means every consumer routes
+        # eth_calls through it. The condition mirrors pool_validation._eth_call's
+        # own gateway-vs-direct decision so the two stay consistent.
+        if self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False):
+            return None
+
         if self.rpc_url:
             return self.rpc_url
 

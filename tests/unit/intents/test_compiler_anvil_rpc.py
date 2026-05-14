@@ -101,3 +101,80 @@ class TestGetChainRpcUrlAnvilDetection:
             url = compiler_no_rpc._get_chain_rpc_url()
         # avalanche compiler should NOT use base's anvil port
         assert url == "https://mainnet.example.com"
+
+
+class TestGetChainRpcUrlGatewayFirst:
+    """VIB-4429: _get_chain_rpc_url() short-circuits when a connected gateway client exists.
+
+    In hosted mode the strategy container holds no RPC credentials by design, so
+    resolving a direct RPC URL always falls through to public RPC and emits a
+    misleading "free public RPC" log. When a connected gateway client is present
+    every consumer routes eth_calls through it, so the URL is dead weight — the
+    function returns None instead of resolving (and logging).
+    """
+
+    @staticmethod
+    def _compiler(gateway_client, rpc_url=None):
+        return IntentCompiler(
+            chain="arbitrum",
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            rpc_url=rpc_url,
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+            gateway_client=gateway_client,
+        )
+
+    def test_connected_gateway_returns_none_regardless_of_env(self):
+        """A connected gateway client → None, even with ALCHEMY_API_KEY / Anvil port set."""
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        compiler = self._compiler(gateway_client)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"ALCHEMY_API_KEY": "test-key", "ANVIL_ARBITRUM_PORT": "8547"},
+            ),
+            patch("almanak.gateway.utils.get_rpc_url") as mock_get_rpc,
+        ):
+            url = compiler._get_chain_rpc_url()
+
+        assert url is None
+        mock_get_rpc.assert_not_called()
+
+    def test_connected_gateway_returns_none_even_with_explicit_rpc_url(self):
+        """Gateway-first wins over an explicit compiler rpc_url too."""
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        compiler = self._compiler(gateway_client, rpc_url="https://explicit-rpc.example.com")
+
+        assert compiler._get_chain_rpc_url() is None
+
+    def test_disconnected_gateway_falls_through_to_resolution(self):
+        """An injected-but-disconnected gateway client must NOT short-circuit."""
+        gateway_client = MagicMock()
+        gateway_client.is_connected = False
+        compiler = self._compiler(gateway_client)
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ANVIL_")}
+        with (
+            patch.dict(os.environ, clean_env, clear=True),
+            patch("almanak.gateway.utils.get_rpc_url", return_value="https://mainnet.example.com") as mock_get_rpc,
+        ):
+            url = compiler._get_chain_rpc_url()
+
+        assert url == "https://mainnet.example.com"
+        mock_get_rpc.assert_called_once_with("arbitrum")
+
+    def test_no_gateway_client_falls_through_to_resolution(self):
+        """With no gateway client at all, behaviour is unchanged (direct resolution)."""
+        compiler = self._compiler(gateway_client=None)
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ANVIL_")}
+        with (
+            patch.dict(os.environ, clean_env, clear=True),
+            patch("almanak.gateway.utils.get_rpc_url", return_value="https://mainnet.example.com") as mock_get_rpc,
+        ):
+            url = compiler._get_chain_rpc_url()
+
+        assert url == "https://mainnet.example.com"
+        mock_get_rpc.assert_called_once_with("arbitrum")

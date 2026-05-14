@@ -74,6 +74,9 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self.market_servicer: object | None = None  # Set by GatewayServer after creation
         self._registered_chains: set[str] | None = None
         self._registered_chain_wallets: dict[str, str] | None = None
+        # Chains for which we have already logged a public-RPC-fallback ERROR,
+        # so the alert fires once per chain per gateway lifetime, not per request.
+        self._public_rpc_warned_chains: set[str] = set()
 
     async def _fetch_prices_for_tokens(self, tokens: list[str]) -> dict[str, Decimal]:
         """Fetch prices from the gateway's own market service for the given tokens.
@@ -172,6 +175,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # Get RPC URL for the chain
         network = self.settings.network
         rpc_url = get_rpc_url(chain, network=network)
+        self._warn_if_resolved_to_public_rpc(chain, rpc_url)
 
         # Create compiler with allow_placeholder_prices=True. Real prices are
         # injected per-request in CompileIntent() via price_map field.
@@ -187,6 +191,47 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self._compiler_cache[cache_key] = (compiler, now)
         logger.info(f"Created IntentCompiler for chain={chain}, wallet={wallet_address[:10]}...")
         return compiler
+
+    def _warn_if_resolved_to_public_rpc(self, chain: str, rpc_url: str) -> None:
+        """Emit a one-time ERROR when the hosted gateway resolved ``chain`` to a public RPC.
+
+        The gateway-side IntentCompiler built here has no gateway_client to defer
+        to (it IS the gateway), so it resolves RPC URLs directly via get_rpc_url().
+        When no credentialed provider (Alchemy key, Tenderly key, chain-specific
+        or generic RPC URL) is configured, resolution falls through to free public
+        RPC — a real, rate-limited egress from the gateway pod. This is distinct
+        from the strategy-container "free public RPC" log in VIB-4429, which is
+        harmless noise; here the gateway genuinely has no credentials. Log loudly
+        once per chain so Infra can alert and fix the gateway pod env.
+
+        We inspect the *resolved* URL rather than re-deriving the provider-selection
+        priority list, so this check cannot drift out of sync with
+        ``_auto_select_provider`` and naturally covers every provider path
+        (Alchemy / Tenderly / custom / generic) and every chain in
+        ``PUBLIC_RPC_URLS``. See VIB-4429.
+        """
+        chain_lower = chain.lower()
+        if chain_lower in self._public_rpc_warned_chains:
+            return
+
+        from almanak.framework.deployment import is_hosted
+        from almanak.gateway.utils.rpc_provider import PUBLIC_RPC_URLS
+
+        if not is_hosted():
+            return
+        if rpc_url != PUBLIC_RPC_URLS.get(chain_lower):
+            return
+
+        self._public_rpc_warned_chains.add(chain_lower)
+        logger.error(
+            "Hosted gateway resolved chain=%s to a free public RPC — no credentialed "
+            "provider is configured, so gateway-side intent compilation is subject to "
+            "rate limits. Set ALMANAK_GATEWAY_ALCHEMY_API_KEY, TENDERLY_API_KEY_%s, or "
+            "%s_RPC_URL in the gateway pod env. See VIB-4429.",
+            chain_lower,
+            chain_lower.upper(),
+            chain_lower.upper(),
+        )
 
     def _is_safe_address(self, wallet_address: str) -> bool:
         """Check if a wallet address matches the configured Safe address."""
