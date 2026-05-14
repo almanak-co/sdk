@@ -23,6 +23,69 @@ from .loader import (
 logger = logging.getLogger(__name__)
 
 
+def _spinner_label(display_name: str | None) -> str:
+    """Build the loading-spinner label for a custom dashboard.
+
+    display_name often already ends in "Dashboard" (e.g. "Strategy
+    Dashboard"), so only append the suffix when it isn't already there —
+    avoids "Loading Strategy Dashboard dashboard...". Tolerates malformed
+    metadata (None / non-str / trailing whitespace) since display_name
+    comes from user-authored metadata.json.
+    """
+    name = str(display_name or "").strip()
+    if not name:
+        return "dashboard"
+    if name.lower().endswith("dashboard"):
+        return name
+    return f"{name} dashboard"
+
+
+def _resolve_api_client(
+    strategy_id: str,
+    api_client: DashboardAPIClient | Any | None,
+    gateway_client: Any | None,
+) -> DashboardAPIClient | Any:
+    """Resolve the API client for a custom dashboard render.
+
+    Returns the caller-supplied client untouched if one was given; otherwise
+    builds one from gateway_client, or discovers the dashboard gateway client,
+    falling back to a mock client on any connection failure.
+    """
+    if api_client is not None:
+        return api_client
+
+    if gateway_client is not None:
+        # Create a scoped API client for this dashboard
+        return create_api_client(gateway_client, strategy_id)
+
+    # Try to get gateway client from the dashboard module
+    try:
+        from almanak.framework.dashboard.gateway_client import (
+            GatewayConnectionError,
+            get_dashboard_client,
+        )
+
+        gw_client_inner = get_dashboard_client()
+        if not gw_client_inner.is_connected:
+            try:
+                logger.debug(f"Attempting to connect to gateway for {strategy_id}")
+                gw_client_inner.connect()
+            except GatewayConnectionError as conn_err:
+                logger.warning(f"Gateway connection failed for {strategy_id}: {conn_err}, using mock API client")
+                return create_mock_api_client()
+
+        if gw_client_inner.is_connected:
+            return create_api_client(gw_client_inner, strategy_id)
+
+        # gw_client_inner exists but failed to connect for other reason
+        logger.warning(f"Gateway not connected, using mock API client for {strategy_id}")
+        return create_mock_api_client()
+    except Exception as e:  # noqa: BLE001
+        # Fallback to mock client on any unexpected error
+        logger.debug(f"Failed to create gateway API client: {e}")
+        return create_mock_api_client()
+
+
 def render_custom_dashboard_safe(
     dashboard_info: CustomDashboardInfo,
     strategy_id: str | None = None,
@@ -58,43 +121,10 @@ def render_custom_dashboard_safe(
         session_state = {}
 
     # Create gateway-backed API client if not provided
-    if api_client is None:
-        if gateway_client is not None:
-            # Create a scoped API client for this dashboard
-            api_client = create_api_client(gateway_client, strategy_id)
-        else:
-            # Try to get gateway client from the dashboard module
-            try:
-                from almanak.framework.dashboard.gateway_client import (
-                    GatewayConnectionError,
-                    get_dashboard_client,
-                )
+    api_client = _resolve_api_client(strategy_id, api_client, gateway_client)
 
-                gw_client_inner = get_dashboard_client()
-                connection_handled = False
-                if not gw_client_inner.is_connected:
-                    try:
-                        logger.debug(f"Attempting to connect to gateway for {strategy_id}")
-                        gw_client_inner.connect()
-                    except GatewayConnectionError as conn_err:
-                        logger.warning(
-                            f"Gateway connection failed for {strategy_id}: {conn_err}, using mock API client"
-                        )
-                        api_client = create_mock_api_client()
-                        connection_handled = True  # Signal that we've handled this case
-
-                if not connection_handled and gw_client_inner.is_connected:
-                    api_client = create_api_client(gw_client_inner, strategy_id)
-                elif api_client is None:  # gw_client_inner exists but failed to connect for other reason
-                    api_client = create_mock_api_client()
-                    logger.warning(f"Gateway not connected, using mock API client for {strategy_id}")
-            except Exception as e:  # noqa: BLE001
-                # Fallback to mock client on any unexpected error
-                logger.debug(f"Failed to create gateway API client: {e}")
-                api_client = create_mock_api_client()
-
-    # Show loading indicator while importing
-    with st.spinner(f"Loading {dashboard_info.display_name} dashboard..."):
+    # Show loading indicator while importing.
+    with st.spinner(f"Loading {_spinner_label(dashboard_info.display_name)}..."):
         try:
             # Load the module
             module = load_dashboard_module(
