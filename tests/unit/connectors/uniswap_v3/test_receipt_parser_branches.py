@@ -629,14 +629,22 @@ def _make_pool_mint_log_for_ticks(
     tick_upper: int,
     pool: str = POOL_ADDR,
     owner_padded: str | None = None,
+    sender: str = ARBITRUM_NPM,
     liquidity: int = 1000,
     amount0: int = 100,
     amount1: int = 200,
 ) -> dict[str, Any]:
     if owner_padded is None:
         owner_padded = _pad32(ARBITRUM_NPM)
+    # Pool ``Mint`` event data: sender (non-indexed) ‖ amount (uint128)
+    # ‖ amount0 (uint256) ‖ amount1 (uint256). ``sender`` occupies the first
+    # 32-byte slot — historic test helpers omitted it and matched the (now
+    # fixed) parser bug that read liquidity from offset 0 instead of 32
+    # (VIB-4395).
+    sender_padded = _pad32(sender).removeprefix("0x")
     data = (
-        f"{liquidity:064x}"  # uint128 amount
+        f"{sender_padded}"  # address sender (left-padded to 32B)
+        f"{liquidity:064x}"  # uint128 amount (right-aligned in 32B word)
         f"{amount0:064x}"  # uint256 amount0
         f"{amount1:064x}"  # uint256 amount1
     )
@@ -720,6 +728,78 @@ class TestExtractLiquidity:
             "data": "0x",
         }
         assert parser.extract_liquidity({"logs": [log]}) is None
+
+    def test_reads_amount_slot_not_sender_slot(self) -> None:
+        """VIB-4395 regression: ``extract_liquidity`` must read the uint128
+        amount at offset 32, NOT the sender-address slot at offset 0.
+
+        The original bug surfaced as a ~50-digit integer in
+        ``extracted_data['liquidity']`` because the parser was decoding the
+        sender-address slot of the Pool ``Mint`` event as a uint256 (the
+        decoder silently widened uint128 to uint256). The dashboard then
+        rendered that garbage onto the LP position card. We pin the offset
+        explicitly so future ABI confusion fails this test instead of
+        leaking onto an operator screen.
+        """
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        # Use the canonical NPM address as the Mint event ``sender`` so that
+        # a regression to offset=0 reads ``0xC36442b4…`` (~1.1e48 as uint256)
+        # instead of the asserted liquidity below.
+        log = _make_pool_mint_log_for_ticks(
+            tick_lower=-100,
+            tick_upper=100,
+            sender=ARBITRUM_NPM,
+            liquidity=1_720_485_611_955,
+        )
+        assert parser.extract_liquidity({"logs": [log], "status": 1}) == 1_720_485_611_955
+
+    def test_matches_lp_open_data_liquidity(self) -> None:
+        """Invariant: for any Uniswap V3 LP_OPEN, the Pool ``Mint.amount``
+        and the NPM ``IncreaseLiquidity.liquidity`` are the SAME value
+        (the protocol guarantees this — both are the minted L for the new
+        position). After the VIB-4395 offset fix, both extraction paths
+        should agree; a future drift would point at a regression in one
+        path or the other.
+
+        This is Codex review Q7: cross-check the two parser surfaces that
+        report liquidity so the dashboard / agent-tools / accounting writer
+        cannot disagree about how much L was minted.
+        """
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        liquidity = 476_588_196_908  # Position #2 (wide leg) from PR-trigger run
+
+        pool_mint = _make_pool_mint_log_for_ticks(
+            tick_lower=-201_280,
+            tick_upper=-197_220,
+            sender=ARBITRUM_NPM,
+            liquidity=liquidity,
+            amount0=871_720_086_157_647,
+            amount1=2_402_098,
+        )
+        # NFT manager IncreaseLiquidity log — same liquidity by protocol invariant.
+        # uint128 liquidity is left-padded to 32 bytes in the data slot.
+        increase_data = (
+            f"{liquidity:064x}"  # liquidity (uint128 widened to 32 bytes)
+            f"{871_720_086_157_647:064x}"  # amount0
+            f"{2_402_098:064x}"  # amount1
+        )
+        increase_liquidity = {
+            "address": ARBITRUM_NPM,
+            "topics": [
+                EVENT_TOPICS["IncreaseLiquidity"],
+                f"0x{5_487_862:064x}",
+            ],
+            "data": "0x" + increase_data,
+        }
+        receipt = {"logs": [pool_mint, increase_liquidity], "status": 1}
+
+        pool_liquidity = parser.extract_liquidity(receipt)
+        lp_open_data = parser.extract_lp_open_data(receipt)
+
+        assert pool_liquidity == liquidity
+        assert lp_open_data is not None
+        assert lp_open_data.liquidity == liquidity
+        assert pool_liquidity == lp_open_data.liquidity
 
 
 # ---------------------------------------------------------------------------

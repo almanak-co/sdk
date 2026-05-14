@@ -8,6 +8,8 @@ This module provides comprehensive tests for all HexDecoder methods including:
 - Edge cases and error handling
 """
 
+import pytest
+
 from almanak.framework.connectors.base.hex_utils import HexDecoder
 
 
@@ -242,6 +244,25 @@ class TestDecodeUint160:
         result = HexDecoder.decode_uint160(hex_str)
         assert result > 0
 
+    def test_decode_uint160_max(self):
+        """Max uint160 (high 96 bits zero, low 160 bits = 1) decodes losslessly."""
+        hex_str = "0x" + "00" * 12 + "ff" * 20
+        assert HexDecoder.decode_uint160(hex_str) == (1 << 160) - 1
+
+    def test_decode_uint160_overflow_raises(self):
+        """Values outside the 160-bit range must raise — guards against wrong offsets (VIB-4395)."""
+        # All-1s 32-byte slot — clearly not a valid ABI-encoded uint160.
+        hex_str = "0x" + "ff" * 32
+        with pytest.raises(ValueError, match="uint160 overflow"):
+            HexDecoder.decode_uint160(hex_str)
+
+    def test_decode_uint160_just_overflow_raises(self):
+        """A single bit set above bit 160 must raise — strict boundary."""
+        # 0x0000_0000_0000_0000_0000_0001_0000_..._0000 == 1 << 160
+        hex_str = "0x" + "00" * 11 + "01" + "00" * 20
+        with pytest.raises(ValueError, match="uint160 overflow"):
+            HexDecoder.decode_uint160(hex_str)
+
 
 class TestDecodeUint128:
     """Tests for decoding unsigned 128-bit integers (Uniswap liquidity)."""
@@ -257,6 +278,55 @@ class TestDecodeUint128:
         hex_str = "0x" + "00" * 16 + "0000000000001000"
         result = HexDecoder.decode_uint128(hex_str)
         assert result == 4096
+
+    def test_decode_uint128_max(self):
+        """Max uint128 (high 128 bits zero, low 128 bits all-ones) decodes losslessly."""
+        hex_str = "0x" + "00" * 16 + "ff" * 16
+        assert HexDecoder.decode_uint128(hex_str) == (1 << 128) - 1
+
+    def test_decode_uint128_overflow_raises(self):
+        """Values outside the 128-bit range must raise — VIB-4395 strict-mode guard.
+
+        This is the regression that caused the bug: reading the
+        Uniswap V3 Pool ``Mint`` sender-address slot (offset 0) as a
+        uint128. The sender address is left-padded into a 32-byte word, so
+        the high 96 bits are zero AND bits [128, 160) carry address bytes —
+        the resulting integer trips this overflow check.
+        """
+        # All-1s 32-byte slot — definitely overflows uint128.
+        hex_str = "0x" + "ff" * 32
+        with pytest.raises(ValueError, match="uint128 overflow"):
+            HexDecoder.decode_uint128(hex_str)
+
+    def test_decode_uint128_sender_address_slot_raises(self):
+        """The exact misalignment that triggered VIB-4395 must now fail loudly.
+
+        The Uniswap V3 NonfungiblePositionManager is at
+        ``0xC36442b4a4522E871399CD717aBDD847Ab11FE88`` (Arbitrum). When
+        encoded as the sender field of a Pool Mint event, it lives in a
+        32-byte word right-aligned. Reading that slot as ``uint128`` would
+        previously silently truncate; now it raises.
+        """
+        npm = "C36442b4a4522E871399CD717aBDD847Ab11FE88"  # 20-byte address
+        hex_str = "0x" + "00" * 12 + npm  # left-padded to 32 bytes
+        with pytest.raises(ValueError, match="uint128 overflow"):
+            HexDecoder.decode_uint128(hex_str)
+
+    def test_decode_uint128_just_overflow_raises(self):
+        """A single bit set above bit 128 must raise — strict boundary."""
+        hex_str = "0x" + "00" * 15 + "01" + "00" * 16
+        with pytest.raises(ValueError, match="uint128 overflow"):
+            HexDecoder.decode_uint128(hex_str)
+
+    def test_decode_uint128_with_offset(self):
+        """Offset variant still validates per-slot — strict mode applies at any offset."""
+        # Slot 0: junk (would overflow); Slot 1: valid uint128 = 42.
+        bad_slot = "ff" * 32
+        good_slot = "00" * 16 + f"{42:032x}"
+        hex_str = "0x" + bad_slot + good_slot
+        assert HexDecoder.decode_uint128(hex_str, offset=32) == 42
+        with pytest.raises(ValueError, match="uint128 overflow"):
+            HexDecoder.decode_uint128(hex_str, offset=0)
 
 
 class TestDecodeDynamicArray:

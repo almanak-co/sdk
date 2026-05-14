@@ -1436,21 +1436,33 @@ class UniswapV3ReceiptParser:
             return None
 
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
-        """Extract liquidity from LP mint transaction receipt.
+        """Extract liquidity from a Uniswap V3 Pool ``Mint`` event.
 
-        Looks for Mint events from Uniswap V3 pools.
-        Liquidity amount is in the data field.
+        Pool Mint signature (only the non-indexed fields land in ``data``)::
 
-        Mint event data layout:
-        - amount (uint128): offset 0
-        - amount0 (uint256): offset 16
-        - amount1 (uint256): offset 48
+            event Mint(
+                address sender,             // non-indexed → data[ 0..32 ]
+                address indexed owner,
+                int24   indexed tickLower,
+                int24   indexed tickUpper,
+                uint128 amount,             // non-indexed → data[32..64 ]  (the liquidity)
+                uint256 amount0,            // non-indexed → data[64..96 ]
+                uint256 amount1             // non-indexed → data[96..128]
+            );
+
+        Sister parsers (``sushiswap_v3``, ``pancakeswap_v3``) already read
+        at offset 32 — this method used to read at offset 0 and surface the
+        sender-address slot as "liquidity" (a ~50-digit garbage uint), which
+        leaked into ``extracted_data['liquidity']`` for every LP_OPEN
+        (VIB-4395). The fix here aligns with the ABI; the canonical
+        per-position liquidity is also available via
+        :meth:`extract_lp_open_data` (NFT manager ``IncreaseLiquidity``).
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            Liquidity amount if found, None otherwise
+            Liquidity amount if a Pool Mint event is found, ``None`` otherwise.
         """
         try:
             logs = receipt.get("logs", [])
@@ -1478,10 +1490,9 @@ class UniswapV3ReceiptParser:
                 if not data or data == "0x":
                     continue
 
-                # Mint event: sender (address, 32 bytes), amount (uint128, 32 bytes), amount0, amount1
-                # Actually the Mint event has: amount (uint128), amount0 (uint256), amount1 (uint256)
-                # All packed at 32-byte boundaries
-                liquidity = HexDecoder.decode_uint128(data, 0)
+                # uint128 ``amount`` is the SECOND non-indexed field; the
+                # first is the sender address, which occupies data[0..32].
+                liquidity = HexDecoder.decode_uint128(data, 32)
                 return liquidity
 
             return None

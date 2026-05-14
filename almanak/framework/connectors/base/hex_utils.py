@@ -115,37 +115,75 @@ class HexDecoder:
 
     @staticmethod
     def decode_uint160(hex_str: str, offset: int = 0) -> int:
-        """Decode an unsigned 160-bit integer from hex string.
+        """Decode an unsigned 160-bit integer from a 32-byte ABI slot.
 
-        Used for Uniswap V3 sqrtPriceX96 which is uint160.
+        Used for Uniswap V3 ``sqrtPriceX96`` which is uint160. ABI-encoded
+        uint160 is always right-aligned in a 32-byte word with the high 96
+        bits zero; a non-zero high-bit pattern indicates either a wrong byte
+        offset or non-ABI-encoded input, both of which would silently
+        corrupt downstream math. Raise rather than truncate — this validates
+        callers' offsets and keeps a misaligned decode from looking like a
+        plausible value (VIB-4395).
 
         Args:
             hex_str: Hex string to decode (with or without '0x')
             offset: Byte offset to start reading from
 
         Returns:
-            Decoded unsigned integer value
+            Decoded unsigned integer value in ``[0, 2**160)``
+
+        Raises:
+            ValueError: when the high 96 bits of the 32-byte slot are non-zero.
         """
         hex_str = HexDecoder.normalize_hex(hex_str)
         chunk = hex_str[offset * 2 : offset * 2 + 64]
-        return int(chunk, 16) if chunk else 0
+        if not chunk:
+            return 0
+        value = int(chunk, 16)
+        if value >= (1 << 160):
+            raise ValueError(
+                f"uint160 overflow at offset {offset}: value={value:#x} "
+                "has bits set outside the 160-bit range — likely a wrong byte offset or "
+                "non-ABI-encoded input"
+            )
+        return value
 
     @staticmethod
     def decode_uint128(hex_str: str, offset: int = 0) -> int:
-        """Decode an unsigned 128-bit integer from hex string.
+        """Decode an unsigned 128-bit integer from a 32-byte ABI slot.
 
-        Used for Uniswap V3 liquidity which is uint128.
+        Used for Uniswap V3 ``liquidity`` / Pool ``Mint.amount`` /
+        Pool ``Collect`` amount0/amount1 — all uint128 fields stored
+        right-aligned in 32-byte ABI words. ABI-encoded uint128 has the high
+        128 bits zero; non-zero high bits signal a wrong byte offset or
+        non-ABI-encoded input (e.g. the ``extract_liquidity`` regression
+        that read the sender-address slot at offset 0 instead of the amount
+        slot at offset 32 — VIB-4395). Raise rather than truncate, so a
+        misaligned decode fails loudly instead of returning a plausible
+        garbage value.
 
         Args:
             hex_str: Hex string to decode (with or without '0x')
             offset: Byte offset to start reading from
 
         Returns:
-            Decoded unsigned integer value
+            Decoded unsigned integer value in ``[0, 2**128)``
+
+        Raises:
+            ValueError: when the high 128 bits of the 32-byte slot are non-zero.
         """
         hex_str = HexDecoder.normalize_hex(hex_str)
         chunk = hex_str[offset * 2 : offset * 2 + 64]
-        return int(chunk, 16) if chunk else 0
+        if not chunk:
+            return 0
+        value = int(chunk, 16)
+        if value >= (1 << 128):
+            raise ValueError(
+                f"uint128 overflow at offset {offset}: value={value:#x} "
+                "has bits set above 128 — likely a wrong byte offset or "
+                "non-ABI-encoded input"
+            )
+        return value
 
     @staticmethod
     def decode_int256(hex_str: str, offset: int = 0) -> int:
