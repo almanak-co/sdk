@@ -11,6 +11,7 @@ Supported chains:
 - Base
 - Avalanche
 - BNB Chain
+- Monad
 
 Example:
     from almanak.framework.connectors.uniswap_v3 import UniswapV3Adapter, UniswapV3Config
@@ -182,5 +183,6 @@ register_connector(
         "base",
         "avalanche",
         "bnb",
+        "monad",
     ),
 )

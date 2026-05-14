@@ -12,6 +12,7 @@ Supported chains:
 - BNB Smart Chain (BSC)
 - Ethereum
 - Arbitrum
+- Base
 
 Example:
     from almanak.framework.connectors.pancakeswap_v3 import (
@@ -96,5 +97,6 @@ register_connector(
         "bnb",
         "ethereum",
         "arbitrum",
+        "base",
     ),
 )

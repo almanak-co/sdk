@@ -876,6 +876,21 @@ TRADERJOE_V2_LBPAIRS: dict[str, list[dict[str, str | int]]] = {
             "address": "0xf258929a659F68ace4732e36F626d6D1544878aC",
         },
     ],
+    # Ethereum USDT/USDC LBPair (bin_step=1) — the only TJv2 pair on Ethereum
+    # carrying meaningful reserves at the fork block (~497 USDT / ~70 USDC as
+    # of 2026-05-14). LBFactory at ``0xDC8d77b69155c7E68A95a4fb0f06a71FF90B943a``.
+    # Token X = USDT, token Y = USDC (verified on-chain via
+    # ``LBPair.getTokenX/Y()``). Required by ``permission_hints._build_static_permissions``
+    # so the Roles manifest authorises ``approveForAll(LBRouter, true)`` on the
+    # LBPair during LP_CLOSE. See VIB-4419.
+    "ethereum": [
+        {
+            "tokenX": "USDT",
+            "tokenY": "USDC",
+            "bin_step": 1,
+            "address": "0x47B1CEC2D2370E11B049c73aB6732F03E920C71a",
+        },
+    ],
 }
 
 

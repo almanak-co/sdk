@@ -1,7 +1,7 @@
-"""TraderJoe Liquidity Book V2 Connector (Avalanche).
+"""TraderJoe Liquidity Book V2 Connector.
 
 This module provides the TraderJoe V2 adapter for executing swaps and
-managing liquidity positions on TraderJoe V2's Liquidity Book on Avalanche.
+managing liquidity positions on TraderJoe V2's Liquidity Book.
 
 TraderJoe V2 Architecture:
 - LBRouter: Main entry point for swaps and liquidity operations
@@ -16,6 +16,8 @@ Key Concepts:
 Supported chains:
 - Avalanche (Chain ID: 43114)
 - Arbitrum One (Chain ID: 42161)
+- BNB Smart Chain (Chain ID: 56)
+- Ethereum (Chain ID: 1)
 
 Example:
     from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
@@ -140,5 +142,5 @@ register_connector(
         IntentType.LP_OPEN,
         IntentType.LP_CLOSE,
     ),
-    chains=("avalanche", "arbitrum", "bnb"),
+    chains=("avalanche", "arbitrum", "bnb", "ethereum"),
 )
