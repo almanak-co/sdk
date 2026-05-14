@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import click
-from dotenv import load_dotenv
+
+from almanak.config.env import _load_dotenv_once
 
 from .cli_helpers import (
     apply_cli_overrides,
@@ -223,7 +224,7 @@ def qa_data(
         python -m src.data.qa.cli --output reports/my-qa-run
     """
     # Load environment variables from .env file
-    load_dotenv()
+    _load_dotenv_once()
 
     # Configure logging
     configure_logging(verbose)

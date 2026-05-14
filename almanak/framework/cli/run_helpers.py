@@ -1,42 +1,22 @@
-"""Helper functions extracted from `framework/cli/run.py:run` (Phase 4a).
+"""Private orchestration helpers for `almanak strat run`.
 
-Pure refactor: these helpers encapsulate well-defined chunks of the `run()`
-CLI orchestration. No behavior change. Each helper preserves the exact
-click.echo output, exit codes, and side effects (env mutations, atexit
-registrations) of the original inlined code.
+This module holds the mechanics that make `run()` work without forcing the CLI
+entrypoint itself to carry every branch and side effect:
 
-Scope of 4a (this module):
-    - _configure_logging_and_validate — phase 1 of run()
-    - _handle_list_all              — phase 4 of run()
-    - _load_strategy_class          — phase 6 of run()
-    - _discover_and_load_config     — phase 7 of run()
-    - _print_startup_banner         — phase 10 of run()
+- setup and validation
+- gateway bootstrap and dashboard lifecycle
+- strategy/config discovery
+- identity/runtime resolution
+- component assembly and cleanup
+- single-iteration / lifecycle / continuous execution
 
-Scope of 4b (this module):
-    - _setup_gateway                — phase 2 of run()
-    - _wire_token_resolver          — phase 3 of run()
-    - _resolve_identity             — phase 8 of run()
-    - _detect_state_resume          — phase 9 of run()
-
-Scope of 4c (this module):
-    - _instantiate_strategy         — phase 11 of run()
-    - _build_runtime_config         — phase 12 of run()
-    - _build_components             — phase 13 of run()
-    - _build_cleanup_fn             — phase 14 of run()
-
-Scope of 4d (this module):
-    - _start_dashboard_background   — phase 5a of run()
-    - _stop_dashboard               — phase 5b of run()
-    - _handle_standalone_dashboard  — phase 5c of run()
-    - _run_once                     — phase 15 of run()
-    - _run_continuous               — phase 16 of run()
-
-Phase 4e (extended tests) will add additional coverage. See
-`jazzy-tinkering-zephyr.md`.
+The goal is behavioral parity with the historical inline implementation, but
+grouped by responsibility instead of by extraction order.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import inspect
 import json
@@ -45,12 +25,14 @@ import sys
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
 
+from almanak.config.cli_runtime import almanak_chain_from_env, anvil_port_for_chain
+
 from ..strategies.metadata import LEGACY_COMPAT_DATA_REQUIREMENTS, StrategyDataRequirements
-from ._run_context import ComponentBundle, IdentityInfo, ResumeInfo
+from ._run_context import ComponentBundle, IdentityInfo, ResumeInfo, RuntimeBootstrap, StrategyBootstrap
 
 if TYPE_CHECKING:
     from ..strategies.intent_strategy import IntentStrategy
@@ -238,7 +220,7 @@ def _configure_logging_and_validate(
 ) -> None:
     """Configure structured logging and validate setup-stage flag combinations.
 
-    Mirrors the pre-gateway block in `run()` (phase 1):
+    Covers the pre-gateway setup at the top of `run()`:
         - Select log level (debug > verbose > info).
         - Configure logging with console format.
         - Optionally add a JSON file handler at DEBUG level.
@@ -310,12 +292,11 @@ def _anchor_strategy_folder_env(working_dir: str) -> None:
     explicitly so test/operator overrides win. No-op when the resolved
     path is not a directory.
 
-    Phase 4c hoist: the env mutation that used to live inline in ``run()``
-    now happens through ``set_strategy_folder`` (the single allowlisted
-    setter in ``local_paths.py``). Called from ``_setup_gateway`` rather
-    than ``run()`` so the high-CRAP god function does not grow new diff
-    lines that the CRAP gate cannot cover without a full refactor of
-    ``run`` itself.
+    The env mutation that used to live inline in ``run()`` now happens
+    through ``set_strategy_folder`` (the single allowlisted setter in
+    ``local_paths.py``). Called from ``_setup_gateway`` rather than
+    ``run()`` so path anchoring still happens before any local-path
+    resolution without bloating the top-level orchestrator.
     """
     from almanak.framework.local_paths import set_strategy_folder, strategy_folder_env
 
@@ -413,7 +394,7 @@ def _discover_and_load_config(
 ) -> tuple[dict[str, Any], bool, bool, str | None, str | None]:
     """Discover config file, load it, apply copy-trading overrides.
 
-    Mirrors phase 7 of `run()`:
+    Centralizes the config-loading segment of `run()`:
         1. Auto-discover config.json / config.yaml / config.yml in working_dir
            if `config_file` was not provided.
         2. Load config via `load_strategy_config` (exit 1 on error).
@@ -525,7 +506,7 @@ def _print_startup_banner(
     Pure print helper. All fields are taken as keyword arguments to keep the
     helper free of magic: no attribute-lookups on an opaque context, no
     implicit defaulting. The set of click.echo calls (including conditionals
-    and colors) matches the inlined block in `run()` (phase 10) byte-for-byte.
+    and colors) matches the prior inline startup banner byte-for-byte.
     """
     click.echo("=" * 60)
     click.echo("ALMANAK STRATEGY RUNNER")
@@ -585,10 +566,9 @@ def _print_startup_banner(
 def _wire_token_resolver(gateway_client: Any) -> None:
     """Wire the gateway channel into the global TokenResolver.
 
-    Mirrors phase 3 of `run()`: after the gateway is live (managed or
-    external), the TokenResolver needs the gRPC channel so it can resolve
-    arbitrary ERC-20 addresses on-chain when a symbol misses the static
-    registry.
+    After the gateway is live (managed or external), the TokenResolver needs
+    the gRPC channel so it can resolve arbitrary ERC-20 addresses on-chain
+    when a symbol misses the static registry.
     """
     from ..data.tokens import get_token_resolver
 
@@ -599,11 +579,11 @@ def _wire_token_resolver(gateway_client: Any) -> None:
 def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
     """Detect whether a deployment has prior state (RESUME vs FRESH START).
 
-    Mirrors phase 9 of `run()`. Quick SQLite read of `strategy_state`
-    filtered by `strategy_id = deployment_id`. All errors (missing DB file,
-    corrupt schema, connection failure, JSON-parse errors) are swallowed and
-    logged at DEBUG — the caller treats them as "no resume", identical to
-    the inlined behavior.
+    Quick SQLite read of `strategy_state` filtered by
+    `strategy_id = deployment_id`. All errors (missing DB file, corrupt
+    schema, connection failure, JSON-parse errors) are swallowed and logged
+    at DEBUG — the caller treats them as "no resume", identical to the
+    prior inline behavior.
 
     Returns:
         ResumeInfo with is_resume=True if a matching row was found.
@@ -716,7 +696,7 @@ def _resolve_identity(
 ) -> IdentityInfo:
     """Resolve deployment_id/run_id, backfill old state rows, and handle `--fresh`.
 
-    Mirrors phase 8 of `run()`. This helper:
+    This helper:
         1. Computes `identity_chain` (the strategy's chain or a
            comma-separated sorted multi-chain signature).
         2. Resolves `deployment_id` via `resolve_deployment_id()`.
@@ -878,7 +858,7 @@ def _attach_external_gateway(
 
     click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
     # Read the typed gateway auth token with fallback to the legacy unprefixed
-    # GATEWAY_AUTH_TOKEN. Both flow through the Phase 5 config service, but
+    # GATEWAY_AUTH_TOKEN. Both flow through the config service, but
     # we narrow to the gateway + cli factories rather than ``load_config()``
     # so an unrelated submodel validation error (e.g. malformed
     # ``ANVIL_*_PORT``) cannot block ``--no-gateway`` startup (PR #2152 review).
@@ -1105,7 +1085,7 @@ def _derive_isolated_wallet_or_none(
 
     Resolution order for the master key: caller-plumbed ``runtime_private_key``
     (or its contextvar fallback set by `almanak strat test`) > the typed
-    ``GatewayConfig.private_key`` (Phase 5 — populated from
+    ``GatewayConfig.private_key`` (populated from
     ``ALMANAK_PRIVATE_KEY`` via the ``_apply_gateway_env_fallbacks`` ladder).
     Honours the kwarg-first, no-env signing-key plumbing the rest of
     ``_setup_gateway`` documents (#2100).
@@ -1121,7 +1101,7 @@ def _derive_isolated_wallet_or_none(
     if master_key is None:
         master_key = _runtime_private_key_override.get()
     if not master_key:
-        # Phase 5: read through the typed gateway config rather than directly
+        # Read through the typed gateway config rather than directly
         # off ``os.environ`` so the config-boundary lint stays clean. The
         # ``_apply_gateway_env_fallbacks`` ladder still honours
         # ``ALMANAK_PRIVATE_KEY``.
@@ -1202,7 +1182,7 @@ def _build_gateway_settings(
         gateway_kwargs["auth_token"] = session_auth_token
     if gateway_private_key:
         gateway_kwargs["private_key"] = gateway_private_key
-    # Phase 1: route through the config service so unprefixed ALMANAK_* and
+    # Route through the config service so unprefixed ALMANAK_* and
     # Polymarket-ladder fallbacks resolve identically to gateway boot.
     return gateway_config_from_env(**gateway_kwargs), session_auth_token
 
@@ -1292,7 +1272,7 @@ def _setup_gateway(
 ) -> tuple[Any, Any, str, int, str, str | None, str | None, type[IntentStrategy[Any]] | None]:
     """Set up the gateway (managed auto-start or connect to external).
 
-    Mirrors phase 2 of `run()`. Orchestrates per-stage helpers covering:
+    Orchestrates the gateway bootstrap that used to live inline in `run()`:
         - `--wallet isolated` derivation (returns a per-strategy derived
           key alongside the wallet address; the caller plumbs it into
           `_build_runtime_config` via the `runtime_private_key` kwarg
@@ -1346,13 +1326,13 @@ def _setup_gateway(
         caller-plumbed ``runtime_private_key`` > None for env fallback) is
         propagated to ``_build_runtime_config`` via the
         ``_runtime_private_key_override`` ContextVar (#2100). Returning it in
-        the tuple was preserving the Phase-4b contract but tripping the CRAP
-        gate on every line of the destructure inside ``run`` — the ContextVar
-        keeps the same end-to-end semantics with zero footprint in `run`.
+        the tuple kept the older helper contract but tripped the CRAP gate on
+        every line of the destructure inside ``run`` — the ContextVar keeps
+        the same end-to-end semantics with zero footprint in `run`.
         early_strategy_class is None if strategy.py wasn't present or failed
         to load (retried later by `_load_strategy_class`).
     """
-    # VIB-3761 / Phase 4c: anchor ``ALMANAK_STRATEGY_FOLDER`` before any
+    # VIB-3761: anchor ``ALMANAK_STRATEGY_FOLDER`` before any
     # downstream helper resolves a local path. Done here (not in ``run()``)
     # because every gateway-setup downstream — ``local_db_path``, the
     # managed gateway's SQLite store, ``_resolve_identity`` — reads the env
@@ -1467,7 +1447,7 @@ def _setup_gateway(
 
 
 # ---------------------------------------------------------------------------
-# Phase 14 — Cleanup helper
+# Cleanup helper
 # ---------------------------------------------------------------------------
 
 
@@ -1480,10 +1460,10 @@ def _build_cleanup_fn(
 ) -> Callable[[], Coroutine[Any, Any, None]]:
     """Build an async cleanup closure that tears down all run-time resources.
 
-    Mirrors phase 14 of `run()`. Returns a zero-arg async function that the
-    caller awaits in the single-run and loop finally blocks. Preserves the
-    original None-checks and hasattr-close checks exactly so that callers
-    with partial component initialization don't blow up during shutdown.
+    Returns a zero-arg async function that the caller awaits in the
+    single-run and loop finally blocks. Preserves the original None-checks
+    and hasattr-close checks exactly so that callers with partial component
+    initialization don't blow up during shutdown.
 
     Args:
         gateway_client: The connected `GatewayClient` (or None).
@@ -1524,7 +1504,7 @@ def _build_cleanup_fn(
 
 
 # ---------------------------------------------------------------------------
-# Phase 11 — Strategy instantiation
+# Strategy instantiation
 # ---------------------------------------------------------------------------
 
 
@@ -1539,7 +1519,7 @@ def _instantiate_strategy(  # noqa: C901
 ) -> Any:
     """Instantiate the strategy class with the right config-type branch.
 
-    Mirrors phase 11 of `run()`. Two call conventions are supported:
+    Two call conventions are supported:
 
     1. ``IntentStrategy`` subclasses: discovered via ``issubclass`` check.
        The helper tries to resolve a dataclass config type from
@@ -1702,7 +1682,7 @@ def _intent_strategy_runtime() -> type:
 
 
 # ---------------------------------------------------------------------------
-# Phase 12 — Runtime config wiring
+# Runtime config wiring
 # ---------------------------------------------------------------------------
 
 
@@ -1725,8 +1705,7 @@ def _resolve_effective_signing_key(
     ``almanak.config.runtime._resolve_private_key_from_env``. Without this
     branch, a Solana strategy with ``--no-gateway`` and only
     ``SOLANA_PRIVATE_KEY`` set would falsely take the sidecar branch even
-    though ``runtime_config_from_env`` (Phase 5a-2 entry point) is fully
-    able to load.
+    though ``runtime_config_from_env`` is fully able to load.
     """
     if runtime_private_key is not None:
         # Honour the explicit kwarg before touching the typed config — the
@@ -1737,13 +1716,13 @@ def _resolve_effective_signing_key(
     # Narrow to ``gateway_config_from_env`` rather than ``load_config()`` so
     # a malformed unrelated submodel (backtest, cli, connectors) cannot block
     # signing-key resolution. ``GatewayConfig`` already carries the
-    # ``ALMANAK_PRIVATE_KEY`` / ``SOLANA_PRIVATE_KEY`` Phase 1 fallback ladder.
+    # ``ALMANAK_PRIVATE_KEY`` / ``SOLANA_PRIVATE_KEY`` canonical fallback ladder.
     from almanak.config.env import gateway_config_from_env
 
     _gw = gateway_config_from_env()
     if (config_chain or "").strip().lower() == "solana":
         # The typed ``GatewayConfig.solana_private_key`` carries
-        # SOLANA_PRIVATE_KEY via the Phase 1 env-fallback ladder; falling
+        # SOLANA_PRIVATE_KEY via the canonical env-fallback ladder; falling
         # back to ``private_key`` (ALMANAK_PRIVATE_KEY) preserves the legacy
         # "Solana strategy with hex key" path.
         return _gw.solana_private_key or _gw.private_key or None
@@ -1852,9 +1831,9 @@ def _load_local_runtime_config(
 ) -> Any:
     """Build a ``LocalRuntimeConfig`` with Anvil-default fallback and verbose errors.
 
-    Phase 5a-2: routes env reads through
-    :func:`almanak.config.runtime.runtime_config_from_env` and converts to
-    the dataclass shape via :meth:`LocalRuntimeConfig.from_runtime_config`.
+    Routes env reads through :func:`almanak.config.runtime.runtime_config_from_env`
+    and converts to the dataclass shape via
+    :meth:`LocalRuntimeConfig.from_runtime_config`.
     On ``MissingEnvironmentVariableError`` for ``PRIVATE_KEY`` while on
     Anvil, a second attempt plumbs ``ANVIL_DEFAULT_PRIVATE_KEY`` via the
     typed kwarg (#2100). Anything else exits with the canonical help text.
@@ -1912,9 +1891,8 @@ def _load_multichain_runtime_config(
 ) -> Any:
     """Build a ``MultiChainRuntimeConfig`` with Anvil-default fallback and verbose errors.
 
-    Phase 5a-2: routes env reads through
-    :func:`almanak.config.runtime.runtime_config_from_env` and converts to
-    the dataclass shape via
+    Routes env reads through :func:`almanak.config.runtime.runtime_config_from_env`
+    and converts to the dataclass shape via
     :meth:`MultiChainRuntimeConfig.from_runtime_config`. The Anvil-default
     retry and the multi-chain-sidecar guard match the legacy semantics
     (#2100).
@@ -2102,7 +2080,7 @@ def _build_runtime_config(
 ) -> tuple[Any, dict[str, str]]:
     """Build the runtime config (Local / MultiChain / Gateway) and register chains.
 
-    Mirrors phase 12 of `run()`. Three-way dispatch over the loader helpers
+    Three-way dispatch over the loader helpers
     (``_build_sidecar_runtime_config`` / ``_load_multichain_runtime_config`` /
     ``_load_local_runtime_config``) plus Safe-mode preflight, gateway
     chain-wallet registration, and ``strategy_config`` mutations.
@@ -2182,7 +2160,7 @@ def _build_runtime_config(
 
 
 # ---------------------------------------------------------------------------
-# Phase 13 — Component initialization
+# Component initialization
 # ---------------------------------------------------------------------------
 
 
@@ -2203,10 +2181,10 @@ def _get_data_requirements(strategy_instance: Any) -> StrategyDataRequirements:
     return dr
 
 
-# crap-allowlist: Phase 5e (#2097) replaces direct os.environ.get reads with the typed
+# crap-allowlist: #2097 replaces direct os.environ.get reads with the typed
 # cli_runtime_config_from_env() — no new branches, no new behaviour. Function refactor
-# is tracked separately; allowlist matches the documented escape hatch for boundary
-# cutovers (#2097, plan §"Phase 5e").
+# is tracked separately; allowlist matches the documented escape hatch for this
+# config-boundary cutover.
 def _build_orchestrator_and_providers(  # noqa: C901
     *,
     multi_chain: bool,
@@ -2698,7 +2676,7 @@ def _maybe_auto_deploy_vault(
 ) -> Any:
     """Return a VaultLifecycleManager or None, auto-deploying on Anvil if placeholder.
 
-    Mirrors the vault-lifecycle block in phase 13. When
+    Mirrors the prior vault-lifecycle block in `run()`. When
     ``strategy_config["vault"]`` is absent, returns None. Otherwise loads the
     Lagoon adapters, auto-deploys on Anvil if the vault_address is a
     placeholder (exiting with 0 under ``--dry-run``), and wires the vault's
@@ -2803,7 +2781,7 @@ def _reconciliation_enforcement_from_env() -> bool:
     reads close the false-positive race. Truthy values: ``1``, ``true``, ``yes``
     (case-insensitive, surrounding whitespace tolerated). Anything else — unset,
     empty, ``0``, ``false``, arbitrary strings — returns False. Read via the
-    typed CLI-runtime config (Phase 5e).
+    typed CLI-runtime config during the config-service cutover.
     """
     from almanak.config import cli_runtime_config_from_env as _cli_cfg
 
@@ -2890,7 +2868,7 @@ def _build_components(
 ) -> ComponentBundle:
     """Construct the full runtime component bundle (orchestrator -> runner).
 
-    Mirrors phase 13 of `run()`. Internal ordering is load-bearing:
+    Internal ordering is load-bearing:
 
     1. Build orchestrator + price/balance/OHLCV providers + indicators +
        rate/funding providers + optional Solana fork manager.
@@ -3009,7 +2987,7 @@ def _build_components(
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Dashboard helpers
+# Dashboard helpers
 # ---------------------------------------------------------------------------
 
 
@@ -3209,7 +3187,406 @@ def _handle_standalone_dashboard(
 
 
 # ---------------------------------------------------------------------------
-# Phase 15 — --once execution
+# Strategy-run orchestration
+# ---------------------------------------------------------------------------
+
+
+def _maybe_handle_run_early_exit(
+    *,
+    list_all: bool,
+    gateway_client: Any,
+    working_dir: str,
+    dashboard: bool,
+    dashboard_port: int,
+    gateway_host: str,
+    gateway_port: int,
+    auth_token: str | None,
+) -> bool:
+    """Handle early-return `run()` branches before strategy bootstrap."""
+    if _handle_list_all(list_all, gateway_client):
+        return True
+
+    return _handle_standalone_dashboard(
+        working_dir=working_dir,
+        dashboard=dashboard,
+        dashboard_port=dashboard_port,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        auth_token=auth_token,
+    )
+
+
+def _maybe_start_dashboard_process(
+    *,
+    dashboard: bool,
+    dashboard_port: int,
+    gateway_host: str,
+    gateway_port: int,
+    auth_token: str | None,
+) -> Any:
+    """Start the dashboard sidecar when requested, registering cleanup."""
+    import atexit
+
+    if not dashboard:
+        return None
+
+    dashboard_process = _start_dashboard_background(
+        port=dashboard_port,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        auth_token=auth_token,
+    )
+    if dashboard_process is not None:
+        atexit.register(_stop_dashboard, dashboard_process)
+    return dashboard_process
+
+
+def _load_strategy_bootstrap(
+    *,
+    working_dir: str,
+    config_file: str | None,
+    copy_mode: str | None,
+    copy_shadow: bool,
+    copy_replay_file: str | None,
+    copy_strict: bool,
+    dry_run: bool,
+    early_strategy_class: Any,
+) -> StrategyBootstrap:
+    """Load strategy class, config, and resolved chain metadata for `run()`."""
+    from .run import get_strategy_chains, get_strategy_protocols
+
+    strategy_class = _load_strategy_class(working_dir, early_strategy_class)
+    strategy_name = strategy_class.__name__
+    click.echo(f"Loaded strategy: {strategy_name}")
+
+    strategy_chains = get_strategy_chains(strategy_class)
+    strategy_protocols = get_strategy_protocols(strategy_class)
+
+    (
+        strategy_config,
+        multi_chain,
+        effective_dry_run,
+        resolved_config_file,
+        normalized_copy_mode,
+    ) = _discover_and_load_config(
+        working_dir=working_dir,
+        config_file=config_file,
+        strategy_class=strategy_class,
+        copy_mode=copy_mode,
+        copy_shadow=copy_shadow,
+        copy_replay_file=copy_replay_file,
+        copy_strict=copy_strict,
+        dry_run=dry_run,
+    )
+    strategy_chains = _refine_strategy_chains(
+        strategy_chains=strategy_chains,
+        strategy_config=strategy_config,
+        multi_chain=multi_chain,
+    )
+    config_display_name = _normalize_strategy_display_name(raw_name=strategy_config.get("strategy_id", strategy_name))
+    strategy_config["strategy_display_name"] = config_display_name
+
+    return StrategyBootstrap(
+        strategy_class=strategy_class,
+        strategy_name=strategy_name,
+        strategy_config=strategy_config,
+        multi_chain=multi_chain,
+        config_file=resolved_config_file,
+        normalized_copy_mode=normalized_copy_mode,
+        strategy_chains=strategy_chains,
+        strategy_protocols=strategy_protocols,
+        config_display_name=config_display_name,
+        effective_dry_run=effective_dry_run,
+    )
+
+
+def _refine_strategy_chains(
+    *,
+    strategy_chains: list[str],
+    strategy_config: dict[str, Any],
+    multi_chain: bool,
+) -> list[str]:
+    """Use config-specified chains when a multi-chain strategy provides them."""
+    if not multi_chain:
+        return strategy_chains
+
+    config_chains = strategy_config.get("chains", [])
+    if isinstance(config_chains, list) and len(config_chains) > 1:
+        return config_chains
+    return strategy_chains
+
+
+def _normalize_strategy_display_name(*, raw_name: Any) -> str:
+    """Strip any persisted deployment-id suffix from the display name."""
+    name = "" if raw_name is None else str(raw_name)
+    return name.split(":", 1)[0]
+
+
+def _maybe_echo_chain_override(
+    *,
+    env_chain: str | None,
+    config_chain: str | None,
+    config_chain_norm: str,
+    config_chain_raw: Any,
+) -> None:
+    """Emit the env-over-config chain banner only when the env actually won."""
+    if env_chain != config_chain:
+        return
+    if env_chain == config_chain_norm:
+        return
+    click.echo(f"Chain override: ALMANAK_CHAIN={env_chain} (config.json: {config_chain_raw or 'unset'})")
+
+
+def _resolve_config_chain_with_echo(
+    *,
+    strategy_class: Any,
+    strategy_config: dict[str, Any],
+    multi_chain: bool,
+) -> str | None:
+    """Resolve the effective chain context and preserve override echoing."""
+    from .run import resolve_strategy_chain
+
+    env_chain = almanak_chain_from_env()
+    config_chain = resolve_strategy_chain(
+        strategy_class,
+        strategy_config,
+        env_chain=env_chain,
+        multi_chain=multi_chain,
+    )
+    config_chain_raw = strategy_config.get("chain")
+    config_chain_norm = config_chain_raw.strip().lower() if isinstance(config_chain_raw, str) else ""
+    if env_chain:
+        _maybe_echo_chain_override(
+            env_chain=env_chain,
+            config_chain=config_chain,
+            config_chain_norm=config_chain_norm,
+            config_chain_raw=config_chain_raw,
+        )
+
+    return config_chain
+
+
+def _echo_anvil_network_banner(*, config_chain: str | None) -> None:
+    """Echo the local fork endpoint when `run()` targets Anvil."""
+    anvil_port = anvil_port_for_chain(config_chain or "arbitrum") or 8545
+    click.echo(f"Network: ANVIL (local fork at http://127.0.0.1:{anvil_port})")
+
+
+def _resolve_network_with_echo(*, network: str | None, config_chain: str | None) -> str:
+    """Resolve the effective network and preserve the Anvil banner."""
+    resolved_network = "mainnet"
+    if network:
+        resolved_network = network
+    if resolved_network == "anvil":
+        _echo_anvil_network_banner(config_chain=config_chain)
+    return resolved_network
+
+
+def _prepare_runtime_bootstrap(
+    *,
+    strategy_bootstrap: StrategyBootstrap,
+    no_gateway: bool,
+    network: str | None,
+    gateway_client: Any,
+    provided_instance_id: str | None,
+    gateway_network: str,
+    fresh: bool,
+) -> RuntimeBootstrap:
+    """Resolve runtime config and stable identity for `run()`."""
+    config_chain = _resolve_config_chain_with_echo(
+        strategy_class=strategy_bootstrap.strategy_class,
+        strategy_config=strategy_bootstrap.strategy_config,
+        multi_chain=strategy_bootstrap.multi_chain,
+    )
+    resolved_network = _resolve_network_with_echo(
+        network=network,
+        config_chain=config_chain,
+    )
+    runtime_config, chain_wallets = _build_runtime_config(
+        no_gateway=no_gateway,
+        multi_chain=strategy_bootstrap.multi_chain,
+        resolved_network=resolved_network,
+        config_chain=config_chain,
+        strategy_chains=strategy_bootstrap.strategy_chains,
+        strategy_protocols=strategy_bootstrap.strategy_protocols,
+        gateway_client=gateway_client,
+        strategy_config=strategy_bootstrap.strategy_config,
+    )
+    identity_info = _resolve_identity(
+        strategy_config=strategy_bootstrap.strategy_config,
+        fresh=fresh,
+        multi_chain=strategy_bootstrap.multi_chain,
+        strategy_chains=strategy_bootstrap.strategy_chains,
+        config_display_name=strategy_bootstrap.config_display_name,
+        cli_id_override=provided_instance_id,
+        gateway_network=gateway_network,
+    )
+    return RuntimeBootstrap(
+        config_chain=config_chain,
+        resolved_network=resolved_network,
+        runtime_config=runtime_config,
+        chain_wallets=chain_wallets,
+        strategy_id=strategy_bootstrap.strategy_config["strategy_id"],
+        run_id=identity_info.run_id,
+    )
+
+
+def _load_resume_state(
+    *,
+    strategy_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Load local SQLite resume metadata when the deployment mode is local."""
+    from almanak.framework.deployment import is_local
+    from almanak.framework.local_paths import local_db_path as _local_db_path
+
+    if not is_local():
+        return False, None
+
+    state_db_path = _local_db_path()
+    resume_info = _detect_state_resume(state_db_path, strategy_id)
+    if not resume_info.is_resume:
+        return False, None
+
+    return True, {"version": resume_info.version, "keys": resume_info.state_keys}
+
+
+def _echo_strategy_runtime_summary(
+    *,
+    strategy_class: Any,
+    multi_chain: bool,
+    strategy_chains: list[str],
+) -> None:
+    """Emit the final strategy-class summary banner."""
+    click.echo(f"Strategy class loaded: {strategy_class.__name__}")
+    if multi_chain:
+        click.echo(f"  Multi-chain: Yes ({len(strategy_chains)} chains)")
+
+
+def _cleanup_after_dry_run_vault_exit(
+    *,
+    gateway_client: Any,
+    managed_gateway: Any,
+    keep_anvil: bool,
+    components: Any,
+    dashboard_process: Any,
+) -> NoReturn:
+    """Unwind resources for the intentional dry-run vault early-exit path."""
+    early_cleanup = _build_cleanup_fn(
+        gateway_client=gateway_client,
+        managed_gateway=managed_gateway,
+        keep_anvil=keep_anvil,
+        components=components,
+    )
+    try:
+        asyncio.run(early_cleanup())
+    except Exception:  # pragma: no cover - cleanup best-effort
+        logger.exception("Cleanup failed during dry-run vault early exit")
+    _stop_dashboard(dashboard_process)
+    sys.exit(0)
+
+
+def _build_components_or_exit(
+    *,
+    strategy_instance: Any,
+    strategy_config: dict[str, Any],
+    runtime_config: Any,
+    strategy_chains: list[str],
+    multi_chain: bool,
+    resolved_network: str,
+    gateway_client: Any,
+    chain_wallets: Any,
+    interval: int,
+    effective_dry_run: bool,
+    strategy_id: str,
+    normalized_copy_mode: str | None,
+    copy_replay_file: str | None,
+    copy_shadow: bool,
+    copy_strict: bool,
+    config_chain: str | None,
+    managed_gateway: Any,
+    keep_anvil: bool,
+    dashboard_process: Any,
+) -> Any:
+    """Build run-time components, preserving the dry-run vault early-exit path."""
+    try:
+        return _build_components(
+            strategy_instance=strategy_instance,
+            strategy_config=strategy_config,
+            runtime_config=runtime_config,
+            strategy_chains=strategy_chains,
+            multi_chain=multi_chain,
+            resolved_network=resolved_network,
+            gateway_client=gateway_client,
+            chain_wallets=chain_wallets,
+            interval=interval,
+            effective_dry_run=effective_dry_run,
+            strategy_id=strategy_id,
+            normalized_copy_mode=normalized_copy_mode,
+            copy_replay_file=copy_replay_file,
+            copy_shadow=copy_shadow,
+            copy_strict=copy_strict,
+            config_chain=config_chain,
+        )
+    except _DryRunVaultEarlyExit as early:
+        partial_components = early.components or ComponentBundle()
+        _cleanup_after_dry_run_vault_exit(
+            gateway_client=gateway_client,
+            managed_gateway=managed_gateway,
+            keep_anvil=keep_anvil,
+            components=partial_components,
+            dashboard_process=dashboard_process,
+        )
+
+
+def _execute_run_mode(
+    *,
+    test_actions: list[str] | None,
+    once: bool,
+    teardown_after: bool,
+    test_json: bool,
+    runner: Any,
+    strategy_instance: Any,
+    state_manager: Any,
+    cleanup_fn: Any,
+    interval: int,
+    max_iterations: int | None,
+    reset_fork: bool,
+    managed_gateway: Any,
+) -> int:
+    """Dispatch to the lifecycle, once, or continuous execution lane."""
+    if test_actions is not None:
+        return _run_test_lifecycle(
+            runner=runner,
+            strategy_instance=strategy_instance,
+            state_manager=state_manager,
+            cleanup_fn=cleanup_fn,
+            actions=test_actions,
+            teardown=teardown_after,
+            json_output=test_json,
+        )
+
+    if once:
+        return _run_once(
+            runner=runner,
+            strategy_instance=strategy_instance,
+            state_manager=state_manager,
+            cleanup_fn=cleanup_fn,
+            teardown_after=teardown_after,
+        )
+
+    return _run_continuous(
+        runner=runner,
+        strategy_instance=strategy_instance,
+        cleanup_fn=cleanup_fn,
+        interval=interval,
+        max_iterations=max_iterations,
+        reset_fork=reset_fork,
+        managed_gateway=managed_gateway,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Single-iteration execution
 # ---------------------------------------------------------------------------
 
 
@@ -3261,7 +3638,7 @@ def _run_once(  # noqa: C901
         """Run single iteration, optional teardown, and cleanup resources."""
         # Guarded layout ensures cleanup_fn() always runs, even if
         # setup_gateway_integration or teardown_gateway_integration raise.
-        # Mirrors the Phase 4a copy_replay_file safety fix (always-run cleanup).
+        # Mirrors the copy_replay_file safety fix (always-run cleanup).
         gateway_integration_ready = False
         try:
             runner.setup_gateway_integration(strategy_instance)
@@ -3286,7 +3663,7 @@ def _run_once(  # noqa: C901
             # VIB-3944: rebuild lending FIFO lots from durable accounting_events.
             # The continuous run_loop entry point does this in initialize_run_loop
             # but --once / --teardown-after bypass that path. Without rebuild,
-            # Phase 2 teardown REPAYs land with no matching BORROW lot and the
+            # Earlier teardown flows could land a REPAY with no matching BORROW lot and the
             # writer cannot emit interest_delta_usd → L4 Accountant Test fails.
             # Run AFTER setup_gateway_integration so the gRPC channel is up.
             from ..runner._run_loop_helpers import (
@@ -3302,7 +3679,7 @@ def _run_once(  # noqa: C901
 
             # VIB-4086 — same cross-process restart hole for the
             # position_events recent-open cache. Without hydration, the
-            # ``--once --teardown-after`` Phase 2 process closes a position
+            # ``--once --teardown-after`` can close a position
             # opened in a prior process with no in-memory bracket /
             # tokens to carry forward, landing the CLOSE row with empty
             # token0/token1/value_usd (the LP6 ship gate this PR closes).
@@ -3793,7 +4170,7 @@ def _run_test_lifecycle(  # noqa: C901
 
 
 # ---------------------------------------------------------------------------
-# Phase 16 — Continuous execution
+# Continuous execution
 # ---------------------------------------------------------------------------
 
 

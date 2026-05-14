@@ -17,6 +17,12 @@ attached as later phases land them.
   config the moment they are constructed (CoinGecko / TheGraph keys,
   the ``ARCHIVE_RPC_URL_<CHAIN>`` cluster as a typed dict, gas-API
   per-chain keys, and the SSL-cert hint for paper-trading subprocesses).
+* Phase 5d — ``simulation``: typed Tenderly / Alchemy simulator config
+  populated eagerly by ``load_config()`` so boot-time consumers can use
+  the prebuilt simulator settings instead of reparsing env.
+* Phase 5d — ``safe_signer``: typed Safe wallet registry + Zodiac signer
+  config populated eagerly by ``load_config()`` so Safe signer boot paths
+  can consume a typed slice instead of thin env wrappers.
 * Phase 6 — ``agent_tools`` and ``framework``: typed agent-tools cluster
   (LLM client config + ``XDG_CACHE_HOME`` resolver) and typed framework
   toggles (log emojis, strategy / accounting paths, API-key validator
@@ -34,6 +40,8 @@ from almanak.config.cli_runtime import CliRuntimeConfig, cli_runtime_config_from
 from almanak.config.connectors import ConnectorsConfig, connectors_config_from_env
 from almanak.config.framework import FrameworkConfig, framework_config_from_env
 from almanak.config.runtime import RuntimeConfig
+from almanak.config.safe_signer import SafeSignerServiceConfig, safe_signer_service_config_from_env
+from almanak.config.simulation import SimulationConfig, simulation_config_from_env
 
 
 class LocalConfig(BaseConfig):
@@ -58,14 +66,22 @@ class LocalConfig(BaseConfig):
     (PnL providers, paper-trading background process, crisis-runner
     date-range guard).
 
+    ``simulation`` carries the Tenderly / Alchemy simulator settings for
+    normal boot-time consumers. Code that needs the standard simulator
+    config should prefer ``load_config().simulation`` over reparsing env.
+
+    ``safe_signer`` carries the Safe wallet-registry JSON plus the Zodiac
+    remote-signer endpoint / JWT pair. Standard Safe signer boot paths
+    should prefer ``load_config().safe_signer`` over helper wrappers.
+
     ``cli`` (Phase 5e) carries the CLI-specific knobs that don't fit
     any other submodel: gateway-wallets discriminator, Safe-mode
     preflight inputs, Solana fork URL/port, Anvil per-chain ports,
     reconciliation / hardcoded-prices toggles, and the legacy unprefixed
-    ``GATEWAY_AUTH_TOKEN`` fallback. Eager factory same as the others —
-    consumers reach for ``cli_runtime_config_from_env()`` for stateless
-    re-reads (truthy boolean toggles flip mid-process during tests),
-    or ``load_config().cli`` for boot-time reads.
+    ``GATEWAY_AUTH_TOKEN`` fallback. Standard boot-time readers should
+    consume ``load_config().cli`` from the framework boot surface.
+    ``cli_runtime_config_from_env()`` remains for explicit dynamic /
+    compatibility paths only.
 
     ``agent_tools`` (Phase 6) carries the LLM client config consumed by
     ``framework/agent_tools/llm_client.py``. ``framework`` (Phase 6)
@@ -77,6 +93,8 @@ class LocalConfig(BaseConfig):
     runtime: RuntimeConfig | None = None
     connectors: ConnectorsConfig = Field(default_factory=connectors_config_from_env)
     backtest: BacktestConfig = Field(default_factory=backtest_config_from_env)
+    simulation: SimulationConfig = Field(default_factory=simulation_config_from_env)
+    safe_signer: SafeSignerServiceConfig = Field(default_factory=safe_signer_service_config_from_env)
     cli: CliRuntimeConfig = Field(default_factory=cli_runtime_config_from_env)
     agent_tools: AgentToolsConfig = Field(default_factory=agent_tools_config_from_env)
     framework: FrameworkConfig = Field(default_factory=framework_config_from_env)

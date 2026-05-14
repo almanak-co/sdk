@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+
+from almanak.config.backtest import backtest_service_config_from_env
 
 
 @dataclass
@@ -20,11 +21,12 @@ class BacktestServiceConfig:
     @classmethod
     def from_env(cls) -> BacktestServiceConfig:
         """Load config from environment variables."""
+        cfg = backtest_service_config_from_env()
         return cls(
-            host=os.environ.get("BACKTEST_SERVICE_HOST", "0.0.0.0"),
-            port=int(os.environ.get("BACKTEST_SERVICE_PORT", "8000")),
-            workers=int(os.environ.get("BACKTEST_SERVICE_WORKERS", "1")),
-            max_concurrent_backtest_jobs=int(os.environ.get("BACKTEST_MAX_JOBS", "4")),
-            max_concurrent_paper_sessions=int(os.environ.get("BACKTEST_MAX_PAPER_SESSIONS", "2")),
-            log_level=os.environ.get("BACKTEST_LOG_LEVEL", "info"),
+            host=cfg.host,
+            port=cfg.port,
+            workers=cfg.workers,
+            max_concurrent_backtest_jobs=cfg.max_concurrent_backtest_jobs,
+            max_concurrent_paper_sessions=cfg.max_concurrent_paper_sessions,
+            log_level=cfg.log_level,
         )

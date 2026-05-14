@@ -3,7 +3,8 @@
 Phase 5c of the config-service migration (see
 ``docs/internal/config-service-plan.md``). Owns every env read for the
 backtest cluster: paper-trading and the historical PnL providers under
-``almanak/framework/backtesting/*``.
+``almanak/framework/backtesting/*``, plus the standalone service
+runtime config consumed by ``almanak/services/backtest/*``.
 
 Three families of config consolidated here:
 
@@ -31,10 +32,12 @@ Import direction
 ----------------
 Strict (mirrors :mod:`almanak.config.runtime` and
 :mod:`almanak.config.connectors`): this module MUST NOT import from
-``almanak.framework.backtesting.*``. The backtesting code imports
-:class:`BacktestConfig` from here at construction time; reverse imports
-would create a cycle and make the typed-config service depend on the
-backtesting layer it is meant to feed.
+``almanak.framework.backtesting.*`` or ``almanak.services.backtest.*``.
+The backtesting code imports :class:`BacktestConfig` from here at
+construction time, and the standalone service imports
+:class:`BacktestServiceConfig` from here at boot. Reverse imports would
+create a cycle and make the typed-config service depend on the runtime
+layers it is meant to feed.
 """
 
 from __future__ import annotations
@@ -79,6 +82,13 @@ DEFAULT_GAS_API_KEY_ENV_VARS: dict[str, str] = {
     "bsc": "BSCSCAN_API_KEY",
     "avalanche": "SNOWTRACE_API_KEY",
 }
+
+DEFAULT_BACKTEST_SERVICE_HOST: str = "0.0.0.0"
+DEFAULT_BACKTEST_SERVICE_PORT: int = 8000
+DEFAULT_BACKTEST_SERVICE_WORKERS: int = 1
+DEFAULT_BACKTEST_MAX_JOBS: int = 4
+DEFAULT_BACKTEST_MAX_PAPER_SESSIONS: int = 2
+DEFAULT_BACKTEST_LOG_LEVEL: str = "info"
 
 
 # =============================================================================
@@ -215,11 +225,46 @@ class BacktestConfig(BaseModel):
     field to ``None`` disables the helper (no env mutation).
     """
 
+    service: BacktestServiceConfig = Field(default_factory=lambda: BacktestServiceConfig())
+    """Standalone backtest-service runtime config.
+
+    Part of the same backtest cluster and built as part of the one-shot
+    :func:`almanak.config.load_config` flow. Service boot paths should prefer
+    ``load_config().backtest.service`` over a second env-reading factory.
+    """
+
     model_config = ConfigDict(
         # Reject typos at the service boundary — a misspelt kwarg here
         # would silently flow into the config without populating any
         # consumer field.
         extra="forbid",
+    )
+
+
+class BacktestServiceConfig(BaseModel):
+    """Typed runtime config for the standalone backtest service."""
+
+    host: str = DEFAULT_BACKTEST_SERVICE_HOST
+    port: int = DEFAULT_BACKTEST_SERVICE_PORT
+    workers: int = DEFAULT_BACKTEST_SERVICE_WORKERS
+    max_concurrent_backtest_jobs: int = DEFAULT_BACKTEST_MAX_JOBS
+    max_concurrent_paper_sessions: int = DEFAULT_BACKTEST_MAX_PAPER_SESSIONS
+    log_level: str = DEFAULT_BACKTEST_LOG_LEVEL
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _backtest_service_config_from_env_values() -> BacktestServiceConfig:
+    """Build the standalone backtest-service config from current env values."""
+    return BacktestServiceConfig(
+        host=os.environ.get("BACKTEST_SERVICE_HOST", DEFAULT_BACKTEST_SERVICE_HOST),
+        port=int(os.environ.get("BACKTEST_SERVICE_PORT", str(DEFAULT_BACKTEST_SERVICE_PORT))),
+        workers=int(os.environ.get("BACKTEST_SERVICE_WORKERS", str(DEFAULT_BACKTEST_SERVICE_WORKERS))),
+        max_concurrent_backtest_jobs=int(os.environ.get("BACKTEST_MAX_JOBS", str(DEFAULT_BACKTEST_MAX_JOBS))),
+        max_concurrent_paper_sessions=int(
+            os.environ.get("BACKTEST_MAX_PAPER_SESSIONS", str(DEFAULT_BACKTEST_MAX_PAPER_SESSIONS))
+        ),
+        log_level=os.environ.get("BACKTEST_LOG_LEVEL", DEFAULT_BACKTEST_LOG_LEVEL),
     )
 
 
@@ -344,8 +389,24 @@ def backtest_config_from_env(
         "archive_rpc_urls": archive_rpc_urls,
         "gas_api": GasApiConfig(api_keys=gas_api_keys),
         "ssl_cert_file": _resolve_ssl_cert_file(),
+        "service": _backtest_service_config_from_env_values(),
     }
     return BacktestConfig(**kwargs)
+
+
+def backtest_service_config_from_env() -> BacktestServiceConfig:
+    """Construct the standalone backtest-service config from environment.
+
+    Use this narrow loader when only ``BACKTEST_*`` env vars are needed
+    (standalone service boot, tests, and the legacy
+    :class:`almanak.services.backtest.config.BacktestServiceConfig`
+    adapter). It keeps the failure surface scoped to backtest inputs
+    instead of validating the full config tree. Boot paths inside the
+    integrated SDK that already consume the full tree should use
+    ``load_config().backtest.service`` directly.
+    """
+    _load_dotenv_once()
+    return _backtest_service_config_from_env_values()
 
 
 # =============================================================================
@@ -394,9 +455,17 @@ def apply_ssl_cert_file(cfg: BacktestConfig) -> None:
 
 __all__ = [
     "DEFAULT_ARCHIVE_RPC_CHAINS",
+    "DEFAULT_BACKTEST_LOG_LEVEL",
+    "DEFAULT_BACKTEST_MAX_JOBS",
+    "DEFAULT_BACKTEST_MAX_PAPER_SESSIONS",
+    "DEFAULT_BACKTEST_SERVICE_HOST",
+    "DEFAULT_BACKTEST_SERVICE_PORT",
+    "DEFAULT_BACKTEST_SERVICE_WORKERS",
     "DEFAULT_GAS_API_KEY_ENV_VARS",
     "BacktestConfig",
+    "BacktestServiceConfig",
     "GasApiConfig",
     "apply_ssl_cert_file",
     "backtest_config_from_env",
+    "backtest_service_config_from_env",
 ]

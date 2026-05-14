@@ -40,7 +40,6 @@ Example:
 """
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +59,8 @@ from almanak.config.runtime import (
     ExecutionMode,
     MissingEnvironmentVariableError,
     RuntimeConfig,
+    gateway_wallets_configured,
+    multi_chain_rpc_urls_from_env,
 )
 from almanak.framework.execution.interfaces import Chain
 
@@ -300,7 +301,7 @@ class LocalRuntimeConfig:
 
         # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
         # at RegisterChains time, not from local env vars.
-        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+        if not self.private_key and gateway_wallets_configured():
             self.wallet_address = ""  # Resolved later by register_chains()
             return
 
@@ -923,7 +924,7 @@ class MultiChainRuntimeConfig:
         # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
         # at RegisterChains time, not from local env vars. Set a placeholder that will
         # be overridden after register_chains() returns per-chain wallets.
-        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+        if not self.private_key and gateway_wallets_configured():
             self.wallet_address = ""  # Resolved later by register_chains()
             logger.info(
                 "Gateway wallets configured — wallet address will be resolved "
@@ -970,59 +971,11 @@ class MultiChainRuntimeConfig:
         Args:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
         """
-        # Gateway wallets mode: the gateway handles all RPC access, no local URLs needed.
-        # Wallet addresses are resolved at RegisterChains time from the WalletRegistry.
-        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
-            logger.info("Gateway wallets mode — skipping local RPC URL loading (gateway handles RPC)")
-            return
-
-        from almanak.config.env import _load_dotenv_once
-        from almanak.gateway.utils.rpc_provider import get_rpc_url
-
-        _load_dotenv_once()
-
-        is_anvil = network.lower() == "anvil"
-
-        for chain in self.chains:
-            env_var = f"ALMANAK_{chain.upper()}_RPC_URL"
-
-            if is_anvil:
-                # Anvil mode: always use local fork URL, skip env vars
-                rpc_url = get_rpc_url(chain, network="anvil")
-                self.rpc_urls[chain] = rpc_url
-                logger.debug(f"Using Anvil RPC URL for {chain}: {rpc_url}")
-
-            else:
-                # Mainnet/testnet: try explicit per-chain URL first
-                rpc_url_env = os.environ.get(env_var)
-
-                if rpc_url_env:
-                    # Validate URL format
-                    url_pattern = re.compile(
-                        r"^https?://"  # http:// or https://
-                        r"[a-zA-Z0-9.-]+"  # domain
-                        r"(:\d+)?"  # optional port
-                        r"(/.*)?$"  # optional path
-                    )
-                    if not url_pattern.match(rpc_url_env):
-                        raise ConfigurationError(
-                            field=env_var,
-                            reason=f"Invalid RPC URL format: {self._mask_url(rpc_url_env)}",
-                        )
-                    self.rpc_urls[chain] = rpc_url_env
-                    logger.debug(f"Using explicit RPC URL for {chain}")
-
-                else:
-                    # Build dynamically via get_rpc_url (handles API keys, Tenderly, and free public RPCs)
-                    try:
-                        rpc_url = get_rpc_url(chain, network=network)
-                        self.rpc_urls[chain] = rpc_url
-                        logger.debug(f"Built RPC URL dynamically for {chain}")
-                    except ValueError as e:
-                        raise ConfigurationError(
-                            field=env_var,
-                            reason=f"Could not build RPC URL for {chain}: {e}. Set {env_var}, RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{chain.upper()}.",
-                        ) from None
+        self.rpc_urls = multi_chain_rpc_urls_from_env(
+            chains=self.chains,
+            network=network,
+            private_key=self.private_key,
+        )
 
     def _validate_optional_fields(self) -> None:
         """Validate optional fields with defaults."""

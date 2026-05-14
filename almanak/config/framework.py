@@ -6,7 +6,8 @@ framework-tier toggles and paths that don't fit into any of the
 existing typed submodels: log emoji rendering, strategy / accounting
 directory overrides, dashboard authentication, the API-key validator
 list, the Anvil fork-manager timeouts, and the token-resolver negative
-cache knobs.
+cache knobs, plus the boot-time demo-mode and RugCheck toggles used by
+the framework runtime.
 
 Five surfaces consolidated here:
 
@@ -49,6 +50,18 @@ Five surfaces consolidated here:
   (``ALMANAK_TOKEN_NEGATIVE_CACHE_MAX``). VIB-2715 negative-cache
   knobs the resolver reads at construction time. ``None`` preserves
   the resolver's hard-coded defaults (300s TTL, 10000-entry cap).
+
+* **Boot-time safety toggles** — ``demo_mode_enabled``
+  (``ALMANAK_DEMO_MODE``), ``force_production_enabled``
+  (``ALMANAK_FORCE_PRODUCTION``), and ``rugcheck_api_key``
+  (``RUGCHECK_API_KEY``). These are fixed for the lifetime of a normal
+  process and should be read from the typed config built by
+  :func:`almanak.config.load_config`, not through per-call helpers.
+
+* **Redaction toggle** — ``redact_secrets_enabled``
+  (``ALMANAK_REDACT_SECRETS``). Controls whether centralized log redaction is
+  installed at boot. This is also a boot-time toggle and should live on the
+  typed framework config rather than behind a pass-through env helper.
 
 Import direction
 ----------------
@@ -159,6 +172,13 @@ def _parse_api_keys(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _parse_truthy_flag(value: str | None) -> bool:
+    """Parse the standard truthy env ladder used by framework toggles."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
 # =============================================================================
 # FrameworkConfig — typed, validated, secret-safe
 # =============================================================================
@@ -267,6 +287,35 @@ class FrameworkConfig(BaseModel):
     / malformed inputs fall back to the default.
     """
 
+    demo_mode_enabled: bool = False
+    """Whether demo mode is enabled (``ALMANAK_DEMO_MODE``).
+
+    Default ``False``. When enabled, the execution guard blocks real
+    transaction submission.
+    """
+
+    force_production_enabled: bool = False
+    """Whether production mode was explicitly confirmed
+    (``ALMANAK_FORCE_PRODUCTION``).
+
+    Default ``False``. This is only meaningful when demo mode is not enabled.
+    """
+
+    rugcheck_api_key: str | None = Field(default=None, repr=False)
+    """Optional RugCheck API key (``RUGCHECK_API_KEY``).
+
+    Used by the Solana token-safety client. ``None`` preserves the
+    unauthenticated / free-tier behavior.
+    """
+
+    redact_secrets_enabled: bool = True
+    """Whether centralized secret redaction is enabled
+    (``ALMANAK_REDACT_SECRETS``).
+
+    Default ``True``. Falsy values (``"false"`` / ``"0"`` / ``"no"``)
+    disable redaction installation.
+    """
+
     model_config = ConfigDict(
         # Reject typos at the service boundary — a misspelt kwarg here
         # would silently flow into the config without populating any
@@ -307,6 +356,10 @@ def framework_config_from_env(
       ``token_negative_cache_ttl_s`` (positive float or ``None``).
     * ``ALMANAK_TOKEN_NEGATIVE_CACHE_MAX`` → ``token_negative_cache_max``
       (positive int or ``None``).
+    * ``ALMANAK_DEMO_MODE`` → ``demo_mode_enabled``.
+    * ``ALMANAK_FORCE_PRODUCTION`` → ``force_production_enabled``.
+    * ``RUGCHECK_API_KEY`` → ``rugcheck_api_key``.
+    * ``ALMANAK_REDACT_SECRETS`` → ``redact_secrets_enabled``.
 
     Args:
         dotenv_path: Optional ``.env`` path; routed through the shared
@@ -346,6 +399,10 @@ def framework_config_from_env(
         ),
         token_negative_cache_ttl_s=_parse_positive_float(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S")),
         token_negative_cache_max=_parse_positive_int(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_MAX")),
+        demo_mode_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_DEMO_MODE")),
+        force_production_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_FORCE_PRODUCTION")),
+        rugcheck_api_key=os.environ.get("RUGCHECK_API_KEY") or None,
+        redact_secrets_enabled=_parse_log_emojis(os.environ.get("ALMANAK_REDACT_SECRETS")),
     )
 
 

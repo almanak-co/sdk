@@ -30,10 +30,11 @@ Example:
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from almanak.config import load_config
+from almanak.config.safe_signer import safe_signer_service_config_from_env
 from almanak.framework.execution.signer.safe.constants import (
     DEFAULT_GAS_BUFFER_MULTIPLIER,
     DEFAULT_ROLE_KEY,
@@ -205,7 +206,12 @@ class SafeWalletMapping:
         """Load wallet mapping from environment variable."""
         from web3 import Web3
 
-        env_value = os.environ.get(self._env_var)
+        if self._env_var == "ALMANAK_PLATFORM_WALLETS":
+            env_value = load_config().safe_signer.platform_wallets_json
+        else:
+            # Compatibility path for callers that intentionally read a
+            # non-canonical wallet-registry env var name.
+            env_value = safe_signer_service_config_from_env(wallet_env_var=self._env_var).platform_wallets_json
         if not env_value:
             raise SafeConfigError(f"Environment variable {self._env_var} is not set")
 
@@ -371,8 +377,9 @@ def create_signer_config_from_env(
     signer_service_jwt = None
 
     if mode == "zodiac":
-        signer_service_url = os.environ.get("ALMANAK_SIGNER_SERVICE_ENDPOINT_ROOT")
-        signer_service_jwt = os.environ.get("ALMANAK_SIGNER_SERVICE_JWT")
+        service_config = load_config().safe_signer
+        signer_service_url = service_config.endpoint_root
+        signer_service_jwt = service_config.jwt
 
         if not signer_service_url:
             raise SafeConfigError("ALMANAK_SIGNER_SERVICE_ENDPOINT_ROOT required for Zodiac mode")

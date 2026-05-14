@@ -20,9 +20,11 @@ Partial reveal format: first 2 + last 2 characters shown.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import TextIO
+
+from almanak.config import FrameworkConfig, load_config
+from almanak.config.redaction import secret_environment_items
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -99,7 +101,7 @@ def _collect_secrets() -> list[tuple[str, str]]:
     secrets: list[tuple[str, str]] = []
     seen_values: set[str] = set()
 
-    for name, value in os.environ.items():
+    for name, value in secret_environment_items():
         if not value or len(value) < _MIN_SECRET_LENGTH:
             continue
         if value.lower() in _IGNORE_VALUES:
@@ -284,7 +286,7 @@ class RedactingStream:
 _installed = False
 
 
-def install_redaction() -> None:
+def install_redaction(*, framework_config: FrameworkConfig | None = None) -> None:
     """Install centralized secret redaction on all logging channels.
 
     Call once at application startup (CLI entry, gateway boot, strategy runner).
@@ -293,14 +295,15 @@ def install_redaction() -> None:
 
     Controlled by ``ALMANAK_REDACT_SECRETS`` env var (default: ``true``).
     Set to ``false`` to disable redaction (useful for local debugging).
+
+    Args:
+        framework_config: Optional injected typed framework config from the
+            caller's boot surface. When omitted, falls back to
+            ``load_config().framework`` for standalone callers.
     """
     global _installed
 
-    enabled = os.environ.get("ALMANAK_REDACT_SECRETS", "true").lower() not in (
-        "false",
-        "0",
-        "no",
-    )
+    enabled = (framework_config or load_config().framework).redact_secrets_enabled
 
     # Always rebuild patterns (env may have changed since last call).
     _rebuild()

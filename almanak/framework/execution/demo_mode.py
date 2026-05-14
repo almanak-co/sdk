@@ -30,8 +30,9 @@ Environment Variables:
 """
 
 import logging
-import os
 from dataclasses import dataclass
+
+from almanak.config import FrameworkConfig, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -137,14 +138,24 @@ class DemoModeGuard:
     # Cached state
     _logged_demo_warning = False
 
-    def __init__(self, config: DemoModeConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: DemoModeConfig | None = None,
+        framework_config: FrameworkConfig | None = None,
+    ) -> None:
         """Initialize the demo mode guard.
 
         Args:
             config: Optional configuration (uses defaults if not provided)
+            framework_config: Optional injected typed framework config.
         """
         self.config = config or DemoModeConfig()
+        self._framework_config = framework_config
         self._demo_mode: bool | None = None  # Cached value
+
+    def _resolve_framework_config(self) -> FrameworkConfig:
+        """Return the typed framework config for this process."""
+        return self._framework_config or load_config().framework
 
     def is_demo_mode(self) -> bool:
         """Check if demo mode is enabled.
@@ -153,8 +164,7 @@ class DemoModeGuard:
             True if ALMANAK_DEMO_MODE is set to a truthy value
         """
         if self._demo_mode is None:
-            demo_value = os.environ.get(self.ENV_DEMO_MODE, "").lower()
-            self._demo_mode = demo_value in ("true", "1", "yes", "on")
+            self._demo_mode = self._resolve_framework_config().demo_mode_enabled
 
             # Log once on first check
             if self._demo_mode and not DemoModeGuard._logged_demo_warning:
@@ -180,8 +190,7 @@ class DemoModeGuard:
         if self.is_demo_mode():
             return False
 
-        force_prod = os.environ.get(self.ENV_FORCE_PRODUCTION, "").lower()
-        return force_prod in ("true", "1", "yes", "on")
+        return self._resolve_framework_config().force_production_enabled
 
     def validate_not_demo(self, operation: str = "execute transaction") -> None:
         """Validate that we're not in demo mode.

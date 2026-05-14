@@ -200,6 +200,21 @@ def _load_cli_config(path: str) -> dict:
         return json.load(f)
 
 
+def _prime_strategy_command_config(ctx: click.Context):
+    """Build and stash the typed config for strategy-scoped CLI wrappers.
+
+    The wrapper has already loaded the strategy-local ``.env`` (if any), so
+    this is the correct framework boot surface for ``strat run`` /
+    ``strat test``. Downstream framework code can then consume typed slices
+    from ``ctx.obj`` instead of reparsing env ad hoc.
+    """
+    from almanak.config import load_config
+
+    config = load_config()
+    ctx.obj = config
+    return config
+
+
 def _load_pyproject_run_config(working_dir: str) -> dict:
     pyproject_path = Path(working_dir) / "pyproject.toml"
     if not pyproject_path.exists():
@@ -1340,13 +1355,14 @@ def strategy_test(
     # Match strategy_run() — load strategy-local .env through the boundary
     # helper so test runs see the same environment overrides the production
     # run path does.
-    from almanak.config import load_config
     from almanak.config.env import _load_dotenv_once
 
     env_file = Path(working_dir) / ".env"
     if env_file.exists():
         _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
+
+    boot_config = _prime_strategy_command_config(ctx)
 
     # `almanak strat test` always runs against a managed Anvil fork. If the user
     # has no ALMANAK_PRIVATE_KEY set (fresh scaffolds ship with it empty),
@@ -1357,7 +1373,7 @@ def strategy_test(
     # value via the Phase 1 env-fallback ladder; reading it here keeps the
     # config-boundary lint clean.
     test_runtime_private_key: str | None = None
-    if not load_config().gateway.private_key:
+    if not boot_config.gateway.private_key:
         from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
 
         # Plumbed via the ``_runtime_private_key_override`` ContextVar below
@@ -1703,6 +1719,8 @@ def strategy_run(
         _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
 
+    boot_config = _prime_strategy_command_config(ctx)
+
     run_config = _load_pyproject_run_config(working_dir)
     if interval is None:
         interval = run_config.get("interval", DEFAULT_STRAT_RUN_INTERVAL)
@@ -1716,7 +1734,7 @@ def strategy_run(
     # Install secret redaction after env is loaded so all secrets are registered.
     # (The managed gateway also calls install_redaction(), but strat run may log
     # before the gateway starts, so we install here too.)
-    install_redaction()
+    install_redaction(framework_config=boot_config.framework)
 
     # Invoke the framework's run command
     try:

@@ -17,6 +17,10 @@ landing in later phases.
   config across deployment modes. In hosted mode the strategy container
   has no direct egress, so most consumers route through the gateway —
   but the typed shape stays uniform.
+* Phase 5d — ``simulation``: same shape as ``LocalConfig.simulation`` so
+  the simulator bootstrap reads one typed config shape in either mode.
+* Phase 5d — ``safe_signer``: same shape as ``LocalConfig.safe_signer`` so
+  Safe signer bootstrap reads one typed config shape in either mode.
 * Phase 6 — ``agent_tools`` and ``framework``: same shape as
   ``LocalConfig.agent_tools`` / ``LocalConfig.framework``. The hosted
   surface mirrors the same env reads so the strategy container's CLI
@@ -34,6 +38,8 @@ from almanak.config.base import BaseConfig
 from almanak.config.cli_runtime import CliRuntimeConfig, cli_runtime_config_from_env
 from almanak.config.connectors import ConnectorsConfig, connectors_config_from_env
 from almanak.config.framework import FrameworkConfig, framework_config_from_env
+from almanak.config.safe_signer import SafeSignerServiceConfig, safe_signer_service_config_from_env
+from almanak.config.simulation import SimulationConfig, simulation_config_from_env
 
 
 class HostedConfig(BaseConfig):
@@ -48,6 +54,12 @@ class HostedConfig(BaseConfig):
     moment a connector is instantiated.
 
     ``backtest`` mirrors :attr:`LocalConfig.backtest` — same eager
+    factory pattern, same submodel shape.
+
+    ``simulation`` mirrors :attr:`LocalConfig.simulation` — same eager
+    factory pattern, same submodel shape.
+
+    ``safe_signer`` mirrors :attr:`LocalConfig.safe_signer` — same eager
     factory pattern, same submodel shape.
 
     ``cli`` mirrors :attr:`LocalConfig.cli`. The hosted strategy
@@ -67,6 +79,8 @@ class HostedConfig(BaseConfig):
 
     connectors: ConnectorsConfig = Field(default_factory=connectors_config_from_env)
     backtest: BacktestConfig = Field(default_factory=backtest_config_from_env)
+    simulation: SimulationConfig = Field(default_factory=simulation_config_from_env)
+    safe_signer: SafeSignerServiceConfig = Field(default_factory=safe_signer_service_config_from_env)
     cli: CliRuntimeConfig = Field(default_factory=cli_runtime_config_from_env)
     agent_tools: AgentToolsConfig = Field(default_factory=agent_tools_config_from_env)
     framework: FrameworkConfig = Field(default_factory=framework_config_from_env)

@@ -28,11 +28,10 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
-
+from almanak.config import load_config
+from almanak.config.simulation import simulation_config_from_env
 from almanak.framework.execution.gas.constants import (
     CHAIN_SIMULATION_BUFFERS,
     DEFAULT_SIMULATION_BUFFER,
@@ -305,35 +304,20 @@ class SimulationConfig:
             # Custom prefix
             config = SimulationConfig.from_env(prefix="MY_APP_")
         """
-        if dotenv_path:
-            load_dotenv(dotenv_path)
+        if prefix == "ALMANAK_" and dotenv_path is None:
+            cfg = load_config().simulation
         else:
-            load_dotenv()
-
-        def get_bool(name: str, default: bool) -> bool:
-            value = os.environ.get(name)
-            if value is None:
-                return default
-            return value.lower() in ("true", "1", "yes", "y")
-
-        def get_float(name: str, default: float) -> float:
-            value = os.environ.get(name)
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except ValueError:
-                logger.warning(f"Invalid float for {name}: {value}, using default {default}")
-                return default
-
+            # Compatibility path for non-standard prefixes / explicit dotenv
+            # sources that are outside the normal framework boot surface.
+            cfg = simulation_config_from_env(prefix=prefix, dotenv_path=dotenv_path)
         return cls(
-            enabled=get_bool(f"{prefix}SIMULATION_ENABLED", True),
-            tenderly_account=os.environ.get("TENDERLY_ACCOUNT_SLUG"),
-            tenderly_project=os.environ.get("TENDERLY_PROJECT_SLUG"),
-            tenderly_access_key=os.environ.get("TENDERLY_ACCESS_KEY"),
-            alchemy_api_key=os.environ.get("ALCHEMY_API_KEY"),
-            timeout_seconds=get_float(f"{prefix}SIMULATION_TIMEOUT", 10.0),
-            prefer_alchemy=get_bool(f"{prefix}SIMULATION_PREFER_ALCHEMY", False),
+            enabled=cfg.enabled,
+            tenderly_account=cfg.tenderly_account,
+            tenderly_project=cfg.tenderly_project,
+            tenderly_access_key=cfg.tenderly_access_key,
+            alchemy_api_key=cfg.alchemy_api_key,
+            timeout_seconds=cfg.timeout_seconds,
+            prefer_alchemy=cfg.prefer_alchemy,
         )
 
     @classmethod

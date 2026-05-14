@@ -10,23 +10,42 @@ stack trace or an import.
 ```python
 from almanak.config import load_config
 
-config = load_config()  # called once at the Click main group
+config = load_config()  # called once at the relevant framework boot surface
 ```
 
 `load_config()` returns either a `LocalConfig` or a `HostedConfig` depending
 on `is_hosted()` (the `AGENT_ID` single-reader rule). Both share
 `BaseConfig.gateway` so any code that only needs gateway settings can take
-`BaseConfig` and ignore the discriminator.
+`BaseConfig` and ignore the discriminator. The currently-wired boot-time
+submodels include `gateway`, `connectors`, `backtest`, `simulation`, `cli`,
+`framework`, `safe_signer`, and `agent_tools`.
 
-## Phase 0 status
+## Boot rule
 
-This package currently exposes only the gateway submodel — `GatewayConfig` is
-an alias for `GatewaySettings` (`almanak/gateway/core/settings.py`). Mode-
-specific fields (private key, db path, agent_id, simulation, etc.) land in
-later phases as the plan migrates each surface.
+- The framework owns `load_config()`. User strategy code should not import or
+  call it.
+- Each process entrypoint calls `load_config()` once after resolving the
+  relevant dotenv source for that surface. Examples: CLI bootstrap, the
+  `strat run` wrapper after loading a strategy-local `.env`, and
+  `gateway.server.main()`.
+- After boot, framework code should prefer injected typed slices from that
+  object (for example `config.cli` or `config.framework`) instead of reparsing
+  env ad hoc.
+- Direct `*_config_from_env()` calls are transition shims. They are reserved
+  for config-service assembly, truly dynamic env reads, or explicit
+  compatibility paths that cannot use the boot-loaded object.
 
-Phase 0 ships the skeleton, the parity test that guards the cutover, and the
-CI lint gate that enforces the boundary going forward. Behavior change: none.
+## Current status
+
+The package is past the original Phase 0 skeleton. `load_config()` now builds
+the currently-migrated typed submodels eagerly so normal boot-time consumers can
+reuse one config object instead of reparsing env in each layer.
+
+Some surfaces still expose compatibility adapters such as `*.from_env()` or
+small helper functions. Those should be treated as transition shims:
+- Boot-time consumers should prefer typed slices from `load_config()`.
+- Truly dynamic values that must reflect live process state can remain helper
+  APIs under `almanak.config`.
 
 ## Files
 
@@ -36,6 +55,10 @@ CI lint gate that enforces the boundary going forward. Behavior change: none.
 | `base.py` | `BaseConfig` + `GatewayConfig` alias for the gateway submodel |
 | `local.py` | `LocalConfig` (folder-scoped, sqlite-backed) |
 | `hosted.py` | `HostedConfig` (gateway-managed, postgres-backed) |
+| `framework.py` | Framework toggles and boot-time runtime safety knobs |
+| `safe_signer.py` | Safe wallet registry + Zodiac signer config |
+| `simulation.py` | Tenderly / Alchemy simulation config |
+| `backtest.py` | Backtesting + standalone backtest-service config |
 | `strategy.py` | `StrategyConfig` Pydantic base for per-strategy schemas |
 | `service.py` | `load_config()` + the singleton `_load_dotenv_once()` |
 | `env.py` | The single env-collection layer (re-exports `_load_dotenv_once`) |

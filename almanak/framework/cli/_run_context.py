@@ -1,13 +1,13 @@
-"""Shared state carriers for the `almanak strat run` refactor (Phase 4b+).
+"""Shared state carriers for `almanak strat run`.
 
-`RunContext` accumulates state as `run()` progresses through its phases. The
-frozen `IdentityInfo` and `ResumeInfo` dataclasses are the immutable outputs
-of the identity-resolution and state-resume-detection helpers.
+`RunContext` accumulates mutable runtime handles as the strategy-run bootstrap
+progresses. The frozen `IdentityInfo`, `ResumeInfo`, `StrategyBootstrap`, and
+`RuntimeBootstrap` dataclasses carry the immutable outputs of specific
+bootstrap decisions so the orchestrator can thread them without long tuples.
 
-Gradual typing (the Phase 3c pattern): runtime-handle fields that carry
-protocol-specific types live in `Any = None` slots. Typed fields get explicit
-types. Fields are added incrementally as each helper lands — do NOT preload
-fields for phases that haven't been extracted yet.
+Runtime-handle fields that carry protocol-specific types live in `Any = None`
+slots. Typed fields get explicit types. Keep this module focused on state
+carriers, not behavior.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 
 @dataclass
 class RunContext:
-    """Mutable state carrier threaded through `run()` phase helpers.
+    """Mutable state carrier threaded through `run()` bootstrap helpers.
 
     Populated progressively. Fields appear only as the helper that writes
     them lands. Runtime-handle fields typed as `Any = None` because their
@@ -79,11 +79,39 @@ class ResumeInfo:
     state_keys: list[str]
 
 
+@dataclass(frozen=True)
+class StrategyBootstrap:
+    """Strategy discovery + config loading outputs needed later in `run()`."""
+
+    strategy_class: Any
+    strategy_name: str
+    strategy_config: dict[str, Any]
+    multi_chain: bool
+    config_file: str | None
+    normalized_copy_mode: str | None
+    strategy_chains: list[str]
+    strategy_protocols: dict[str, list[str]]
+    config_display_name: str
+    effective_dry_run: bool
+
+
+@dataclass(frozen=True)
+class RuntimeBootstrap:
+    """Resolved runtime + identity outputs needed by startup and execution."""
+
+    config_chain: str | None
+    resolved_network: str
+    runtime_config: Any
+    chain_wallets: Any
+    strategy_id: str
+    run_id: str
+
+
 @dataclass
 class ComponentBundle:
-    """Built components that phases 15/16 (execution) need to run iterations.
+    """Built components that single-run and continuous execution need.
 
-    Populated by `_build_components` (Phase 4c). Runtime-handle fields typed
+    Populated by `_build_components`. Runtime-handle fields typed
     as ``Any = None`` because their concrete types pull in heavy imports and
     the helper boundary avoids the circular-import risk that would arise from
     typing (e.g.) `StrategyRunner` at module load time.

@@ -1197,6 +1197,29 @@ def private_key_from_env(*, prefix: str = "ALMANAK_") -> str:
     return os.environ.get(f"{prefix}PRIVATE_KEY", "") or ""
 
 
+def gateway_wallets_configured(*, prefix: str = "ALMANAK_") -> bool:
+    """Return True when ``{prefix}GATEWAY_WALLETS`` is present and non-empty."""
+    return bool(os.environ.get(f"{prefix}GATEWAY_WALLETS"))
+
+
+def multi_chain_rpc_urls_from_env(
+    *,
+    chains: list[str],
+    network: str,
+    private_key: str | None,
+    prefix: str = "ALMANAK_",
+    dotenv_path: str | None = None,
+) -> dict[str, str]:
+    """Resolve per-chain RPC URLs for the legacy multi-chain dataclass path."""
+    _load_dotenv_once(dotenv_path)
+    return _resolve_multi_chain_rpc_urls(
+        chains=chains,
+        network=network,
+        private_key=private_key or "",
+        prefix=prefix,
+    )
+
+
 __all__ = [
     "CHAIN_IDS",
     "ConfigurationError",
@@ -1204,6 +1227,8 @@ __all__ = [
     "ExecutionMode",
     "MissingEnvironmentVariableError",
     "RuntimeConfig",
+    "gateway_wallets_configured",
+    "multi_chain_rpc_urls_from_env",
     "private_key_from_env",
     "runtime_config_from_env",
 ]

@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any
 
 import aiohttp
+
+from almanak.config import FrameworkConfig, load_config
 
 from .models import (
     GoPlusResult,
@@ -74,10 +75,12 @@ class TokenSafetyClient:
         request_timeout: float = 15.0,
         cache_ttl: int = 300,
         rugcheck_api_key: str | None = None,
+        framework_config: FrameworkConfig | None = None,
     ) -> None:
         self._request_timeout = request_timeout
         self._cache_ttl = cache_ttl
-        self._rugcheck_api_key = rugcheck_api_key or os.environ.get("RUGCHECK_API_KEY")
+        config = framework_config or load_config().framework
+        self._rugcheck_api_key = rugcheck_api_key or config.rugcheck_api_key
         self._session: aiohttp.ClientSession | None = None
         self._cache: dict[str, tuple[float, TokenSafetyResult]] = {}
         self._last_rugcheck_request: float = 0.0

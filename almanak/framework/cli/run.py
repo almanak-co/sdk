@@ -22,7 +22,6 @@ import dataclasses
 import inspect
 import json
 import logging
-import os
 import re
 import sys
 import uuid
@@ -37,6 +36,7 @@ if TYPE_CHECKING:
 import click
 
 from almanak.config.cli_options import gateway_client_options
+from almanak.config.cli_runtime import CliRuntimeConfig
 from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
@@ -80,7 +80,6 @@ from ..execution.signer.local import LocalKeySigner
 from ..execution.simulator import create_simulator
 from ..execution.submitter.public import PublicMempoolSubmitter
 from ..runner import IterationResult
-from ..strategies import IntentStrategy
 from ..strategies.intent_strategy import IndicatorProvider
 
 logger = logging.getLogger(__name__)
@@ -241,14 +240,15 @@ def _warn_missing_token_funding(config: dict[str, Any], config_path: Path) -> No
     )
 
 
-# crap-allowlist: Phase 3 (#2098/#2101) — schema validation around existing loader, no body complexity added.
+# crap-allowlist: #2098/#2101 adds schema validation around the existing loader
+# without increasing its decision complexity.
 def load_strategy_config(
     strategy_name: str,
     config_file: str | None = None,
 ) -> dict[str, Any]:
     """Load strategy configuration from file or defaults.
 
-    Phase 3 (#2098 / #2101) wraps the file read in Pydantic schema validation.
+    #2098 / #2101 wrap the file read in Pydantic schema validation.
     JSON / YAML parse errors and schema mismatches surface as
     ``click.ClickException`` naming the file, instead of bubbling as opaque
     stack traces or — worse — being swallowed by ``except Exception`` further
@@ -609,18 +609,36 @@ def create_routing_ohlcv_provider(
 from ._solana_setup import get_orca_pool_accounts as _get_orca_pool_accounts  # noqa: F401
 
 
+def _current_cli_runtime_config() -> CliRuntimeConfig:
+    """Return the boot-loaded CLI config when available.
+
+    `almanak strat run` / `strat test` prime `ctx.obj` after loading the
+    strategy-local `.env`. Prefer that boot-surface-owned config slice over a
+    fresh submodel loader call. The `load_config()` fallback keeps direct unit
+    tests and non-wrapper invocation paths working.
+    """
+    ctx = click.get_current_context(silent=True)
+    while ctx is not None:
+        obj = getattr(ctx, "obj", None)
+        if obj is not None and hasattr(obj, "cli"):
+            return obj.cli
+        ctx = ctx.parent
+
+    from almanak.config import load_config
+
+    return load_config().cli
+
+
 def _validate_safe_mode_preflight(execution_address: str) -> str | None:
     """Validate Safe mode environment consistency between framework and gateway.
 
     Returns an error message string if validation fails, or None on success.
 
     Reads through the typed CLI-runtime config so the env-boundary lint stays
-    clean (Phase 5e). The legacy callsite read four env vars directly; the
-    typed shape exposes the same values via :class:`CliRuntimeConfig`.
+    clean during the config-service cutover. Prefer the boot-surface-owned `ctx.obj.cli` slice when
+    the strategy wrapper has already called `load_config()`.
     """
-    from almanak.config import cli_runtime_config_from_env
-
-    cli_cfg = cli_runtime_config_from_env()
+    cli_cfg = _current_cli_runtime_config()
     gw_safe_mode = cli_cfg.gateway_safe_mode or ""
     gw_safe_address = cli_cfg.gateway_safe_address or cli_cfg.safe_address
 
@@ -793,7 +811,7 @@ def create_balance_provider(
     )
 
 
-# crap-allowlist: Phase 5e (#2097) replaces the legacy 5x ``os.environ.get(...) or os.environ.get(legacy)``
+# crap-allowlist: #2097 replaces the legacy 5x ``os.environ.get(...) or os.environ.get(legacy)``
 # presence-check ladder with a typed :func:`gas_risk_override_presence` call.
 # CC stays at 7 (one branch per typed override + the max_value_usd parse) and the
 # function is exercised end-to-end by ``almanak strat run`` smokes; targeted unit
@@ -814,7 +832,7 @@ def _apply_runtime_gas_risk_overrides(
     is preserved verbatim.
 
     The presence-check is sourced from the typed CLI-runtime config so
-    the boundary lint stays clean (Phase 5e).
+    the boundary lint stays clean during the config-service cutover.
     """
     from decimal import Decimal as _Decimal
     from decimal import InvalidOperation as _InvalidOperation
@@ -885,7 +903,7 @@ def create_execution_orchestrator(
     tx_risk_config = TransactionRiskConfig.for_chain(config.chain)
     # Override with explicit env var values (env vars take precedence over chain defaults).
     # Route through the typed gas-risk override resolver so the boundary
-    # check stays clean (Phase 5e).
+    # check stays clean during the config-service cutover.
     _apply_runtime_gas_risk_overrides(tx_risk_config, config)
 
     return ExecutionOrchestrator(
@@ -1288,27 +1306,20 @@ def run(  # noqa: C901
         # List registered strategies
         almanak strat run --list
     """
-    # Configure logging + validate setup-stage flag combinations (phase 1 helper).
-    import atexit
-
     from .run_helpers import (
         _build_cleanup_fn,
-        _build_components,
-        _build_runtime_config,
+        _build_components_or_exit,
         _configure_logging_and_validate,
-        _detect_state_resume,
-        _discover_and_load_config,
-        _DryRunVaultEarlyExit,
-        _handle_list_all,
-        _handle_standalone_dashboard,
+        _echo_strategy_runtime_summary,
+        _execute_run_mode,
         _instantiate_strategy,
-        _load_strategy_class,
+        _load_resume_state,
+        _load_strategy_bootstrap,
+        _maybe_handle_run_early_exit,
+        _maybe_start_dashboard_process,
+        _prepare_runtime_bootstrap,
         _print_startup_banner,
-        _resolve_identity,
-        _run_continuous,
-        _run_once,
         _setup_gateway,
-        _start_dashboard_background,
         _stop_dashboard,
         _wire_token_resolver,
     )
@@ -1322,7 +1333,6 @@ def run(  # noqa: C901
         max_iterations=max_iterations,
     )
 
-    # Gateway setup (phase 2 helper): managed auto-start or external connect.
     (
         gateway_client,
         managed_gateway,
@@ -1346,17 +1356,13 @@ def run(  # noqa: C901
         once=once,
     )
 
-    # Wire gateway channel into TokenResolver for on-chain token discovery (phase 3 helper).
     _wire_token_resolver(gateway_client)
 
     click.echo()
 
-    # Handle --list flag (phase 4 helper)
-    if _handle_list_all(list_all, gateway_client):
-        return
-
-    # If only --dashboard is provided without a working directory, launch dashboard and block (phase 5 helper)
-    if _handle_standalone_dashboard(
+    if _maybe_handle_run_early_exit(
+        list_all=list_all,
+        gateway_client=gateway_client,
         working_dir=working_dir,
         dashboard=dashboard,
         dashboard_port=dashboard_port,
@@ -1366,220 +1372,99 @@ def run(  # noqa: C901
     ):
         return
 
-    # Start dashboard as background subprocess (after gateway is healthy, before strategy runs)
-    dashboard_process = None
-    if dashboard:
-        dashboard_process = _start_dashboard_background(
-            port=dashboard_port,
-            gateway_host=effective_host,
-            gateway_port=gateway_port,
-            auth_token=session_auth_token,
-        )
-        if dashboard_process is not None:
-            atexit.register(_stop_dashboard, dashboard_process)
+    dashboard_process = _maybe_start_dashboard_process(
+        dashboard=dashboard,
+        dashboard_port=dashboard_port,
+        gateway_host=effective_host,
+        gateway_port=gateway_port,
+        auth_token=session_auth_token,
+    )
 
-    # Load strategy from working directory (reuse early-loaded class if available) (phase 6 helper)
-    strategy_class: type[IntentStrategy[Any]] = _load_strategy_class(working_dir, _early_strategy_class)
-    strategy_name = strategy_class.__name__
-    click.echo(f"Loaded strategy: {strategy_name}")
-
-    # Use provided instance ID if given
-    provided_instance_id = strategy_id_override
-
-    # Preliminary: get strategy chains from decorator (may be refined after config load)
-    strategy_chains = get_strategy_chains(strategy_class)
-    multi_chain = False  # Determined after config load
-    strategy_protocols = get_strategy_protocols(strategy_class)
-
-    # Auto-discover config, load it, and apply copy-trading overrides (phase 7 helper)
-    (
-        strategy_config,
-        multi_chain,
-        effective_dry_run,
-        config_file,
-        normalized_copy_mode,
-    ) = _discover_and_load_config(
+    strategy_bootstrap = _load_strategy_bootstrap(
         working_dir=working_dir,
         config_file=config_file,
-        strategy_class=strategy_class,
         copy_mode=copy_mode,
         copy_shadow=copy_shadow,
         copy_replay_file=copy_replay_file,
         copy_strict=copy_strict,
         dry_run=dry_run,
+        early_strategy_class=_early_strategy_class,
     )
-    if multi_chain:
-        # Use chains from config if specified, else fall back to decorator
-        config_chains = strategy_config.get("chains", [])
-        if isinstance(config_chains, list) and len(config_chains) > 1:
-            strategy_chains = config_chains
 
-    # --- Three-tier identity model (VIB-2764) ---
-    # strategy_name: human/code reference (display name).
-    # deployment_id: stable primary key for all DB tables (survives restarts).
-    # run_id: per-process ephemeral UUID (forensics only).
-    # (deployment_id/run_id resolution itself happens in _resolve_identity below.)
-    config_display_name = strategy_config.get("strategy_id", strategy_name)
-    if ":" in config_display_name:
-        config_display_name = config_display_name.split(":")[0]
-    strategy_config["strategy_display_name"] = config_display_name
-
-    # deployment_id is resolved after wallet/chain are known (below).
-    # For now, stash the cli_id for the resolver.
-    _cli_id_override = provided_instance_id
-
-    # See resolve_strategy_chain(): single-chain strategies always use their
-    # declared chain; multi-supported strategies use env > config.json > default.
-    env_chain = (os.environ.get("ALMANAK_CHAIN") or "").strip().lower() or None
-    config_chain = resolve_strategy_chain(
-        strategy_class,
-        strategy_config,
-        env_chain=env_chain,
-        multi_chain=multi_chain,
-    )
-    _cfg_chain_raw = strategy_config.get("chain")
-    _cfg_chain_norm = _cfg_chain_raw.strip().lower() if isinstance(_cfg_chain_raw, str) else ""
-    # Only echo the override message when env was actually used to select the
-    # chain (i.e. the resolved chain matches env). For single-chain strategies
-    # the env is silently ignored and resolve_strategy_chain() returns the
-    # strategy's declared chain — no override message should appear in that case.
-    if env_chain and config_chain == env_chain and env_chain != _cfg_chain_norm:
-        click.echo(f"Chain override: ALMANAK_CHAIN={env_chain} (config.json: {_cfg_chain_raw or 'unset'})")
-
-    # Determine network: CLI flag > config.json > default "mainnet"
-    # Priority: --network flag (highest) > config "network" field > "mainnet" (default)
-    resolved_network = network or "mainnet"
-    if resolved_network == "anvil":
-        anvil_port = os.environ.get(f"ANVIL_{(config_chain or 'arbitrum').upper()}_PORT", "8545")
-        click.echo(f"Network: ANVIL (local fork at http://127.0.0.1:{anvil_port})")
-
-    # Runtime config wiring (phase 12 helper): sidecar | multi-chain | single-chain.
-    runtime_config, chain_wallets = _build_runtime_config(
+    runtime_bootstrap = _prepare_runtime_bootstrap(
+        strategy_bootstrap=strategy_bootstrap,
         no_gateway=no_gateway,
-        multi_chain=multi_chain,
-        resolved_network=resolved_network,
-        config_chain=config_chain,
-        strategy_chains=strategy_chains,
-        strategy_protocols=strategy_protocols,
         gateway_client=gateway_client,
-        strategy_config=strategy_config,
-    )
-
-    # Resolve identity + backfill + --fresh state deletion (phase 8 helper).
-    identity_info = _resolve_identity(
-        strategy_config=strategy_config,
-        fresh=fresh,
-        multi_chain=multi_chain,
-        strategy_chains=strategy_chains,
-        config_display_name=config_display_name,
-        cli_id_override=_cli_id_override,
+        provided_instance_id=strategy_id_override,
+        network=network,
         gateway_network=gateway_network,
+        fresh=fresh,
     )
-    run_id = identity_info.run_id
-    strategy_id = strategy_config["strategy_id"]
 
-    # Detect RESUME vs FRESH START (phase 9 helper).
-    # VIB-3761: canonical local-DB resolver.
-    #
-    # Hosted mode (AGENT_ID set) keeps state in Postgres via the gateway state
-    # manager — there is no local SQLite file to inspect. Calling local_db_path
-    # in hosted mode raises LocalPathError by design (see local_paths._ensure_local).
-    # Resume semantics for hosted strategies are handled by the gateway against
-    # Postgres, not by the runner CLI.
-    from almanak.framework.deployment import is_local
-    from almanak.framework.local_paths import local_db_path as _local_db_path
+    is_resume, existing_state_info = _load_resume_state(
+        strategy_id=runtime_bootstrap.strategy_id,
+    )
 
-    is_resume = False
-    existing_state_info: dict[str, Any] | None = None
-    if is_local():
-        state_db_path = _local_db_path()
-        resume_info = _detect_state_resume(state_db_path, strategy_id)
-        is_resume = resume_info.is_resume
-        existing_state_info = {"version": resume_info.version, "keys": resume_info.state_keys} if is_resume else None
-
-    # Display startup information (phase 10 helper)
     _print_startup_banner(
-        strategy_name=strategy_name,
-        strategy_id=strategy_id,
-        run_id=run_id,
+        strategy_name=strategy_bootstrap.strategy_name,
+        strategy_id=runtime_bootstrap.strategy_id,
+        run_id=runtime_bootstrap.run_id,
         is_resume=is_resume,
         existing_state_info=existing_state_info,
         once=once,
         fresh=fresh,
-        multi_chain=multi_chain,
-        strategy_chains=strategy_chains,
-        strategy_protocols=strategy_protocols,
-        runtime_config=runtime_config,
+        multi_chain=strategy_bootstrap.multi_chain,
+        strategy_chains=strategy_bootstrap.strategy_chains,
+        strategy_protocols=strategy_bootstrap.strategy_protocols,
+        runtime_config=runtime_bootstrap.runtime_config,
         interval=interval,
         max_iterations=max_iterations,
-        effective_dry_run=effective_dry_run,
-        strategy_config=strategy_config,
+        effective_dry_run=strategy_bootstrap.effective_dry_run,
+        strategy_config=strategy_bootstrap.strategy_config,
         gateway_host=gateway_host,
         gateway_port=gateway_port,
         dashboard=dashboard,
     )
 
-    # Strategy class already loaded above
-    click.echo(f"Strategy class loaded: {strategy_class.__name__}")
-    if multi_chain:
-        click.echo(f"  Multi-chain: Yes ({len(strategy_chains)} chains)")
-
-    # Instantiate the strategy (phase 11 helper).
-    strategy_instance = _instantiate_strategy(
-        strategy_class=strategy_class,
-        strategy_config=strategy_config,
-        runtime_config=runtime_config,
-        multi_chain=multi_chain,
-        strategy_chains=strategy_chains,
-        chain_wallets=chain_wallets,
+    _echo_strategy_runtime_summary(
+        strategy_class=strategy_bootstrap.strategy_class,
+        multi_chain=strategy_bootstrap.multi_chain,
+        strategy_chains=strategy_bootstrap.strategy_chains,
     )
 
-    # Build components (phase 13 helper): orchestrator + providers + copy-trading +
-    # state manager + vault auto-deploy + StrategyRunner. Ordering is load-bearing;
-    # see `_build_components` docstring.
-    try:
-        components = _build_components(
-            strategy_instance=strategy_instance,
-            strategy_config=strategy_config,
-            runtime_config=runtime_config,
-            strategy_chains=strategy_chains,
-            multi_chain=multi_chain,
-            resolved_network=resolved_network,
-            gateway_client=gateway_client,
-            chain_wallets=chain_wallets,
-            interval=interval,
-            effective_dry_run=effective_dry_run,
-            strategy_id=strategy_id,
-            normalized_copy_mode=normalized_copy_mode,
-            copy_replay_file=copy_replay_file,
-            copy_shadow=copy_shadow,
-            copy_strict=copy_strict,
-            config_chain=config_chain,
-        )
-    except _DryRunVaultEarlyExit as early:
-        # --dry-run + placeholder vault on Anvil: skip runner construction but
-        # still unwind providers/gateway/Solana-fork via cleanup_fn (see #1682).
-        import asyncio as _asyncio
+    strategy_instance = _instantiate_strategy(
+        strategy_class=strategy_bootstrap.strategy_class,
+        strategy_config=strategy_bootstrap.strategy_config,
+        runtime_config=runtime_bootstrap.runtime_config,
+        multi_chain=strategy_bootstrap.multi_chain,
+        strategy_chains=strategy_bootstrap.strategy_chains,
+        chain_wallets=runtime_bootstrap.chain_wallets,
+    )
 
-        from ._run_context import ComponentBundle as _ComponentBundle
-
-        partial_components = early.components or _ComponentBundle()
-        early_cleanup = _build_cleanup_fn(
-            gateway_client=gateway_client,
-            managed_gateway=managed_gateway,
-            keep_anvil=keep_anvil,
-            components=partial_components,
-        )
-        try:
-            _asyncio.run(early_cleanup())
-        except Exception:  # pragma: no cover - cleanup best-effort
-            logger.exception("Cleanup failed during dry-run vault early exit")
-        _stop_dashboard(dashboard_process)
-        sys.exit(0)
+    components = _build_components_or_exit(
+        strategy_instance=strategy_instance,
+        strategy_config=strategy_bootstrap.strategy_config,
+        runtime_config=runtime_bootstrap.runtime_config,
+        strategy_chains=strategy_bootstrap.strategy_chains,
+        multi_chain=strategy_bootstrap.multi_chain,
+        resolved_network=runtime_bootstrap.resolved_network,
+        gateway_client=gateway_client,
+        chain_wallets=runtime_bootstrap.chain_wallets,
+        interval=interval,
+        effective_dry_run=strategy_bootstrap.effective_dry_run,
+        strategy_id=runtime_bootstrap.strategy_id,
+        normalized_copy_mode=strategy_bootstrap.normalized_copy_mode,
+        copy_replay_file=copy_replay_file,
+        copy_shadow=copy_shadow,
+        copy_strict=copy_strict,
+        config_chain=runtime_bootstrap.config_chain,
+        managed_gateway=managed_gateway,
+        keep_anvil=keep_anvil,
+        dashboard_process=dashboard_process,
+    )
     runner = components.runner
     state_manager = components.state_manager
 
-    # Build cleanup closure (phase 14 helper).
     cleanup_resources = _build_cleanup_fn(
         gateway_client=gateway_client,
         managed_gateway=managed_gateway,
@@ -1587,37 +1472,20 @@ def run(  # noqa: C901
         components=components,
     )
 
-    # Run strategy (phase 15/16 helpers).
-    if test_actions is not None:
-        from .run_helpers import _run_test_lifecycle
-
-        exit_code = _run_test_lifecycle(
-            runner=runner,
-            strategy_instance=strategy_instance,
-            state_manager=state_manager,
-            cleanup_fn=cleanup_resources,
-            actions=test_actions,
-            teardown=teardown_after,
-            json_output=test_json,
-        )
-    elif once:
-        exit_code = _run_once(
-            runner=runner,
-            strategy_instance=strategy_instance,
-            state_manager=state_manager,
-            cleanup_fn=cleanup_resources,
-            teardown_after=teardown_after,
-        )
-    else:
-        exit_code = _run_continuous(
-            runner=runner,
-            strategy_instance=strategy_instance,
-            cleanup_fn=cleanup_resources,
-            interval=interval,
-            max_iterations=max_iterations,
-            reset_fork=reset_fork,
-            managed_gateway=managed_gateway,
-        )
+    exit_code = _execute_run_mode(
+        test_actions=test_actions,
+        once=once,
+        teardown_after=teardown_after,
+        test_json=test_json,
+        runner=runner,
+        strategy_instance=strategy_instance,
+        state_manager=state_manager,
+        cleanup_fn=cleanup_resources,
+        interval=interval,
+        max_iterations=max_iterations,
+        reset_fork=reset_fork,
+        managed_gateway=managed_gateway,
+    )
 
     _stop_dashboard(dashboard_process)
     sys.exit(exit_code)

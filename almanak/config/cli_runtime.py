@@ -701,11 +701,17 @@ def _almanak_chain_env() -> str | None:
     return raw or None
 
 
+def almanak_chain_from_env() -> str | None:
+    """Public helper for the lowercased ``ALMANAK_CHAIN`` env override."""
+    return _almanak_chain_env()
+
+
 __all__ = [
     "DEFAULT_ANVIL_PORT",
     "DEFAULT_SOLANA_RPC_URL",
     "DEFAULT_SOLANA_VALIDATOR_PORT",
     "CliRuntimeConfig",
+    "almanak_chain_from_env",
     "chain_rpc_url_from_env",
     "cli_runtime_config_from_env",
     "gas_risk_override_presence",

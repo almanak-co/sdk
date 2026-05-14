@@ -24,7 +24,9 @@ from almanak.config.connectors import ConnectorsConfig, connectors_config_from_e
 from almanak.config.framework import FrameworkConfig, framework_config_from_env
 from almanak.config.hosted import HostedConfig
 from almanak.config.local import LocalConfig
+from almanak.config.safe_signer import SafeSignerServiceConfig, safe_signer_service_config_from_env
 from almanak.config.service import load_config
+from almanak.config.simulation import SimulationConfig, simulation_config_from_env
 from almanak.config.strategy import StrategyConfig
 
 __all__ = [
@@ -37,6 +39,8 @@ __all__ = [
     "GatewayConfig",
     "HostedConfig",
     "LocalConfig",
+    "SafeSignerServiceConfig",
+    "SimulationConfig",
     "StrategyConfig",
     "agent_tools_config_from_env",
     "backtest_config_from_env",
@@ -44,4 +48,6 @@ __all__ = [
     "connectors_config_from_env",
     "framework_config_from_env",
     "load_config",
+    "safe_signer_service_config_from_env",
+    "simulation_config_from_env",
 ]
