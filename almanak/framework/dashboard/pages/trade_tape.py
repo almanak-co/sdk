@@ -20,15 +20,18 @@ from __future__ import annotations
 
 import html
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import streamlit as st
 
+from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.dashboard.gateway_client import TradeTapeRow
 from almanak.framework.dashboard.theme import get_chain_color
 from almanak.framework.dashboard.utils import (
+    _try_token_decimals,
     decode_selector,
     format_chain_badge,
     format_token_amount,
@@ -91,6 +94,115 @@ def _safe_decimal(s: str | None) -> Decimal:
         return Decimal(s)
     except (ValueError, TypeError):
         return Decimal("0")
+
+
+def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
+    """Format an LP ledger ``amount_in/out`` field.
+
+    The ledger ``amount_in/out`` field can land in one of THREE shapes
+    depending on which fallback path in ``observability/ledger.py`` fired:
+
+    1. **Raw on-chain integer** — ``LPOpenData.amount0/amount1`` from
+       ``_extract_from_lp_open`` when the receipt parser succeeded.
+       Always integral; for 18-dec WETH a 1-token position is ``10^18``.
+    2. **Human Decimal from SwapAmounts** —
+       ``_extract_from_swap_amounts`` stores ``amount_in_decimal`` /
+       ``amount_out_decimal``; LP_CLOSE rides this route when the close
+       receipt produced SwapAmounts rather than ``LPCloseData``. Can be
+       any positive Decimal (fractional or integral).
+    3. **Human Decimal from intent** —
+       ``_extract_from_lp_open`` falls back to ``intent.amount0/1`` when
+       ``LPOpenData`` is absent (pre-VIB-3417 rows, parser failure).
+       Same shape as (2).
+
+    Without a ``units_kind`` discriminator on the ledger row, the only
+    available signal is the value's magnitude. The ``>= 10⁶`` heuristic
+    matches ``format_token_amount``'s own rule: integers ``>= 10⁶`` AND
+    integral get scaled by token decimals; everything else passes through
+    unscaled. The threshold reliably catches (1) — every 18/8/6-dec raw
+    token holding above one ``raw=10⁶`` boundary scales correctly — and
+    almost always passes (2) and (3) through unchanged.
+
+    KNOWN LIMITATIONS (VIB-4396 follow-up — needs a ledger-side
+    ``units_kind`` discriminator, deliberately deferred from this PR
+    because it crosses writer / schema / metrics-database boundaries):
+
+    - **False POSITIVE** (raw mis-scaled as human): a small raw 8-dec
+      WBTC position (raw=1346 = 0.00001346 WBTC) renders as
+      ``"1,346.00 WBTC"`` because ``1346 < 10⁶`` so the heuristic
+      doesn't scale.
+    - **False NEGATIVE** (human mis-scaled as raw): a whole-million
+      human position from path (2) / (3) — e.g. ``2_000_000`` USDC LP
+      stored as ``Decimal("2000000")`` — would be re-scaled by 6 dec
+      and render as ``"2.00 USDC"``. Bounded to (a) LP_CLOSE rows
+      whose receipt populated ``SwapAmounts`` instead of ``LPCloseData``
+      AND (b) the payload was missing from the accounting event
+      (rare — only when the accounting writer hasn't run yet). Codex
+      P2 on PR #2290 raised this thread; the discriminator fix is
+      the only durable answer.
+
+    The operator-trust invariant ("operator never sees a 10**decimals
+    scale lie on a normal-sized position") is preserved for the common
+    path: integer raw amounts ``>= 10⁶`` for 18/8/6-dec tokens.
+    """
+    if amount in (None, "", "—"):
+        return "—"
+    try:
+        d = Decimal(str(amount))
+    except (ArithmeticError, ValueError, TypeError):
+        return format_token_amount(amount, symbol, chain)
+    if not d.is_finite() or d != d.to_integral_value():
+        return format_token_amount(amount, symbol, chain)
+    if not (symbol and chain):
+        return format_token_amount(amount, symbol, chain)
+    if abs(d) < Decimal("1000000"):
+        return format_token_amount(amount, symbol, chain)
+    decimals = _try_token_decimals(symbol, chain)
+    if decimals is None or decimals <= 0:
+        return format_token_amount(amount, symbol, chain)
+    return _format_human_amount(d / (Decimal(10) ** decimals))
+
+
+def _format_native_gas(gas_usd: Decimal, chain: str | None, price_inputs_json: str | None) -> str:
+    """Return ``"0.00000132 ETH"``-style suffix for the gas cost, or ``""``.
+
+    Derives the native amount as ``gas_usd / native_price_usd`` using the
+    oracle quote stamped on the row's ``price_inputs_json``. Returns ``""``
+    when the native quote isn't on the row (no extra network call from the
+    dashboard) — the caller falls back to the bare USD figure.
+    """
+    if gas_usd <= 0 or not chain or not price_inputs_json:
+        return ""
+    symbol = native_token_for_chain(chain)
+    if not symbol:
+        return ""
+    try:
+        prices = json.loads(price_inputs_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(prices, dict):
+        return ""
+    # Case-insensitive lookup so casings like ``Eth`` / ``WETH`` / ``weth``
+    # all resolve — gemini medium on PR #2290.
+    symbol_lower = symbol.lower()
+    info = next(
+        (v for k, v in prices.items() if isinstance(k, str) and k.lower() == symbol_lower),
+        None,
+    )
+    if not isinstance(info, dict):
+        return ""
+    raw_price = info.get("price_usd") or info.get("price")
+    native_price = _safe_decimal(str(raw_price) if raw_price is not None else None)
+    if native_price <= 0:
+        return ""
+    native_amount = gas_usd / native_price
+    # Format: 4 sig figs for sub-1 values, 6dp for ≥1 — gas is almost
+    # always sub-1 native, so the 4 sig-fig branch is the common path.
+    if abs(native_amount) >= Decimal("1"):
+        amount_str = f"{native_amount:,.6f}"
+    else:
+        amount_str = f"{native_amount:.4g}"
+    return f"{amount_str} {symbol}"
 
 
 def _format_human_amount(amount: Any) -> str:
@@ -433,17 +545,19 @@ def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str
     token1 = payload.get("token1") or row.token_out or ""
 
     # Payload values are already-decoded human Decimals → use the human
-    # formatter. Ledger fallback values (``row.amount_in/out``) are raw
-    # on-chain integers → keep ``format_token_amount`` so its raw-units
-    # heuristic scales them correctly.
+    # formatter. Ledger fallback values (``row.amount_in/out``) are EITHER
+    # ``LPOpenData.amount0/1`` raw integers (post-receipt) OR the intent's
+    # human ``Decimal`` (intent fallback) per ``_extract_from_lp_open``;
+    # ``_format_lp_ledger_amount`` uses the ``>= 10⁶`` heuristic to
+    # disambiguate.
     if payload.get("amount0") is not None:
         amt0_str = _format_human_amount(payload["amount0"])
     else:
-        amt0_str = format_token_amount(row.amount_in, token0, row.chain)
+        amt0_str = _format_lp_ledger_amount(row.amount_in, token0, row.chain)
     if payload.get("amount1") is not None:
         amt1_str = _format_human_amount(payload["amount1"])
     else:
-        amt1_str = format_token_amount(row.amount_out, token1, row.chain)
+        amt1_str = _format_lp_ledger_amount(row.amount_out, token1, row.chain)
 
     parts: list[str] = []
     if token0:
@@ -489,6 +603,30 @@ def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str
     )
 
 
+def _registry_handle_from_payload(payload_json: str) -> str:
+    """Extract ``position_reference.registry_handle`` from a typed payload, or ''.
+
+    Multi-position strategies (``lp_dual`` / ``lp_triple``) stamp an explicit
+    handle (``leg_narrow`` / ``leg_wide``) on every accounting event so the
+    operator can tell which leg an LP_OPEN belongs to. Surfacing it on the
+    headline (Bug 6) replaces "row 1" / "row 2" guesswork with the strategy's
+    own naming.
+    """
+    if not payload_json:
+        return ""
+    try:
+        payload = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    ref = payload.get("position_reference")
+    if not isinstance(ref, dict):
+        return ""
+    handle = ref.get("registry_handle")
+    return str(handle) if handle else ""
+
+
 def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     """Render a single tape row with its receipt-parsed expander."""
     icon = _INTENT_ICONS.get(row.intent_type, "•")
@@ -496,6 +634,7 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     chain_badge = format_chain_badge(row.chain, chain_color) if row.chain else ""
     success_marker = "<span style='color:#00c853;'>✓</span>" if row.success else "<span style='color:#f44336;'>✗</span>"
     confidence_color, confidence_label = _CONFIDENCE_BADGES.get(row.confidence, ("#888888", _e(row.confidence) or ""))
+    registry_handle = _registry_handle_from_payload(row.accounting_payload_json)
 
     # VIB-4046 — multi-tx bundle awareness. ``all_tx_results`` is already
     # populated by ``observability.ledger._build_extracted_data_json``
@@ -527,7 +666,11 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     if row.gas_usd:
         gas_d = _safe_decimal(row.gas_usd)
         if gas_d > 0:
-            cost_bits.append(f"gas {_e(format_usd(gas_d))}")
+            gas_text = f"gas {format_usd(gas_d)}"
+            native = _format_native_gas(gas_d, row.chain, row.price_inputs_json)
+            if native:
+                gas_text = f"{gas_text} ({native})"
+            cost_bits.append(_e(gas_text))
     if row.slippage_bps:
         cost_bits.append(f"slip {row.slippage_bps:.1f} bps")
     cost_line = " · ".join(cost_bits) if cost_bits else ""
@@ -606,6 +749,19 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     # line to pure whitespace, which then re-opened the *following*
     # indented HTML as a 4-space code block ("</div>" rendered as
     # literal text below the BORROW/SUPPLY headlines).
+    # Bug 6 — surface the strategy-stamped registry_handle (e.g.
+    # ``leg_wide`` / ``leg_narrow``) next to the protocol name so a
+    # multi-position LP strategy renders identifiable rows instead of
+    # five indistinguishable LP_OPEN cards.
+    handle_chip = ""
+    if registry_handle:
+        handle_chip = (
+            f"<span style='background:#2c3e50;color:#90caf9;border-radius:4px;"
+            f"padding:1px 6px;font-size:0.72rem;margin-left:0.5rem;'"
+            f" title='position_reference.registry_handle'>"
+            f"·&nbsp;{_e(registry_handle)}</span>"
+        )
+
     parts = [
         f'<div style="background:#161616;border:1px solid #2a2a2a;'
         f"border-left:3px solid {intent_color};border-radius:4px;"
@@ -617,6 +773,7 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
         f'<strong style="font-size:1.05rem;">{_e(row.intent_type)}</strong>',
         chain_badge,
         f'<span style="color:#888;margin-left:0.5rem;font-size:0.82rem;">{_e(row.protocol)}</span>',
+        handle_chip,
         confidence_chip,
         count_badge,
         "</div>",
@@ -658,27 +815,23 @@ def _render_expander_blocks(
     if len(sub_txs) > 1:
         _render_sub_tx_block(row, sub_txs, show_approvals=show_approvals)
 
-    block_col1, block_col2 = st.columns(2)
+    # Block 1 — Receipt-parsed extracted data (full width).
+    st.markdown("**Receipt-parsed data**")
+    _render_receipt_block(row.extracted_data_json)
 
-    # Block 1 — Receipt-parsed extracted data (left column, top).
-    with block_col1:
-        st.markdown("**Receipt-parsed data**")
-        _render_receipt_block(row.extracted_data_json)
-
-    # Block 2 — Oracle quotes used (right column, top)
-    with block_col2:
-        st.markdown("**Oracle quotes used (price_inputs_json)**")
-        if row.price_inputs_json:
-            try:
-                prices = json.loads(row.price_inputs_json)
-                _render_oracle_block(prices)
-            except (json.JSONDecodeError, TypeError):
-                st.code(row.price_inputs_json, language="json")
-        else:
-            st.markdown(
-                "<div style='color:#666;font-style:italic;'>no oracle quotes recorded for this intent</div>",
-                unsafe_allow_html=True,
-            )
+    # Block 2 — Oracle quotes used (full width).
+    st.markdown("**Oracle quotes used (price_inputs_json)**")
+    if row.price_inputs_json:
+        try:
+            prices = json.loads(row.price_inputs_json)
+            _render_oracle_block(prices)
+        except (json.JSONDecodeError, TypeError):
+            st.code(row.price_inputs_json, language="json")
+    else:
+        st.markdown(
+            "<div style='color:#666;font-style:italic;'>no oracle quotes recorded for this intent</div>",
+            unsafe_allow_html=True,
+        )
 
     # Block 3 — Accounting payload (full width)
     st.markdown("**Typed accounting payload**")
@@ -730,7 +883,12 @@ def _render_expander_blocks(
         )
         try:
             pe = json.loads(row.position_event_json)
-            _render_kv_block(pe, prefix="position_event")
+            pe_visible = _filter_position_event_fields(pe) if isinstance(pe, dict) else pe
+            _render_kv_block(
+                pe_visible,
+                prefix="position_event",
+                context=_kv_context_for_position_event(pe if isinstance(pe, dict) else {}, row),
+            )
         except (json.JSONDecodeError, TypeError):
             st.code(row.position_event_json, language="json")
 
@@ -814,30 +972,237 @@ def _render_sub_tx_block(
     )
 
 
+# Field schemas for the per-row "Linked position event" panel. The
+# ``position_events`` table is unified for LP and PERP, with one set of
+# columns NULL on each row depending on ``position_type``. Without a
+# type-aware filter, an LP row renders five blank PERP fields
+# (``leverage`` / ``entry_price`` / ``mark_price`` / ``unrealized_pnl`` /
+# ``is_long``) — visual noise that confuses operators.
+_POSITION_EVENT_LP_FIELDS: frozenset[str] = frozenset(
+    {
+        "token0",
+        "token1",
+        "amount0",
+        "amount1",
+        "tick_lower",
+        "tick_upper",
+        "liquidity",
+        "in_range",
+        "fees_token0",
+        "fees_token1",
+    }
+)
+_POSITION_EVENT_PERP_FIELDS: frozenset[str] = frozenset(
+    {
+        "leverage",
+        "entry_price",
+        "mark_price",
+        "unrealized_pnl",
+        "is_long",
+    }
+)
+_POSITION_EVENT_SHARED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "deployment_id",
+        "cycle_id",
+        "position_id",
+        "position_type",
+        "event_type",
+        "timestamp",
+        "protocol",
+        "chain",
+        "value_usd",
+        "tx_hash",
+        "gas_usd",
+        "ledger_entry_id",
+        "protocol_fees_usd",
+        "attribution_json",
+        "attribution_version",
+        # ``execution_mode`` distinguishes ``live`` / ``paper`` / ``dry_run``
+        # (VIB-2837 on ``PositionEvent``). Operators rely on this to tell
+        # whether a position came from a real run or paper-trading; dropping
+        # it from the panel would erode the same trust signal this PR is
+        # trying to strengthen.
+        "execution_mode",
+    }
+)
+
+# Raw-on-chain integer fields in the position-event payload that the
+# dashboard scales to human units via the token resolver (Bug 5 — same
+# screen no longer mixes raw and scaled representations of the same
+# logical value). Keys → token-side ("token0" / "token1" / "native") that
+# decides which symbol drives the decimals lookup.
+_LP_AMOUNT_FIELDS_TOKEN0: frozenset[str] = frozenset(
+    {
+        "amount0",
+        "fees_token0",
+        "fees0_collected",
+    }
+)
+_LP_AMOUNT_FIELDS_TOKEN1: frozenset[str] = frozenset(
+    {
+        "amount1",
+        "fees_token1",
+        "fees1_collected",
+    }
+)
+
+# Event types that do not produce ``protocol_fees_usd`` by definition.
+# Empty cells for these are correct but noisy — hide them rather than
+# render ``""`` (which the operator misreads as "fee = 0").
+_NO_PROTOCOL_FEES_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "OPEN",
+        "ADJUST",
+        "LP_OPEN",
+        "PERP_OPEN",
+    }
+)
+
+
+@dataclass(frozen=True)
+class KVContext:
+    """Per-block context threaded into ``_render_kv_block``.
+
+    Centralizes the bits of row metadata the kv-block needs to make
+    rendering decisions: the event_type (for the protocol_fees_usd
+    hiding policy), and chain/token symbols (for scaling raw integer
+    amounts via the token resolver). All fields default to empty so
+    call sites that don't need scaling can omit the context entirely.
+    """
+
+    event_type: str = ""
+    chain: str = ""
+    token0: str = ""
+    token1: str = ""
+
+
+def _kv_context_for_position_event(pe: dict[str, Any], row: TradeTapeRow) -> KVContext:
+    """Build a :class:`KVContext` from a position_event dict and its ledger row."""
+    return KVContext(
+        event_type=str(pe.get("event_type") or row.position_event_type or "").upper(),
+        chain=str(pe.get("chain") or row.chain or ""),
+        token0=str(pe.get("token0") or ""),
+        token1=str(pe.get("token1") or ""),
+    )
+
+
+def _filter_position_event_fields(pe: dict[str, Any]) -> dict[str, Any]:
+    """Drop PERP fields from an LP position_event (and vice-versa).
+
+    ``position_events`` is a unified LP+PERP table; the columns that don't
+    apply to the row's ``position_type`` are NULL. Rendering them as
+    blanks misleads operators (Bug 2 on the position panel — an LP row
+    showed ``leverage:`` ``entry_price:`` ``mark_price:`` ``is_long: null``).
+    """
+    position_type = str(pe.get("position_type") or "").upper()
+    if position_type == "LP":
+        kept = _POSITION_EVENT_SHARED_FIELDS | _POSITION_EVENT_LP_FIELDS
+    elif position_type == "PERP":
+        kept = _POSITION_EVENT_SHARED_FIELDS | _POSITION_EVENT_PERP_FIELDS
+    else:
+        # Unknown position_type — keep everything; the column noise is
+        # better than dropping legitimate fields the gateway evolves.
+        return pe
+    return {k: v for k, v in pe.items() if k in kept}
+
+
+def _scale_lp_amount(raw: Any, symbol: str, chain: str) -> str | None:
+    """Scale a raw on-chain integer amount to human units using the resolver.
+
+    Returns ``None`` when scaling cannot be done (no decimals, non-integer
+    value, missing symbol/chain) — caller falls back to the raw string.
+    """
+    if raw in (None, ""):
+        return None
+    try:
+        d = Decimal(str(raw))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    if not d.is_finite() or d != d.to_integral_value():
+        return None
+    if not (symbol and chain):
+        return None
+    decimals = _try_token_decimals(symbol, chain)
+    if decimals is None or decimals <= 0:
+        return None
+    return _format_human_amount(d / (Decimal(10) ** decimals))
+
+
+def _format_scalar_kv_value(k: str, v: Any, ctx: KVContext) -> str | None:
+    """Return the inner-``<span>`` HTML for a (k, v) row, or None to hide it.
+
+    Encapsulates the two value-shape policies for the kv block:
+
+    * **Bug 4** — empty/None ``protocol_fees_usd`` is rendered as
+      "unmeasured" for events that *can* produce fees, and hidden entirely
+      for OPEN / ADJUST events (which can't, by definition). Never
+      substituted with ``0`` (AGENTS §Accounting: Empty ≠ Zero).
+    * **Bug 5** — raw on-chain integer LP amounts (``amount0`` / ``amount1``
+      / ``fees_token0`` / ``fees_token1`` / ``fees{0,1}_collected``) are
+      scaled via the token resolver and labelled with their symbol so the
+      same logical value is no longer rendered raw on one panel and scaled
+      on an adjacent panel of the same card.
+    """
+    if k == "protocol_fees_usd" and (v is None or v == ""):
+        if ctx.event_type in _NO_PROTOCOL_FEES_EVENT_TYPES:
+            return None
+        return (
+            "<span style='color:#888;font-style:italic;' "
+            "title='Empty ≠ Zero — this fee category was not measured "
+            "for this event'>unmeasured</span>"
+        )
+
+    if k in _LP_AMOUNT_FIELDS_TOKEN0:
+        scaled = _scale_lp_amount(v, ctx.token0, ctx.chain)
+        if scaled is not None:
+            return f"{_e(scaled)} <span style='color:#888;'>{_e(ctx.token0)}</span>"
+    elif k in _LP_AMOUNT_FIELDS_TOKEN1:
+        scaled = _scale_lp_amount(v, ctx.token1, ctx.chain)
+        if scaled is not None:
+            return f"{_e(scaled)} <span style='color:#888;'>{_e(ctx.token1)}</span>"
+
+    return _format_value(v)
+
+
 def _render_kv_block(
     data: Any,
     *,
     prefix: str = "",
     primary: bool = False,
     indent: int = 0,
+    context: KVContext | None = None,
 ) -> None:
-    """Render a dict / list as a borderless monospace key-value block."""
+    """Render a dict / list as a borderless monospace key-value block.
+
+    Nested dict/list values are split out into ``st.json`` widgets so the
+    operator can expand / collapse them rather than reading a 120-char
+    truncated preview (Bug 7).
+    """
+    ctx = context or KVContext()
     if isinstance(data, dict):
-        rows_html = []
+        scalar_items: list[tuple[str, Any]] = []
+        nested_items: list[tuple[str, Any]] = []
         for k, v in data.items():
             if k.startswith("_"):
                 continue
-            # ``v_repr`` is already HTML-escaped by ``_format_value``.
-            # The key ``k`` is dict-derived from receipt-parsed data on
-            # the gateway side and must also be escaped before
-            # interpolating into ``unsafe_allow_html``.
-            v_repr = _format_value(v)
+            if isinstance(v, dict | list):
+                nested_items.append((k, v))
+            else:
+                scalar_items.append((k, v))
+
+        rows_html: list[str] = []
+        for k, v in scalar_items:
+            v_repr = _format_scalar_kv_value(k, v, ctx)
+            if v_repr is None:
+                continue
             k_repr = _e(k)
             color = "#ddd" if primary else "#bbb"
             highlight = ""
-            if k.endswith("_usd") and isinstance(v_repr, str):
+            if k.endswith("_usd"):
                 highlight = "color:#00c853;font-weight:600;"
-            elif k in ("unavailable_reason",) and v:
+            elif k == "unavailable_reason" and v:
                 highlight = "color:#ff9800;"
             elif k in ("event_type", "asset", "protocol"):
                 highlight = "color:#2196f3;font-weight:600;"
@@ -846,23 +1211,45 @@ def _render_kv_block(
                 f"<span style='color:#888;'>{k_repr}:</span> "
                 f"<span style='{highlight}'>{v_repr}</span></div>"
             )
-        st.markdown(
-            "<div style='background:#1a1a1a;border-radius:4px;padding:0.5rem 0.75rem;'>"
-            + "".join(rows_html)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+
+        if rows_html:
+            st.markdown(
+                "<div style='background:#1a1a1a;border-radius:4px;padding:0.5rem 0.75rem;'>"
+                + "".join(rows_html)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Bug 7 — nested dict/list values get their own expand/collapse
+        # widget. Renders below the scalar block; visually grouped by a
+        # leading key label so the operator knows which field the JSON
+        # belongs to.
+        for k, v in nested_items:
+            st.markdown(
+                f"<div style='font-family:monospace;font-size:0.84rem;color:#888;margin-top:0.25rem;'>{_e(k)}:</div>",
+                unsafe_allow_html=True,
+            )
+            st.json(v, expanded=False)
     elif isinstance(data, list):
         for i, item in enumerate(data):
             st.markdown(f"**[{i}]**")
-            _render_kv_block(item, prefix=f"{prefix}[{i}]", indent=indent + 1)
+            _render_kv_block(
+                item,
+                prefix=f"{prefix}[{i}]",
+                indent=indent + 1,
+                context=context,
+            )
     else:
         st.code(str(data), language="text")
 
 
 def _format_value(v: Any) -> str:
-    """Return an HTML-safe representation of a JSON value for the kv block.
+    """Return an HTML-safe representation of a JSON scalar value for the kv block.
 
+    Dict / list values are handled separately by ``_render_kv_block``
+    (which delegates to ``st.json`` for expand/collapse); this helper is
+    now scalar-only. The dict/list branch is kept as a defensive fallback
+    for callers that bypass ``_render_kv_block`` and feed values directly.
     All gateway-sourced strings flowing through here are escaped before
     being interpolated into ``st.markdown(unsafe_allow_html=True)``.
     """

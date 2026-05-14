@@ -300,7 +300,7 @@ def render_lp_dashboard(
 
     # Position Status Section
     st.subheader("Position Status")
-    _render_position_status(session_state, config)
+    _render_position_status_panel(session_state, config)
 
     st.divider()
 
@@ -410,61 +410,152 @@ def render_lp_dashboard(
     render_trade_tape_section(strategy_id)
 
 
+def _render_position_status_panel(
+    session_state: dict[str, Any],
+    config: LPDashboardConfig,
+) -> None:
+    """Top-level dispatch: single position vs multi-position.
+
+    Strategies running a single LP (the historical default) populate the
+    scalar ``position_id`` / ``range_lower`` / ``range_upper`` /
+    ``token0_amount`` / ``token1_amount`` keys on ``session_state``. We
+    render that as one panel — backward compatible with every demo today.
+
+    Multi-position strategies (e.g. ``lp_dual`` / ``lp_triple``) populate
+    ``session_state["positions"]`` with a list of per-position dicts (each
+    shaped like the scalar keys above, plus an optional ``label``). We
+    render each in its own ``st.expander``, stacked, so an operator can
+    see all legs at a glance and drill into any one without losing the
+    others. Tabs were considered and rejected — they hide N-1 positions
+    behind a click.
+    """
+    positions = session_state.get("positions")
+    if isinstance(positions, list) and positions:
+        # Defensive: a strategy author who populates ``positions`` with
+        # anything that is not a dict (tuple, Pydantic model, string)
+        # would 500 the dashboard via ``AttributeError`` on ``.get``.
+        # Skip such entries so a single typo can't take the panel down.
+        valid = [p for p in positions if isinstance(p, dict)]
+        if not valid:
+            _render_position_status(session_state, config)
+            return
+        if len(valid) == 1:
+            _render_position_status(_merge_state(session_state, valid[0]), config)
+            return
+        for idx, pos in enumerate(valid, start=1):
+            # Bug 6 — surface the strategy-stamped registry_handle (e.g.
+            # ``leg_narrow`` / ``leg_wide``) directly. The dashboard used
+            # to read ``label``, which the lp_dual / lp_triple strategies
+            # don't populate — the operator saw "Position 1" / "Position 2"
+            # instead of the strategy's own per-leg names. Fall back to
+            # ``label`` (older strategies) and then to a numeric stub.
+            leg_name = pos.get("registry_handle") or pos.get("label") or f"Position {idx}"
+            pid = pos.get("position_id")
+            header = f"{leg_name} — id {pid}" if pid else leg_name
+            with st.expander(header, expanded=idx == 1):
+                _render_position_status(_merge_state(session_state, pos), config)
+        return
+
+    _render_position_status(session_state, config)
+
+
+def _merge_state(base: dict[str, Any], pos: dict[str, Any]) -> dict[str, Any]:
+    """Overlay per-position fields on the strategy-wide session state."""
+    merged = dict(base)
+    merged.update(pos)
+    return merged
+
+
 def _render_position_status(
     session_state: dict[str, Any],
     config: LPDashboardConfig,
 ) -> None:
-    """Render the position status section."""
-    col1, col2, col3, col4 = st.columns(4)
+    """Render the position status section.
 
-    with col1:
+    Layout: 2 columns × 4 rows. The 4-col layout truncated long values
+    (``Out of Range``, ``$80,950.0123``); 2 columns gives each metric
+    enough horizontal room to render at full ``st.metric`` size without
+    ellipsizing.
+    """
+    # Row 1
+    col_a, col_b = st.columns(2)
+    with col_a:
         position_id = session_state.get("position_id", "N/A")
-        st.metric("Position ID", str(position_id)[:10] + "..." if len(str(position_id)) > 10 else position_id)
-
-    with col2:
+        pid_str = str(position_id)
+        st.metric("Position ID", pid_str if len(pid_str) <= 24 else pid_str[:24] + "...")
+    with col_b:
         is_active = session_state.get("is_active", False)
-        status = "Active" if is_active else "Inactive"
-        st.metric("Status", status)
+        st.metric("Status", "Active" if is_active else "Inactive")
 
-    with col3:
-        in_range = session_state.get("in_range", None)
-        if in_range is not None:
-            range_status = "In Range" if in_range else "Out of Range"
-            st.metric("Range Status", range_status)
-        else:
-            st.metric("Range Status", "Unknown")
+    # Row 2 — Range Status full-width (Current Price removed pending
+    # pool-relative-unit fix; today's USD value didn't compose with the
+    # tick-derived range bounds, so we drop it rather than display
+    # something misleading).
+    in_range = session_state.get("in_range", None)
+    if in_range is None:
+        range_status = "Unknown"
+    else:
+        range_status = "In Range" if in_range else "Out of Range"
+    st.metric("Range Status", range_status)
 
-    with col4:
-        current_price = session_state.get("current_price")
-        if current_price is not None:
-            st.metric("Current Price", f"${float(current_price):,.4f}")
-        else:
-            st.metric("Current Price", "N/A")
+    # Row 3
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("Lower Bound", _fmt_pool_price(session_state.get("range_lower"), config))
+    with col_b:
+        st.metric("Upper Bound", _fmt_pool_price(session_state.get("range_upper"), config))
 
-    # Second row of metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Row 4
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric(config.token0, _fmt_token_amount(session_state.get("token0_amount", 0)))
+    with col_b:
+        st.metric(config.token1, _fmt_token_amount(session_state.get("token1_amount", 0)))
 
-    with col1:
-        range_lower = session_state.get("range_lower")
-        try:
-            st.metric("Lower Bound", f"${float(range_lower):,.4f}" if range_lower is not None else "N/A")
-        except (ValueError, TypeError):
-            st.metric("Lower Bound", "N/A")
 
-    with col2:
-        range_upper = session_state.get("range_upper")
-        try:
-            st.metric("Upper Bound", f"${float(range_upper):,.4f}" if range_upper is not None else "N/A")
-        except (ValueError, TypeError):
-            st.metric("Upper Bound", "N/A")
+def _fmt_token_amount(value: Any) -> str:
+    """Format a token amount with adaptive precision.
 
-    with col3:
-        token0_amount = session_state.get("token0_amount", 0)
-        st.metric(config.token0, f"{float(token0_amount):.4f}")
+    Fixed ``:.4f`` / ``:,.2f`` rounds sub-1 amounts to ``0.0000`` /
+    ``0.00`` — a 0.0001346 WBTC position disappears entirely. Use 4
+    significant figures for sub-1 values and 2dp thousands-separated for
+    ≥1, matching the trade-tape headline convention.
+    """
+    try:
+        d = Decimal(str(value)) if value is not None else Decimal("0")
+    except (ArithmeticError, ValueError, TypeError):
+        return str(value)
+    if not d.is_finite():
+        return str(value)
+    abs_d = abs(d)
+    if abs_d == 0:
+        return "0"
+    if abs_d >= Decimal("1"):
+        return f"{d:,.2f}"
+    return f"{d:.4g}"
 
-    with col4:
-        token1_amount = session_state.get("token1_amount", 0)
-        st.metric(config.token1, f"{float(token1_amount):,.2f}")
+
+def _fmt_pool_price(value: Any, config: LPDashboardConfig) -> str:
+    """Format an LP price value with adaptive precision.
+
+    Always preserves the strategy-provided unit — the template is
+    agnostic to whether ``current_price``/``range_lower``/``range_upper``
+    are pool-relative (``token1 per token0``, the natural Uniswap V3
+    tick output) or USD-denominated. The display picks ``:.4g`` for
+    sub-1 values so a ratio like ``0.000868 BTC/ETH`` doesn't collapse
+    to ``0.0009``.
+    """
+    if value is None or value == "":
+        return "N/A"
+    try:
+        d = Decimal(str(value))
+    except (ArithmeticError, ValueError, TypeError):
+        return "N/A"
+    if not d.is_finite():
+        return "N/A"
+    if abs(d) >= Decimal("1"):
+        return f"{d:,.4f}"
+    return f"{d:.4g}"
 
 
 def _render_performance_summary(

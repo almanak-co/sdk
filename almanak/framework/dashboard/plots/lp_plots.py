@@ -378,6 +378,23 @@ def plot_positions_over_time(  # noqa: C901
             else:
                 processed_positions.append(pos)
 
+        # Multi-position color cycle. With one position we keep the
+        # original green (``position_fill``) so single-LP demos look
+        # unchanged. With N>1 each position picks a distinct hue so
+        # overlapping rectangles in a dual / triple LP strategy stay
+        # visually separable.
+        if len(processed_positions) > 1:
+            position_palette = [
+                colors.position_fill,  # green
+                colors.primary,  # blue
+                colors.secondary,  # purple
+                colors.warning,  # orange
+                colors.accent,  # teal
+                colors.danger,  # red
+            ]
+        else:
+            position_palette = [colors.position_fill]
+
         # Add legend entry for positions
         fig.add_trace(
             go.Scatter(
@@ -389,7 +406,8 @@ def plot_positions_over_time(  # noqa: C901
             )
         )
 
-        for pos in processed_positions:
+        for idx, pos in enumerate(processed_positions):
+            pos_color = position_palette[idx % len(position_palette)]
             # Get position bounds
             date_start = pos.date_start
             date_end = pos.date_end or x_max
@@ -435,7 +453,7 @@ def plot_positions_over_time(  # noqa: C901
                     x1=date_end,
                     y0=lower_price,
                     y1=upper_price,
-                    fillcolor=colors.position_fill,
+                    fillcolor=pos_color,
                     opacity=0.3,
                     line_width=0,
                 )
