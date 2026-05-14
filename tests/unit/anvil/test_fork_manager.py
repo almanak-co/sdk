@@ -287,3 +287,220 @@ class TestFundTokensWrappedNativeFallback:
         # anvil_deal should have been called (returns True = success)
         deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_deal"]
         assert len(deal_calls) == 1, "anvil_deal must be called as fallback"
+
+
+# =============================================================================
+# Regression guards for the FiatToken-proxy funding bug (e.g. cbBTC on Base):
+# brute-force slot probing would write to slot 3 (the `blacklisted` mapping in
+# Circle's FiatTokenV2_2 storage layout) before landing on slot 9 (`_balances`),
+# blacklisting the wallet so every subsequent approve/transfer reverted with
+# "Blacklistable: account is blacklisted". The fixes below are tested here.
+# =============================================================================
+
+
+def _make_rpc_dispatcher(handlers: dict):
+    """Build an AsyncMock side_effect for `_rpc_call_raw` that dispatches by method.
+
+    Each handler value is either:
+      - a callable `fn(params) -> (success, result)` invoked per call
+      - a static `(success, result)` tuple returned every time
+    Unknown methods raise AssertionError so the test fails loudly.
+    """
+
+    async def _dispatch(method, params):
+        if method not in handlers:
+            raise AssertionError(f"Unexpected RPC call: {method} {params!r}")
+        h = handlers[method]
+        return h(params) if callable(h) else h
+
+    return AsyncMock(side_effect=_dispatch)
+
+
+class TestFundTokenViaStorageSnapshotRevert:
+    """Wrong-slot writes must be reverted before the next probe attempt.
+
+    Without snapshot/revert, slot probing on Coinbase-style FiatToken proxies
+    would leave the wallet blacklisted (slot 3 = blacklisted mapping) before
+    reaching the right balance slot. These tests guard the snapshot/revert
+    wrapper around each iteration of `_fund_token_via_storage`.
+    """
+
+    WALLET = "0x" + "a" * 40
+    TOKEN = "0x" + "b" * 40
+    AMOUNT_HEX = "0x" + (1_000_000).to_bytes(32, "big").hex()  # 1e6 token units
+
+    @pytest.fixture()
+    def manager(self):
+        _clear_flags_cache()
+        mgr = RollingForkManager(rpc_url="http://rpc.test", chain="base", anvil_port=9999)
+        mgr._is_running = True
+        return mgr
+
+    @pytest.mark.asyncio()
+    async def test_wrong_slot_writes_are_reverted(self, manager):
+        """For each non-matching slot probed, evm_revert MUST be called before the next snapshot."""
+        # Make slot 9 the "correct" one: balanceOf only returns the expected
+        # value on the 7th call (slot 9 is index 6 in [0,1,2,3,4,5,9,51,52]).
+        handlers = {
+            "evm_snapshot": (True, "0xsnap"),
+            "anvil_setStorageAt": (True, None),
+            "evm_mine": (True, None),
+            "evm_revert": (True, True),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+
+        balance_call_count = 0
+
+        async def fake_balance(_token, _wallet):
+            nonlocal balance_call_count
+            balance_call_count += 1
+            return 1_000_000 if balance_call_count == 7 else 0
+
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", side_effect=fake_balance),
+        ):
+            result = await manager._fund_token_via_storage(self.WALLET, self.TOKEN, self.AMOUNT_HEX, "TEST")
+
+        assert result is True
+        # Exactly 6 evm_revert calls — one per wrong slot (0,1,2,3,4,5). The
+        # matching slot 9 keeps its snapshot uncommitted (no revert).
+        revert_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "evm_revert"]
+        assert len(revert_calls) == 6, f"Expected 6 reverts, got {len(revert_calls)}"
+        # And exactly 7 snapshots (one per attempted slot up to and including slot 9)
+        snap_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "evm_snapshot"]
+        assert len(snap_calls) == 7
+        # Ordering: each wrong-slot snapshot must be reverted BEFORE the next
+        # iteration takes its snapshot. A regression that batches reverts at
+        # the end would still satisfy the counts above but leave wrong-slot
+        # writes visible to subsequent probes — defeating the snapshot fix.
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        snapshot_positions = [i for i, m in enumerate(methods) if m == "evm_snapshot"]
+        revert_positions = [i for i, m in enumerate(methods) if m == "evm_revert"]
+        for k, rev_pos in enumerate(revert_positions):
+            next_snap_pos = snapshot_positions[k + 1]
+            assert rev_pos < next_snap_pos, (
+                f"Revert for iteration {k} (pos {rev_pos}) must come before next snapshot (pos {next_snap_pos})"
+            )
+
+    @pytest.mark.asyncio()
+    async def test_aborts_when_snapshot_unsupported(self, manager):
+        """If evm_snapshot returns (False, _), probing must abort without writes."""
+        handlers = {
+            "evm_snapshot": (False, None),
+            # If anvil_setStorageAt or evm_revert get called, the dispatcher
+            # asserts — that itself would fail the test.
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", AsyncMock(return_value=0)),
+        ):
+            result = await manager._fund_token_via_storage(self.WALLET, self.TOKEN, self.AMOUNT_HEX, "TEST")
+
+        assert result is False
+        set_storage_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setStorageAt"]
+        assert len(set_storage_calls) == 0, "Must NOT write storage when snapshot is unavailable"
+
+class TestFundTokenViaWhaleGasFunding:
+    """Whale impersonation must work even when the whale is a contract with 0 ETH.
+
+    Many realistic whales (Aave aTokens, Morpho vaults) hold large token reserves
+    but carry no native gas, so eth_sendTransaction would fail. The fix tops up
+    the whale conditionally (only when it has < 0.1 ETH) and restores the
+    original balance on exit so the fork's observable state is unchanged.
+    """
+
+    WALLET = "0x" + "a" * 40
+    TOKEN = "0x" + "b" * 40
+    WHALE = "0x" + "c" * 40
+    AMOUNT_HEX = "0x" + (1_000_000).to_bytes(32, "big").hex()
+
+    @pytest.fixture()
+    def manager(self):
+        _clear_flags_cache()
+        mgr = RollingForkManager(rpc_url="http://rpc.test", chain="base", anvil_port=9999)
+        mgr._is_running = True
+        return mgr
+
+    @pytest.mark.asyncio()
+    async def test_tops_up_whale_when_balance_low(self, manager):
+        """anvil_setBalance must be called when the whale has < 0.1 ETH."""
+        handlers = {
+            "anvil_impersonateAccount": (True, None),
+            "eth_getBalance": (True, "0x0"),  # 0 ETH — needs top-up
+            "anvil_setBalance": (True, None),
+            "eth_sendTransaction": (True, "0xtxhash"),
+            "evm_mine": (True, None),
+            "anvil_stopImpersonatingAccount": (True, None),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", AsyncMock(return_value=1_000_000)),
+        ):
+            result = await manager._fund_token_via_whale(self.WALLET, self.TOKEN, self.AMOUNT_HEX, self.WHALE, "TEST")
+
+        assert result is True
+        setbalance_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setBalance"]
+        # Two setBalance calls expected: top-up to 1 ETH, then restore to 0x0
+        assert len(setbalance_calls) == 2, f"Expected 2 setBalance calls (topup + restore), got {len(setbalance_calls)}"
+        topup_args = setbalance_calls[0][0][1]
+        assert topup_args[0] == self.WHALE
+        assert int(topup_args[1], 16) == 10**18, "Top-up must be 1 ETH"
+
+    @pytest.mark.asyncio()
+    async def test_skips_topup_when_whale_has_enough_eth(self, manager):
+        """When whale has >= 0.1 ETH, anvil_setBalance must NOT be called."""
+        existing_balance_hex = "0x" + format(5 * 10**17, "x")  # 0.5 ETH
+        handlers = {
+            "anvil_impersonateAccount": (True, None),
+            "eth_getBalance": (True, existing_balance_hex),
+            # setBalance MUST NOT be called — would raise via dispatcher
+            "eth_sendTransaction": (True, "0xtxhash"),
+            "evm_mine": (True, None),
+            "anvil_stopImpersonatingAccount": (True, None),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", AsyncMock(return_value=1_000_000)),
+        ):
+            result = await manager._fund_token_via_whale(self.WALLET, self.TOKEN, self.AMOUNT_HEX, self.WHALE, "TEST")
+
+        assert result is True
+        setbalance_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setBalance"]
+        assert len(setbalance_calls) == 0, "Whale with sufficient ETH must not be perturbed"
+
+    @pytest.mark.asyncio()
+    async def test_restores_original_balance_on_exit(self, manager):
+        """After topping up, the whale's original balance must be restored."""
+        original_balance_hex = "0x1234"
+        handlers = {
+            "anvil_impersonateAccount": (True, None),
+            "eth_getBalance": (True, original_balance_hex),
+            "anvil_setBalance": (True, None),
+            "eth_sendTransaction": (True, "0xtxhash"),
+            "evm_mine": (True, None),
+            "anvil_stopImpersonatingAccount": (True, None),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", AsyncMock(return_value=1_000_000)),
+        ):
+            await manager._fund_token_via_whale(self.WALLET, self.TOKEN, self.AMOUNT_HEX, self.WHALE, "TEST")
+
+        setbalance_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setBalance"]
+        assert len(setbalance_calls) == 2
+        # Second call (the restore) must reference the ORIGINAL balance hex.
+        restore_args = setbalance_calls[1][0][1]
+        assert restore_args[0] == self.WHALE
+        assert restore_args[1] == original_balance_hex, "Restore must use the original balance"
+
+def test_cbbtc_base_whale_entry_present():
+    """cbBTC on Base must be in the whale list — guards against accidental deletion
+    of the entry that prevents storage probing from corrupting FiatTokenV2_2 state.
+    """
+    assert "base" in fm.WHALE_FUNDED_TOKENS
+    assert "CBBTC" in fm.WHALE_FUNDED_TOKENS["base"]

@@ -694,3 +694,136 @@ class TestStateSetupGasBuffer:
         assert _STATE_SETUP_GAS_BUFFER == 1.2, (
             f"Gas buffer should be 1.2 (20%), got {_STATE_SETUP_GAS_BUFFER}"
         )
+
+
+class TestDecodeRevertPayload:
+    """Pure-function tests for `_decode_revert_payload`.
+
+    The decoder turns the raw `data` field from an eth_call revert into a
+    human-readable reason. Each test pins one branch of the selector dispatch.
+    """
+
+    def _build_error_string_payload(self, message: str) -> str:
+        """Build a real Error(string) ABI payload for the given message."""
+        from eth_abi.abi import encode as abi_encode
+
+        encoded = abi_encode(["string"], [message]).hex()
+        return "0x08c379a0" + encoded
+
+    def test_decodes_error_string(self):
+        from almanak.framework.execution.simulator.local import _decode_revert_payload
+
+        payload = self._build_error_string_payload("Blacklistable: account is blacklisted")
+        assert _decode_revert_payload(payload) == "Blacklistable: account is blacklisted"
+
+    def test_decodes_panic(self):
+        from almanak.framework.execution.simulator.local import _decode_revert_payload
+
+        # Panic(uint256) selector + code 0x11 (arithmetic overflow)
+        panic_code = (0x11).to_bytes(32, "big").hex()
+        payload = "0x4e487b71" + panic_code
+        assert _decode_revert_payload(payload) == "Panic(0x11)"
+
+    def test_unknown_selector_reports_selector_with_args_preview(self):
+        from almanak.framework.execution.simulator.local import _decode_revert_payload
+
+        # Synthetic custom error with one uint256 arg
+        payload = "0xfe47b63c" + (42).to_bytes(32, "big").hex()
+        decoded = _decode_revert_payload(payload)
+        assert decoded is not None
+        assert "0xfe47b63c" in decoded
+        # First 32 bytes of args (the encoded 42) should appear in the preview
+        assert "00000000000000000000000000000000000000000000000000000000000000002a"[-64:] in decoded
+
+    def test_empty_and_malformed_inputs_return_none(self):
+        from almanak.framework.execution.simulator.local import _decode_revert_payload
+
+        # None of these should decode — empty, just-the-0x, truncated below 10 chars
+        for bad in (None, "", "0x", "0x12"):
+            assert _decode_revert_payload(bad) is None, f"Expected None for {bad!r}"
+
+
+class TestExplainRevert:
+    """Tests for `LocalSimulator._explain_revert` — the eth_call replay path
+    that surfaces the on-chain revert reason instead of a bare 'Transaction
+    reverted' string.
+    """
+
+    @pytest.mark.asyncio
+    async def test_decodes_string_revert_from_data(self):
+        """ContractLogicError with Error(string) `.data` should yield the decoded reason."""
+        from eth_abi.abi import encode as abi_encode
+        from web3.exceptions import ContractLogicError
+
+        from almanak.framework.execution.simulator.local import LocalSimulator
+
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        encoded = abi_encode(["string"], ["Blacklistable: account is blacklisted"]).hex()
+        data = "0x08c379a0" + encoded
+
+        mock_web3 = MagicMock()
+        mock_web3.eth.call = AsyncMock(side_effect=ContractLogicError("execution reverted", data=data))
+
+        result = await sim._explain_revert(mock_web3, {"from": "0xa", "to": "0xb", "data": "0x"})
+        assert result == "Transaction reverted: Blacklistable: account is blacklisted"
+
+    @pytest.mark.asyncio
+    async def test_no_data_returns_no_reason(self):
+        """ContractLogicError with empty `.data` should yield '(no reason)'."""
+        from web3.exceptions import ContractLogicError
+
+        from almanak.framework.execution.simulator.local import LocalSimulator
+
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3 = MagicMock()
+        mock_web3.eth.call = AsyncMock(side_effect=ContractLogicError("execution reverted", data="0x"))
+
+        result = await sim._explain_revert(mock_web3, {"from": "0xa", "to": "0xb", "data": "0x"})
+        assert result == "Transaction reverted (no reason)"
+
+    @pytest.mark.asyncio
+    async def test_replay_not_reverting_is_reported(self):
+        """If eth_call does NOT revert (state shifted), report that explicitly
+        instead of pretending we have a reason.
+        """
+        from almanak.framework.execution.simulator.local import LocalSimulator
+
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+        mock_web3 = MagicMock()
+        mock_web3.eth.call = AsyncMock(return_value=b"")  # call succeeds
+
+        result = await sim._explain_revert(mock_web3, {"from": "0xa", "to": "0xb", "data": "0x"})
+        assert "did not revert" in result
+
+
+class TestEstimateGasDecodesCustomError:
+    """Regression guard: gas estimation must decode known custom-error selectors
+    to their friendly name via the shared submitter registry, not surface them
+    as the raw 4-byte selector or web3.py's args-tuple repr.
+
+    Without this, every Aave V3 health-factor revert surfaces as
+    ``('0x6679996d', '0x6679996d')`` and forces callers to decode by hand.
+    """
+
+    @pytest.mark.asyncio
+    async def test_aave_health_factor_revert_decodes_to_friendly_name(self):
+        from web3.exceptions import ContractCustomError
+
+        from almanak.framework.execution.simulator.local import LocalSimulator
+
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+        # Aave V3 Pool reverts with this selector when a withdraw would drop
+        # health factor below the liquidation threshold.
+        mock_web3.eth.estimate_gas = AsyncMock(side_effect=ContractCustomError("0x6679996d", data="0x6679996d"))
+        sim._web3 = mock_web3
+
+        tx = _make_tx(data="0x69328dec", gas_limit=200000)  # Aave withdraw selector
+        gas, error = await sim._estimate_gas(tx)
+
+        assert gas == 0
+        assert error == "HealthFactorLowerThanLiquidationThreshold()", (
+            f"Expected decoded Aave error, got {error!r}"
+        )

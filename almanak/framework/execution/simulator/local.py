@@ -35,8 +35,10 @@ import asyncio
 import logging
 from typing import Any
 
+from eth_abi.abi import decode as abi_decode
 from hexbytes import HexBytes
 from web3 import AsyncHTTPProvider, AsyncWeb3
+from web3.exceptions import ContractCustomError, ContractLogicError
 from web3.types import RPCEndpoint, TxParams, Wei
 
 from almanak.framework.execution.interfaces import (
@@ -47,6 +49,51 @@ from almanak.framework.execution.interfaces import (
 from almanak.framework.execution.simulator.config import is_local_rpc
 
 logger = logging.getLogger(__name__)
+
+# Solidity selectors used when decoding revert payloads.
+_ERROR_STRING_SELECTOR = "0x08c379a0"  # Error(string)
+_PANIC_SELECTOR = "0x4e487b71"  # Panic(uint256) — overflow, div/0, assert, etc.
+
+
+def _decode_revert_payload(data: str | None) -> str | None:
+    """Decode the `data` field of an eth_call revert into a short reason.
+
+    Handles the two standard Solidity revert encodings:
+      - Error(string)   selector 0x08c379a0
+      - Panic(uint256)  selector 0x4e487b71
+
+    Unknown selectors are reported as `custom error <selector>` with the first
+    32 bytes of args as a preview (enough to tell distinct errors apart even
+    without the ABI). Returns None when no useful reason can be extracted.
+    """
+    if not data or data in ("0x", "0x0") or len(data) < 10:
+        return None
+    selector = data[:10].lower()
+    body_hex = data[10:]
+    if selector == _ERROR_STRING_SELECTOR:
+        try:
+            (msg,) = abi_decode(["string"], bytes.fromhex(body_hex))
+            return msg or None
+        except Exception:
+            return None
+    if selector == _PANIC_SELECTOR:
+        try:
+            (code,) = abi_decode(["uint256"], bytes.fromhex(body_hex))
+            return f"Panic(0x{code:02x})"
+        except Exception:
+            return None
+    # Consult the shared selector registry maintained by the submitter so well-
+    # known protocol errors (Aave's HealthFactorLowerThanLiquidationThreshold,
+    # OpenZeppelin's ERC20InsufficientBalance, etc.) decode to their friendly
+    # names instead of a bare hex selector. Imported lazily to avoid pulling
+    # the submitter's heavy graph into simulator import time.
+    from almanak.framework.execution.submitter.public import KNOWN_CUSTOM_ERRORS
+
+    if selector in KNOWN_CUSTOM_ERRORS:
+        return KNOWN_CUSTOM_ERRORS[selector]
+    arg_preview = body_hex[:64] if body_hex else ""
+    return f"custom error {selector}" + (f" args=0x{arg_preview}" if arg_preview else "")
+
 
 # Timeout for waiting for transaction receipts during simulation state setup.
 # 30s accommodates slower chains (Avalanche, Ethereum mainnet forks) where
@@ -221,6 +268,29 @@ class LocalSimulator(Simulator):
                 extra={"to": tx.to, "timeout_seconds": _ESTIMATE_GAS_TIMEOUT},
             )
             return 0, timeout_msg
+        except (ContractLogicError, ContractCustomError) as e:
+            # web3.py raises these with `.data` set to the raw revert payload.
+            # Decode it directly: friendly name for known selectors (Aave's
+            # HealthFactorLowerThanLiquidationThreshold etc.), Error(string)
+            # message for plain reverts, "(no reason)" when the contract
+            # reverted with empty data. Without this, the simulator surfaces
+            # web3.py's args-tuple repr like `('0x6679996d', '0x6679996d')`
+            # which forces every caller to debug the 4-byte selector by hand.
+            data = getattr(e, "data", None)
+            decoded = _decode_revert_payload(data) if isinstance(data, str) else None
+            if not decoded:
+                message = (getattr(e, "message", None) or str(e)).strip()
+                prefix = "execution reverted"
+                if message.startswith(prefix):
+                    tail = message[len(prefix) :].lstrip(": ").strip()
+                    decoded = tail or "(no reason)"
+                else:
+                    decoded = self._parse_revert_reason(message)
+            logger.warning(
+                f"Gas estimation reverted: {decoded}",
+                extra={"to": tx.to, "error": str(e), "data": data},
+            )
+            return 0, decoded
         except Exception as e:
             error_str = str(e)
             # Try to extract revert reason from common error formats
@@ -337,13 +407,50 @@ class LocalSimulator(Simulator):
             receipt = await web3.eth.wait_for_transaction_receipt(tx_hash, timeout=_STATE_SETUP_TX_TIMEOUT)
 
             if receipt["status"] != 1:
-                return False, "Transaction reverted"
+                reason = await self._explain_revert(web3, tx_params)
+                return False, reason
 
             logger.debug(f"Executed tx for state setup: {tx_hash.hex()}")
             return True, None
 
         except Exception as e:
             return False, str(e)
+
+    async def _explain_revert(self, web3: AsyncWeb3, tx_params: TxParams) -> str:
+        """Re-run a failed tx as eth_call to recover the on-chain revert reason.
+
+        Without this, callers only see a generic "Transaction reverted" and have
+        to dig through traces to understand why. Replaying as eth_call against
+        the post-revert state gives identical EVM behavior (the reverted tx
+        didn't mutate state) and lets the node return the Error(string) /
+        Panic / custom-error payload.
+
+        Always returns a non-empty string. Never raises — RPC/transport failures
+        degrade gracefully to a generic message.
+        """
+        call_params: TxParams = {
+            k: v for k, v in tx_params.items() if k in ("from", "to", "data", "value", "gas", "gasPrice")
+        }  # type: ignore[assignment]
+        try:
+            await web3.eth.call(call_params, block_identifier="latest")
+            # The mined tx reverted but the read-only replay didn't. State
+            # could have shifted between submission and replay (e.g., another
+            # tx mined into the same block). Report what we know.
+            return "Transaction reverted (eth_call replay did not revert)"
+        except (ContractLogicError, ContractCustomError) as e:
+            data = getattr(e, "data", None)
+            if isinstance(data, str):
+                decoded = _decode_revert_payload(data)
+                if decoded:
+                    return f"Transaction reverted: {decoded}"
+            msg = (getattr(e, "message", None) or str(e)).strip()
+            prefix = "execution reverted"
+            if msg.startswith(prefix):
+                tail = msg[len(prefix) :].lstrip(": ").strip()
+                return f"Transaction reverted: {tail}" if tail else "Transaction reverted (no reason)"
+            return f"Transaction reverted: {msg}" if msg else "Transaction reverted"
+        except Exception as e:
+            return f"Transaction reverted (eth_call failed: {type(e).__name__})"
 
     async def simulate(  # noqa: C901
         self,

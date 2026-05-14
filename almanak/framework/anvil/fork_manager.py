@@ -323,6 +323,13 @@ WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
         # Circle: Treasury is a reliable large holder.
         "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
     },
+    "base": {
+        # cbBTC (Coinbase Wrapped BTC) FiatTokenProxy-style upgradeable proxy:
+        # brute-force slot 9 produces a valid balanceOf() but approve()/transfer
+        # revert because the implementation's internal state is inconsistent.
+        # aBasCbBTC (Aave V3 cbBTC reserve) holds ~2000 cbBTC and is auto-impersonatable.
+        "CBBTC": "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6",
+    },
 }
 
 # Wrapped native tokens that can be funded via deposit() instead of storage
@@ -860,6 +867,11 @@ class RollingForkManager:
             logger.exception(f"Error funding wallet: {e}")
             return False
 
+    # crap-allowlist: 5-tier funding fallback — wrapped-native deposit() / whale
+    # impersonation / known balance slot / anvil_deal / brute-force slot probe.
+    # Each tier exists to fund a class of token the prior tier can't handle safely,
+    # and the "first-that-succeeds-wins" sequencing relies on shared skip_storage_fallback
+    # state that doesn't cleanly split across helper boundaries.
     async def fund_tokens(  # noqa: C901
         self,
         address: str,
@@ -998,7 +1010,7 @@ class RollingForkManager:
 
                 # Priority 0b: Whale impersonation (VIB-2571)
                 # For tokens where storage slot patches pass balanceOf but break
-                # transferFrom (e.g., Ethereum USDC FiatTokenProxy).
+                # transferFrom (e.g., Ethereum USDC FiatTokenProxy, Base cbBTC).
                 if not funded:
                     whale_tokens = WHALE_FUNDED_TOKENS.get(self.chain, {})
                     whale_address = whale_tokens.get(lookup_symbol)
@@ -1007,8 +1019,20 @@ class RollingForkManager:
                             address, token_address, amount_hex, whale_address, display_name
                         )
                         # Whale-funded tokens are listed precisely because slot
-                        # patching produces broken internal state; skip storage.
+                        # patching produces broken internal state (blacklist
+                        # mapping, allowances). Skip storage fallback regardless
+                        # of whale outcome — falling through would corrupt proxy
+                        # state on tokens we know are unsafe for slot patching.
                         skip_storage_fallback = True
+                        if not funded:
+                            # `_fund_token_via_whale` logs only at debug; surface
+                            # the failure so the cause (e.g. whale has no gas,
+                            # transfer reverted) is visible at the top level
+                            # instead of just "Failed to fund X" with no reason.
+                            logger.error(
+                                f"Whale impersonation failed for {display_name} on {self.chain}; "
+                                f"refusing storage-slot fallback (would corrupt proxy state)"
+                            )
 
                 # Priority 1: Known storage slot (fast and reliable)
                 # Look up by original symbol key (case-insensitive)
@@ -1186,6 +1210,15 @@ class RollingForkManager:
         makes balanceOf() return the right value but transferFrom() reverts.
         Impersonation produces a real transfer with consistent internal state.
         """
+        # Gas top-up threshold: any whale with < 0.1 ETH gets bumped to 1 ETH
+        # for the duration of this call. Most realistic whales are contract
+        # addresses (Aave aTokens, lending pools) that hold huge token reserves
+        # but carry 0 ETH, so eth_sendTransaction would fail with "Insufficient
+        # funds for gas * price + value" without this.
+        MIN_GAS_WEI = 10**17
+        TOPUP_WEI = 10**18  # 1 ETH — plenty for one transfer
+
+        original_balance_hex: str | None = None
         try:
             # Impersonate the whale account
             success, _ = await self._rpc_call_raw("anvil_impersonateAccount", [whale_address])
@@ -1194,13 +1227,38 @@ class RollingForkManager:
                 return False
 
             try:
+                # Read the whale's current ETH balance. If it already has enough
+                # for gas, leave it alone — don't perturb fork state needlessly.
+                # If we do top up, capture the original so we can restore it in
+                # the finally block (keeps the whale's balance invariant from
+                # the strategy's perspective once impersonation ends).
+                #
+                # Bail out hard if the balance read fails: treating a failed
+                # eth_getBalance as 0 would mean later restoring the whale to
+                # "0x0", silently zeroing a non-zero balance that we just
+                # couldn't read due to transient RPC error. Better to fail the
+                # whale-funding attempt cleanly than to mutate fork state we
+                # can't see.
+                ok, balance_result = await self._rpc_call_raw("eth_getBalance", [whale_address, "latest"])
+                if not ok or not isinstance(balance_result, str):
+                    logger.debug(
+                        f"Failed to read ETH balance for whale {whale_address[:10]}... — "
+                        f"aborting whale-funded transfer to avoid clobbering unknown balance"
+                    )
+                    return False
+                current_balance = int(balance_result, 16)
+                if current_balance < MIN_GAS_WEI:
+                    original_balance_hex = balance_result
+                    topup_hex = "0x" + format(TOPUP_WEI, "x")
+                    await self._rpc_call_raw("anvil_setBalance", [whale_address, topup_hex])
+
                 # ERC-20 transfer(address,uint256) selector = 0xa9059cbb
                 # Encode: selector + address padded to 32 bytes + amount padded to 32 bytes
                 addr_padded = wallet_address.lower().replace("0x", "").zfill(64)
                 amt_padded = amount_hex.replace("0x", "").zfill(64)
                 calldata = "0xa9059cbb" + addr_padded + amt_padded
 
-                success, tx_hash = await self._rpc_call_raw(
+                success, _tx_hash = await self._rpc_call_raw(
                     "eth_sendTransaction",
                     [
                         {
@@ -1229,6 +1287,14 @@ class RollingForkManager:
                 logger.debug(f"Whale transfer for {token_symbol}: balance {balance} < expected {expected}")
                 return False
             finally:
+                # Restore the whale's original ETH balance if we topped it up,
+                # so the fork's state is observably unchanged from outside this
+                # function. Best-effort — never let cleanup mask the result.
+                if original_balance_hex is not None:
+                    try:
+                        await self._rpc_call_raw("anvil_setBalance", [whale_address, original_balance_hex])
+                    except Exception as e:
+                        logger.debug(f"Failed to restore whale balance for {whale_address[:10]}...: {e}")
                 # Stop impersonation regardless of transfer result
                 await self._rpc_call_raw("anvil_stopImpersonatingAccount", [whale_address])
 
@@ -1257,11 +1323,29 @@ class RollingForkManager:
             True if successful
         """
         common_slots = [0, 1, 2, 3, 4, 5, 9, 51, 52]
+        expected = int(amount_hex, 16)
 
         for slot in common_slots:
+            snap_id: str | None = None
             try:
-                storage_slot = self._calculate_mapping_slot(wallet_address, slot)
+                # Snapshot before the probe so wrong-slot writes can be rolled
+                # back. Without this, a write to a slot that turns out NOT to
+                # be `_balances` can corrupt unrelated state on proxy tokens —
+                # e.g. cbBTC's FiatTokenV2_2 has the `blacklisted` mapping at
+                # slot 3, so writing `keccak256(wallet||3) = nonzero` flags the
+                # wallet as blacklisted and every subsequent approve/transfer
+                # reverts with "Blacklistable: account is blacklisted" even
+                # though balanceOf(wallet) returns the expected value once we
+                # eventually hit slot 9.
+                snap_ok, snap_id = await self._rpc_call_raw("evm_snapshot", [])
+                if not snap_ok or snap_id is None:
+                    logger.warning(
+                        f"evm_snapshot unsupported on this fork; aborting storage-slot probe for "
+                        f"{token_symbol} to avoid corrupting proxy state"
+                    )
+                    return False
 
+                storage_slot = self._calculate_mapping_slot(wallet_address, slot)
                 success, _ = await self._rpc_call_raw(
                     "anvil_setStorageAt",
                     [token_address, storage_slot, self._pad_hex_to_32_bytes(amount_hex)],
@@ -1272,14 +1356,42 @@ class RollingForkManager:
                     await self._rpc_call_raw("evm_mine", [])
 
                     balance = await self._get_token_balance(token_address, wallet_address)
-                    expected = int(amount_hex, 16)
 
                     if balance == expected:
+                        # Right slot — keep the write. The snapshot is left
+                        # uncommitted; evm_revert is never called for this
+                        # iteration so the write persists.
                         logger.info(f"Funded {wallet_address[:10]}... with {token_symbol} via brute-force slot {slot}")
                         return True
 
+                # Wrong slot — revert the write before trying the next one.
+                # If the revert RPC itself fails, the wrong-slot write persists
+                # and any subsequent probe could compound the corruption that
+                # snapshot/revert exists to prevent. Bail out hard.
+                reverted, _ = await self._rpc_call_raw("evm_revert", [snap_id])
+                snap_id = None
+                if not reverted:
+                    logger.warning(
+                        f"evm_revert failed while probing slot {slot} for {token_symbol}; "
+                        f"aborting probe to avoid leaving corrupt state from earlier writes"
+                    )
+                    return False
+
             except Exception as e:
                 logger.debug(f"Storage slot {slot} failed for {token_symbol}: {e}")
+                # Best-effort revert if we took a snapshot before the failure.
+                # Same hard-abort rule as the wrong-slot path: a revert that
+                # silently fails leaves the fork dirty.
+                if snap_id is not None:
+                    try:
+                        reverted, _ = await self._rpc_call_raw("evm_revert", [snap_id])
+                        if not reverted:
+                            logger.warning(
+                                f"evm_revert failed while cleaning up slot {slot} for {token_symbol}; aborting probe"
+                            )
+                            return False
+                    except Exception:
+                        return False
                 continue
 
         logger.warning(
