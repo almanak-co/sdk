@@ -845,6 +845,20 @@ TRADERJOE_V2_LBPAIRS: dict[str, list[dict[str, str | int]]] = {
             "address": "0xD446eb1660F766d533BeCeEf890Df7A69d26f7d1",
         },
     ],
+    # Arbitrum WETH/USDC LBPair (bin_step=15) — the only WETH/USDC pair with
+    # meaningful liquidity on the LBFactory at
+    # ``0x8e42f2F4101563bF679975178e880FD87d3eFd4e``. Address verified on-chain
+    # via ``LBFactory.getLBPairInformation(WETH, USDC, 15)`` against the
+    # arbitrum one RPC and ``LBPair.getReserves()`` (~4 WETH / ~3861 USDC as of
+    # 2026-05-14).
+    "arbitrum": [
+        {
+            "tokenX": "WETH",
+            "tokenY": "USDC",
+            "bin_step": 15,
+            "address": "0x69f1216cB2905bf0852f74624D5Fa7b5FC4dA710",
+        },
+    ],
 }
 
 
