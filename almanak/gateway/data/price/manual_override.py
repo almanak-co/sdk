@@ -27,11 +27,14 @@ that infrastructure to ship first.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+from almanak.config.gateway_runtime import (
+    manual_price_override_keys,
+    manual_price_override_raw,
+)
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
@@ -70,7 +73,7 @@ def _lookup(token: str, quote: str) -> Decimal | None:
         candidates.append(f"{_ENV_PREFIX}{token_u}")
 
     for var in candidates:
-        raw = os.environ.get(var)
+        raw = manual_price_override_raw(var)
         if raw is None:
             continue
         try:
@@ -110,9 +113,7 @@ class ManualPriceOverrideSource(BasePriceSource):
         vars without restarting the gateway.
         """
         supported: list[str] = []
-        for key in os.environ:
-            if not key.startswith(_ENV_PREFIX):
-                continue
+        for key in manual_price_override_keys(prefix=_ENV_PREFIX):
             suffix = key[len(_ENV_PREFIX) :]
             # Strip the optional quote suffix (_USD, _WBTC, ...) to recover
             # the base token symbol.

@@ -9,7 +9,6 @@ All API keys are held in the gateway, keeping credentials secure.
 
 import json
 import logging
-import os
 import time
 
 import aiohttp
@@ -237,15 +236,12 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
 
-        # Load credentials from settings or environment
-        self._tenderly_account = getattr(settings, "tenderly_account_slug", None) or os.environ.get(
-            "TENDERLY_ACCOUNT_SLUG"
-        )
-        self._tenderly_project = getattr(settings, "tenderly_project_slug", None) or os.environ.get(
-            "TENDERLY_PROJECT_SLUG"
-        )
-        self._tenderly_key = getattr(settings, "tenderly_access_key", None) or os.environ.get("TENDERLY_ACCESS_KEY")
-        self._alchemy_key = getattr(settings, "alchemy_api_key", None) or os.environ.get("ALCHEMY_API_KEY")
+        # Boot-time settings are resolved through the config service; the
+        # servicer consumes that typed slice rather than reparsing env.
+        self._tenderly_account = getattr(settings, "tenderly_account_slug", None)
+        self._tenderly_project = getattr(settings, "tenderly_project_slug", None)
+        self._tenderly_key = getattr(settings, "tenderly_access_key", None)
+        self._alchemy_key = getattr(settings, "alchemy_api_key", None)
 
         # Determine available simulators
         self._tenderly_available = bool(self._tenderly_account and self._tenderly_project and self._tenderly_key)

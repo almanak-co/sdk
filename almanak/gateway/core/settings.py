@@ -1,10 +1,11 @@
 """Gateway configuration using Pydantic Settings."""
 
 import logging
+import math
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class GatewaySettings(BaseSettings):
     coingecko_api_key: str | None = None
     enso_api_key: str | None = None
     pendle_api_key: str | None = None
+    thegraph_api_key: str | None = None
     portfolio_api_key: str | None = None
     portfolio_api_provider: str = "zerion"
     portfolio_api_cache_ttl: int = 300
@@ -100,6 +102,18 @@ class GatewaySettings(BaseSettings):
 
     # Pendle API settings
     pendle_api_cache_ttl: float = 15.0  # seconds
+
+    # Gateway-side third-party integrations / service thresholds.
+    tenderly_account_slug: str | None = None
+    tenderly_project_slug: str | None = None
+    tenderly_access_key: str | None = None
+    dexscreener_min_liquidity_usd: float = 10_000.0
+    dexscreener_min_volume_usd: float = 1_000.0
+    dexscreener_min_turnover_ratio: float = 0.05
+    dexscreener_dominance_multiple: float = 3.0
+    polymarket_network: str = "mainnet"
+    polymarket_market_cache_ttl_seconds: float = 60.0
+    anvil_watchdog_interval: float = 5.0
 
     # Execution secrets
     private_key: str | None = None  # EVM (hex secp256k1)
@@ -187,6 +201,48 @@ class GatewaySettings(BaseSettings):
         # surfaces at boot rather than after first request.
         if value <= 0:
             raise ValueError(f"timeout must be > 0 (got {value})")
+        return value
+
+    @field_validator(
+        "dexscreener_min_liquidity_usd",
+        "dexscreener_min_volume_usd",
+        "dexscreener_dominance_multiple",
+        "anvil_watchdog_interval",
+    )
+    @classmethod
+    def _validate_positive_float(cls, value: float, info: ValidationInfo) -> float:
+        # CodeRabbit review on PR 2324: env.py only normalizes the unprefixed
+        # fallback path. Explicit kwargs / ALMANAK_GATEWAY_* still hit these
+        # fields directly, so the same NaN / non-positive guards have to live
+        # at the model boundary — otherwise a NaN DexScreener threshold
+        # silently disables the scam gates and a non-positive watchdog
+        # interval hot-loops the watchdog.
+        if not math.isfinite(value):
+            raise ValueError(f"{info.field_name} must be a finite number (got {value!r})")
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be > 0 (got {value})")
+        return value
+
+    @field_validator("dexscreener_min_turnover_ratio")
+    @classmethod
+    def _validate_turnover_ratio(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError(f"dexscreener_min_turnover_ratio must be a finite number (got {value!r})")
+        if value < 0 or value > 1:
+            raise ValueError(f"dexscreener_min_turnover_ratio must be in [0, 1] (got {value})")
+        return value
+
+    @field_validator("polymarket_market_cache_ttl_seconds")
+    @classmethod
+    def _validate_cache_ttl(cls, value: float) -> float:
+        # The legacy ``_parse_polymarket_market_cache_ttl_seconds`` helper
+        # clamps to ``[0, 24h]`` for the unprefixed fallback path; mirror
+        # ``>= 0`` here so the kwargs / ALMANAK_GATEWAY_* paths agree on the
+        # floor, and reject NaN that would defeat the clamp.
+        if not math.isfinite(value):
+            raise ValueError(f"polymarket_market_cache_ttl_seconds must be a finite number (got {value!r})")
+        if value < 0:
+            raise ValueError(f"polymarket_market_cache_ttl_seconds must be >= 0 (got {value})")
         return value
 
     @field_validator("chains", mode="before")

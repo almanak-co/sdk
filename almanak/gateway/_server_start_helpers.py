@@ -33,13 +33,16 @@ pre-refactor code because they are load-bearing for observability grep.
 from __future__ import annotations
 
 import logging
-import os
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any
 
 from grpc_health.v1 import health_pb2
 from grpc_reflection.v1alpha import reflection
 
+from almanak.config.gateway_runtime import (
+    gateway_wallets_configured,
+    legacy_safe_wallet_address,
+)
 from almanak.gateway.audit import AuditInterceptor
 from almanak.gateway.auth import AuthInterceptor
 from almanak.gateway.lifecycle import get_lifecycle_store
@@ -425,7 +428,7 @@ def load_wallet_registry(settings: GatewaySettings) -> Any | None:
     The legacy Safe env vars (``SAFE_WALLET_ADDRESS``, ``ALMANAK_GATEWAY_SAFE_MODE``)
     use the pre-registry path and are intentionally NOT intercepted here.
     """
-    if not os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+    if not gateway_wallets_configured():
         return None
 
     wallet_eps = entry_points(group="almanak.wallets")
@@ -442,7 +445,7 @@ def load_wallet_registry(settings: GatewaySettings) -> Any | None:
     wallet_registry = registry_cls.from_env(default_chains=settings.chains or None)
     logger.info("Wallet registry plugin loaded: %s", registry_cls.__name__)
 
-    if os.environ.get("SAFE_WALLET_ADDRESS"):
+    if legacy_safe_wallet_address():
         logger.warning(
             "Both ALMANAK_GATEWAY_WALLETS and SAFE_WALLET_ADDRESS are set. "
             "ALMANAK_GATEWAY_WALLETS takes precedence; legacy safe env vars are ignored."

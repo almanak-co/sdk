@@ -58,6 +58,7 @@ small helper functions. Those should be treated as transition shims:
 | `framework.py` | Framework toggles and boot-time runtime safety knobs |
 | `safe_signer.py` | Safe wallet registry + Zodiac signer config |
 | `simulation.py` | Tenderly / Alchemy simulation config |
+| `gateway_runtime.py` | Dynamic gateway-runtime helpers that intentionally still read live env |
 | `backtest.py` | Backtesting + standalone backtest-service config |
 | `strategy.py` | `StrategyConfig` Pydantic base for per-strategy schemas |
 | `service.py` | `load_config()` + the singleton `_load_dotenv_once()` |

@@ -29,7 +29,7 @@ A candidate pair on the requested chain is accepted only if ALL pass:
    runner-up's liquidity. Otherwise the symbol is ambiguous and the caller
    is forced to disambiguate with an explicit address.
 
-Thresholds are tunable via environment variables — see module constants.
+Thresholds are configurable at gateway boot via ``GatewaySettings``.
 
 The defaults are calibrated for the primary use case (new DEX launches on
 chains CoinGecko hasn't indexed), not for established tokens (those are
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,25 +66,27 @@ BACKOFF_INITIAL_S = 0.5
 BACKOFF_MAX_RETRIES = 1  # total tries = 1 initial + 1 retry
 
 # =============================================================================
-# Gating thresholds (env-configurable)
+# Gating thresholds (boot-configurable via GatewaySettings)
 # =============================================================================
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid float in env %s=%r; using default %s", name, raw, default)
-        return default
+MIN_LIQUIDITY_USD = 10_000.0
+MIN_VOLUME_USD = 1_000.0
+MIN_TURNOVER_RATIO = 0.05
+DOMINANCE_MULTIPLE = 3.0
 
 
-MIN_LIQUIDITY_USD = _float_env("ALMANAK_DEXSCREENER_MIN_LIQUIDITY_USD", 10_000.0)
-MIN_VOLUME_USD = _float_env("ALMANAK_DEXSCREENER_MIN_VOLUME_USD", 1_000.0)
-MIN_TURNOVER_RATIO = _float_env("ALMANAK_DEXSCREENER_MIN_TURNOVER_RATIO", 0.05)
-DOMINANCE_MULTIPLE = _float_env("ALMANAK_DEXSCREENER_DOMINANCE_MULTIPLE", 3.0)
+@dataclass(frozen=True)
+class DexScreenerGateConfig:
+    """Gateway-boot-configured thresholds for the DexScreener 4-gate policy."""
+
+    min_liquidity_usd: float = MIN_LIQUIDITY_USD
+    min_volume_usd: float = MIN_VOLUME_USD
+    min_turnover_ratio: float = MIN_TURNOVER_RATIO
+    dominance_multiple: float = DOMINANCE_MULTIPLE
+
+
+DEFAULT_GATE_CONFIG = DexScreenerGateConfig()
 
 # =============================================================================
 # Chain-slug mapping
@@ -189,6 +190,7 @@ async def find_token_address(
     *,
     session: Any | None = None,
     http_timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+    gate_config: DexScreenerGateConfig = DEFAULT_GATE_CONFIG,
 ) -> DexScreenerResult | None:
     """Resolve a symbol to a token address on ``chain`` via DexScreener.
 
@@ -234,7 +236,7 @@ async def find_token_address(
         )
         return None
 
-    result = _apply_gates(candidates, symbol=symbol, chain=chain)
+    result = _apply_gates(candidates, symbol=symbol, chain=chain, gate_config=gate_config)
     if result is not None:
         _record_metric("resolved_total")
     return result
@@ -394,6 +396,7 @@ def _apply_gates(
     *,
     symbol: str,
     chain: str,
+    gate_config: DexScreenerGateConfig = DEFAULT_GATE_CONFIG,
 ) -> DexScreenerResult | None:
     """Apply the four-gate policy and return the accepted candidate, if any.
 
@@ -407,7 +410,7 @@ def _apply_gates(
 
     passing: list[_Candidate] = []
     for cand in aggregated:
-        reason = _gate_reject_reason(cand)
+        reason = _gate_reject_reason(cand, gate_config=gate_config)
         if reason is None:
             passing.append(cand)
         else:
@@ -431,8 +434,8 @@ def _apply_gates(
 
     if len(passing) > 1:
         runner_up = passing[1]
-        # runner_up.liquidity_usd is normally >= MIN_LIQUIDITY_USD (gate 1),
-        # but an operator can configure MIN_LIQUIDITY_USD=0 via env, and a
+        # runner_up.liquidity_usd is normally >= gate_config.min_liquidity_usd
+        # (gate 1), but an operator can configure the floor down to 0, and a
         # runner-up at exactly $0 liquidity would otherwise ZeroDivisionError
         # here. Treat zero-liquidity runner-up as effectively absent — the
         # leader is trivially dominant.
@@ -440,7 +443,7 @@ def _apply_gates(
             ratio = leader.liquidity_usd / runner_up.liquidity_usd
         else:
             ratio = float("inf")
-        if ratio < DOMINANCE_MULTIPLE:
+        if ratio < gate_config.dominance_multiple:
             addresses = [c.address for c in passing]
             suggestions = [
                 f"Candidate {c.address}: liq=${c.liquidity_usd:,.0f}, vol24h=${c.volume_24h_usd:,.0f}" for c in passing
@@ -454,14 +457,14 @@ def _apply_gates(
                 leader.address,
                 runner_up.address,
                 ratio,
-                DOMINANCE_MULTIPLE,
+                gate_config.dominance_multiple,
             )
             raise AmbiguousTokenError(
                 token=symbol,
                 chain=chain,
                 reason=(
                     f"DexScreener returned multiple liquid contracts claiming '{symbol}' on {chain} "
-                    f"(top two within {DOMINANCE_MULTIPLE:.1f}x liquidity). Disambiguate with an address."
+                    f"(top two within {gate_config.dominance_multiple:.1f}x liquidity). Disambiguate with an address."
                 ),
                 matching_addresses=addresses,
                 suggestions=suggestions,
@@ -500,17 +503,21 @@ def _aggregate_by_address(candidates: list[_Candidate]) -> list[_Candidate]:
     return list(best.values())
 
 
-def _gate_reject_reason(cand: _Candidate) -> str | None:
+def _gate_reject_reason(
+    cand: _Candidate,
+    *,
+    gate_config: DexScreenerGateConfig = DEFAULT_GATE_CONFIG,
+) -> str | None:
     """Return a one-word reason the candidate fails gates 1-3, or None if it passes."""
-    if cand.liquidity_usd < MIN_LIQUIDITY_USD:
-        return f"liquidity<{MIN_LIQUIDITY_USD:.0f}"
-    if cand.volume_24h_usd < MIN_VOLUME_USD:
-        return f"volume<{MIN_VOLUME_USD:.0f}"
+    if cand.liquidity_usd < gate_config.min_liquidity_usd:
+        return f"liquidity<{gate_config.min_liquidity_usd:.0f}"
+    if cand.volume_24h_usd < gate_config.min_volume_usd:
+        return f"volume<{gate_config.min_volume_usd:.0f}"
     # Gate 3: turnover ratio. Guard against divide-by-zero (already covered by gate 1).
     if cand.liquidity_usd > 0:
         turnover = cand.volume_24h_usd / cand.liquidity_usd
-        if turnover < MIN_TURNOVER_RATIO:
-            return f"turnover<{MIN_TURNOVER_RATIO:.2f}"
+        if turnover < gate_config.min_turnover_ratio:
+            return f"turnover<{gate_config.min_turnover_ratio:.2f}"
     return None
 
 
@@ -550,8 +557,10 @@ def _reset_for_tests() -> None:
 __all__ = [
     "AmbiguousTokenError",
     "CHAIN_SLUG_MAP",
+    "DEFAULT_GATE_CONFIG",
     "DOMINANCE_MULTIPLE",
     "DexScreenerError",
+    "DexScreenerGateConfig",
     "DexScreenerResult",
     "MIN_LIQUIDITY_USD",
     "MIN_TURNOVER_RATIO",

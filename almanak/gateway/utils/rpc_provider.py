@@ -45,18 +45,28 @@ Environment Variables:
 
 import json
 import logging
-import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
+from almanak.config.gateway_runtime import (
+    anvil_generic_port_string,
+    anvil_port_for_chain,
+    chain_specific_rpc_url,
+    gateway_prefixed_or_bare,
+    generic_rpc_url,
+    generic_rpc_url_env_name,
+    has_chain_specific_rpc_url,
+    has_generic_rpc_url,
+    tenderly_api_key_for_chain,
+)
+
 logger = logging.getLogger(__name__)
 
-# Phase 1 (config-service plan): the module-load ``load_dotenv()`` call was
-# removed — every dotenv ingest now routes through
-# :func:`almanak.config.env._load_dotenv_once`, called once at the Click main
-# group and at the standalone gateway entrypoint. This module's
-# ``os.environ.get`` reads remain (Phase 4 territory).
+# Phase 1 removed the module-load ``load_dotenv()`` call. VIB-4424 routes the
+# remaining dynamic RPC/anvil env contracts through
+# ``almanak.config.gateway_runtime`` so this module no longer reads
+# ``os.environ`` directly either.
 
 
 def _get_gateway_api_key(name: str) -> str | None:
@@ -67,7 +77,7 @@ def _get_gateway_api_key(name: str) -> str | None:
     In local dev, users set the bare name (e.g. ALCHEMY_API_KEY).
     Check prefixed first so deployed containers resolve correctly.
     """
-    return os.environ.get(f"ALMANAK_GATEWAY_{name}") or os.environ.get(name)
+    return gateway_prefixed_or_bare(name)
 
 
 # =============================================================================
@@ -317,40 +327,14 @@ def _get_custom_url(chain: str) -> str:
         ValueError: If no custom URL env var is set
     """
     chain_upper = chain.upper()
-
-    # Determine alias variants for bsc/bnb (requested chain checked first)
-    variants = [chain_upper]
-    if chain_upper == "BSC":
-        variants = ["BSC", "BNB"]
-    elif chain_upper == "BNB":
-        variants = ["BNB", "BSC"]
-
-    # 1. ALMANAK_{CHAIN}_RPC_URL
-    for variant in variants:
-        env_var = f"ALMANAK_{variant}_RPC_URL"
-        url = os.environ.get(env_var)
-        if url:
-            logger.debug(f"Using custom RPC URL from {env_var}")
-            return url
-
-    # 2. {CHAIN}_RPC_URL
-    for variant in variants:
-        env_var = f"{variant}_RPC_URL"
-        url = os.environ.get(env_var)
-        if url:
-            logger.debug(f"Using custom RPC URL from {env_var}")
-            return url
-
-    # 3. ALMANAK_RPC_URL
-    url = os.environ.get("ALMANAK_RPC_URL")
+    url = chain_specific_rpc_url(chain)
     if url:
-        logger.debug("Using custom RPC URL from ALMANAK_RPC_URL")
+        logger.debug("Using chain-specific custom RPC URL for %s", chain_upper)
         return url
 
-    # 4. RPC_URL
-    url = os.environ.get("RPC_URL")
+    url = generic_rpc_url()
     if url:
-        logger.debug("Using custom RPC URL from RPC_URL")
+        logger.debug("Using custom RPC URL from %s", generic_rpc_url_env_name())
         return url
 
     raise ValueError(
@@ -365,25 +349,12 @@ def _has_chain_specific_url(chain: str) -> bool:
     Only checks chain-specific vars (ALMANAK_{CHAIN}_RPC_URL, {CHAIN}_RPC_URL).
     Does NOT check generic catch-all vars (ALMANAK_RPC_URL, RPC_URL).
     """
-    chain_upper = chain.upper()
-    variants = [chain_upper]
-    if chain_upper == "BSC":
-        variants = ["BSC", "BNB"]
-    elif chain_upper == "BNB":
-        variants = ["BNB", "BSC"]
-
-    for variant in variants:
-        if os.environ.get(f"ALMANAK_{variant}_RPC_URL"):
-            return True
-        if os.environ.get(f"{variant}_RPC_URL"):
-            return True
-
-    return False
+    return has_chain_specific_rpc_url(chain)
 
 
 def _has_generic_url() -> bool:
     """Check if a generic catch-all RPC URL env var is set (ALMANAK_RPC_URL or RPC_URL)."""
-    return bool(os.environ.get("ALMANAK_RPC_URL") or os.environ.get("RPC_URL"))
+    return has_generic_rpc_url()
 
 
 def _has_custom_url(chain: str) -> bool:
@@ -503,8 +474,7 @@ def _auto_select_provider(chain: str) -> NodeProvider:
             return NodeProvider.ALCHEMY
 
     # 3. Tenderly
-    tenderly_key_var = f"TENDERLY_API_KEY_{chain.upper()}"
-    if os.environ.get(tenderly_key_var):
+    if tenderly_api_key_for_chain(chain):
         if chain in TENDERLY_SUBDOMAINS:
             return NodeProvider.TENDERLY
 
@@ -512,7 +482,7 @@ def _auto_select_provider(chain: str) -> NodeProvider:
     # WARNING: This uses the same URL for ALL chains, which is almost certainly wrong
     # for multi-chain setups. Log a warning so the user notices.
     if _has_generic_url():
-        generic_var = "ALMANAK_RPC_URL" if os.environ.get("ALMANAK_RPC_URL") else "RPC_URL"
+        generic_var = generic_rpc_url_env_name() or "RPC_URL"
         logger.warning(
             f"Using generic {generic_var} for chain '{chain}'. "
             f"This URL is shared across ALL chains -- if it points to a specific chain "
@@ -549,9 +519,8 @@ def _get_anvil_url(chain: str | None = None) -> str:
     """
     # Check for chain-specific port override first
     if chain:
-        chain_port_var = f"ANVIL_{chain.upper()}_PORT"
-        chain_port = os.environ.get(chain_port_var)
-        if chain_port:
+        chain_port = anvil_port_for_chain(chain)
+        if chain_port is not None:
             return f"http://127.0.0.1:{chain_port}"
 
         # Use default chain port mapping
@@ -559,7 +528,7 @@ def _get_anvil_url(chain: str | None = None) -> str:
         return f"http://127.0.0.1:{port}"
 
     # Single-chain: use generic ANVIL_PORT or default
-    port_str = os.environ.get("ANVIL_PORT", "8545")
+    port_str = anvil_generic_port_string()
     return f"http://127.0.0.1:{port_str}"
 
 
@@ -620,7 +589,7 @@ def _get_tenderly_url(chain: str) -> str:
         raise ValueError(f"Chain '{chain}' not supported by Tenderly. Supported chains: {supported}")
 
     api_key_var = f"TENDERLY_API_KEY_{chain.upper()}"
-    api_key = os.environ.get(api_key_var)
+    api_key = tenderly_api_key_for_chain(chain)
     if not api_key:
         raise ValueError(f"{api_key_var} environment variable not set for Tenderly on {chain}.")
 
@@ -705,29 +674,20 @@ def has_api_key_configured() -> bool:
         True if any custom RPC URL env var, ALCHEMY_API_KEY, or any TENDERLY_API_KEY_* is set
     """
     # Check generic custom URL env vars
-    if os.environ.get("RPC_URL"):
-        return True
-    if os.environ.get("ALMANAK_RPC_URL"):
+    if has_generic_rpc_url():
         return True
 
     # Check per-chain custom URL env vars (check all known chains)
     for chain in ALCHEMY_CHAIN_KEYS:
-        chain_upper = chain.upper()
-        variants = [chain_upper]
-        if chain_upper == "BNB":
-            variants.append("BSC")
-        for variant in variants:
-            if os.environ.get(f"ALMANAK_{variant}_RPC_URL"):
-                return True
-            if os.environ.get(f"{variant}_RPC_URL"):
-                return True
+        if has_chain_specific_rpc_url(chain):
+            return True
 
     if _get_gateway_api_key("ALCHEMY_API_KEY"):
         return True
 
     # Check for any Tenderly key
     for chain in TENDERLY_SUBDOMAINS:
-        if os.environ.get(f"TENDERLY_API_KEY_{chain.upper()}"):
+        if tenderly_api_key_for_chain(chain):
             return True
 
     return False

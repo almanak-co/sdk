@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,7 +43,6 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.services.polymarket_service import (
     POLYMARKET_MARKET_CACHE_MAX_ENTRIES,
     POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
-    POLYMARKET_MARKET_CACHE_TTL_ENV,
     POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS,
     PolymarketServiceServicer,
     _read_market_cache_ttl_seconds,
@@ -86,59 +86,58 @@ def settings() -> MagicMock:
     s.polymarket_api_key = "k"
     s.polymarket_secret = "c2VjcmV0"
     s.polymarket_passphrase = "p"
+    s.polymarket_market_cache_ttl_seconds = POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
     return s
 
 
 @pytest.fixture
-def servicer(settings: MagicMock, monkeypatch: pytest.MonkeyPatch) -> PolymarketServiceServicer:
-    """Servicer with cache TTL forced to the default 60s so tests don't depend
-    on whatever the developer happens to have in their shell env."""
-    monkeypatch.delenv(POLYMARKET_MARKET_CACHE_TTL_ENV, raising=False)
+def servicer(settings: MagicMock) -> PolymarketServiceServicer:
+    """Servicer with cache TTL forced to the default 60s via typed settings."""
     return PolymarketServiceServicer(settings=settings)
 
 
 # =============================================================================
-# 1. TTL env parsing
+# 1. TTL parsing
 # =============================================================================
 
 
 class TestReadTtl:
-    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(POLYMARKET_MARKET_CACHE_TTL_ENV, raising=False)
+    def test_default_when_unset(self) -> None:
         assert _read_market_cache_ttl_seconds() == POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
 
-    def test_explicit_zero_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, "0")
-        assert _read_market_cache_ttl_seconds() == 0.0
+    def test_explicit_zero_disables(self) -> None:
+        assert _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds=0)) == 0.0
 
-    def test_negative_clamped_to_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, "-5")
-        assert _read_market_cache_ttl_seconds() == 0.0
+    def test_negative_clamped_to_zero(self) -> None:
+        assert _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds=-5)) == 0.0
 
-    def test_invalid_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, "not-a-number")
-        assert _read_market_cache_ttl_seconds() == POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+    def test_invalid_falls_back_to_default(self) -> None:
+        assert (
+            _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds="not-a-number"))
+            == POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+        )
 
-    def test_custom_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, "120")
-        assert _read_market_cache_ttl_seconds() == 120.0
+    def test_custom_value(self) -> None:
+        assert _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds=120)) == 120.0
 
     @pytest.mark.parametrize("raw", ["inf", "Infinity", "-inf", "nan", "NaN", "1e309"])
-    def test_non_finite_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch, raw: str
-    ) -> None:
+    def test_non_finite_falls_back_to_default(self, raw: str) -> None:
         """``float("inf")`` parses without ValueError and would silently
         produce a *permanent* cache (every expiry check returns False).
         ``float("nan")`` is even worse — comparisons all return False so
         the cache reads as enabled AND never expires. Both must reject."""
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, raw)
-        assert _read_market_cache_ttl_seconds() == POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+        assert (
+            _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds=raw))
+            == POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+        )
 
-    def test_clamped_to_max(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_clamped_to_max(self) -> None:
         """A typo like '86400000' (intended seconds, actually ms) must not
         produce a 1000-day stale window."""
-        monkeypatch.setenv(POLYMARKET_MARKET_CACHE_TTL_ENV, "86400000")
-        assert _read_market_cache_ttl_seconds() == POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS
+        assert (
+            _read_market_cache_ttl_seconds(SimpleNamespace(polymarket_market_cache_ttl_seconds=86_400_000))
+            == POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS
+        )
 
 
 # =============================================================================

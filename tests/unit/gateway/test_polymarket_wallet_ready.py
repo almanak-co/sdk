@@ -58,6 +58,7 @@ def settings() -> MagicMock:
     s.polymarket_api_key = "k"
     s.polymarket_secret = "c2VjcmV0"  # base64("secret")
     s.polymarket_passphrase = "p"
+    s.polymarket_network = "mainnet"
     return s
 
 
@@ -332,13 +333,11 @@ class TestChainIdAssertion:
     used for setup txs against contracts that don't exist there."""
 
     @pytest.mark.asyncio
-    async def test_raises_when_chain_id_is_not_polygon(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_raises_when_chain_id_is_not_polygon(self, servicer: PolymarketServiceServicer) -> None:
         """Force the assertion path: real polygon RPC URL (mainnet), but the
         node reports the wrong chain-id."""
         # Pretend we're on a real polygon mainnet RPC (not anvil, not localhost).
-        monkeypatch.delenv("ALMANAK_POLYMARKET_NETWORK", raising=False)
+        servicer.settings.polymarket_network = "mainnet"
         with patch(
             "almanak.gateway.services.polymarket_service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
@@ -355,10 +354,8 @@ class TestChainIdAssertion:
         assert servicer._chain_id_verified is False
 
     @pytest.mark.asyncio
-    async def test_passes_when_chain_id_is_polygon_mainnet(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ALMANAK_POLYMARKET_NETWORK", raising=False)
+    async def test_passes_when_chain_id_is_polygon_mainnet(self, servicer: PolymarketServiceServicer) -> None:
+        servicer.settings.polymarket_network = "mainnet"
         with patch(
             "almanak.gateway.services.polymarket_service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
@@ -371,13 +368,11 @@ class TestChainIdAssertion:
         assert servicer._chain_id_verified is True
 
     @pytest.mark.asyncio
-    async def test_chain_id_is_cached_after_first_check(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_chain_id_is_cached_after_first_check(self, servicer: PolymarketServiceServicer) -> None:
         """A second call must NOT touch the RPC — the verification flag short-
         circuits. This keeps high-frequency setup paths from paying an
         ``eth_chainId`` round-trip per send."""
-        monkeypatch.delenv("ALMANAK_POLYMARKET_NETWORK", raising=False)
+        servicer.settings.polymarket_network = "mainnet"
         with patch(
             "almanak.gateway.services.polymarket_service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
@@ -412,13 +407,11 @@ class TestChainIdAssertion:
         assert len(chain_id_reads) == 1
 
     @pytest.mark.asyncio
-    async def test_anvil_via_env_skips_chain_id_check(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_anvil_via_env_skips_chain_id_check(self, servicer: PolymarketServiceServicer) -> None:
         """``ALMANAK_POLYMARKET_NETWORK=anvil`` exempts the call from the
         chain-id check — Anvil forks default to chain 31337 unless launched
         with ``--chain-id 137``, and we don't want to require that flag."""
-        monkeypatch.setenv("ALMANAK_POLYMARKET_NETWORK", "anvil")
+        servicer.settings.polymarket_network = "anvil"
         web3 = MagicMock()
         web3.eth.chain_id = 31337  # Default Anvil chain id
 
@@ -427,11 +420,9 @@ class TestChainIdAssertion:
         assert servicer._chain_id_verified is True
 
     @pytest.mark.asyncio
-    async def test_anvil_via_localhost_url_skips_chain_id_check(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_anvil_via_localhost_url_skips_chain_id_check(self, servicer: PolymarketServiceServicer) -> None:
         """Localhost RPC URL → treated as Anvil even without the env var."""
-        monkeypatch.delenv("ALMANAK_POLYMARKET_NETWORK", raising=False)
+        servicer.settings.polymarket_network = "mainnet"
         with patch(
             "almanak.gateway.services.polymarket_service.get_rpc_url",
             return_value="http://127.0.0.1:8545",
@@ -541,12 +532,10 @@ class TestCachedWeb3Integration:
         assert result is sentinel_web3
         mock_get_cached.assert_called_once_with("polygon", network="mainnet")
 
-    def test_get_polygon_web3_passes_anvil_network_when_env_set(
-        self, settings: MagicMock, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``ALMANAK_POLYMARKET_NETWORK=anvil`` flows into the helper so the
-        cache key is properly partitioned between mainnet and Anvil."""
-        monkeypatch.setenv("ALMANAK_POLYMARKET_NETWORK", "anvil")
+    def test_get_polygon_web3_passes_anvil_network_when_env_set(self, settings: MagicMock) -> None:
+        """``polymarket_network='anvil'`` flows into the helper so the cache
+        key is properly partitioned between mainnet and Anvil."""
+        settings.polymarket_network = "anvil"
         servicer = PolymarketServiceServicer(settings=settings)
         sentinel_web3 = MagicMock()
         with patch(
@@ -585,10 +574,8 @@ class TestSignAndSubmitChainIdGate:
     ``eth_gasPrice`` round-trips."""
 
     @pytest.mark.asyncio
-    async def test_send_aborts_on_wrong_chain_id(
-        self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ALMANAK_POLYMARKET_NETWORK", raising=False)
+    async def test_send_aborts_on_wrong_chain_id(self, servicer: PolymarketServiceServicer) -> None:
+        servicer.settings.polymarket_network = "mainnet"
         web3 = MagicMock()
         web3.eth.chain_id = 1  # Ethereum mainnet
         web3.eth.get_transaction_count = MagicMock(side_effect=AssertionError("must not be called"))

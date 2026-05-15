@@ -11,9 +11,12 @@ Callers must handle the None case explicitly.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 
+from almanak.config.gateway_runtime import (
+    portfolio_provider_cache_ttl,
+    portfolio_provider_chain_filter,
+)
 from almanak.gateway.integrations.base import BaseIntegration
 from almanak.gateway.integrations.circuit_breaker import CircuitBreaker
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot
@@ -124,16 +127,13 @@ def get_portfolio_provider_configs(
         if not api_key and name == "zerion" and portfolio_api_key:
             api_key = portfolio_api_key
 
-        chain_filter_env = os.environ.get(f"{name.upper()}_CHAIN_FILTER", "")
-        chain_filter = [c.strip() for c in chain_filter_env.split(",") if c.strip()] if chain_filter_env else []
-
         configs.append(
             PortfolioProviderConfig(
                 name=name,
                 api_key=api_key,
                 priority=priority,
-                cache_ttl=int(os.environ.get(f"{name.upper()}_CACHE_TTL", str(portfolio_api_cache_ttl))),
-                chain_filter=chain_filter,
+                cache_ttl=portfolio_provider_cache_ttl(name, portfolio_api_cache_ttl),
+                chain_filter=portfolio_provider_chain_filter(name),
             )
         )
     return configs

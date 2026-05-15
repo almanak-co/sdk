@@ -17,7 +17,6 @@ import hmac
 import json
 import logging
 import math
-import os
 import re
 import time
 from collections import OrderedDict
@@ -35,6 +34,7 @@ from pydantic import SecretStr
 if TYPE_CHECKING:
     from web3 import Web3
 
+from almanak.config.gateway_runtime import parse_gateway_wallets_json
 from almanak.framework.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
@@ -130,38 +130,18 @@ _MARKET_SHAPE_ERROR_PATTERN = re.compile(
 )
 
 
-def _read_market_cache_ttl_seconds() -> float:
-    """Resolve the GammaMarket cache TTL from env. <=0 disables caching.
-
-    Default 60s, hard-capped at ``POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS``.
-    Misconfigured values (non-numeric, NaN, ±Inf) log a warning and fall
-    back to the default rather than failing service startup — the cache is
-    a perf optimisation, not a correctness gate. NaN/Inf get rejected
-    explicitly because ``float("inf")`` and ``float("nan")`` parse
-    silently and would otherwise produce a *permanent* cache (every
-    expiry check returns False), contradicting the design property that
-    admin tick-size updates propagate within ~1 minute.
-    """
-    raw = os.environ.get(POLYMARKET_MARKET_CACHE_TTL_ENV)
-    if not raw:
-        return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+def _read_market_cache_ttl_seconds(settings: GatewaySettings | None = None) -> float:
+    """Resolve the GammaMarket cache TTL from typed gateway settings."""
+    raw = getattr(
+        settings,
+        "polymarket_market_cache_ttl_seconds",
+        POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
+    )
     try:
         ttl = float(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid %s=%r; falling back to default %ss",
-            POLYMARKET_MARKET_CACHE_TTL_ENV,
-            raw,
-            POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
-        )
+    except (TypeError, ValueError):
         return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
     if not math.isfinite(ttl):
-        logger.warning(
-            "%s=%r is not a finite number; falling back to default %ss",
-            POLYMARKET_MARKET_CACHE_TTL_ENV,
-            raw,
-            POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
-        )
         return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
     return max(0.0, min(ttl, POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS))
 
@@ -188,20 +168,9 @@ def _resolve_polymarket_zodiac_entry() -> dict | None:
     signing. Returns ``None`` when the env var is unset, malformed, or doesn't
     contain a polymarket_zodiac entry — local-key fallback then applies.
     """
-    raw = os.environ.get("ALMANAK_GATEWAY_WALLETS")
-    if not raw:
+    wallets = parse_gateway_wallets_json()
+    if wallets is None:
         return None
-    # Fail closed once ``ALMANAK_GATEWAY_WALLETS`` is set: a malformed value
-    # used to log a warning and degrade to legacy local-key mode, which
-    # silently switches production traffic onto a different signer/funder
-    # than the platform intended. Gateway is the security boundary —
-    # mis-configured wallet config is a startup error, not a fallback path.
-    try:
-        wallets = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"ALMANAK_GATEWAY_WALLETS is not valid JSON: {e}") from e
-    if not isinstance(wallets, dict):
-        raise ValueError(f"ALMANAK_GATEWAY_WALLETS must be a JSON object keyed by chain, got {type(wallets).__name__}")
 
     # Hoisted so we don't re-import inside the per-entry loop and so the
     # ``polygon_canonical`` lookup falls back gracefully when the helper
@@ -296,7 +265,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # one Gamma round-trip per order on the critical path. Per-token
         # asyncio.Locks coalesce concurrent first-fetches onto a single
         # upstream call.
-        self._market_cache_ttl_seconds: float = _read_market_cache_ttl_seconds()
+        self._market_cache_ttl_seconds = _read_market_cache_ttl_seconds(settings)
         self._market_cache: OrderedDict[str, tuple[GammaMarket, float]] = OrderedDict()
         self._market_locks: dict[str, asyncio.Lock] = {}
         self._market_locks_lock = asyncio.Lock()
@@ -844,7 +813,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         Anvil port mapping for local-fork testing.
         """
         if self._polygon_web3 is None:
-            network = os.environ.get("ALMANAK_POLYMARKET_NETWORK", "mainnet")
+            network = getattr(self.settings, "polymarket_network", "mainnet")
             self._polygon_web3 = get_cached_web3("polygon", network=network)
         return self._polygon_web3
 
@@ -853,8 +822,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             self._ctf_sdk = CtfSDK()
         return self._ctf_sdk
 
-    @staticmethod
-    def _is_anvil_polymarket_setup() -> bool:
+    def _is_anvil_polymarket_setup(self) -> bool:
         """Whether the current process is wired up against an Anvil polygon fork.
 
         True when ``ALMANAK_POLYMARKET_NETWORK`` explicitly selects Anvil OR
@@ -862,7 +830,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         the chain-id assertion: a forked Anvil keeps the same Polygon
         contract addresses but can return any chain ID depending on flags.
         """
-        if (os.environ.get("ALMANAK_POLYMARKET_NETWORK") or "").lower() == "anvil":
+        if str(getattr(self.settings, "polymarket_network", "mainnet") or "").lower() == "anvil":
             return True
         try:
             return is_local_rpc(get_rpc_url("polygon"))

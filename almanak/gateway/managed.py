@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import hmac
 import logging
-import os
 import socket
 import threading
 import time
@@ -21,6 +20,15 @@ if TYPE_CHECKING:
     from almanak.framework.anvil.fork_manager import RollingForkManager
     from almanak.gateway.server import GatewayServer
 
+from almanak.config.gateway_runtime import (
+    anvil_fork_block_for_chain,
+    chain_specific_rpc_url,
+    env_value,
+    generic_rpc_url,
+    restore_env_value,
+    set_env_value,
+)
+from almanak.config.runtime import private_key_from_env
 from almanak.gateway.core.settings import GatewaySettings
 
 logger = logging.getLogger(__name__)
@@ -182,6 +190,7 @@ class ManagedGateway:
         self._startup_error: BaseException | None = None
         # Chains currently undergoing an intentional reset (watchdog must skip these)
         self._resetting_chains: set[str] = set()
+        self._watchdog_interval: float = getattr(settings, "anvil_watchdog_interval", 5.0)
 
     @property
     def host(self) -> str:
@@ -206,8 +215,8 @@ class ManagedGateway:
         If not, emits a warning for each affected chain so users know the
         fork will likely fail on contract storage access.
         """
-        has_alchemy = bool(os.environ.get("ALCHEMY_API_KEY"))
-        has_generic_rpc = bool(os.environ.get("RPC_URL") or os.environ.get("ALMANAK_RPC_URL"))
+        has_alchemy = bool(env_value("ALCHEMY_API_KEY"))
+        has_generic_rpc = bool(generic_rpc_url())
 
         for chain in self._anvil_chains:
             if chain.lower() not in self.ARCHIVE_RPC_REQUIRED_CHAINS:
@@ -217,9 +226,7 @@ class ManagedGateway:
                 continue
             # Check chain-specific env vars
             chain_upper = chain.upper()
-            has_chain_rpc = bool(
-                os.environ.get(f"{chain_upper}_RPC_URL") or os.environ.get(f"ALMANAK_{chain_upper}_RPC_URL")
-            )
+            has_chain_rpc = bool(chain_specific_rpc_url(chain_upper))
             if not has_alchemy and not has_generic_rpc and not has_chain_rpc:
                 logger.warning(
                     "Chain '%s' requires an archive-capable RPC for Anvil fork testing. "
@@ -259,8 +266,8 @@ class ManagedGateway:
                 if chain in self._external_anvil_ports:
                     # External Anvil: set env var, don't start a process
                     port = self._external_anvil_ports[chain]
-                    self._original_env[env_var] = os.environ.get(env_var)
-                    os.environ[env_var] = str(port)
+                    self._original_env[env_var] = env_value(env_var)
+                    set_env_value(env_var, str(port))
 
                     if not is_port_in_use("127.0.0.1", port):
                         raise RuntimeError(
@@ -275,8 +282,7 @@ class ManagedGateway:
                 fork_url = get_rpc_url(chain, network="mainnet")
                 # Use pinned fork block if available (set by CI or nightly entrypoint)
                 # to maximise Foundry RPC cache hits across strategy runs.
-                fork_block_env = os.environ.get(f"ANVIL_FORK_BLOCK_{chain.upper()}")
-                fork_block = int(fork_block_env) if fork_block_env else None
+                fork_block = anvil_fork_block_for_chain(chain)
                 if fork_block:
                     logger.info("Anvil fork for %s pinned to block %d", chain, fork_block)
                 # Archive-RPC chains (Avalanche, Ethereum, Polygon) require
@@ -325,8 +331,8 @@ class ManagedGateway:
                         raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
                 self._anvil_managers[chain] = manager
                 # Set env var so gateway RPC provider routes to this Anvil
-                self._original_env[env_var] = os.environ.get(env_var)
-                os.environ[env_var] = str(port)
+                self._original_env[env_var] = env_value(env_var)
+                set_env_value(env_var, str(port))
                 # Redact API key from fork URL to avoid leaking secrets in logs
                 # Handles Alchemy (/v2/KEY), Tenderly (/KEY), and other providers
                 from urllib.parse import urlparse
@@ -411,7 +417,7 @@ class ManagedGateway:
         #      the funding code, and Anvil funding silently skips every wallet.
         wallet = self._wallet_address
         if not wallet:
-            pk = os.environ.get("ALMANAK_PRIVATE_KEY", "") or (getattr(self.settings, "private_key", None) or "")
+            pk = private_key_from_env(prefix="ALMANAK_") or (getattr(self.settings, "private_key", None) or "")
             if not pk:
                 logger.warning("No wallet address or ALMANAK_PRIVATE_KEY set -- skipping Anvil funding")
                 return
@@ -519,10 +525,7 @@ class ManagedGateway:
             for env_var, original in self._original_env.items():
                 chain_from_var = env_var.replace("ANVIL_", "").replace("_PORT", "").lower()
                 if chain_from_var in self._external_anvil_ports:
-                    if original is None:
-                        os.environ.pop(env_var, None)
-                    else:
-                        os.environ[env_var] = original
+                    restore_env_value(env_var, original)
             return
 
         # Normal shutdown: stop all managed forks
@@ -531,25 +534,19 @@ class ManagedGateway:
             logger.info("Anvil fork stopped for %s", chain)
         # Restore all env vars
         for env_var, original in self._original_env.items():
-            if original is None:
-                os.environ.pop(env_var, None)
-            else:
-                os.environ[env_var] = original
-
-    # Anvil watchdog check interval (seconds). Env-overridable for tests.
-    _WATCHDOG_INTERVAL: float = float(os.environ.get("ALMANAK_ANVIL_WATCHDOG_INTERVAL", "5.0"))
+            restore_env_value(env_var, original)
 
     async def _anvil_watchdog(self) -> None:
         """Background task: detect crashed Anvil processes and restart them.
 
         Runs on the gateway event loop. Checks each managed Anvil process
-        every _WATCHDOG_INTERVAL seconds. If a process has exited (poll() is
+        every ``self._watchdog_interval`` seconds. If a process has exited (poll() is
         not None), resets it to the latest block and re-funds the wallet.
 
         Does not restart if a gateway shutdown has been requested.
         """
         while not self._stop_requested.is_set():
-            await asyncio.sleep(self._WATCHDOG_INTERVAL)
+            await asyncio.sleep(self._watchdog_interval)
             if self._stop_requested.is_set():
                 break
             for chain, manager in list(self._anvil_managers.items()):

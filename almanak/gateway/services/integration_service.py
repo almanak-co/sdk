@@ -72,7 +72,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         )
 
         # Initialize TheGraph
-        self._thegraph = TheGraphIntegration()
+        self._thegraph = TheGraphIntegration(api_key=self.settings.thegraph_api_key)
 
         # Build multi-provider portfolio chain
         self._portfolio_chain = build_portfolio_chain(

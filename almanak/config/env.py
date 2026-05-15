@@ -8,6 +8,7 @@ _resolve_polymarket_* methods. Single source of truth post Phase 1.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from almanak.config.base import GatewayConfig
 # tests/unit/config/test_env_fallbacks.py assert the unified-signer INFO log
 # is emitted on this logger (legacy "almanak.gateway.core.settings" channel).
 logger = logging.getLogger("almanak.gateway.core.settings")
+
+_POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS = 24 * 3600.0
 
 # Path-aware load tracking. The SDK genuinely has more than one dotenv
 # source per process: the Click main group loads the cwd default, and a
@@ -82,53 +85,251 @@ def _load_dotenv_once(dotenv_path: str | None = None) -> None:
     _DEFAULT_LOADED = True
 
 
-def _apply_gateway_env_fallbacks(gateway: GatewayConfig) -> None:  # noqa: C901
+def _parse_float_with_default(
+    env_var: str,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+    min_inclusive: bool = True,
+    max_inclusive: bool = True,
+) -> float:
+    """Parse a float env var, logging and falling back to ``default`` on error.
+
+    Non-finite values (``nan`` / ``inf`` / ``-inf``) are rejected the same way
+    as unparseable strings — otherwise they would propagate into downstream
+    gate comparisons (DexScreener thresholds, watchdog interval) and silently
+    disable the safety checks.
+
+    Optional ``min_value`` / ``max_value`` bounds keep the unprefixed-env
+    fallback path in sync with the model validators on ``GatewaySettings``:
+    ``GatewaySettings`` does not enable ``validate_assignment``, so a
+    negative / out-of-range value coming through this helper would
+    otherwise reach the field without triggering ``_validate_positive_float``
+    or ``_validate_turnover_ratio``. Set ``min_inclusive=False`` to enforce
+    a strict ``>`` lower bound (matching the ``> 0`` validators);
+    ``max_inclusive=False`` does the symmetric thing on the upper bound.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid float in env %s=%r; using default %s", env_var, raw, default)
+        return default
+    if not math.isfinite(value):
+        logger.warning("%s=%r is not a finite number; using default %s", env_var, raw, default)
+        return default
+    if min_value is not None:
+        below = value < min_value if min_inclusive else value <= min_value
+        if below:
+            logger.warning(
+                "%s=%r is below the allowed minimum (%s%s); using default %s",
+                env_var,
+                raw,
+                ">=" if min_inclusive else ">",
+                min_value,
+                default,
+            )
+            return default
+    if max_value is not None:
+        above = value > max_value if max_inclusive else value >= max_value
+        if above:
+            logger.warning(
+                "%s=%r is above the allowed maximum (%s%s); using default %s",
+                env_var,
+                raw,
+                "<=" if max_inclusive else "<",
+                max_value,
+                default,
+            )
+            return default
+    return value
+
+
+def _parse_polymarket_market_cache_ttl_seconds(default: float) -> float:
+    """Parse the Polymarket market-cache TTL with the legacy clamp/fallback semantics."""
+    env_var = "ALMANAK_POLYMARKET_MARKET_CACHE_TTL_SECONDS"
+    raw = os.environ.get(env_var)
+    if not raw:
+        return default
+    try:
+        ttl = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to default %ss", env_var, raw, default)
+        return default
+    if not math.isfinite(ttl):
+        logger.warning("%s=%r is not a finite number; falling back to default %ss", env_var, raw, default)
+        return default
+    return max(0.0, min(ttl, _POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS))
+
+
+# Falsy-checked secret/identifier fallbacks: ``(field_name, env_var)`` pairs.
+# Legacy contract from the deleted ``GatewaySettings._fallback_env_vars``:
+# fill ``gateway.<field>`` from the bare-name env var only when the gateway
+# field is falsy (``None`` or ``""``). Third-party API keys are injected by
+# deployers under bare names so the same env var feeds both pydantic-settings
+# consumers and direct ``os.environ`` readers.
+#
+# NB: ``zodiac_roles_address`` uses ``ALMANAK_ZODIAC_ADDRESS`` — the legacy
+# env name does not mirror the field name.
+_FALSY_FALLBACK_PAIRS: tuple[tuple[str, str], ...] = (
+    ("private_key", "ALMANAK_PRIVATE_KEY"),
+    ("solana_private_key", "SOLANA_PRIVATE_KEY"),
+    ("eoa_address", "ALMANAK_EOA_ADDRESS"),
+    ("safe_address", "ALMANAK_SAFE_ADDRESS"),
+    ("zodiac_roles_address", "ALMANAK_ZODIAC_ADDRESS"),
+    ("signer_service_url", "ALMANAK_SIGNER_SERVICE_URL"),
+    ("signer_service_jwt", "ALMANAK_SIGNER_SERVICE_JWT"),
+    ("alchemy_api_key", "ALCHEMY_API_KEY"),
+    ("coingecko_api_key", "COINGECKO_API_KEY"),
+    ("enso_api_key", "ENSO_API_KEY"),
+    ("portfolio_providers", "PORTFOLIO_PROVIDERS"),
+)
+
+# ``is None`` fallbacks: same pattern, but the explicit-None check preserves
+# an empty-string sentinel. A Tenderly operator setting
+# ``TENDERLY_ACCESS_KEY=""`` to disable the integration must not be silently
+# re-filled from a higher-up env layer.
+_OPTIONAL_STRING_FALLBACK_PAIRS: tuple[tuple[str, str], ...] = (
+    ("thegraph_api_key", "THEGRAPH_API_KEY"),
+    ("tenderly_account_slug", "TENDERLY_ACCOUNT_SLUG"),
+    ("tenderly_project_slug", "TENDERLY_PROJECT_SLUG"),
+    ("tenderly_access_key", "TENDERLY_ACCESS_KEY"),
+)
+
+
+def _apply_gateway_env_fallbacks(gateway: GatewayConfig) -> None:
     """Replicate GatewaySettings._fallback_env_vars at the service boundary.
 
-    Mutates gateway in-place, only setting fields that are currently falsy.
-    Preserves bit-for-bit behavior of the deleted in-class validator.
+    Mutates ``gateway`` in-place. Three classes of fallback live here; each
+    helper documents its own precedence rule:
+
+    * :func:`_apply_secret_string_fallbacks` — falsy-check fallback for
+      credentials and required identifiers.
+    * :func:`_apply_optional_string_fallbacks` — ``is None`` fallback for
+      optional integration keys (preserves empty-string sentinel).
+    * :func:`_apply_dexscreener_threshold_fallbacks`,
+      :func:`_apply_polymarket_runtime_fallbacks`,
+      :func:`_apply_anvil_watchdog_fallback` — ``model_fields_set`` fallback
+      for typed-numeric fields with non-``None`` defaults, with bounds that
+      mirror the matching ``GatewaySettings`` validator.
     """
-    if not gateway.private_key:
-        if v := os.environ.get("ALMANAK_PRIVATE_KEY"):
-            gateway.private_key = v
-    if not gateway.solana_private_key:
-        if v := os.environ.get("SOLANA_PRIVATE_KEY"):
-            gateway.solana_private_key = v
-    if not gateway.eoa_address:
-        if v := os.environ.get("ALMANAK_EOA_ADDRESS"):
-            gateway.eoa_address = v
-    if not gateway.safe_address:
-        if v := os.environ.get("ALMANAK_SAFE_ADDRESS"):
-            gateway.safe_address = v
-    if not gateway.zodiac_roles_address:
-        # NB: legacy env name is ALMANAK_ZODIAC_ADDRESS — not the field-name
-        # mirror ALMANAK_ZODIAC_ROLES_ADDRESS.
-        if v := os.environ.get("ALMANAK_ZODIAC_ADDRESS"):
-            gateway.zodiac_roles_address = v
-    if not gateway.signer_service_url:
-        if v := os.environ.get("ALMANAK_SIGNER_SERVICE_URL"):
-            gateway.signer_service_url = v
-    if not gateway.signer_service_jwt:
-        if v := os.environ.get("ALMANAK_SIGNER_SERVICE_JWT"):
-            gateway.signer_service_jwt = v
-    # Third-party API keys are injected by deployers under bare names
-    # (ALCHEMY_API_KEY, not ALMANAK_GATEWAY_ALCHEMY_API_KEY) so the same env
-    # var feeds both pydantic-settings consumers and direct os.environ readers.
-    if not gateway.alchemy_api_key:
-        if v := os.environ.get("ALCHEMY_API_KEY"):
-            gateway.alchemy_api_key = v
-    if not gateway.coingecko_api_key:
-        if v := os.environ.get("COINGECKO_API_KEY"):
-            gateway.coingecko_api_key = v
-    if not gateway.enso_api_key:
-        if v := os.environ.get("ENSO_API_KEY"):
-            gateway.enso_api_key = v
+    _apply_secret_string_fallbacks(gateway)
+    _apply_optional_string_fallbacks(gateway)
+    _apply_dexscreener_threshold_fallbacks(gateway)
+    _apply_polymarket_runtime_fallbacks(gateway)
+    _apply_anvil_watchdog_fallback(gateway)
+
+
+def _apply_secret_string_fallbacks(gateway: GatewayConfig) -> None:
+    """Fill secret-string fields from bare-name env vars when falsy.
+
+    Covers credentials and third-party API keys. Empty-string fields trigger
+    the fallback — matches the bit-for-bit semantics of the deleted
+    ``_fallback_env_vars`` validator.
+    """
+    for field_name, env_var in _FALSY_FALLBACK_PAIRS:
+        if not getattr(gateway, field_name):
+            if value := os.environ.get(env_var):
+                setattr(gateway, field_name, value)
+    # ``portfolio_api_key`` has a two-name fallback ladder — handled inline
+    # because the loop above is single-env-var per field.
     if not gateway.portfolio_api_key:
-        if v := os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY"):
-            gateway.portfolio_api_key = v
-    if not gateway.portfolio_providers:
-        if v := os.environ.get("PORTFOLIO_PROVIDERS"):
-            gateway.portfolio_providers = v
+        if value := os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY"):
+            gateway.portfolio_api_key = value
+
+
+def _apply_optional_string_fallbacks(gateway: GatewayConfig) -> None:
+    """Fill optional-string fields from bare-name env vars when ``None``.
+
+    Distinct from :func:`_apply_secret_string_fallbacks`: the explicit
+    ``is None`` check preserves an empty-string sentinel so an operator can
+    disable an integration (e.g. ``TENDERLY_ACCESS_KEY=""``) without the
+    env-fallback layer treating it as unset.
+    """
+    for field_name, env_var in _OPTIONAL_STRING_FALLBACK_PAIRS:
+        if getattr(gateway, field_name) is None:
+            raw = os.environ.get(env_var)
+            if raw is not None:
+                setattr(gateway, field_name, raw)
+
+
+def _apply_dexscreener_threshold_fallbacks(gateway: GatewayConfig) -> None:
+    """Fill DexScreener numeric thresholds from unprefixed env vars.
+
+    Documented precedence is ``kwargs > ALMANAK_GATEWAY_* > unprefixed >
+    defaults``. Guarded on ``gateway.model_fields_set`` so an unprefixed
+    env var only fills values that the higher-precedence sources have not
+    already supplied. Bounds mirror the matching ``GatewaySettings``
+    validator — strict ``> 0`` for liquidity/volume/dominance, ``[0, 1]``
+    for the turnover ratio — because ``validate_assignment`` is not
+    enabled on the model, so an out-of-range value coming through this
+    path would otherwise reach the field without firing the validator.
+    """
+    if "dexscreener_min_liquidity_usd" not in gateway.model_fields_set:
+        gateway.dexscreener_min_liquidity_usd = _parse_float_with_default(
+            "ALMANAK_DEXSCREENER_MIN_LIQUIDITY_USD",
+            gateway.dexscreener_min_liquidity_usd,
+            min_value=0.0,
+            min_inclusive=False,
+        )
+    if "dexscreener_min_volume_usd" not in gateway.model_fields_set:
+        gateway.dexscreener_min_volume_usd = _parse_float_with_default(
+            "ALMANAK_DEXSCREENER_MIN_VOLUME_USD",
+            gateway.dexscreener_min_volume_usd,
+            min_value=0.0,
+            min_inclusive=False,
+        )
+    if "dexscreener_min_turnover_ratio" not in gateway.model_fields_set:
+        gateway.dexscreener_min_turnover_ratio = _parse_float_with_default(
+            "ALMANAK_DEXSCREENER_MIN_TURNOVER_RATIO",
+            gateway.dexscreener_min_turnover_ratio,
+            min_value=0.0,
+            max_value=1.0,
+        )
+    if "dexscreener_dominance_multiple" not in gateway.model_fields_set:
+        gateway.dexscreener_dominance_multiple = _parse_float_with_default(
+            "ALMANAK_DEXSCREENER_DOMINANCE_MULTIPLE",
+            gateway.dexscreener_dominance_multiple,
+            min_value=0.0,
+            min_inclusive=False,
+        )
+
+
+def _apply_polymarket_runtime_fallbacks(gateway: GatewayConfig) -> None:
+    """Fill Polymarket runtime fields (cache TTL + network) from env vars.
+
+    ``polymarket_market_cache_ttl_seconds`` uses the legacy
+    clamp/fallback helper which enforces ``[0, 24h]`` and rejects NaN /
+    ``inf``. ``polymarket_network`` is a string with no validator so the
+    bare ``model_fields_set`` guard is sufficient.
+    """
+    if "polymarket_market_cache_ttl_seconds" not in gateway.model_fields_set:
+        gateway.polymarket_market_cache_ttl_seconds = _parse_polymarket_market_cache_ttl_seconds(
+            gateway.polymarket_market_cache_ttl_seconds
+        )
+    if "polymarket_network" not in gateway.model_fields_set:
+        polymarket_network = os.environ.get("ALMANAK_POLYMARKET_NETWORK")
+        if polymarket_network is not None:
+            gateway.polymarket_network = polymarket_network
+
+
+def _apply_anvil_watchdog_fallback(gateway: GatewayConfig) -> None:
+    """Fill ``anvil_watchdog_interval`` from the unprefixed env var.
+
+    Same ``model_fields_set`` + bounds pattern as the DexScreener fields.
+    A non-positive value would hot-loop the watchdog, so the lower bound
+    is strict ``> 0`` to match ``_validate_positive_float``.
+    """
+    if "anvil_watchdog_interval" not in gateway.model_fields_set:
+        gateway.anvil_watchdog_interval = _parse_float_with_default(
+            "ALMANAK_ANVIL_WATCHDOG_INTERVAL",
+            gateway.anvil_watchdog_interval,
+            min_value=0.0,
+            min_inclusive=False,
+        )
 
 
 def _resolve_polymarket_credentials(gateway: GatewayConfig) -> None:

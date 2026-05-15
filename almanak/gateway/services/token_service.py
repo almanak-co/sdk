@@ -40,6 +40,7 @@ from almanak.gateway.data.price.coingecko import COINGECKO_PLATFORM_IDS
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services.dexscreener_lookup import (
     DexScreenerError,
+    DexScreenerGateConfig,
     chain_slug_for,
 )
 from almanak.gateway.services.dexscreener_lookup import (
@@ -344,6 +345,12 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Solana resolution request lands.
         self._spl_lookup: SplMintLookup | None = None
         self._spl_lookup_lock = asyncio.Lock()
+        self._dexscreener_gate_config = DexScreenerGateConfig(
+            min_liquidity_usd=getattr(settings, "dexscreener_min_liquidity_usd", 10_000.0),
+            min_volume_usd=getattr(settings, "dexscreener_min_volume_usd", 1_000.0),
+            min_turnover_ratio=getattr(settings, "dexscreener_min_turnover_ratio", 0.05),
+            dominance_multiple=getattr(settings, "dexscreener_dominance_multiple", 3.0),
+        )
 
         logger.debug(
             "TokenService initialized",
@@ -1098,6 +1105,9 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             resolved_at=datetime.now(UTC),
         )
 
+    # crap-allowlist: VIB-4445 — pre-existing complexity (cc=25, cov=54%).
+    # 9-tier resolution ladder; touched here only by VIB-4424 to pass a
+    # ``gate_config`` parameter, refactor tracked separately.
     async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:  # noqa: C901
         """Try to resolve an EVM token by symbol via Pendle, Aave, Compound, Beefy, Yearn, Morpho, CoinGecko, then DexScreener.
 
@@ -1208,7 +1218,11 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return None
 
         try:
-            ds_result = await dexscreener_find_token_address(symbol, chain)
+            ds_result = await dexscreener_find_token_address(
+                symbol,
+                chain,
+                gate_config=self._dexscreener_gate_config,
+            )
         except AmbiguousTokenError:
             # Propagate so ResolveToken can surface the candidate list.
             raise

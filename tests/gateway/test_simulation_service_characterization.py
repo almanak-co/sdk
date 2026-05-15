@@ -39,6 +39,7 @@ import grpc
 import pytest
 import pytest_asyncio
 
+from almanak.config.env import gateway_config_from_env
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
 from tests.gateway.grpc_harness import (
@@ -73,8 +74,22 @@ def _make_settings(
 def _isolate_simulator_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip TENDERLY_*/ALCHEMY_* from os.environ so a developer's local
     .env doesn't leak into tests and silently flip availability flags.
+
+    Both unprefixed and ``ALMANAK_GATEWAY_*`` variants are scrubbed: the
+    prefixed names are read by ``GatewaySettings`` via pydantic-settings,
+    so leaving them set would override anything the test injects through
+    the unprefixed fallback path in ``almanak.config.env``.
     """
-    for key in ("TENDERLY_ACCOUNT_SLUG", "TENDERLY_PROJECT_SLUG", "TENDERLY_ACCESS_KEY", "ALCHEMY_API_KEY"):
+    for key in (
+        "TENDERLY_ACCOUNT_SLUG",
+        "TENDERLY_PROJECT_SLUG",
+        "TENDERLY_ACCESS_KEY",
+        "ALCHEMY_API_KEY",
+        "ALMANAK_GATEWAY_TENDERLY_ACCOUNT_SLUG",
+        "ALMANAK_GATEWAY_TENDERLY_PROJECT_SLUG",
+        "ALMANAK_GATEWAY_TENDERLY_ACCESS_KEY",
+        "ALMANAK_GATEWAY_ALCHEMY_API_KEY",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -125,11 +140,17 @@ class TestInit:
         assert svc._tenderly_available is False
 
     def test_credentials_fall_back_to_env_vars(self, monkeypatch):
+        # VIB-4424: the env-fallback ladder lives in
+        # ``almanak.config.env._apply_gateway_env_fallbacks`` now — the
+        # servicer only reads attributes off ``settings``. Construct settings
+        # the same way production does (via ``gateway_config_from_env``) so
+        # the unprefixed env vars hydrate the fields and the resolved config
+        # reaches the servicer through its public boundary.
         monkeypatch.setenv("TENDERLY_ACCOUNT_SLUG", "env_acct")
         monkeypatch.setenv("TENDERLY_PROJECT_SLUG", "env_proj")
         monkeypatch.setenv("TENDERLY_ACCESS_KEY", "env_key")
         monkeypatch.setenv("ALCHEMY_API_KEY", "env_alchemy")
-        svc = SimulationServiceServicer(_make_settings())
+        svc = SimulationServiceServicer(gateway_config_from_env())
         assert svc._tenderly_account == "env_acct"
         assert svc._tenderly_project == "env_proj"
         assert svc._tenderly_key == "env_key"

@@ -428,7 +428,7 @@ class TestAnvilWatchdog:
         gw._wallet_address = None  # no funding needed
 
         # Use a short interval so the watchdog triggers immediately
-        gw._WATCHDOG_INTERVAL = 0.05
+        gw._watchdog_interval = 0.05
 
         # Run watchdog for just long enough for one cycle, then stop
         async def run_briefly():
@@ -459,7 +459,7 @@ class TestAnvilWatchdog:
         mock_manager.reset_to_latest = AsyncMock(return_value=True)
         gw._anvil_managers["base"] = mock_manager
 
-        gw._WATCHDOG_INTERVAL = 0.05
+        gw._watchdog_interval = 0.05
 
         async def run_briefly():
             task = asyncio.ensure_future(gw._anvil_watchdog())
@@ -489,7 +489,7 @@ class TestAnvilWatchdog:
         mock_manager.reset_to_latest = AsyncMock(return_value=False)  # restart fails
         gw._anvil_managers["arbitrum"] = mock_manager
 
-        gw._WATCHDOG_INTERVAL = 0.05
+        gw._watchdog_interval = 0.05
 
         async def run_briefly():
             task = asyncio.ensure_future(gw._anvil_watchdog())
@@ -519,7 +519,7 @@ class TestAnvilWatchdog:
         mock_manager.is_running = False
         gw._anvil_managers["arbitrum"] = mock_manager
 
-        gw._WATCHDOG_INTERVAL = 0.05
+        gw._watchdog_interval = 0.05
 
         task = asyncio.ensure_future(gw._anvil_watchdog())
         await asyncio.sleep(0.15)

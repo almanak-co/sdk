@@ -9,7 +9,6 @@ The gateway can optionally restrict queries to allowlisted subgraphs.
 """
 
 import logging
-import os
 from typing import Any
 
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
@@ -78,9 +77,6 @@ class TheGraphIntegration(BaseIntegration):
                 If None, uses default allowlist.
             request_timeout: HTTP request timeout in seconds
         """
-        # Check for API key in environment
-        api_key = api_key or os.environ.get("THEGRAPH_API_KEY")
-
         super().__init__(
             api_key=api_key,
             base_url="",  # URLs are per-subgraph
