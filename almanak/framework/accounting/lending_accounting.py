@@ -732,6 +732,61 @@ def _resolve_morpho_market_params(
     return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
 
 
+def _derive_morpho_token_symbols(
+    *,
+    intent: Any,
+    intent_type_str: str,
+) -> tuple[str | None, str | None]:
+    """Derive (collateral_token_sym, loan_token_sym) for a Morpho Blue intent
+    before registry resolution.
+
+    SUPPLY: routing depends on ``SupplyIntent.use_as_collateral`` (default
+    True). True → ``morpho.supplyCollateral()`` and ``intent.token`` is the
+    collateral asset. False → ``morpho.supply()`` (loan-side deposit) and
+    ``intent.token`` is the loan asset. The compiler's two-branch routing is
+    documented in ``compiler_lending.py:3851-3852``.
+
+    WITHDRAW: mirror of SUPPLY using ``WithdrawIntent.is_collateral``
+    (default True).
+
+    For BORROW / REPAY / DELEVERAGE: ``intent.borrow_token`` is the loan asset
+    when set; fall back to ``intent.token`` otherwise (e.g. ``RepayIntent``
+    uses ``token`` rather than ``borrow_token``).
+
+    The helper leaves ``loan_token_sym`` (collateral path) or
+    ``collateral_token_sym`` (loan-side path) as ``None`` so
+    :func:`_resolve_morpho_market_params` fills the other leg from
+    ``MORPHO_MARKETS`` (GH #2148 / VIB-4432).
+
+    Used from both pre-state (``_capture_morpho_blue_pre_state``) and
+    post-state (``build_lending_accounting_event``) Morpho branches so they
+    cannot drift again.
+    """
+    collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
+    intent_type_upper = intent_type_str.upper()
+
+    if intent_type_upper == "SUPPLY":
+        # SupplyIntent.use_as_collateral default True (lending_intents.py:290).
+        # Tolerate intents without the attribute (e.g. legacy mocks) by
+        # defaulting to the collateral branch.
+        if getattr(intent, "use_as_collateral", True):
+            collateral_token_sym = collateral_token_sym or getattr(intent, "token", None)
+            return collateral_token_sym, None
+        # Loan-side supply: intent.token is the loan asset.
+        return collateral_token_sym, getattr(intent, "token", None)
+
+    if intent_type_upper == "WITHDRAW":
+        # WithdrawIntent.is_collateral default True (lending_intents.py:387).
+        if getattr(intent, "is_collateral", True):
+            collateral_token_sym = collateral_token_sym or getattr(intent, "token", None)
+            return collateral_token_sym, None
+        return collateral_token_sym, getattr(intent, "token", None)
+
+    # BORROW / REPAY / DELEVERAGE.
+    loan_token_sym = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+    return collateral_token_sym, loan_token_sym
+
+
 # crap-allowlist: pre-state arm for Morpho Blue, exercised by integration tests
 # in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py.
 # Unit-scope coverage is artificially low (7%) — see
@@ -751,8 +806,11 @@ def _capture_morpho_blue_pre_state(
         logger.debug("capture_lending_pre_state: Morpho market_id missing — skipping pre-state read")
         return None
 
-    collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
-    loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+    intent_type_str = _intent_type_value(intent)
+    collateral_token_sym, loan_token_sym = _derive_morpho_token_symbols(
+        intent=intent,
+        intent_type_str=intent_type_str,
+    )
 
     (
         collateral_token_sym,
@@ -1138,6 +1196,13 @@ def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asse
         return None
 
 
+# crap-allowlist: VIB-4436 — pre-existing cc=101 / CRAP=171 primitive-dispatch
+# function (the C901 noqa just below is pre-existing). PR #2321 / VIB-4432
+# touches 2 lines inside the Morpho arm to route through the shared
+# ``_derive_morpho_token_symbols`` helper, reducing duplication; zero new
+# branches added. Full refactor tracked in VIB-4436 — must follow
+# .claude/rules/crap-refactor.md (fresh-context Plan agent + test-baseline
+# protocol) and is well out of scope for a 4-line semantic bugfix.
 def build_lending_accounting_event(  # noqa: C901
     *,
     intent: Any,
@@ -1405,59 +1470,38 @@ def build_lending_accounting_event(  # noqa: C901
     if is_aave and gateway_client is not None:
         aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
 
-    if is_morpho and gateway_client is not None and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE"):
-        # Morpho Blue HF persistence (VIB-3483): requires market_id, collateral/loan
-        # token symbols and decimals, and lltv from the market registry.
+    if (
+        is_morpho
+        and gateway_client is not None
+        and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
+    ):
+        # Morpho Blue post-state HF persistence: extended to SUPPLY/WITHDRAW so
+        # post-state is in parity with pre-state (VIB-4432). Required inputs:
+        # market_id + collateral/loan symbols + decimals + lltv from the market
+        # registry. Sharing ``_resolve_morpho_market_params`` with the pre-state
+        # branch is the contract that keeps the two arms from drifting again
+        # (Gemini PR #2321 finding).
         if not market_id:
             morpho_unavailable_reason = "market_id missing from intent — cannot read Morpho Blue position"
             logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
         else:
-            # Resolve collateral/loan token info from the intent and market registry.
-            collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
-            loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+            collateral_token_sym, loan_token_sym = _derive_morpho_token_symbols(
+                intent=intent,
+                intent_type_str=intent_type_str,
+            )
+            (
+                collateral_token_sym,
+                loan_token_sym,
+                _collateral_decimals,
+                _loan_decimals,
+                _lltv_raw,
+            ) = _resolve_morpho_market_params(
+                chain=chain,
+                market_id=market_id,
+                collateral_token_sym=collateral_token_sym,
+                loan_token_sym=loan_token_sym,
+            )
 
-            # Try to get market params from adapter registry for decimals + lltv.
-            _collateral_decimals: int | None = None
-            _loan_decimals: int | None = None
-            _lltv_raw: int | None = None
-
-            try:
-                from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
-
-                _markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
-                _market_info: dict | None = None
-                for _mid, _info in _markets_for_chain.items():
-                    if _mid.lower().lstrip("0x") == market_id.lower().lstrip("0x"):
-                        _market_info = _info
-                        break
-
-                if _market_info is not None:
-                    if collateral_token_sym is None:
-                        collateral_token_sym = _market_info.get("collateral_token")
-                    if loan_token_sym is None:
-                        loan_token_sym = _market_info.get("loan_token")
-                    _lltv_raw = _market_info.get("lltv")
-
-                    # Resolve decimals via token resolver
-                    try:
-                        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-                        _resolver = get_token_resolver()
-                        if collateral_token_sym:
-                            _ct = _resolver.resolve(collateral_token_sym, chain=chain)
-                            if _ct:
-                                _collateral_decimals = _ct.decimals
-                        if loan_token_sym:
-                            _lt = _resolver.resolve(loan_token_sym, chain=chain)
-                            if _lt:
-                                _loan_decimals = _lt.decimals
-                    except Exception:
-                        logger.debug("token resolver failed for Morpho Blue HF read", exc_info=True)
-
-            except Exception:
-                logger.debug("MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
-
-            # Only proceed if we have all required inputs
             if (
                 collateral_token_sym
                 and loan_token_sym

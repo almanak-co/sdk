@@ -718,12 +718,26 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         assert event.lltv is not None
         assert event.confidence == AccountingConfidence.HIGH
 
-    def test_supply_intent_does_not_trigger_morpho_hf_read(self) -> None:
-        """SUPPLY events do not trigger a Morpho Blue HF read (only BORROW/REPAY/DELEVERAGE)."""
+    def test_supply_intent_triggers_morpho_hf_read(self) -> None:
+        """VIB-4432: SUPPLY/WITHDRAW now trigger the Morpho Blue post-state HF
+        read in parity with the pre-state arm (and with the Compound V3 branch
+        at line 1570, which already handles SUPPLY/WITHDRAW).
+
+        Previously this test asserted ``eth_call.assert_not_called()`` for
+        SUPPLY — that encoded the pre-VIB-4432 guard ``intent_type_str in
+        ("BORROW", "REPAY", "DELEVERAGE")`` which Gemini flagged as a
+        consistency gap (post-state events for SUPPLY/WITHDRAW would ship
+        with ESTIMATED confidence because no HF/debt was read). The
+        behaviour change is intentional and now matches Compound V3.
+        """
         from almanak.framework.accounting.basis import FIFOBasisStore
         from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
 
         gateway = MagicMock()
+        # Gateway will be called for SUPPLY post-state; return empty so the
+        # read does not actually attempt to decode a market reply. The
+        # important assertion is *that* it was called, not what it returned.
+        gateway.eth_call.return_value = ""
 
         intent = MagicMock()
         intent.intent_type.value = "SUPPLY"
@@ -731,11 +745,12 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         intent.market_id = _MARKET_ID
         intent.borrow_token = None
         intent.collateral_token = "wstETH"
-        intent.token = "USDC"
+        intent.token = "wstETH"  # for SUPPLY-as-collateral, intent.token IS the collateral
+        intent.use_as_collateral = True
 
         result = MagicMock()
         result.tx_hash = "0xdeadbeef"
-        result.extracted_data = {"supply_amount": 1_000 * 10**6}
+        result.extracted_data = {"supply_collateral_amount": 1_000 * 10**18}
         result.total_gas_cost_wei = None
 
         event = build_lending_accounting_event(
@@ -754,10 +769,13 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         )
 
         assert event is not None
-        # No eth_call should have been made for SUPPLY
-        gateway.eth_call.assert_not_called()
-        # HF fields should remain None
-        assert event.health_factor_after is None
+        # Post-VIB-4432: SUPPLY does trigger the Morpho HF post-state read,
+        # in parity with BORROW/REPAY/DELEVERAGE.
+        assert gateway.eth_call.called, (
+            "SUPPLY must trigger the Morpho Blue post-state HF read (VIB-4432 "
+            "parity with the pre-state arm and Compound V3's post-state branch). "
+            f"Got called={gateway.eth_call.called}, call_count={gateway.eth_call.call_count}"
+        )
 
     def test_deleverage_intent_populates_hf(self) -> None:
         """DELEVERAGE intents trigger Morpho Blue HF read, identical to REPAY."""
