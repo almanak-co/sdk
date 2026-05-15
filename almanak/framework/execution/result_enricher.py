@@ -241,6 +241,18 @@ class ResultEnricher:
             "LP_OPEN": ["bin_ids"],
             "LP_COLLECT_FEES": ["bin_ids"],
         },
+        # Morpho Blue isolated markets emit ``SupplyCollateral`` for the
+        # collateral leg of a market — a distinct on-chain event from the
+        # loan-side ``Supply``. The generic spec only asks for
+        # ``supply_amount`` (loan-side); collateral receipts return ``None``.
+        # This overlay surfaces the collateral amount so downstream
+        # lending-accounting can book the typed event with the true on-chain
+        # assets value. See MorphoMay15 §6.2 (F2). The symmetric
+        # ``WITHDRAW`` overlay is deferred until the Morpho parser exposes
+        # ``extract_withdraw_collateral_amount`` — that block ships next.
+        "morpho_blue": {
+            "SUPPLY": ["supply_collateral_amount"],
+        },
     }
 
     @staticmethod

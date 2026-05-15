@@ -1113,6 +1113,30 @@ def _to_lending_event_type(intent_type_str: str):
     return _MAP.get(intent_type_str.upper())
 
 
+def _select_lending_raw_amount(extracted: dict) -> int | None:
+    """Return the canonical raw-int amount for a lending intent from enriched data.
+
+    MorphoMay15 §6.2 (F2): Morpho Blue isolated-market SUPPLY intents emit
+    ``SupplyCollateral`` on-chain — distinct from the loan-side ``Supply``.
+    The enricher's per-protocol overlay (``EXTRACTION_SPECS_BY_PROTOCOL[
+    "morpho_blue"]``) surfaces the collateral assets as
+    ``supply_collateral_amount``. Without including it in this lookup,
+    ``raw_amount`` stays ``None`` for Morpho collateral supplies and the
+    SUPPLY accounting branch silently emits ``amount_token=None`` /
+    ``principal_delta_usd=None``. ``supply_amount`` retains precedence so the
+    loan-side path is unchanged. The symmetric ``withdraw_collateral_amount``
+    slot is reserved for the WITHDRAW leg once the Morpho parser exposes
+    that extractor.
+    """
+    return (
+        extracted.get("supply_amount")
+        or extracted.get("supply_collateral_amount")
+        or extracted.get("borrow_amount")
+        or extracted.get("repay_amount")
+        or extracted.get("withdraw_amount")
+    )
+
+
 def _ray_to_bps(ray_value: int | float | Decimal | str | None) -> int | None:
     """Convert an APR value to integer basis-points (1 bps = 0.01 %).
 
@@ -1196,13 +1220,11 @@ def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asse
         return None
 
 
-# crap-allowlist: VIB-4436 — pre-existing cc=101 / CRAP=171 primitive-dispatch
-# function (the C901 noqa just below is pre-existing). PR #2321 / VIB-4432
-# touches 2 lines inside the Morpho arm to route through the shared
-# ``_derive_morpho_token_symbols`` helper, reducing duplication; zero new
-# branches added. Full refactor tracked in VIB-4436 — must follow
-# .claude/rules/crap-refactor.md (fresh-context Plan agent + test-baseline
-# protocol) and is well out of scope for a 4-line semantic bugfix.
+# crap-allowlist: VIB-4437 / VIB-4440 — replay-path counterpart of handle_lending
+# (also allowlisted at lending_handler.py:78 under VIB-4257). Dispatches over 5
+# lending intent types × 3 protocols (Aave, Morpho, Compound); CRAP=165 (cc=99,
+# cov=81%) reflects the integration matrix, not a tidiness gap. Refactor tracked
+# under VIB-4440 and must follow .claude/rules/crap-refactor.md.
 def build_lending_accounting_event(  # noqa: C901
     *,
     intent: Any,
@@ -1257,12 +1279,7 @@ def build_lending_accounting_event(  # noqa: C901
     tx_hash = getattr(result, "tx_hash", None) or ""
 
     # ── Amounts & APRs from extracted_data ────────────────────────────────────
-    raw_amount: int | None = (
-        extracted.get("supply_amount")
-        or extracted.get("borrow_amount")
-        or extracted.get("repay_amount")
-        or extracted.get("withdraw_amount")
-    )
+    raw_amount: int | None = _select_lending_raw_amount(extracted)
     amount_human: Decimal | None = None
     if raw_amount is not None:
         try:

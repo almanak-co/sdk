@@ -51,6 +51,15 @@ PROTOCOL_ALIASES: dict[tuple[str, str], str] = {
 # ---------------------------------------------------------------------------
 _GLOBAL_ALIASES: dict[str, str] = {
     "trader_joe_v2": "traderjoe_v2",
+    # VIB-4437 (Codex P2 on PR #2322): the lending compiler accepts both
+    # "morpho" and "morpho_blue", and ReceiptParserRegistry registers "morpho"
+    # as an alias to MorphoBlueReceiptParser. Without this alias the
+    # ResultEnricher's per-protocol overlay
+    # (``EXTRACTION_SPECS_BY_PROTOCOL["morpho_blue"]``) silently misses any
+    # intent compiled with ``protocol="morpho"`` — the parser still runs, but
+    # ``supply_collateral_amount`` is never requested. Canonical key is
+    # "morpho_blue".
+    "morpho": "morpho_blue",
 }
 
 # =============================================================================

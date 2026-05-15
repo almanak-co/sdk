@@ -462,6 +462,17 @@ def _extract_amount_human(
         "DELEVERAGE": "repay_amount",
         "WITHDRAW": "withdraw_amount",
     }
+    # MorphoMay15 §6.2 (F2): per-intent fallback to the collateral-side key
+    # when the primary loan-side key is absent. Morpho Blue isolated-market
+    # SUPPLY intents emit ``SupplyCollateral`` (not ``Supply``); the enricher
+    # surfaces the amount as ``supply_collateral_amount`` via the morpho_blue
+    # overlay in ``ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL``. Without this
+    # fallback the live writer silently produces ``amount_token=None``. The
+    # symmetric ``withdraw_collateral_amount`` slot is reserved for the
+    # WITHDRAW leg once the Morpho parser exposes that extractor.
+    _COLLATERAL_FALLBACK_BY_INTENT: dict[str, str] = {
+        "SUPPLY": "supply_collateral_amount",
+    }
     raw_amount: int | None = None
     primary_key = _AMOUNT_KEY_BY_INTENT.get(intent_type_str)
     if primary_key is not None:
@@ -471,6 +482,16 @@ def _extract_amount_human(
                 raw_amount = int(v)
             except (TypeError, ValueError):
                 pass
+
+    if raw_amount is None:
+        fallback_key = _COLLATERAL_FALLBACK_BY_INTENT.get(intent_type_str)
+        if fallback_key is not None:
+            v = extracted.get(fallback_key)
+            if v is not None:
+                try:
+                    raw_amount = int(v)
+                except (TypeError, ValueError):
+                    pass
 
     if raw_amount is None:
         return None
