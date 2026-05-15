@@ -33,10 +33,16 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Load environment variables
-from dotenv import load_dotenv  # noqa: E402
+from almanak.config.demo_runtime import (  # noqa: E402
+    demo_anvil_port,
+    demo_anvil_url,
+    demo_chain_rpc_url,
+    demo_fork_block,
+    demo_subprocess_env,
+    load_demo_dotenv,
+)
 
-load_dotenv(project_root / ".env")
+load_demo_dotenv(project_root)
 
 from web3 import Web3  # noqa: E402
 
@@ -55,9 +61,9 @@ logger = logging.getLogger(__name__)
 # Anvil default URL
 # Note: Gateway uses port 8545 for Arbitrum when network=anvil
 # (see almanak/gateway/utils/rpc_provider.py ANVIL_CHAIN_PORTS)
-ARBITRUM_ANVIL_PORT = int(os.environ.get("ANVIL_ARBITRUM_PORT", "8545"))
+ARBITRUM_ANVIL_PORT = demo_anvil_port("arbitrum", default=8545)
 ARBITRUM_ANVIL_URL = f"http://127.0.0.1:{ARBITRUM_ANVIL_PORT}"
-ANVIL_URL = os.environ.get("ANVIL_URL", ARBITRUM_ANVIL_URL)
+ANVIL_URL = demo_anvil_url("arbitrum", default_port=8545)
 
 # Test wallet (Anvil account 0)
 TEST_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -112,7 +118,7 @@ class AnvilManager:
         # CI exports ANVIL_FORK_BLOCK to pin Anvil to a stable per-week block
         # so Foundry's RPC disk cache (keyed by (chain_id, block)) hits across
         # runs. Local dev runs without it forks `latest`, unchanged.
-        fork_block_env = os.environ.get("ANVIL_FORK_BLOCK")
+        fork_block_env = demo_fork_block("arbitrum")
         if fork_block_env:
             cmd.extend(["--fork-block-number", fork_block_env])
             print(f"Pinning fork block to {fork_block_env}")
@@ -240,10 +246,11 @@ def run_strategy_via_cli(config: dict) -> int:
     print(f"{'=' * 60}")
 
     # Build environment for CLI
-    env = os.environ.copy()
-    env["ALMANAK_CHAIN"] = "arbitrum"
-    env["ALMANAK_RPC_URL"] = ANVIL_URL
-    env["ALMANAK_PRIVATE_KEY"] = TEST_PRIVATE_KEY
+    env = demo_subprocess_env(
+        chain="arbitrum",
+        rpc_url=ANVIL_URL,
+        private_key=TEST_PRIVATE_KEY,
+    )
 
     # Write config to temp file
     config_file = None
@@ -310,7 +317,7 @@ def main():
     print("=" * 70)
 
     # Get RPC URL for forking
-    fork_url = os.getenv("ALMANAK_ARBITRUM_RPC_URL") or os.getenv("ALMANAK_RPC_URL")
+    fork_url = demo_chain_rpc_url("arbitrum")
     if not fork_url:
         print("ERROR: No RPC URL found in .env file")
         print("\nAdd one of these to .env:")

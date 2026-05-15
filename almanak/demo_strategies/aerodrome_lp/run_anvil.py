@@ -48,10 +48,14 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Load environment variables
-from dotenv import load_dotenv
+from almanak.config.demo_runtime import (
+    demo_chain_rpc_url,
+    demo_fork_block,
+    demo_subprocess_env,
+    load_demo_dotenv,
+)
 
-load_dotenv(project_root / ".env")
+load_demo_dotenv(project_root)
 
 
 # =============================================================================
@@ -123,7 +127,7 @@ class AnvilManager:
         # CI exports ANVIL_FORK_BLOCK to pin Anvil to a stable per-week block
         # so Foundry's RPC disk cache (keyed by (chain_id, block)) hits across
         # runs. Local dev runs without it forks `latest`, unchanged.
-        fork_block_env = os.environ.get("ANVIL_FORK_BLOCK")
+        fork_block_env = demo_fork_block("base")
         if fork_block_env:
             cmd.extend(["--fork-block-number", fork_block_env])
             print(f"Pinning fork block to {fork_block_env}")
@@ -445,11 +449,11 @@ def run_strategy_via_cli(force_action: str = "open", pool: str = "WETH/USDC", st
     print(f"{'=' * 60}")
 
     # Build environment for CLI
-    env = os.environ.copy()
-    env["ALMANAK_CHAIN"] = "base"
-    env["ALMANAK_RPC_URL"] = ANVIL_RPC
-    env["ALMANAK_BASE_RPC_URL"] = ANVIL_RPC  # CLI checks chain-specific URL first
-    env["ALMANAK_PRIVATE_KEY"] = ANVIL_PRIVATE_KEY
+    env = demo_subprocess_env(
+        chain="base",
+        rpc_url=ANVIL_RPC,
+        private_key=ANVIL_PRIVATE_KEY,
+    )
 
     # Build config
     import json
@@ -621,10 +625,8 @@ def main():
     print("")
 
     # Get RPC URL - Base specific
-    fork_url = os.getenv("ALMANAK_BASE_RPC_URL")
-    if not fork_url:
-        # Use public Base RPC as fallback
-        fork_url = "https://mainnet.base.org"
+    fork_url = demo_chain_rpc_url("base", allow_generic_fallback=False, fallback="https://mainnet.base.org")
+    if fork_url == "https://mainnet.base.org":
         print("Note: Using public Base RPC (set ALMANAK_BASE_RPC_URL for better reliability)")
     print(f"Fork URL: {fork_url[:50]}...")
 

@@ -44,7 +44,6 @@ USAGE:
 ===============================================================================
 """
 
-import os
 import subprocess
 import sys
 import time
@@ -56,10 +55,9 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Load environment variables from .env
-from dotenv import load_dotenv
+from almanak.config.demo_runtime import demo_chain_rpc_url, load_demo_dotenv
 
-load_dotenv(project_root / ".env")
+load_demo_dotenv(project_root)
 
 
 # =============================================================================
@@ -807,7 +805,7 @@ def main():
 
     # Get RPC URL for forking
     # Try ALMANAK_ARBITRUM_RPC_URL first, then ALMANAK_RPC_URL
-    fork_url = os.getenv("ALMANAK_ARBITRUM_RPC_URL") or os.getenv("ALMANAK_RPC_URL")
+    fork_url = demo_chain_rpc_url("arbitrum")
     if not fork_url:
         print("ERROR: No RPC URL found in .env file")
         print("\nAdd one of these to .env:")

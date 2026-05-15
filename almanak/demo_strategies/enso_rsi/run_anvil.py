@@ -53,10 +53,13 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Load environment variables
-from dotenv import load_dotenv
+from almanak.config.demo_runtime import (
+    demo_chain_rpc_url,
+    demo_subprocess_env,
+    load_demo_dotenv,
+)
 
-load_dotenv(project_root / ".env")
+load_demo_dotenv(project_root)
 
 
 # =============================================================================
@@ -337,10 +340,11 @@ def run_strategy_via_cli(force_action: str = "buy") -> int:
     print(f"{'=' * 60}")
 
     # Build environment for CLI
-    env = os.environ.copy()
-    env["ALMANAK_CHAIN"] = "arbitrum"
-    env["ALMANAK_RPC_URL"] = ANVIL_RPC
-    env["ALMANAK_PRIVATE_KEY"] = ANVIL_PRIVATE_KEY
+    env = demo_subprocess_env(
+        chain="arbitrum",
+        rpc_url=ANVIL_RPC,
+        private_key=ANVIL_PRIVATE_KEY,
+    )
 
     # Build config
     import json
@@ -440,7 +444,7 @@ def main():
     print("")
 
     # Get RPC URL
-    fork_url = os.getenv("ALMANAK_ARBITRUM_RPC_URL") or os.getenv("ALMANAK_RPC_URL")
+    fork_url = demo_chain_rpc_url("arbitrum")
     if not fork_url:
         print("ERROR: No RPC URL found in .env file")
         print("\nAdd one of these to .env:")
