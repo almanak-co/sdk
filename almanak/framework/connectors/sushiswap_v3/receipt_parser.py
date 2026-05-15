@@ -444,6 +444,24 @@ class SushiSwapV3ReceiptParser:
         result = parser.parse_receipt(receipt)
     """
 
+    # Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS check
+    # (VIB-4434 W2 — see audit doc §5). Each entry maps to a present
+    # ``extract_<field>`` method on the class. ``protocol_fees`` is NOT
+    # included because ``extract_protocol_fees`` is not implemented on
+    # SushiSwap V3 today (A5 gap — audit doc §2 / VIB-3204 / VIB-3495).
+    # Once implemented, add it here in lockstep.
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "position_id",
+            "swap_amounts",
+            "tick_lower",
+            "tick_upper",
+            "liquidity",
+            "lp_open_data",
+            "lp_close_data",
+        }
+    )
+
     def __init__(
         self,
         chain: str = "arbitrum",

@@ -1293,3 +1293,232 @@ class TestExtractionSpecPerProtocolOverlay:
                 f"Unexpected {field_name!r} warning for sushiswap_v3 LP_OPEN: "
                 f"{enriched.extraction_warnings}"
             )
+
+
+# ===========================================================================
+# VIB-4434 W2 — Per-protocol EXTRACTION_SPECS_REMOVE_BY_PROTOCOL narrowing
+# ===========================================================================
+
+
+class TestExtractionSpecRemoveOverlay:
+    """Narrowing of ``EXTRACTION_SPECS`` per protocol via the REMOVE table.
+
+    Verifies four scenarios from the audit doc §8 W2 spec:
+
+    1. Aerodrome V1 LP_OPEN — no SUPPORTED_EXTRACTIONS warning for
+       ``lp_open_data`` / ``tick_lower`` / ``tick_upper`` (structurally
+       absent on fungible Solidly-fork LP).
+    2. Aerodrome Slipstream LP_OPEN — no warning for ``tick_lower`` /
+       ``tick_upper`` (ticks ship via ``lp_open_data`` struct), AND
+       ``lp_open_data`` is still in the effective spec.
+    3. Cross-protocol regression guard — Uniswap V3 LP_OPEN's effective
+       spec must still contain ``lp_open_data`` / ``tick_lower`` /
+       ``tick_upper`` (Aerodrome narrowing must NOT leak to other protocols).
+    4. TraderJoe V2 additive overlay (VIB-4320) — ``bin_ids`` still appended
+       to LP_OPEN spec; no regression from the REMOVE table addition.
+    """
+
+    # ----- 1. Aerodrome V1 narrowing fires (no false noise).
+
+    def test_aerodrome_v1_lp_open_no_v3_field_warnings(self) -> None:
+        from almanak.framework.connectors.aerodrome.receipt_parser import (
+            AerodromeReceiptParser,
+        )
+
+        parser = AerodromeReceiptParser(chain="base")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="aerodrome")
+        context = _FakeContext(chain="base", protocol="aerodrome")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
+            assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
+                f"Unexpected {field_name!r} warning for aerodrome V1 LP_OPEN — "
+                f"the REMOVE overlay must narrow this field away: "
+                f"{enriched.extraction_warnings}"
+            )
+
+    # ----- 2a. Aerodrome Slipstream narrowing fires (no false noise on ticks).
+
+    def test_aerodrome_slipstream_lp_open_no_tick_warnings(self) -> None:
+        from almanak.framework.connectors.aerodrome.receipt_parser import (
+            AerodromeSlipstreamReceiptParser,
+        )
+
+        parser = AerodromeSlipstreamReceiptParser(chain="base")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_OPEN", protocol="aerodrome_slipstream")
+        context = _FakeContext(chain="base", protocol="aerodrome_slipstream")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        for field_name in ("tick_lower", "tick_upper"):
+            assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
+                f"Unexpected {field_name!r} warning for aerodrome_slipstream "
+                f"LP_OPEN — REMOVE overlay must narrow it. Ticks ship via "
+                f"lp_open_data on Slipstream, not as flat fields: "
+                f"{enriched.extraction_warnings}"
+            )
+
+    # ----- 2b. Slipstream KEEPS lp_open_data in the effective spec.
+
+    def test_aerodrome_slipstream_lp_open_data_remains_in_effective_spec(self) -> None:
+        """The REMOVE table for ``aerodrome_slipstream`` MUST drop only
+        ``tick_lower`` / ``tick_upper`` from LP_OPEN — NOT ``lp_open_data``.
+        Slipstream implements ``extract_lp_open_data`` (V2-verified at
+        ``aerodrome/receipt_parser.py:1892``); narrowing it away would mute
+        the structured-tick extraction path entirely.
+        """
+        effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "aerodrome_slipstream")
+        assert "lp_open_data" in effective, (
+            f"Slipstream LP_OPEN effective spec must KEEP lp_open_data "
+            f"(it is the structured path that carries the ticks). Got: {effective}"
+        )
+        assert "tick_lower" not in effective, (
+            f"Slipstream LP_OPEN effective spec must drop flat tick_lower "
+            f"(ticks ship via lp_open_data). Got: {effective}"
+        )
+        assert "tick_upper" not in effective, (
+            f"Slipstream LP_OPEN effective spec must drop flat tick_upper "
+            f"(ticks ship via lp_open_data). Got: {effective}"
+        )
+
+    # ----- 3. Cross-protocol regression guard — UniV3 LP_OPEN must still
+    #         include lp_open_data / tick_lower / tick_upper.
+
+    def test_uniswap_v3_lp_open_unaffected_by_aerodrome_narrowing(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "uniswap_v3")
+        for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
+            assert field_name in effective, (
+                f"Uniswap V3 LP_OPEN effective spec must still contain "
+                f"{field_name!r}. Aerodrome's REMOVE entries must not leak "
+                f"to other protocols. Got: {effective}"
+            )
+
+    # ----- 4. TraderJoe V2 additive overlay (VIB-4320) regression guard.
+
+    def test_traderjoe_v2_additive_overlay_unchanged(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
+        base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
+        assert "bin_ids" in effective, (
+            f"TraderJoe V2 LP_OPEN must still append bin_ids via the additive "
+            f"overlay (VIB-4320). Got: {effective}"
+        )
+        # bin_ids appended at the tail (post-base-fields)
+        assert effective.index("bin_ids") >= len(base), (
+            f"bin_ids must come after base fields. Got: {effective}"
+        )
+
+    # ----- 5. Direct unit test of two-phase merge ordering.
+
+    def test_merge_overlay_then_remove_ordering(self) -> None:
+        """Verify the merge semantics: additive THEN subtractive, so a
+        REMOVE entry can drop both a base field AND a same-protocol additive
+        overlay field if both were declared.
+        """
+        saved_add = ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.get("__test_merge__")
+        saved_rm = ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL.get("__test_merge__")
+        try:
+            ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test_merge__"] = {
+                "LP_OPEN": ["bin_ids", "synthetic_added"],
+            }
+            ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["__test_merge__"] = {
+                # ``position_id`` is a base field; ``synthetic_added`` came
+                # from the additive overlay above. Both must be removable.
+                # Stored as frozenset to match the production dict's value type.
+                "LP_OPEN": frozenset({"position_id", "synthetic_added"}),
+            }
+            merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "__test_merge__")
+            assert "position_id" not in merged, (
+                f"REMOVE must drop base field. Got: {merged}"
+            )
+            assert "synthetic_added" not in merged, (
+                f"REMOVE must drop additive-overlay field. Got: {merged}"
+            )
+            assert "bin_ids" in merged, (
+                f"Additive overlay field not in REMOVE must remain. Got: {merged}"
+            )
+        finally:
+            if saved_add is None:
+                ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.pop("__test_merge__", None)
+            else:
+                ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL["__test_merge__"] = saved_add
+            if saved_rm is None:
+                ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL.pop("__test_merge__", None)
+            else:
+                ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["__test_merge__"] = saved_rm
+
+    # ----- 6. Aerodrome V1 effective spec direct assertion.
+
+    def test_aerodrome_v1_lp_open_effective_spec_drops_three_v3_fields(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "aerodrome")
+        for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
+            assert field_name not in effective, (
+                f"Aerodrome V1 LP_OPEN effective spec must drop {field_name!r}. "
+                f"Got: {effective}"
+            )
+        # Sanity — the V1-supported fields are still in the effective spec.
+        assert "position_id" in effective
+        assert "liquidity" in effective
+        assert "protocol_fees" in effective
+
+    # ----- 7. LP_CLOSE narrowing for Aerodrome V1 (Codex review on PR #2331).
+    #
+    # V1's SUPPORTED_EXTRACTIONS lists ``lp_close_data`` but NOT the standalone
+    # flat fields ``amount0_collected`` / ``amount1_collected`` / ``fees0`` /
+    # ``fees1`` (those collected amounts live INSIDE the lp_close_data struct).
+    # Without LP_CLOSE narrowing, every Aerodrome V1 LP_CLOSE receipt would
+    # trigger 4 false info-warnings.
+
+    def test_aerodrome_v1_lp_close_effective_spec_drops_flat_close_fields(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "aerodrome")
+        for field_name in ("amount0_collected", "amount1_collected", "fees0", "fees1"):
+            assert field_name not in effective, (
+                f"Aerodrome V1 LP_CLOSE effective spec must drop {field_name!r} "
+                f"(collected amounts ship via lp_close_data only). Got: {effective}"
+            )
+        # Sanity — the V1-supported close fields are still in the effective spec.
+        assert "lp_close_data" in effective
+        assert "protocol_fees" in effective
+
+    # ----- 8. LP_CLOSE narrowing for Aerodrome Slipstream (Codex review on PR #2331).
+    #
+    # Slipstream SUPPORTED_EXTRACTIONS lists ``lp_close_data`` AND ``fees0`` /
+    # ``fees1`` (standalone fee extractors exist for Slipstream) but NOT
+    # ``amount0_collected`` / ``amount1_collected`` (those live inside
+    # lp_close_data only on Slipstream too). The narrowing therefore only
+    # drops the two collected-flat fields and KEEPS fees0/fees1.
+
+    def test_aerodrome_slipstream_lp_close_drops_only_collected_flat_fields(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "aerodrome_slipstream")
+        for field_name in ("amount0_collected", "amount1_collected"):
+            assert field_name not in effective, (
+                f"Aerodrome Slipstream LP_CLOSE effective spec must drop {field_name!r}. "
+                f"Got: {effective}"
+            )
+        # fees0 / fees1 MUST remain because Slipstream has standalone
+        # extract_fees0 / extract_fees1 methods.
+        assert "fees0" in effective, (
+            "Slipstream LP_CLOSE effective spec must KEEP fees0 (standalone "
+            f"extract_fees0 method exists). Got: {effective}"
+        )
+        assert "fees1" in effective, (
+            "Slipstream LP_CLOSE effective spec must KEEP fees1 (standalone "
+            f"extract_fees1 method exists). Got: {effective}"
+        )
+        # lp_close_data is the structured path — must remain.
+        assert "lp_close_data" in effective
+
+    # ----- 9. Cross-protocol regression guard: UniV3 LP_CLOSE unaffected.
+
+    def test_uniswap_v3_lp_close_unaffected_by_aerodrome_narrowing(self) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
+        for field_name in ("lp_close_data", "amount0_collected", "amount1_collected", "fees0", "fees1"):
+            assert field_name in effective, (
+                f"Uniswap V3 LP_CLOSE effective spec must still contain "
+                f"{field_name!r}. Aerodrome's REMOVE entries must not leak. "
+                f"Got: {effective}"
+            )

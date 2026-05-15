@@ -105,9 +105,21 @@ class PermissionHints:
 
 _DEFAULT = PermissionHints()
 
-# Protocol names that differ from their connector directory name.
-_PROTOCOL_CONNECTOR_MAP: dict[str, str] = {
+# Protocol-literal → connector resolution.
+#
+# A bare string maps to ``connectors.<value>.permission_hints.PERMISSION_HINTS``
+# (the convention-based default). A ``(connector_name, attribute_name)`` tuple
+# resolves to ``connectors.<connector_name>.permission_hints.<attribute_name>``
+# — used when one connector directory exposes multiple protocol surfaces
+# through distinct module-level ``PermissionHints`` exports.
+#
+# The Aerodrome connector is the canonical example (audit VIB-4434 §B6,
+# blueprint 05 §Aerodrome): one directory backs both ``aerodrome`` (Classic
+# Solidly-fork) and ``aerodrome_slipstream`` (Uniswap V3-style CL NPM), with
+# different routers, selectors, and synthetic-discovery requirements.
+_PROTOCOL_CONNECTOR_MAP: dict[str, str | tuple[str, str]] = {
     "metamorpho": "morpho_vault",
+    "aerodrome_slipstream": ("aerodrome", "PERMISSION_HINTS_SLIPSTREAM"),
 }
 
 
@@ -115,15 +127,27 @@ def get_permission_hints(protocol: str) -> PermissionHints:
     """Load PermissionHints for a protocol via convention-based import.
 
     Tries ``almanak.framework.connectors.{protocol}.permission_hints.PERMISSION_HINTS``.
+    If ``_PROTOCOL_CONNECTOR_MAP`` maps ``protocol`` to a
+    ``(connector_name, attribute_name)`` tuple, loads
+    ``connectors.{connector_name}.permission_hints.{attribute_name}`` instead.
     Falls back to defaults if the module or attribute does not exist.
     """
-    connector_name = _PROTOCOL_CONNECTOR_MAP.get(protocol, protocol)
+    mapping = _PROTOCOL_CONNECTOR_MAP.get(protocol, protocol)
+    if isinstance(mapping, tuple):
+        connector_name, attribute_name = mapping
+    else:
+        connector_name = mapping
+        attribute_name = "PERMISSION_HINTS"
     try:
         mod = importlib.import_module(f"almanak.framework.connectors.{connector_name}.permission_hints")
-        hints = getattr(mod, "PERMISSION_HINTS", None)
+        hints = getattr(mod, attribute_name, None)
         if isinstance(hints, PermissionHints):
             return hints
-        logger.debug("PERMISSION_HINTS in %s.permission_hints is not a PermissionHints instance", connector_name)
+        logger.debug(
+            "%s in %s.permission_hints is not a PermissionHints instance",
+            attribute_name,
+            connector_name,
+        )
     except (ImportError, ModuleNotFoundError):
         pass
     return _DEFAULT

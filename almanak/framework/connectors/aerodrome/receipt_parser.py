@@ -402,6 +402,23 @@ class AerodromeReceiptParser:
     and event registry management. Maintains full backward compatibility.
     """
 
+    # Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS check
+    # (VIB-4434 W2 — see audit doc §5). Each entry maps to a present
+    # ``extract_<field>`` method on the class. Aerodrome V1 is a Solidly
+    # fork with fungible LP — there is no NFT-position model and no
+    # standalone tick extraction; the LP_OPEN fields ``lp_open_data`` /
+    # ``tick_lower`` / ``tick_upper`` are intentionally absent and narrowed
+    # via ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["aerodrome"]["LP_OPEN"]``.
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "swap_amounts",
+            "position_id",  # returns the pool address (Solidly-fork LP id semantics)
+            "liquidity",
+            "lp_close_data",
+            "protocol_fees",  # UNAVAILABLE-with-reason per VIB-3204 / VIB-3495
+        }
+    )
+
     def __init__(
         self,
         chain: str = "base",
@@ -1809,6 +1826,28 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
     Position ID is the NFT tokenId extracted from the ERC-721 Transfer (mint)
     event where from == zero_address.
     """
+
+    # Compose with the V1 base set rather than restating it, so any addition
+    # to the parent stays in lockstep with Slipstream's surface.
+    #
+    # Slipstream extends V1 with three V3-style fields:
+    #   * ``lp_open_data`` — typed LPOpenData populated from IncreaseLiquidity
+    #     + ERC-721 Transfer; ``tick_lower`` / ``tick_upper`` are emitted
+    #     INSIDE this struct.
+    #   * ``fees0`` / ``fees1`` — Slipstream-only standalone fee extractors.
+    #
+    # Standalone ``extract_tick_lower`` / ``extract_tick_upper`` deliberately
+    # do NOT exist (ticks ship via ``lp_open_data``); both flat fields are
+    # narrowed via ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["aerodrome_slipstream"]
+    # ["LP_OPEN"]`` so the SUPPORTED_EXTRACTIONS capability check does not
+    # emit false info-warnings (VIB-4434 W2).
+    SUPPORTED_EXTRACTIONS: frozenset[str] = AerodromeReceiptParser.SUPPORTED_EXTRACTIONS | frozenset(
+        {
+            "lp_open_data",
+            "fees0",
+            "fees1",
+        }
+    )
 
     def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
         """Extract NFT tokenId from LP mint receipt.

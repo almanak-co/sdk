@@ -73,6 +73,7 @@ _LP_PROTOCOLS = {
     "pancakeswap_v3",
     "sushiswap_v3",
     "aerodrome",
+    "aerodrome_slipstream",
     "traderjoe_v2",
     "pendle",
 }

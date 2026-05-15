@@ -255,6 +255,50 @@ class ResultEnricher:
         },
     }
 
+    # VIB-4434 W2 — Per-protocol REMOVE table; companion to
+    # ``EXTRACTION_SPECS_BY_PROTOCOL``. Fields listed here are *removed* from
+    # the effective spec after the additive overlay is applied. Use this when
+    # a protocol legitimately does not expose a base field, so the SUPPORTED_
+    # EXTRACTIONS capability check inside ``_extract_field`` would otherwise
+    # emit a chronic info-warning on every receipt.
+    #
+    # Two narrowing dimensions today (Aerodrome Classic + Slipstream, LP_OPEN
+    # and LP_CLOSE):
+    #
+    # * ``"aerodrome"`` — Classic V1 (Solidly fork) — fungible LP, no NFT, no
+    #   ticks, no structured ``lp_open_data`` and no standalone ``amount0_collected`` /
+    #   ``amount1_collected`` / ``fees0`` / ``fees1`` extractors (those collected
+    #   amounts live INSIDE ``lp_close_data`` only, on the Solidly burn path).
+    # * ``"aerodrome_slipstream"`` — CL — Slipstream DOES extract
+    #   ``lp_open_data`` (``AerodromeSlipstreamReceiptParser.extract_lp_open_data``)
+    #   and the ticks ship inside that struct. There is no standalone
+    #   ``extract_tick_lower`` / ``extract_tick_upper`` method, so without
+    #   narrowing those two flat fields would trigger false info-warnings on
+    #   every Slipstream LP_OPEN even though ticks are extracted via the
+    #   structured path. Keep ``lp_open_data`` (the V3-style struct). For
+    #   LP_CLOSE, the amounts ship via ``lp_close_data`` (not as standalone
+    #   ``amount0_collected`` / ``amount1_collected``), so those flat fields
+    #   are narrowed too. ``fees0`` / ``fees1`` remain in the Slipstream
+    #   SUPPORTED_EXTRACTIONS set (Slipstream-only standalone extractors).
+    #
+    # Values are ``frozenset[str]`` rather than ``list[str]`` because
+    # ``_merge_spec_with_overlay`` only needs O(1) membership tests against
+    # the merged spec — storing as frozenset removes a per-call
+    # ``set(...)`` conversion that otherwise fires on every receipt
+    # enrichment (Gemini perf tip on PR #2331).
+    #
+    # Existing TraderJoe V2 additive overlay (``bin_ids``) is unchanged.
+    EXTRACTION_SPECS_REMOVE_BY_PROTOCOL: dict[str, dict[str, frozenset[str]]] = {
+        "aerodrome": {
+            "LP_OPEN": frozenset({"lp_open_data", "tick_lower", "tick_upper"}),
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
+        },
+        "aerodrome_slipstream": {
+            "LP_OPEN": frozenset({"tick_lower", "tick_upper"}),
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected"}),
+        },
+    }
+
     @staticmethod
     def _canonicalise_protocol(protocol: str | None, context: Any) -> str | None:
         """Normalize a protocol alias (e.g. ``trader-joe-v2``) to canonical form.
@@ -273,8 +317,15 @@ class ResultEnricher:
     def _merge_spec_with_overlay(intent_type: str, protocol: str | None) -> list[str]:
         """Return effective extraction spec for (intent_type, protocol).
 
-        Base = ``EXTRACTION_SPECS[intent_type]``. Overlay (if any) is appended
-        at the tail with order-preserving dedup. Base fields always come first.
+        Two-phase merge:
+
+        1. **Additive** — ``EXTRACTION_SPECS_BY_PROTOCOL`` overlay fields are
+           appended at the tail of the base spec with order-preserving dedup.
+           Base fields always come first (preserves the VIB-4320 semantics).
+        2. **Subtractive** — ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL`` fields are
+           removed from the merged spec. Applied last so a remove entry can
+           drop both base AND overlay fields per-protocol if needed (VIB-4434
+           W2).
 
         ``protocol`` is expected to be already canonicalised via
         ``normalize_protocol(chain, protocol)`` by the caller (see ``enrich``).
@@ -291,6 +342,11 @@ class ResultEnricher:
             if field not in seen:
                 merged.append(field)
                 seen.add(field)
+        # ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL`` values are already ``frozenset[str]``
+        # (Gemini perf tip on PR #2331) so no per-call set conversion is needed.
+        removed = ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL.get(protocol, {}).get(intent_type)
+        if removed:
+            merged = [field for field in merged if field not in removed]
         return merged
 
     def __init__(
