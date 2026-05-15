@@ -320,4 +320,36 @@ def create_mock_api_client():
             """Resume a strategy (mock - not implemented)."""
             return {"status": "not_implemented", "message": "Mock API client"}
 
+        # VIB-4347: mock parity for the new DashboardAPIClient market-data
+        # methods. Each returns ``[]`` — synthetic fixture data is **never**
+        # returned from a mock because it would silently fool custom dashboards
+        # running in fallback/demo mode into rendering meaningful-looking
+        # charts off thin air. If a test needs OHLCV / position fixtures it
+        # must inject them explicitly.
+        def get_ohlcv(
+            self,
+            token: str,
+            quote: str = "USD",
+            timeframe: str = "1h",
+            limit: int = 168,
+            chain: str | None = None,
+            pool_address: str | None = None,
+        ) -> list[dict]:
+            """Mock get_ohlcv — returns empty list."""
+            return []
+
+        def get_position_events(
+            self,
+            position_types: list[str] | None = None,
+        ) -> list[dict]:
+            """Mock get_position_events — returns empty list."""
+            return []
+
+        def get_position_history(
+            self,
+            position_id: str,
+        ) -> list[dict]:
+            """Mock get_position_history — returns empty list."""
+            return []
+
     return MockAPIClient()

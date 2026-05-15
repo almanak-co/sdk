@@ -2211,6 +2211,7 @@ def _build_orchestrator_and_providers(  # noqa: C901
     from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator  # noqa: F401
 
     from ..data.balance.gateway_provider import GatewayBalanceProvider
+    from ..data.ohlcv import create_ohlcv_stack
     from ..data.price.gateway_oracle import GatewayPriceOracle
     from ..execution.multichain import MultiChainOrchestrator
     from .run import (
@@ -2218,7 +2219,6 @@ def _build_orchestrator_and_providers(  # noqa: C901
         _init_prediction_provider,
         _wire_core_providers,
         _wire_indicators,
-        create_routing_ohlcv_provider,
     )
 
     requirements = _get_data_requirements(strategy_instance)
@@ -2276,11 +2276,17 @@ def _build_orchestrator_and_providers(  # noqa: C901
             # For DeFi-native tokens on secondary chains, GeckoTerminal pool search
             # may resolve to the wrong network. Per-chain providers would require
             # passing chain context through the indicator callables, which is a larger change.
-            ohlcv_provider = create_routing_ohlcv_provider(
+            ohlcv_stack = create_ohlcv_stack(
                 gateway_client=gateway_client,
                 chain=strategy_chains[0],
-                strategy_config=strategy_config,
+                pool_address=strategy_config.get("pool_address") if strategy_config else None,
             )
+            ohlcv_provider = ohlcv_stack.provider
+            # VIB-4347: stamp the sync OHLCVRouter on the strategy so
+            # ``MarketSnapshot.ohlcv(...)`` resolves to the same routed gateway-backed
+            # pipes the indicator path already uses. Shared router instance = shared
+            # disk cache + TTL.
+            strategy_instance._ohlcv_router = ohlcv_stack.router
             _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
         elif requirements.price or requirements.balance:
             # indicators=False: wire price/balance directly without OHLCV or indicator calculators
@@ -2417,11 +2423,17 @@ def _build_orchestrator_and_providers(  # noqa: C901
 
         if requirements.indicators:
             # Create indicator calculators using routed OHLCV provider (CEX + DEX fallback)
-            ohlcv_provider = create_routing_ohlcv_provider(
+            ohlcv_stack = create_ohlcv_stack(
                 gateway_client=gateway_client,
                 chain=runtime_config.chain,
-                strategy_config=strategy_config,
+                pool_address=strategy_config.get("pool_address") if strategy_config else None,
             )
+            ohlcv_provider = ohlcv_stack.provider
+            # VIB-4347: stamp the sync OHLCVRouter on the strategy so
+            # ``MarketSnapshot.ohlcv(...)`` resolves to the same routed gateway-backed
+            # pipes the indicator path already uses. Shared router instance = shared
+            # disk cache + TTL.
+            strategy_instance._ohlcv_router = ohlcv_stack.router
             _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
         elif requirements.price or requirements.balance:
             # indicators=False: wire price/balance directly without OHLCV or indicator calculators

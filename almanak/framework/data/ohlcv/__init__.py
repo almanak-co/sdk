@@ -32,6 +32,11 @@ strategy never calls ``MarketSnapshot.ohlcv(...)``.
 from typing import TYPE_CHECKING
 
 from almanak.framework.data.ohlcv.dedup_provider import DedupingOHLCVProvider
+from almanak.framework.data.ohlcv.factory import (
+    OHLCVStack,
+    create_ohlcv_stack,
+    create_routing_ohlcv_provider,
+)
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
     GatewayOHLCVDataProvider,
     GeckoTerminalGatewayDataProvider,
@@ -57,6 +62,7 @@ __all__ = [
     "GatewayGeckoTerminalOHLCVProvider",
     "GatewayOHLCVDataProvider",
     "GeckoTerminalGatewayDataProvider",
+    "OHLCVStack",
     "TOKEN_TO_BINANCE_SYMBOL",
     "DedupingOHLCVProvider",
     "GapStrategy",
@@ -64,6 +70,8 @@ __all__ = [
     "OHLCVRouter",
     "RoutingOHLCVProvider",
     "classify_instrument",
+    "create_ohlcv_stack",
+    "create_routing_ohlcv_provider",
 ]
 
 

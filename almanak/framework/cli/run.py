@@ -66,9 +66,6 @@ from ..data.indicators.sync_wrappers import (
 from ..data.interfaces import BalanceProvider as BalanceProviderInterface
 from ..data.interfaces import PriceOracle
 from ..data.ohlcv.dedup_provider import DedupingOHLCVProvider
-from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider, GeckoTerminalGatewayDataProvider
-from ..data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider, GatewayOHLCVProvider
-from ..data.ohlcv.ohlcv_router import OHLCVRouter
 from ..data.ohlcv.routing_provider import RoutingOHLCVProvider
 from ..execution.config import (
     LocalRuntimeConfig,
@@ -560,47 +557,19 @@ def create_sync_balance_func(
 ## create_sync_rsi_func moved to almanak.framework.data.indicators.sync_wrappers
 
 
-def create_routing_ohlcv_provider(
-    gateway_client: Any,
-    chain: str,
-    strategy_config: dict[str, Any],
-) -> RoutingOHLCVProvider:
-    """Build an OHLCV provider with multi-source routing from strategy context.
-
-    Registers both the gateway/Binance provider and the GeckoTerminal provider
-    with an OHLCVRouter, then returns a RoutingOHLCVProvider that implements
-    the OHLCVProvider protocol for use by indicators.
-
-    Args:
-        gateway_client: Connected GatewayClient instance.
-        chain: Chain name (e.g. "base", "arbitrum").
-        strategy_config: Parsed strategy config.json dict.
-
-    Returns:
-        RoutingOHLCVProvider with multi-source routing enabled.
-    """
-    gateway_provider = GatewayOHLCVProvider(gateway_client=gateway_client)
-    binance_adapter = GatewayOHLCVDataProvider(gateway_provider)
-
-    gecko_provider = GatewayGeckoTerminalOHLCVProvider(gateway_client=gateway_client, chain=chain)
-    gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
-
-    router = OHLCVRouter(default_chain=chain)
-    # VIB-3448: OHLCVRouter._PROVIDER_CHAINS["defi_primary"] lists a "defillama"
-    # middle tier between Gecko and Binance, but no gateway-backed DeFi Llama
-    # OHLCV provider exists yet.  Until one is available, Gecko blips fall straight
-    # through to the known-futile CEX path.  Track on VIB-3448 / gateway roadmap.
-    router.register_provider(gecko_adapter)
-    router.register_provider(binance_adapter)
-
-    pool_address = strategy_config.get("pool_address")
-    return RoutingOHLCVProvider(
-        router=router,
-        chain=chain,
-        pool_address=str(pool_address) if pool_address else None,
-        closeable_providers=[],
-    )
-
+# VIB-4347: factory relocated to ``almanak.framework.data.ohlcv.factory``.
+# This file used to define ``create_routing_ohlcv_provider`` inline, but the
+# factory's dependencies (router, providers, adapters) all live under
+# ``framework/data/ohlcv/``, so its home in ``cli/`` was historical only.
+# Re-exported here unchanged to keep existing imports
+# (``from almanak.framework.cli.run import create_routing_ohlcv_provider``)
+# working without code change. New call sites that also need the underlying
+# sync ``OHLCVRouter`` should call ``create_ohlcv_stack`` instead.
+from almanak.framework.data.ohlcv import (  # noqa: F401
+    OHLCVStack,
+    create_ohlcv_stack,
+    create_routing_ohlcv_provider,
+)
 
 # _get_orca_pool_accounts now lives in ``cli/_solana_setup.py`` so ``cli/teardown.py``
 # can import it without dragging in run.py's full Click command tree (VIB-522).

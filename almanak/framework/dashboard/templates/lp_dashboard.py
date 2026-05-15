@@ -248,7 +248,142 @@ def prepare_lp_session_state(
     result.setdefault("range_upper", None)
     result.setdefault("total_value_usd", "0")
 
+    # VIB-4347: populate position_history + price_history_by_pool via the
+    # shared OHLCV stack (DashboardAPIClient.get_ohlcv → factory →
+    # OHLCVRouter). Always preserve caller-provided ``price_history`` /
+    # ``position_history`` — custom dashboards that supply their own chart
+    # data must not regress.
+    _populate_position_history(api_client, result)
+    _populate_price_history_by_pool(api_client, result, config)
+
     return result
+
+
+def _populate_position_history(api_client: Any, result: dict[str, Any]) -> None:
+    """Fetch LP position events into ``session_state``.
+
+    Caller-provided ``position_history`` is left untouched. On any RPC
+    error, the function silently logs at debug level — the dashboard
+    template already renders a "Position history data not available"
+    info banner when the key is missing.
+    """
+    if api_client is None or "position_history" in result:
+        return
+    try:
+        # ``position_type`` column stores ``"LP"`` / ``"PERP"`` etc.;
+        # ``event_type`` holds ``OPEN`` / ``CLOSE``. Filter on the
+        # column the RPC actually filters on (Codex P2 on PR #2270).
+        events = api_client.get_position_events(position_types=["LP"])
+        if events:
+            # Defer the heavy import until we actually have rows to convert.
+            from almanak.framework.dashboard.custom.position_event_adapter import (
+                position_events_to_position_data_dicts,
+            )
+
+            result["position_history"] = position_events_to_position_data_dicts(events)
+        else:
+            result["position_history"] = []
+    except Exception:
+        logger.debug("Failed to fetch position events for LP dashboard", exc_info=True)
+
+
+def _collect_pool_keys(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect distinct ``(chain, pool_address)`` tuples from session_state.
+
+    Positions may live under either ``positions`` (custom payload) or
+    ``position_history`` (populated by :func:`_populate_position_history`).
+    Output order is deterministic (first-seen wins).
+    """
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str]] = []
+    sources: list[list[Any]] = []
+    if isinstance(result.get("positions"), list):
+        sources.append(result["positions"])
+    if isinstance(result.get("position_history"), list):
+        sources.append(result["position_history"])
+
+    for source in sources:
+        for pos in source:
+            if not isinstance(pos, dict):
+                continue
+            pool = pos.get("pool_address") or pos.get("pool")
+            chain = pos.get("chain")
+            if pool and chain:
+                key = (str(chain), str(pool))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(key)
+    return candidates
+
+
+def _fetch_pool_candles(
+    api_client: Any,
+    chain: str,
+    pool_address: str,
+    token0: str,
+) -> list[Any]:
+    """Best-effort OHLCV fetch for a single pool. Empty list on any failure."""
+    try:
+        return api_client.get_ohlcv(
+            token=token0,
+            quote="USD",
+            timeframe="1h",
+            limit=168,
+            chain=chain,
+            pool_address=pool_address,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to fetch OHLCV for chain=%s pool=%s",
+            chain,
+            pool_address,
+            exc_info=True,
+        )
+        return []
+
+
+def _populate_price_history_by_pool(
+    api_client: Any,
+    result: dict[str, Any],
+    config: LPDashboardConfig | None,
+) -> None:
+    """Fetch lifetime-windowed OHLCV per distinct ``(chain, pool_address)``.
+
+    Grouping by ``(chain, pool_address)`` rather than ``pool_address`` alone
+    handles the multi-chain same-address case (a strategy holding analog
+    LP positions on Aerodrome / Optimism vs. Base, for example) — without
+    the tuple key the second chain would silently overwrite the first.
+
+    Preserves caller-provided ``price_history`` (legacy single-pool field)
+    AND caller-provided ``price_history_by_pool`` (new multi-pool field).
+    """
+    if api_client is None:
+        return
+
+    candidates = _collect_pool_keys(result)
+
+    # Always honor caller-provided overrides — never overwrite.
+    by_pool = result.get("price_history_by_pool")
+    if not isinstance(by_pool, dict):
+        by_pool = {}
+
+    token0 = config.token0 if config else "WETH"
+    for chain, pool_address in candidates:
+        if (chain, pool_address) in by_pool:
+            continue
+        candles = _fetch_pool_candles(api_client, chain, pool_address, token0)
+        if candles:
+            by_pool[(chain, pool_address)] = candles
+
+    if by_pool and "price_history_by_pool" not in result:
+        result["price_history_by_pool"] = by_pool
+
+    # For legacy single-pool callers, populate ``price_history`` ONLY if the
+    # caller didn't provide one (preservation as override) AND there is
+    # exactly one pool — picking arbitrarily across pools would mislead.
+    if "price_history" not in result and len(by_pool) == 1:
+        ((_chain, _pool), candles) = next(iter(by_pool.items()))
+        result["price_history"] = candles
 
 
 def render_lp_dashboard(

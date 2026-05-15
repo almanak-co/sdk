@@ -81,6 +81,13 @@ class MarketSnapshotBuilder:
             )
         wallet_address = wallet_address or getattr(strategy, "wallet_address", "") or ""
 
+        # VIB-4347: thread the OHLCVRouter that ``run_helpers`` stamped on the
+        # strategy during indicator wiring through to MarketSnapshot so live
+        # ``market.ohlcv(...)`` resolves to the same routed gateway-backed pipes
+        # the indicator path uses. ``None`` when ``indicators=False`` strategies
+        # opted out — the snapshot falls back to its legacy OHLCV module path.
+        ohlcv_router = getattr(strategy, "_ohlcv_router", None)
+
         if chains:
             # Multi-chain path: lift the multi-chain providers and the
             # aave_health_factor_provider off the strategy.
@@ -94,6 +101,7 @@ class MarketSnapshotBuilder:
                 aave_health_factor_provider=aave_health_factor_provider
                 or getattr(strategy, "_aave_health_factor_provider", None),
                 gateway_client=gateway_client,
+                ohlcv_router=ohlcv_router,
                 runtime_surface=runtime_surface,
             )
 
@@ -116,6 +124,7 @@ class MarketSnapshotBuilder:
             funding_rate_provider=getattr(strategy, "funding_rate_provider", None)
             or getattr(strategy, "_funding_rate_provider", None),
             gateway_client=gateway_client,
+            ohlcv_router=ohlcv_router,
             default_timeframe=default_timeframe or getattr(strategy, "default_timeframe", None),
             runtime_surface=runtime_surface,
         )

@@ -701,13 +701,24 @@ def _patch_component_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
 
     # OHLCV + indicators + prediction — reach into .run module
     from almanak.framework.cli import run as run_mod
+    from almanak.framework.data import ohlcv as ohlcv_pkg
 
+    # VIB-4347: ``run_helpers`` imports ``create_ohlcv_stack`` from
+    # ``almanak.framework.data.ohlcv`` at function scope. Patch the symbol on
+    # the source package so the production code's local import resolves to
+    # the mock. The legacy ``create_routing_ohlcv_provider`` shim on run_mod
+    # is preserved for back-compat but no longer hit by run_helpers.
+    fake_stack = MagicMock(name="OHLCVStack")
+    fake_stack.provider = MagicMock(name="ohlcv_provider")
+    fake_stack.router = MagicMock(name="ohlcv_router")
+    mocks["create_ohlcv_stack"] = MagicMock(return_value=fake_stack)
     mocks["create_routing_ohlcv_provider"] = MagicMock(return_value=MagicMock(name="ohlcv"))
     mocks["_wire_indicators"] = MagicMock()
     mocks["_init_prediction_provider"] = MagicMock()
     mocks["_get_orca_pool_accounts"] = MagicMock(return_value=[])
     mocks["_auto_deploy_lagoon_vault"] = MagicMock()
     mocks["_has_placeholder_vault_address"] = MagicMock(return_value=False)
+    monkeypatch.setattr(ohlcv_pkg, "create_ohlcv_stack", mocks["create_ohlcv_stack"])
     monkeypatch.setattr(run_mod, "create_routing_ohlcv_provider", mocks["create_routing_ohlcv_provider"])
     monkeypatch.setattr(run_mod, "_wire_indicators", mocks["_wire_indicators"])
     monkeypatch.setattr(run_mod, "_init_prediction_provider", mocks["_init_prediction_provider"])

@@ -268,6 +268,222 @@ class DashboardAPIClient:
             logger.debug(f"Failed to get indicator {indicator_type}: {e}")
             return None
 
+    def get_ohlcv(
+        self,
+        token: str,
+        quote: str = "USD",
+        timeframe: str = "1h",
+        limit: int = 168,
+        chain: str | None = None,
+        pool_address: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch OHLCV candles via the shared OHLCV stack (VIB-4347).
+
+        Routes through ``framework.data.ohlcv.create_ohlcv_stack`` — the same
+        factory that wires the live runner's ``MarketSnapshot.ohlcv()`` and the
+        indicator path's ``RoutingOHLCVProvider``. **Never** calls
+        ``gateway_pb2.GeckoTerminalGetOHLCV`` directly: doing so would bypass
+        the provider routing, CEX/DEX classification, disk cache, retry / typed
+        errors, and provenance metadata that the router applies. See
+        ``docs/internal/OHLCV-Data.md`` §2 for the full rationale.
+
+        Args:
+            token: Token symbol (e.g., ``"WETH"``). For DEX pool lookups, pass
+                ``token0`` symbol — the gateway-side provider keys off
+                ``pool_address`` when present.
+            quote: Quote currency (default ``"USD"``).
+            timeframe: Candle interval. One of ``1m``, ``5m``, ``15m``, ``1h``,
+                ``4h``, ``1d``.
+            limit: Number of candles to fetch. Default 168 (1 week at 1h).
+            chain: Chain name. When omitted, falls back to the strategy
+                config's ``default_chain`` / ``chain``. Mirrors
+                :meth:`get_price` resolution semantics.
+            pool_address: Optional pool address for DEX-pool lookups. Mandatory
+                for DEX-only tokens; ignored for CEX-listed tokens (Binance is
+                symbol-only).
+
+        Returns:
+            List of dicts with keys ``timestamp`` (ISO 8601), ``open``,
+            ``high``, ``low``, ``close``, ``volume`` (all as strings to
+            preserve full ``Decimal`` precision), plus the envelope's
+            provenance fields when available: ``source`` (which provider
+            answered), ``confidence`` (0.0 – 1.0), and ``cache_hit``.
+            Returns ``[]`` on any failure — does **not** raise, does **not**
+            substitute synthetic data.
+        """
+        try:
+            from almanak.framework.data.ohlcv import create_ohlcv_stack
+
+            resolved_chain = chain
+            if resolved_chain is None:
+                if isinstance(self._chain_cache, _Sentinel):
+                    try:
+                        config = self.get_config()
+                        self._chain_cache = config.get("default_chain") or config.get("chain") or None
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"Could not read chain from config: {e}")
+                        self._chain_cache = None
+                resolved_chain = self._chain_cache
+
+            if not resolved_chain:
+                logger.debug("get_ohlcv: no chain specified and none found in config")
+                return []
+
+            stack = create_ohlcv_stack(
+                gateway_client=self._client._client,
+                chain=resolved_chain,
+                pool_address=pool_address,
+            )
+            # ``RoutingOHLCVProvider.get_ohlcv`` is async; the dashboard
+            # Streamlit context is synchronous. Use the underlying sync
+            # ``OHLCVRouter`` directly so we don't pay the asyncio.to_thread
+            # round-trip per Streamlit re-render. The router returns a
+            # ``DataEnvelope`` so we can lift provenance into the output.
+            envelope = stack.router.get_ohlcv(
+                token,
+                chain=resolved_chain,
+                timeframe=timeframe,
+                limit=limit,
+                pool_address=pool_address,
+                quote=quote,
+            )
+            candles = envelope.value or []
+            meta = getattr(envelope, "meta", None)
+            source = getattr(meta, "source", None)
+            confidence = getattr(meta, "confidence", None)
+            cache_hit = getattr(meta, "cache_hit", None)
+
+            results: list[dict[str, Any]] = []
+            for candle in candles:
+                row: dict[str, Any] = {
+                    "timestamp": candle.timestamp.isoformat()
+                    if hasattr(candle.timestamp, "isoformat")
+                    else str(candle.timestamp),
+                    "open": str(candle.open),
+                    "high": str(candle.high),
+                    "low": str(candle.low),
+                    "close": str(candle.close),
+                    "volume": str(candle.volume) if candle.volume is not None else None,
+                }
+                # Stamp provenance only when present — never invent it. Dropping
+                # provenance at the dashboard boundary would re-create part of
+                # the hardcoded-provider problem this factory exists to prevent.
+                if source is not None:
+                    row["source"] = source
+                if confidence is not None:
+                    row["confidence"] = float(confidence)
+                if cache_hit is not None:
+                    row["cache_hit"] = bool(cache_hit)
+                results.append(row)
+            return results
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to fetch OHLCV for {token} on chain={chain}: {e}")
+            return []
+
+    def get_position_events(
+        self,
+        position_types: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch filtered position events for this strategy's deployment (VIB-4347).
+
+        Backed by ``StateService.GetPositionEventsFiltered``. Returns a flat
+        chronological list of position events scoped to this strategy's
+        deployment. ``plot_positions_over_time`` consumes the per-position
+        rollup produced by
+        :func:`framework.dashboard.custom.position_event_adapter.position_events_to_position_data_dicts`,
+        so dashboards that want the chart shape should call that adapter on
+        the result.
+
+        Args:
+            position_types: Optional filter by ``position_type`` (e.g.
+                ``["LP", "PERP"]``). Maps to the proto request's
+                ``position_types`` (a repeated field).
+
+                - ``None`` (default — no filter): expands to every known
+                  :class:`PositionType` value, because the gateway treats
+                  the empty list as the empty-set fast path
+                  (``state_service.py`` §GetPositionEventsFiltered) and
+                  the docstring contract says "no filter = all".
+                - ``[]`` (explicit empty filter): passed through verbatim;
+                  the gateway returns no rows. Use this when the caller
+                  has computed a filter that turned out empty (e.g.
+                  "no allowed types for this user") and wants the
+                  zero-row result rather than the all-rows result —
+                  conflating the two would silently broaden the answer
+                  (CodeRabbit major on PR #2270).
+
+        Returns:
+            List of dicts (one per position event), shape per
+            :func:`framework.dashboard.custom.position_event_adapter.position_event_to_dict`.
+            Returns ``[]`` on any failure — does not raise.
+        """
+        try:
+            from almanak.framework.observability.position_events import PositionType
+            from almanak.gateway.proto import gateway_pb2
+
+            from .position_event_adapter import position_event_to_dict
+
+            # ``is None`` (not falsiness) so an explicit ``[]`` is honoured
+            # as "empty filter → zero rows" and only ``None`` expands to
+            # the full PositionType universe. Forwarded findings: CodeRabbit
+            # major on PR #2270.
+            if position_types is None:
+                effective_types: list[str] = [pt.value for pt in PositionType]
+            else:
+                effective_types = list(position_types)
+            response = self._client._client.state.GetPositionEventsFiltered(
+                gateway_pb2.GetPositionEventsFilteredRequest(
+                    deployment_id=self._strategy_id,
+                    position_types=effective_types,
+                )
+            )
+            if response.error:
+                logger.warning(f"GetPositionEventsFiltered returned error: {response.error}")
+                return []
+            return [position_event_to_dict(e) for e in response.events]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to fetch position events: {e}")
+            return []
+
+    def get_position_history(
+        self,
+        position_id: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch the full lifecycle of a single position (VIB-4347).
+
+        Backed by ``StateService.GetPositionHistory``. Returns chronological
+        events (OPEN -> SNAPSHOT* -> CLOSE) for one position scoped to this
+        strategy's deployment. Use this for drill-down detail views; use
+        :meth:`get_position_events` for multi-position chart data.
+
+        Args:
+            position_id: The position UUID/identifier to retrieve history for.
+
+        Returns:
+            List of dicts (one per position event), shape per
+            :func:`framework.dashboard.custom.position_event_adapter.position_event_to_dict`.
+            Returns ``[]`` on any failure or missing arguments — does not raise.
+        """
+        if not position_id:
+            logger.debug("get_position_history: position_id is required")
+            return []
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            from .position_event_adapter import position_event_to_dict
+
+            response = self._client._client.state.GetPositionHistory(
+                gateway_pb2.GetPositionHistoryRequest(
+                    strategy_id=self._strategy_id,
+                    deployment_id=self._strategy_id,
+                    position_id=position_id,
+                )
+            )
+            return [position_event_to_dict(e) for e in response.events]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to fetch position history for {position_id}: {e}")
+            return []
+
     # =========================================================================
     # Operator Actions (with audit)
     # =========================================================================
