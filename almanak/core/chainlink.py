@@ -266,6 +266,19 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
 #
 # Format: { chain: { "TOKEN/ETH": feed_address } }
 ETH_DENOMINATED_FEEDS: dict[str, dict[str, str]] = {
+    "ethereum": {
+        # VIB-4439 / MorphoMay15 F1 (B1): Ethereum's direct WSTETH/USD feed at
+        # ETH_PRICE_FEEDS["WSTETH/USD"] can return an empty result on some Anvil
+        # forks (observed during the Morpho looping fixture run on 2026-05-15).
+        # Adding the wstETH/ETH derived feed gives the OnChain source an
+        # independent Chainlink path that does NOT depend on the WSTETH/USD
+        # aggregator. The derived path is WSTETH/USD = WSTETH/ETH × ETH/USD;
+        # `_FEED_DECIMALS["WSTETH/ETH"] = 18` in onchain.py decodes the 18-decimal
+        # exchange rate correctly. Combined with the F1 B3 fail-closed semantic,
+        # this restores 3+ working sources for wstETH on Ethereum so the median
+        # is robust without the DexScreener pool-price noise.
+        "WSTETH/ETH": "0x86392dC19c0b719886221c78AB11eb8Cf5c52812",
+    },
     "arbitrum": {
         "WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D",
     },

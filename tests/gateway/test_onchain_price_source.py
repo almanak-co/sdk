@@ -669,20 +669,33 @@ class TestDerivedPricing:
         await source.close()
 
     @pytest.mark.asyncio
-    async def test_derived_price_not_available_on_ethereum(self):
-        """Derived pricing not configured for ethereum -- falls through to error."""
-        from almanak.framework.data.interfaces import DataSourceUnavailable
+    async def test_derived_price_available_on_ethereum_after_vib4439(self) -> None:
+        """VIB-4439 / MorphoMay15 F1 (B1): ethereum DOES have a derived
+        WSTETH/USD path now (WSTETH/ETH × ETH/USD). The pre-B1 test
+        ``test_derived_price_not_available_on_ethereum`` asserted the
+        opposite — that the derived config was absent — which is the
+        behaviour B1 deliberately changed so the OnChain source has a
+        second independent Chainlink path on Ethereum (the direct
+        WSTETH/USD feed at ETHEREUM_PRICE_FEEDS keeps existing; B1 is
+        additive).
+        """
+        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
 
         source = OnChainPriceSource(chain="ethereum")
 
-        # Ethereum has WSTETH/USD in the main feeds dict, so it uses the direct feed.
-        # But if we remove it to test derived fallback, there's no ETH-denominated config.
-        # This test verifies no crash when derived config is absent.
-        with patch.dict(source._feeds, {"WSTETH/USD": None}, clear=False):
-            # Remove WSTETH/USD from feeds to force derived path
-            del source._feeds["WSTETH/USD"]
-            with pytest.raises(DataSourceUnavailable, match="No Chainlink feed"):
-                await source.get_price("WSTETH", "USD")
+        # Config assertions — proves the B1 wiring at construction time.
+        assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS.get("ethereum", {}), (
+            "B1 must add WSTETH/ETH to ETH_DENOMINATED_FEEDS['ethereum']."
+        )
+        assert source._eth_feeds.get("WSTETH/ETH"), (
+            "OnChainPriceSource(chain='ethereum') must pick up the B1 derived "
+            f"feed config. Got _eth_feeds={source._eth_feeds!r}"
+        )
+        # The token->pair map must include WSTETH -> WSTETH/ETH for ethereum.
+        assert source._token_to_eth_pair.get("WSTETH") == "WSTETH/ETH", (
+            f"OnChainPriceSource._token_to_eth_pair on ethereum must point "
+            f"WSTETH -> WSTETH/ETH after B1. Got: {source._token_to_eth_pair!r}"
+        )
 
         await source.close()
 

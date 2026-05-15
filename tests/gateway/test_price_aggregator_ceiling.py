@@ -275,3 +275,33 @@ class TestChainlinkFeedConfig:
         from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
 
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["arbitrum"]
+
+    def test_ethereum_wsteth_in_eth_denominated_feeds(self):
+        """VIB-4439 F1 (B1): Ethereum has a direct WSTETH/USD feed but the
+        derived path (WSTETH/ETH * ETH/USD) is an independent Chainlink
+        oracle that does NOT depend on the WSTETH/USD aggregator. Adding it
+        gives the OnChain source a second working price for wstETH on
+        Ethereum even when the WSTETH/USD direct feed is unavailable, so
+        the multi-source consensus has enough good data to remain robust
+        without DexScreener.
+        """
+        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
+
+        assert "ethereum" in ETH_DENOMINATED_FEEDS
+        assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["ethereum"]
+        # Canonical Chainlink WSTETH/ETH price feed on Ethereum mainnet
+        # (18 decimals — `_FEED_DECIMALS["WSTETH/ETH"]` in
+        # `gateway/data/price/onchain.py:57` handles the decimal scaling).
+        assert ETH_DENOMINATED_FEEDS["ethereum"]["WSTETH/ETH"] == "0x86392dC19c0b719886221c78AB11eb8Cf5c52812"
+
+    def test_ethereum_wsteth_keeps_direct_usd_feed_too(self):
+        """The B1 derived feed is ADDITIVE — Ethereum keeps the direct
+        WSTETH/USD entry so the OnChain source has both paths and median
+        consensus is computed from independent Chainlink aggregators."""
+        from almanak.core.chainlink import ETHEREUM_PRICE_FEEDS
+
+        assert "WSTETH/USD" in ETHEREUM_PRICE_FEEDS, (
+            "Ethereum WSTETH/USD direct feed must remain. B1 added the "
+            "ETH-denominated derived path as a SECOND independent oracle, "
+            "not a replacement."
+        )

@@ -156,6 +156,129 @@ async def test_unsupported_chain_raises_chain_unsupported_skip():
 
 
 @pytest.mark.asyncio
+async def test_lst_quarantine_wsteth_ethereum_raises_skip():
+    """VIB-4439 F1 (B2): WSTETH on Ethereum is in the LST quarantine list.
+
+    DexScreener's wstETH/USD price on Ethereum is structurally unreliable
+    (the dominant pool is wstETH/WETH, no direct USD liquidity), and the
+    fixture run on 2026-05-15 observed DexScreener returning $97.31 vs the
+    Chainlink truth ~$3500. The quarantine raises
+    ``DataSourceUnavailable(reason="quarantined_lst_token:WSTETH:ethereum")``
+    so the aggregator skips this source on this specific token+chain and
+    consensus on the working oracles (Chainlink direct + Chainlink derived
+    + CoinGecko).
+    """
+    source = DexScreenerPriceSource(cache_ttl=30)
+
+    eth_chain = MagicMock()
+    eth_chain.value = "ethereum"
+    wsteth_token = MagicMock()
+    wsteth_token.address = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"  # mainnet wstETH
+    wsteth_token.chain = eth_chain
+    wsteth_token.symbol = "WSTETH"
+
+    with pytest.raises(DataSourceUnavailable) as exc_info:
+        await source.get_price("WSTETH", "USD", resolved_token=wsteth_token)
+
+    assert "quarantined_lst_token:WSTETH:ethereum" in str(exc_info.value), (
+        f"DexScreener must raise quarantined_lst_token for WSTETH on Ethereum. "
+        f"Got: {exc_info.value!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lst_quarantine_matches_resolved_symbol_not_raw_token() -> None:
+    """CodeRabbit on PR #2323: the quarantine must match against the
+    ``resolved_token.symbol`` (not the raw ``token`` argument) so an
+    address-based call ("0x7f39..." rather than "WSTETH") cannot bypass it.
+    This is the typical path from the aggregator's address-based lookup.
+    """
+    source = DexScreenerPriceSource(cache_ttl=30)
+
+    eth_chain = MagicMock()
+    eth_chain.value = "ethereum"
+    wsteth_token = MagicMock()
+    wsteth_token.address = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+    wsteth_token.chain = eth_chain
+    wsteth_token.symbol = "WSTETH"
+
+    # Call with the ADDRESS as the ``token`` arg — the path that previously
+    # slipped past the quarantine when the check used ``token.upper()``.
+    with pytest.raises(DataSourceUnavailable) as exc_info:
+        await source.get_price(wsteth_token.address, "USD", resolved_token=wsteth_token)
+
+    assert "quarantined_lst_token:WSTETH:ethereum" in str(exc_info.value), (
+        f"Quarantine must match resolved_token.symbol even when token arg is "
+        f"an address. Got: {exc_info.value!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lst_quarantine_does_not_apply_to_other_chains():
+    """The quarantine is per-(token, chain). The same wstETH symbol on a
+    different chain is NOT quarantined — DexScreener may have a working
+    USD pool there. Today only the WSTETH+ethereum pair is quarantined."""
+    from unittest.mock import patch
+
+    source = DexScreenerPriceSource(cache_ttl=30)
+
+    op_chain = MagicMock()
+    op_chain.value = "optimism"
+    wsteth_op = MagicMock()
+    wsteth_op.address = "0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb"  # OP wstETH
+    wsteth_op.chain = op_chain
+    wsteth_op.symbol = "WSTETH"
+
+    # Patch _fetch_price so the test does not hit the real DexScreener API.
+    # The quarantine check fires BEFORE _fetch_price; we just need to prove
+    # the call reaches _fetch_price (i.e., the quarantine did NOT trip).
+    with patch.object(
+        source,
+        "_fetch_price",
+        side_effect=DataSourceUnavailable(source="dexscreener", reason="mocked_no_data"),
+    ):
+        with pytest.raises(DataSourceUnavailable) as exc_info:
+            await source.get_price("WSTETH", "USD", resolved_token=wsteth_op)
+
+    # Must reach the patched _fetch_price (mocked_no_data) — quarantine
+    # must not short-circuit for chains other than ethereum.
+    assert "mocked_no_data" in str(exc_info.value), (
+        f"Quarantine should NOT apply to wstETH on optimism — get_price must "
+        f"reach _fetch_price. Got: {exc_info.value!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lst_quarantine_does_not_apply_to_non_lst_tokens_on_ethereum():
+    """The quarantine is per-(token, chain). Tokens other than WSTETH on
+    Ethereum are NOT quarantined — DexScreener is the correct source for
+    most ERC-20s with real USD liquidity."""
+    from unittest.mock import patch
+
+    source = DexScreenerPriceSource(cache_ttl=30)
+
+    eth_chain = MagicMock()
+    eth_chain.value = "ethereum"
+    usdc_token = MagicMock()
+    usdc_token.address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    usdc_token.chain = eth_chain
+    usdc_token.symbol = "USDC"
+
+    with patch.object(
+        source,
+        "_fetch_price",
+        side_effect=DataSourceUnavailable(source="dexscreener", reason="mocked_no_data"),
+    ):
+        with pytest.raises(DataSourceUnavailable) as exc_info:
+            await source.get_price("USDC", "USD", resolved_token=usdc_token)
+
+    assert "mocked_no_data" in str(exc_info.value), (
+        f"Quarantine should NOT apply to USDC on ethereum — get_price must "
+        f"reach _fetch_price. Got: {exc_info.value!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_no_chain_context_raises_skip():
     """No default chain AND no resolved_token → skip with a specific reason."""
     source = DexScreenerPriceSource(cache_ttl=30)

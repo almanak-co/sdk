@@ -449,15 +449,37 @@ class TestOutlierDetection:
         assert result.confidence < 1.0  # Reduced due to outlier
 
     def test_normal_divergence_does_not_trigger_magnitude_check(self) -> None:
-        """Test that normal high-volatility divergence (< 100x) still uses all sources."""
-        # 50% divergence is unusual but not a feed misconfiguration
+        """Test that normal high-volatility divergence (< 100x) across 3+ sources
+        still uses all sources.
+
+        VIB-4439 / MorphoMay15 §6.1: this test was rewritten from 2 sources to
+        4 because the 2-source case now fails closed (the original 2000/3000 pair
+        was the wstETH bug-shape — silent midpoint = wrong PnL). 4 sources
+        chosen specifically so EVERY value is > 2 % off the median (2500) —
+        that's what's required to fall through to ``if not valid_results:`` and
+        then exit via the 3+-source "use all" branch (where median is still
+        meaningful with enough samples).
+
+        CodeRabbit on PR #2323 flagged that [2000, 2500, 3000] left 2500 as a
+        non-outlier and so never reached the fallback — the path the
+        magnitude-check guards was effectively untested. Spread is wider here so
+        every point is an outlier vs the median.
+
+        See ``tests/gateway/test_price_aggregator_two_source_divergence.py``
+        for the 2-source semantic.
+        """
+        # All 4 sources are > 2% off the median (2500): 2000 = -20%,
+        # 2300 = -8%, 2700 = +8%, 3000 = +20%. Magnitude ratio 3000/2000 = 1.5×,
+        # far below the 100× cap → falls into the 3+-source "use all" branch
+        # and returns median([2000, 2300, 2700, 3000]) = $2500.
         sources = [
             MockPriceSource(name="source1", price=Decimal("2000")),
-            MockPriceSource(name="source2", price=Decimal("3000")),  # 50% above source1
+            MockPriceSource(name="source2", price=Decimal("2300")),
+            MockPriceSource(name="source3", price=Decimal("2700")),
+            MockPriceSource(name="source4", price=Decimal("3000")),
         ]
         aggregator = PriceAggregator(sources=sources)
 
-        # Should succeed (ratio=1.5x << 100x threshold), returning median of 2 = average
         result = run_async(aggregator.get_aggregated_price("ETH", "USD"))
         assert result.price == Decimal("2500")
 

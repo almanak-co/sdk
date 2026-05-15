@@ -596,8 +596,54 @@ class PriceAggregator:
                 magnitude_errors.update(errors)
                 raise AllDataSourcesFailed(errors=magnitude_errors)
 
-            # Normal divergence across all sources (e.g., volatile market with 3 sources
-            # each 15% apart). Use all results -- median is still meaningful.
+            # VIB-4439 / MorphoMay15 §6.1 (F1): with EXACTLY 2 sources, "median"
+            # degenerates to the arithmetic mean. If both sources are flagged
+            # as outliers vs that mean (i.e. they disagree by > outlier_threshold)
+            # we have no consensus and no robust statistic available — returning
+            # the midpoint is the worst possible answer when one source is wrong.
+            # Fail closed so the strategy halts on a bad oracle instead of trading
+            # at half-price. (3+ sources still fall through to the "use all" path
+            # below: with 3+ values one outlier cannot move the median past the
+            # threshold, so reaching ``not valid_results`` requires the whole
+            # group to genuinely disagree — i.e. volatile market conditions, not
+            # one bad feed.)
+            if len(results) == 2:
+                sorted_results = sorted(results, key=lambda r: r.price)
+                lo, hi = sorted_results[0], sorted_results[1]
+                divergence_pct = float((hi.price - lo.price) / lo.price) * 100 if lo.price > 0 else float("inf")
+                logger.error(
+                    "Two-source price divergence: %s=%s, %s=%s (%.2f%% apart, "
+                    "outlier threshold=%.2f%%, magnitude ratio=%.2f below %.0f× cap). "
+                    "Cannot consensus-resolve with only 2 sources — raising "
+                    "AllDataSourcesFailed to prevent corrupted price from being used.",
+                    lo.source,
+                    lo.price,
+                    hi.source,
+                    hi.price,
+                    divergence_pct,
+                    self._outlier_threshold * 100,
+                    ratio,
+                    self._magnitude_outlier_ratio,
+                )
+                # Symmetric error message: both sources see the same statement
+                # of facts (both prices, divergence between them). Phrasing
+                # "other source differs by X%" was asymmetric — for [100, 3500]
+                # the lower source IS 3400% away from the higher, but the
+                # higher is only ~97% away from the lower, so the same string
+                # was technically wrong on one of the two error entries.
+                two_source_errors = {
+                    r.source: (
+                        f"Two-source divergence: {lo.source}={lo.price} vs "
+                        f"{hi.source}={hi.price} ({divergence_pct:.2f}% apart, "
+                        f"no consensus possible)"
+                    )
+                    for r in results
+                }
+                two_source_errors.update(errors)
+                raise AllDataSourcesFailed(errors=two_source_errors)
+
+            # Normal divergence across 3+ sources (e.g., volatile market with each
+            # source 15% apart). Use all results -- median is still meaningful.
             logger.warning(
                 "All prices flagged as outliers, using all %d results",
                 len(results),
