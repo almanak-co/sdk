@@ -255,6 +255,10 @@ def test_strategy_on_lp_open_captures_pool_address_end_to_end():
     strat.starting_asset = cfg.starting_asset
     strat.other_asset = "WETH"
     strat.max_slippage = cfg.max_slippage
+    # VIB-4316 — protocol / swap_protocol normally populated in __init__
+    # from config; bypassing __init__ here, so set them explicitly.
+    strat.protocol = "uniswap_v3"
+    strat.swap_protocol = "uniswap_v3"
     strat._wallet_address = "0xtest"
     strat._strategy_id = "AccountingQuantLPStrategy:test"
     strat._phase = PHASE_SWAPPED_IN
@@ -319,6 +323,10 @@ def test_strategy_on_lp_open_falls_back_to_descriptor_when_no_pool_in_lp_open_da
     strat.starting_asset = cfg.starting_asset
     strat.other_asset = "WETH"
     strat.max_slippage = cfg.max_slippage
+    # VIB-4316 — protocol / swap_protocol normally populated in __init__
+    # from config; bypassing __init__ here, so set them explicitly.
+    strat.protocol = "uniswap_v3"
+    strat.swap_protocol = "uniswap_v3"
     strat._wallet_address = "0xtest"
     strat._strategy_id = "AccountingQuantLPStrategy:test"
     strat._phase = PHASE_SWAPPED_IN

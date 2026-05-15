@@ -161,6 +161,46 @@ class AccountantReport:
     def xfailed(self) -> int:
         return sum(1 for c in self.cells if c.status == "XFAIL")
 
+    def to_json(self) -> dict[str, Any]:
+        """JSON-serializable dict for the matrix runner and downstream consumers.
+
+        The flat ``cells: {id -> status}`` shape is a superset-compatible
+        extension of ``tests/fixtures/accounting/<primitive>/expected_cells.json``
+        so existing baselines remain comparable. ``cell_details`` carries the
+        richer per-cell payload (description, diagnostic) for triage.
+        """
+        return {
+            "primitive": self.primitive,
+            "network": self.network,
+            "strategy_id": self.strategy_id,
+            "schema_version": self.schema_version,
+            "formula_version": self.formula_version,
+            "matching_policy_version": self.matching_policy_version,
+            "timestamp": self.timestamp.isoformat(),
+            "cells": {c.cell_id: c.status for c in self.cells},
+            "cell_details": [
+                {
+                    "id": c.cell_id,
+                    "description": c.description,
+                    "status": c.status,
+                    "diagnostic": c.diagnostic,
+                    "primitive": c.primitive,
+                }
+                for c in self.cells
+            ],
+            "scores": {
+                "passed": self.passed,
+                "failed": self.failed,
+                "xfailed": self.xfailed,
+                "total": self.total_cells,
+            },
+            "payload_validation_errors": list(self.payload_validation_errors),
+            "cells_blocked_by_payload_errors": list(self.cells_blocked_by_payload_errors),
+            "g6_decomposition": dict(self.g6_decomposition),
+            "on_chain_footprint": list(self.on_chain_footprint),
+            "db_dump_path": self.db_dump_path,
+        }
+
     def format_markdown(self) -> str:
         lines = []
         lines.append(f"# Accountant Test — {self.primitive} — {self.timestamp.isoformat()}")

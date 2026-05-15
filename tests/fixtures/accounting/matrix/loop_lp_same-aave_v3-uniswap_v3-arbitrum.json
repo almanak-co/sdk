@@ -1,0 +1,46 @@
+{
+  "_provenance": {
+    "row_id": "loop_lp_same-aave_v3-uniswap_v3-arbitrum",
+    "fixture": "loop_lp_same",
+    "chain": "arbitrum",
+    "primitive": "looping",
+    "captured_from": "notes/.tmp/accounting-matrix-rest-of-10/loop_lp_same-aave_v3-uniswap_v3-arbitrum/accountant.json",
+    "captured_at": "2026-05-13T13:58:58.191747+00:00",
+    "captured_at_commit": "e0b4732a51fd8b5e994477ddbe65bb2bf182fdb5",
+    "post_fix_for": [
+      "VIB-4319 (PR #2259)",
+      "VIB-4318 (PR #2260)"
+    ],
+    "note": "Real-Anvil baseline. G6 FAIL is the remaining wallet-drift + first-SWAP-basis residue (separate root causes from #2259/#2260; not LP-null)."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L1": "PASS",
+    "L2": "XFAIL",
+    "L3": "XFAIL",
+    "L4": "PASS",
+    "L5": "XFAIL",
+    "L5_22": "PASS",
+    "L6": "PASS"
+  },
+  "scores": {
+    "failed": 1,
+    "passed": 15,
+    "total": 22,
+    "xfailed": 5
+  }
+}

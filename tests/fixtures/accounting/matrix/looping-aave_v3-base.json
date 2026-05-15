@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "row_id": "looping-aave_v3-base",
+    "fixture": "looping_base",
+    "chain": "base",
+    "primitive": "looping",
+    "captured_from": "notes/.tmp/matrix-overnight-full/looping-aave_v3-base/accountant.json",
+    "captured_at": "2026-05-13T21:39:10.254831+00:00",
+    "captured_at_commit": "59e9fbed509ce7fb9a3c9086f6b40c84e3a10a25",
+    "post_fix_for": [
+      "VIB-4316 Tier 1 matrix expansion (2026-05-14 overnight) \u2014 Aave V3 Base looping with WETH borrow (DAI was paused by Aave governance)"
+    ],
+    "note": "Real-Anvil baseline. First Aave V3 Base looping fixture in the matrix. USDC collateral + WETH borrow; DAI rejected upstream because Aave Base paused that reserve."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L1": "PASS",
+    "L2": "XFAIL",
+    "L3": "XFAIL",
+    "L4": "PASS",
+    "L5": "XFAIL",
+    "L5_22": "XFAIL",
+    "L6": "FAIL"
+  },
+  "scores": {
+    "passed": 13,
+    "failed": 2,
+    "xfailed": 6,
+    "total": 22
+  }
+}

@@ -1,0 +1,16 @@
+{
+    "chain": "arbitrum",
+    "protocol": "sushiswap_v3",
+    "pool": "WETH/USDC/3000",
+    "starting_asset": "USDC",
+    "total_value_usd": 8.0,
+    "swap_split_pct": 0.50,
+    "lp1_range_width_pct": 0.10,
+    "lp2_range_width_pct": 0.40,
+    "lp_capital_split_pct": 0.50,
+    "max_slippage": 0.005,
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 100
+    }
+}

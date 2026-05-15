@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "row_id": "lp-curve-ethereum",
+    "fixture": "lp_curve",
+    "chain": "ethereum",
+    "primitive": "lp",
+    "captured_from": "notes/.tmp/matrix-overnight-new-rows/lp-curve-ethereum/accountant.json",
+    "captured_at": "2026-05-13T19:37:58.424368+00:00",
+    "captured_at_commit": "7df7573c4a55a3950d044aa6c9247d74b41504ee",
+    "post_fix_for": [
+      "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)"
+    ],
+    "note": "Real-Anvil baseline \u2014 first run on this protocol/chain combo. See docs/internal/VIB-4316-Overnight-2026-05-14.md for the per-cell narrative."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "FAIL",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "LP1": "FAIL",
+    "LP2": "XFAIL",
+    "LP3": "PASS",
+    "LP4": "FAIL",
+    "LP5": "XFAIL",
+    "LP6": "XFAIL"
+  },
+  "scores": {
+    "passed": 11,
+    "failed": 4,
+    "xfailed": 6,
+    "total": 22
+  }
+}

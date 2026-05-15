@@ -1,0 +1,46 @@
+{
+  "_provenance": {
+    "row_id": "lp_pancakeswap-arbitrum",
+    "fixture": "lp_pancakeswap",
+    "chain": "arbitrum",
+    "primitive": "lp",
+    "captured_from": "notes/.tmp/accounting-matrix-rest-of-10/lp_pancakeswap-arbitrum/accountant.json",
+    "captured_at": "2026-05-13T13:32:24.096454+00:00",
+    "captured_at_commit": "e0b4732a51fd8b5e994477ddbe65bb2bf182fdb5",
+    "post_fix_for": [
+      "VIB-4319 (PR #2259)",
+      "VIB-4318 (PR #2260)"
+    ],
+    "note": "Real-Anvil baseline. G6 FAIL is the remaining wallet-drift + first-SWAP-basis residue (separate root causes from #2259/#2260; not LP-null)."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "PASS",
+    "LP1": "PASS",
+    "LP2": "XFAIL",
+    "LP3": "PASS",
+    "LP4": "PASS",
+    "LP5": "XFAIL",
+    "LP6": "XFAIL"
+  },
+  "scores": {
+    "failed": 1,
+    "passed": 15,
+    "total": 22,
+    "xfailed": 5
+  }
+}

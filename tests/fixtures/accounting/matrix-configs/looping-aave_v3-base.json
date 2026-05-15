@@ -1,0 +1,39 @@
+{
+    "chain": "base",
+    "protocol": "aave_v3",
+    "collateral_token": "USDC",
+    "borrow_token": "WETH",
+    "starting_collateral_usd": 4.0,
+    "target_ltv": 0.30,
+    "swap_protocol": "uniswap_v3",
+    "swap_slippage": 0.01,
+    "min_health_factor": 1.5,
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 100,
+        "WETH": 1
+    },
+    "token_funding": [
+        {
+            "symbol": "ETH",
+            "address": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "chain": "base",
+            "amount": "1",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "chain": "base",
+            "amount": "100",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "WETH",
+            "address": "0x4200000000000000000000000000000000000006",
+            "chain": "base",
+            "amount": "1",
+            "amount_type": "token"
+        }
+    ]
+}

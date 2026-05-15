@@ -16,6 +16,7 @@ strategy folder per VIB-3835 / VIB-3761.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -117,6 +118,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Write the markdown report to this file (defaults to stdout).",
     )
+    p.add_argument(
+        "--json",
+        dest="json_out",
+        nargs="?",
+        const="-",
+        default=None,
+        help="Emit JSON output instead of markdown. Pass a path to write to a file, "
+        "or omit the value to write to stdout. Mutually exclusive with --report-out "
+        "writing to stdout. Schema includes a flat cells={id: status} map compatible "
+        "with tests/fixtures/accounting/<primitive>/expected_cells.json plus richer "
+        "cell_details / scores / payload_validation_errors for matrix-runner use.",
+    )
     # VIB-3870: gating modes. The default behaviour (exit 0 unless any cell
     # FAILs) is the *progress scorecard* mode — fine for daily Anvil
     # smokes. CI / production deploys should use --strict (any non-PASS
@@ -143,15 +156,25 @@ def main(argv: list[str] | None = None) -> int:
 
     db_path = _resolve_db_path(args.working_dir, args.db)
     report = run_against_sqlite(db_path, primitive=args.primitive)
-    md = report.format_markdown()
+
+    if args.json_out is not None:
+        payload = json.dumps(report.to_json(), indent=2, sort_keys=True, default=str)
+        if args.json_out == "-":
+            sys.stdout.write(payload + "\n")
+        else:
+            json_path = Path(args.json_out).expanduser().resolve()
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            json_path.write_text(payload + "\n", encoding="utf-8")
+            sys.stderr.write(f"Wrote JSON to {json_path}\n")
 
     if args.report_out:
+        md = report.format_markdown()
         out_path = Path(args.report_out).expanduser().resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(md, encoding="utf-8")
         sys.stderr.write(f"Wrote report to {out_path}\n")
-    else:
-        sys.stdout.write(md + "\n")
+    elif args.json_out is None:
+        sys.stdout.write(report.format_markdown() + "\n")
 
     # Default: exit non-zero only on FAIL. XFAIL/SKIP are deferred-tracking
     # statuses per AttemptNo17 §6 and don't gate the progress scorecard.

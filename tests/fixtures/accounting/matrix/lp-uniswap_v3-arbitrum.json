@@ -1,0 +1,43 @@
+{
+  "_provenance": {
+    "row_id": "lp-uniswap_v3-arbitrum",
+    "fixture": "lp",
+    "chain": "arbitrum",
+    "primitive": "lp",
+    "captured_from": "notes/.tmp/accounting-matrix-post-fix/lp-uniswap_v3-arbitrum/accountant.json",
+    "captured_at": "2026-05-13T10:12:31+00:00",
+    "captured_at_commit": "501b8b373b72c9919d15c68def72996f468ba039",
+    "post_fix_for": ["VIB-4319 (PR #2259)", "VIB-4318 (PR #2260)"],
+    "note": "Real-Anvil baseline for the matrix runner. Separate from tests/fixtures/accounting/lp/expected_cells.json (synthetic-fixture contract for test_accountant_test_baseline.py). G6 FAIL is the remaining residue (LP-null portion, separate root cause)."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "L5_22": "PASS",
+    "LP1": "PASS",
+    "LP2": "XFAIL",
+    "LP3": "PASS",
+    "LP4": "PASS",
+    "LP5": "XFAIL",
+    "LP6": "XFAIL"
+  },
+  "scores": {
+    "passed": 15,
+    "failed": 1,
+    "xfailed": 5,
+    "total": 22
+  }
+}

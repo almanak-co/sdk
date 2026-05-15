@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage
 
 # Load .env file if it exists
 -include .env
@@ -426,6 +426,25 @@ test-demo-single:
 # List discoverable demo strategies (DemoSpec catalog).
 list-demo-strategies:
 	uv run python scripts/run_demo.py --list
+
+# Run the VIB-4316 accounting matrix end-to-end across every in-scope fixture
+# defined in scripts/qa/accounting-matrix.yml. Drives each strategy on managed
+# Anvil, scores the 21-cell Accountant Test per row, and writes a typed gap
+# report. Per-row artifacts land under notes/.tmp/accounting-matrix/<row_id>/
+# (gitignored). Full matrix is ~92 min serial — use test-accounting-matrix-quick
+# for a 7-min smoke gate on the two baselined rows.
+test-accounting-matrix:
+	uv run python scripts/qa/run_accounting_matrix.py \
+		--matrix scripts/qa/accounting-matrix.yml \
+		--output-dir notes/.tmp/accounting-matrix
+
+# Quick accounting matrix smoke: only the two baselined rows (lp + looping),
+# ~7-8 min total. Use as a CI gate for accounting-affecting PRs.
+test-accounting-matrix-quick:
+	uv run python scripts/qa/run_accounting_matrix.py \
+		--matrix scripts/qa/accounting-matrix.yml \
+		--output-dir notes/.tmp/accounting-matrix \
+		--rows-include lp-uniswap_v3-arbitrum,looping-aave_v3-arbitrum
 
 # Check Pendle market expiry dates in demo and incubating strategy configs.
 # Fails if any demo strategy references a market expiring within 30 days.

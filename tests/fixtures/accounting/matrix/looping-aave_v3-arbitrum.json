@@ -1,0 +1,43 @@
+{
+  "_provenance": {
+    "row_id": "looping-aave_v3-arbitrum",
+    "fixture": "looping",
+    "chain": "arbitrum",
+    "primitive": "looping",
+    "captured_from": "notes/.tmp/accounting-matrix-post-fix/looping-aave_v3-arbitrum/accountant.json",
+    "captured_at": "2026-05-13T10:12:31+00:00",
+    "captured_at_commit": "501b8b373b72c9919d15c68def72996f468ba039",
+    "post_fix_for": ["VIB-4319 (PR #2259)", "VIB-4318 (PR #2260)"],
+    "note": "Real-Anvil baseline for the matrix runner. Separate from tests/fixtures/accounting/looping/expected_cells.json (synthetic-fixture contract for test_accountant_test_baseline.py). G6 + L6 FAIL are the remaining residues (see Bug-MatrixMay12.md)."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "L1": "PASS",
+    "L2": "XFAIL",
+    "L3": "XFAIL",
+    "L4": "PASS",
+    "L5": "XFAIL",
+    "L5_22": "XFAIL",
+    "L6": "FAIL"
+  },
+  "scores": {
+    "passed": 13,
+    "failed": 2,
+    "xfailed": 6,
+    "total": 22
+  }
+}

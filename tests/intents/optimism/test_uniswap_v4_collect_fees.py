@@ -256,6 +256,17 @@ class TestUniswapV4CollectFeesIntent:
         IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES
     )
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason=(
+            "VIB-4465: V4 StateView.getSlot0 returns inconsistent state on "
+            "optimism Alchemy archive cluster at pinned block 151443623 "
+            "(as of 2026-05-15). Passed 1/5 today across unrelated branches; "
+            "counter-swap reverts under estimated-sqrtPrice fallback. "
+            "strict=False because xpass = Alchemy cluster recovered, not "
+            "a code fix."
+        ),
+        strict=False,
+    )
     async def test_collect_fees_weth_usdc(
         self,
         web3: Web3,
