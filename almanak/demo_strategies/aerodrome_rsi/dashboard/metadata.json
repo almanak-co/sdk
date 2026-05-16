@@ -1,0 +1,5 @@
+{
+    "display_name": "Aerodrome RSI",
+    "description": "RSI mean-reversion swap strategy on Aerodrome (Base). Shows the price and RSI series fetched through the same OHLCVRouter the strategy used live.",
+    "icon": ""
+}

@@ -621,6 +621,19 @@ class TestAerodromeSlipstreamCollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason=(
+            "VIB-4434: fee-accrual swap (auto-routed Aerodrome) reverts "
+            "with selector=0xd27b44a9 on the base CI pinned fork block "
+            "(as of 2026-05-16). Test passes locally against latest block; "
+            "same fork-block flake class as VIB-4465 on the sibling V4 "
+            "collect_fees test. VIB-4434 owns clearing this once the "
+            "pinned fork block has stable pool state for the auto-routed "
+            "swap path. strict=False because xpass = pool state recovered, "
+            "not a code fix."
+        ),
+        strict=False,
+    )
     async def test_collect_fees_zero_accrual_conservation(
         self,
         web3: Web3,

@@ -1,0 +1,5 @@
+{
+    "display_name": "RSI + MACD Confluence LP",
+    "description": "Uniswap V3 LP with dual-signal confluence entry (RSI + MACD) on Arbitrum. Renders both indicator series fetched through the same OHLCVRouter the strategy used live.",
+    "icon": ""
+}
