@@ -703,11 +703,24 @@ class RateMonitor:
                 "aave_v3", token, side, f"No Aave V3 data provider configured for chain {self._chain!r}"
             )
 
-        # Resolve token address
+        # Resolve token address. Curated registry first (handles disambiguation
+        # like USDC vs USDC.e), then TokenResolver fallback so tokens added to
+        # Aave V3 reserves after the SDK shipped (USDe, sUSDe, GHO, etc.) still
+        # resolve. Only TokenNotFoundError is mapped to TokenNotSupportedError —
+        # timeouts / ambiguity / malformed addresses propagate so callers can
+        # retry transient failures instead of seeing them as permanent.
+        # An address that resolves but isn't an Aave reserve is caught by the
+        # all-zero guard after eth_call decoding below.
         chain_tokens = AAVE_V3_TOKENS.get(self._chain, {})
         token_address = chain_tokens.get(token)
         if not token_address:
-            raise TokenNotSupportedError(token, "aave_v3", self._chain)
+            from almanak.framework.data.tokens import get_token_resolver
+            from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
+            try:
+                token_address = get_token_resolver().resolve(token, self._chain).address
+            except TokenNotFoundError:
+                raise TokenNotSupportedError(token, "aave_v3", self._chain) from None
 
         # Encode eth_call: getReserveData(address)
         # Data = 4-byte selector + 32-byte padded address
@@ -744,6 +757,13 @@ class RateMonitor:
             raise RateUnavailableError(
                 "aave_v3", token, side, f"Unexpected response: {len(words)} words (need {_AAVE_MIN_RESPONSE_WORDS})"
             )
+
+        # AaveProtocolDataProvider.getReserveData returns an all-zero struct for
+        # any address that isn't a listed reserve (no revert). Without this
+        # guard, the decode below would emit a misleading 0% rate for non-Aave
+        # tokens that TokenResolver happened to know about.
+        if all(word == b"\x00" * word_size for word in words):
+            raise TokenNotSupportedError(token, "aave_v3", self._chain)
 
         # Extract APY in ray units
         if side == "supply":

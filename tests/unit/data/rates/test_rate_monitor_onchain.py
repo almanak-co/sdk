@@ -19,7 +19,6 @@ import pytest
 
 from almanak.framework.data.rates.monitor import (
     RAY,
-    LendingRate,
     RateMonitor,
     RateSide,
     RateUnavailableError,
@@ -48,15 +47,22 @@ def _build_reserve_data_hex(
       [6] variableBorrowRate   <- borrow APY in ray
       [7] stableBorrowRate
       [8] averageStableBorrowRate
-      [9] liquidityIndex
-      [10] variableBorrowIndex
+      [9] liquidityIndex        <- initialized to RAY for any real reserve
+      [10] variableBorrowIndex  <- initialized to RAY for any real reserve
       [11] lastUpdateTimestamp
+
+    `liquidityIndex` and `variableBorrowIndex` default to RAY (1e27) because
+    Aave V3 initializes them on reserve setup; a fully-zero response is what
+    `getReserveData` returns for an *unknown* reserve, and the monitor rejects
+    that case as `TokenNotSupportedError`.
     """
     words = [0] * 12
     words[2] = total_atoken
     words[4] = total_variable_debt
     words[5] = liquidity_rate_ray
     words[6] = variable_borrow_rate_ray
+    words[9] = 10**27  # liquidityIndex = RAY (Aave V3 init value)
+    words[10] = 10**27  # variableBorrowIndex = RAY (Aave V3 init value)
     raw = b"".join(w.to_bytes(32, "big") for w in words)
     return "0x" + raw.hex()
 
@@ -263,10 +269,103 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_unknown_token_raises_not_supported(self, monitor_with_rpc: RateMonitor) -> None:
-        """Token absent from AAVE_V3_TOKENS raises TokenNotSupportedError immediately."""
-        # No HTTP call should be made -- error before RPC
-        with pytest.raises(TokenNotSupportedError):
-            await monitor_with_rpc.get_lending_rate("aave_v3", "UNKNOWN_XYZ", RateSide.SUPPLY)
+        """Token absent from BOTH AAVE_V3_TOKENS and TokenResolver raises TokenNotSupportedError.
+
+        The rate monitor now falls back to TokenResolver for tokens not in the static
+        AAVE_V3_TOKENS registry, so this test mocks the resolver to ALSO fail (the only
+        way to deterministically force "unknown token" behavior).
+        """
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
+        # Force resolver to also fail, ensuring the test exercises the "truly unknown" path
+        resolver_mock = MagicMock()
+        resolver_mock.resolve = MagicMock(side_effect=TokenNotFoundError(token="UNKNOWN_XYZ", chain="ethereum"))
+
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver_mock):
+            with pytest.raises(TokenNotSupportedError):
+                await monitor_with_rpc.get_lending_rate("aave_v3", "UNKNOWN_XYZ", RateSide.SUPPLY)
+
+        # Without this assertion the test could pass even if the fallback path
+        # were silently bypassed — make sure we actually hit the resolver.
+        resolver_mock.resolve.assert_called_once_with("UNKNOWN_XYZ", "ethereum")
+
+    @pytest.mark.asyncio
+    async def test_token_not_in_static_registry_resolves_via_tokenresolver(
+        self, monitor_with_rpc: RateMonitor
+    ) -> None:
+        """Token missing from AAVE_V3_TOKENS but resolvable via TokenResolver gets a rate.
+
+        Regression for the USDE-on-Aave-V3-Ethereum bug: USDe is a listed Aave reserve
+        but not in the SDK's static AAVE_V3_TOKENS registry. Strategies asking for its
+        rate previously failed with "Rate data unavailable" — they should now resolve
+        the address dynamically and complete the on-chain rate query.
+        """
+        # USDe is a real Aave V3 Ethereum reserve, but not in AAVE_V3_TOKENS["ethereum"]
+        usde_address = "0x4c9edd5852cd905f086c759e8383e09bff1e68b3"
+        resolved_mock = MagicMock()
+        resolved_mock.address = usde_address
+        resolver_mock = MagicMock()
+        resolver_mock.resolve = MagicMock(return_value=resolved_mock)
+
+        # liquidityRate = 0.05 * RAY = 5e25 -> apy_percent = 5e25 / RAY * 100 = 5.0
+        # (the decoder does a plain unit conversion, no APR->APY compounding)
+        supply_rate_ray = 5 * 10**25
+        rpc_response = _make_rpc_response(_build_reserve_data_hex(liquidity_rate_ray=supply_rate_ray))
+        mock_client = _make_mock_client(rpc_response)
+
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver_mock):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                rate = await monitor_with_rpc.get_lending_rate("aave_v3", "USDE", RateSide.SUPPLY)
+
+        # The resolver was consulted with the bare symbol and chain
+        resolver_mock.resolve.assert_called_once_with("USDE", "ethereum")
+        # Exact decode of supply_rate_ray, not just "not zero" — catches index / unit regressions
+        assert rate.protocol == "aave_v3"
+        assert rate.token == "USDE"
+        assert abs(rate.apy_percent - Decimal("5")) < Decimal("0.001")
+        # And the eth_call payload included the USDe address we resolved
+        call_args = mock_client.post.call_args
+        rpc_payload = call_args.kwargs.get("json") or call_args.args[1]
+        assert usde_address[2:].lower() in rpc_payload["params"][0]["data"].lower()
+
+    @pytest.mark.asyncio
+    async def test_resolver_address_not_an_aave_reserve_raises_not_supported(
+        self, monitor_with_rpc: RateMonitor
+    ) -> None:
+        """Resolver returns a real address, but Aave doesn't list it -> TokenNotSupportedError.
+
+        Defense-in-depth for the safety hole called out by reviewers on the
+        TokenResolver-fallback PR. Mainnet Aave's `AaveProtocolDataProvider`
+        actually reverts for unlisted reserves (it internally calls
+        `aToken.totalSupply()` against `address(0)`), so live behavior surfaces
+        as `RateUnavailableError`. But if any fork / fork-of-Aave / future
+        deployment returned an all-zero struct instead of reverting, the
+        decoder would have happily emitted `apy_percent=0`. The all-zero guard
+        catches that and raises `TokenNotSupportedError` instead.
+        """
+        from almanak.framework.data.rates.monitor import TokenNotSupportedError
+
+        resolved_mock = MagicMock()
+        resolved_mock.address = "0x1234567890abcdef1234567890abcdef12345678"
+        resolver_mock = MagicMock()
+        resolver_mock.resolve = MagicMock(return_value=resolved_mock)
+
+        # Mock an all-zero 12-word response — the shape getReserveData would
+        # have if it ever returned data instead of reverting for an unknown reserve.
+        all_zero_hex = "0x" + ("00" * 32) * 12
+        rpc_response = _make_rpc_response(all_zero_hex)
+        mock_client = _make_mock_client(rpc_response)
+
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver_mock):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                with pytest.raises(TokenNotSupportedError):
+                    await monitor_with_rpc.get_lending_rate("aave_v3", "NOT_AN_AAVE_TOKEN", RateSide.SUPPLY)
+
+        # Prove both halves of the fallback path ran: resolver was consulted
+        # for the bare symbol, and the resolved address was actually sent to
+        # the RPC layer (so the guard ran on the response, not earlier).
+        resolver_mock.resolve.assert_called_once_with("NOT_AN_AAVE_TOKEN", "ethereum")
+        assert mock_client.post.call_count == 1
 
     @pytest.mark.asyncio
     async def test_rpc_error_raises_rate_unavailable(self, monitor_with_rpc: RateMonitor) -> None:
