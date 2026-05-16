@@ -1515,18 +1515,22 @@ def _cell_g15_multi_period_self_consistency(
         if not positions_json or positions_json == "[]":
             continue
         try:
-            positions = json.loads(positions_json)
+            parsed = json.loads(positions_json)
         except (json.JSONDecodeError, TypeError):
-            # CodeRabbit (2026-05-02): unreadable JSON is NOT "no positions".
-            # Surface as a coverage failure rather than silently passing
-            # G15 as cash-only — that's the exact masking the cell was
-            # rewritten to catch (VIB-3891 coverage check).
+            # Unreadable JSON is NOT "no positions" — surface as coverage
+            # failure rather than silently passing G15 as cash-only (VIB-3891).
             unreadable_snapshots.append(s.get("id"))
             continue
-        # CodeRabbit (2026-05-02 round 3): valid JSON with the wrong root
-        # shape (``{}``, ``42``, etc.) is also unreadable for the coverage
-        # check. Treat as malformed rather than "no positions".
-        if not isinstance(positions, list):
+        # VIB-4489: accept two writer shapes. Legacy plain list and the
+        # versioned-envelope dict the writer ships today
+        # ({"schema_version": 1, "positions": [...], "metadata": {...}}).
+        # The accept rule is structural: a list at the root, OR a dict
+        # whose `positions` key holds a list. Any other shape is malformed.
+        if isinstance(parsed, list):
+            positions = parsed
+        elif isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
+            positions = parsed["positions"]
+        else:
             unreadable_snapshots.append(s.get("id"))
             continue
         if positions:

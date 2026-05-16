@@ -89,7 +89,9 @@ BASE_STRATEGY_CONFIG = {
     "borrow_token": "USDC",
     "initial_collateral": "0.1",  # Start with 0.1 wstETH for testing
     "target_loops": 2,  # Only 2 loops for testing
-    "target_ltv": "0.70",  # 70% LTV (conservative)
+    "target_ltv": "0.50",  # 50% LTV per loop (conservative — VIB-4491)
+    "lltv": "0.86",  # wstETH/USDC Ethereum market on-chain LLTV (required, VIB-4491)
+    "target_min_hf": "1.10",  # projected-HF refusal threshold (VIB-4491)
     "min_health_factor": "1.5",
     "swap_slippage": "0.01",  # 1% slippage for Anvil
 }

@@ -77,7 +77,7 @@ from typing import Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent
+from almanak.framework.intents import Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -130,8 +130,11 @@ class MorphoLoopingStrategy(IntentStrategy):
     - borrow_token: Token to borrow (e.g., "USDC")
     - initial_collateral: Initial collateral amount (default: "1.0")
     - target_loops: Number of loops to execute (default: 3)
-    - target_ltv: Target LTV per loop (default: 0.75 = 75%)
-    - min_health_factor: Minimum health factor to maintain (default: 1.5)
+    - target_ltv: Target LTV per loop — strategy author's leverage knob (default: 0.50 = 50%)
+    - lltv: On-chain liquidation LTV of the market (REQUIRED, no default — raises ValueError if absent).
+            Drives the actual health-factor formula `HF = (collateral_value * lltv) / borrow_value`.
+    - target_min_hf: Projected-HF refusal threshold for BORROW intents (default: 1.10, WARN-on-fallback).
+    - min_health_factor: Post-execution monitor warn-threshold (default: 1.5).
     - swap_slippage: Slippage tolerance for swaps (default: 0.005 = 0.5%)
 
     Example Config:
@@ -142,7 +145,9 @@ class MorphoLoopingStrategy(IntentStrategy):
         "borrow_token": "USDC",
         "initial_collateral": "1.0",
         "target_loops": 3,
-        "target_ltv": 0.75,
+        "target_ltv": 0.50,
+        "lltv": "0.86",
+        "target_min_hf": "1.10",
         "min_health_factor": 1.5,
         "swap_slippage": 0.005
     }
@@ -203,8 +208,32 @@ class MorphoLoopingStrategy(IntentStrategy):
         self.target_loops = int(self.get_config("target_loops", 3))
         self.target_ltv = Decimal(str(self.get_config("target_ltv", "0.75")))  # 75% LTV per loop
 
+        # VIB-4491: real market LLTV from config (drives the actual HF formula).
+        # Required — no fabricated default. Missing key is a hard configuration error
+        # because computing HF with a wrong LLTV silently puts the position underwater.
+        _lltv_raw = self.get_config("lltv", None)
+        if _lltv_raw is None:
+            raise ValueError(
+                "morpho_looping config.json is missing required `lltv` "
+                f"(market_id={self.market_id[:10]}…). Set it to the Morpho market's "
+                "actual liquidation LTV (e.g. 0.86 for the wstETH/USDC Ethereum market)."
+            )
+        self.lltv = Decimal(str(_lltv_raw))
+
         # Risk parameters
         self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "1.5")))
+
+        # VIB-4491: projected-HF guard threshold. Refuse BORROW when projected
+        # post-action HF < target_min_hf. Default 1.10 with WARN if absent —
+        # the guard MUST stay active even on a misconfigured deployment.
+        _hf_raw = self.get_config("target_min_hf", None)
+        if _hf_raw is None:
+            logger.warning(
+                "morpho_looping config.json missing `target_min_hf`; using default target_min_hf=1.10"
+            )
+            self.target_min_hf = Decimal("1.10")
+        else:
+            self.target_min_hf = Decimal(str(_hf_raw))
 
         # Swap parameters
         self.swap_slippage = Decimal(str(self.get_config("swap_slippage", "0.005")))  # 0.5%
@@ -270,12 +299,29 @@ class MorphoLoopingStrategy(IntentStrategy):
         try:
             collateral_price = market.price(self.collateral_token)
             borrow_price = market.price(self.borrow_token)
-            logger.debug(
-                f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
-            )
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get prices: {e}")
             return Intent.hold(reason=f"Price data unavailable: {e}")
+
+        # VIB-4491: surface invalid oracle output (None / zero / negative) as HOLD
+        # before any further computation. Format-strings below would crash on None;
+        # downstream math would divide by zero or size a nonsense BORROW.
+        if (
+            collateral_price is None
+            or borrow_price is None
+            or collateral_price <= 0
+            or borrow_price <= 0
+        ):
+            return Intent.hold(
+                reason=(
+                    f"invalid_oracle: refusing to act on non-positive/missing price "
+                    f"(collateral_price={collateral_price!r}, borrow_price={borrow_price!r})"
+                )
+            )
+
+        logger.debug(
+            f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+        )
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -361,12 +407,25 @@ class MorphoLoopingStrategy(IntentStrategy):
         return self._create_supply_intent(self.initial_collateral)
 
     def _handle_supplied_state(self, collateral_price: Decimal, borrow_price: Decimal) -> Intent:
-        """Handle SUPPLIED state - borrow against collateral."""
-        logger.info(f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})")
-        self._emit_state_change("supplied", "borrowing")
-        self._previous_stable_state = self._loop_state
-        self._loop_state = "borrowing"
-        return self._create_borrow_intent(collateral_price, borrow_price)
+        """Handle SUPPLIED state - borrow against collateral.
+
+        VIB-4491: build the BORROW intent first; only transition to ``borrowing`` if
+        ``_create_borrow_intent`` produced an actual BORROW. The guard paths in
+        ``_create_borrow_intent`` (missing/invalid oracle, no capacity, projected-HF
+        below threshold) return ``Intent.hold(...)``; HOLD intents don't fire
+        ``on_intent_executed``, so transitioning state first would strand the strategy
+        in ``"borrowing"`` and trigger the safety-net revert on every subsequent
+        iteration — guarded refusal would never reach a stable no-op.
+        """
+        intent = self._create_borrow_intent(collateral_price, borrow_price)
+        if intent.intent_type == IntentType.BORROW:
+            logger.info(
+                f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})"
+            )
+            self._emit_state_change("supplied", "borrowing")
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "borrowing"
+        return intent
 
     def _handle_borrowed_state(self, borrow_price: Decimal) -> Intent:
         """Handle BORROWED state - swap borrowed tokens to collateral."""
@@ -418,7 +477,10 @@ class MorphoLoopingStrategy(IntentStrategy):
         if self._total_borrowed > 0:
             collateral_value = self._total_collateral * collateral_price
             borrow_value = self._total_borrowed * borrow_price
-            self._current_health_factor = (collateral_value * self.target_ltv) / borrow_value
+            # VIB-4491: HF uses the market's actual LLTV, not target_ltv.
+            # Pre-fix this used target_ltv (e.g. 0.50), which yielded a misleading
+            # ratio that diverged from the gateway-observed Track-C HF.
+            self._current_health_factor = (collateral_value * self.lltv) / borrow_value
 
             if self._current_health_factor < self.min_health_factor:
                 logger.warning(f"Health factor low: {self._current_health_factor:.2f} < {self.min_health_factor}")
@@ -460,7 +522,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             chain=self.chain,
         )
 
-    def _create_borrow_intent(self, collateral_price: Decimal, borrow_price: Decimal) -> Intent:
+    def _create_borrow_intent(self, collateral_price: Decimal | None, borrow_price: Decimal | None) -> Intent:
         """
         Create a BORROW intent to borrow against supplied collateral.
 
@@ -469,18 +531,39 @@ class MorphoLoopingStrategy(IntentStrategy):
         - Target LTV (staying below market LLTV for safety)
         - Existing borrows
 
+        VIB-4491: refuses BORROW (returns Intent.hold) when:
+        - Either price is missing (None) — see trust statement §5.
+        - Projected post-action HF would drop below `self.target_min_hf`.
+
         Parameters:
-            collateral_price: Current price of collateral token
-            borrow_price: Current price of borrow token
+            collateral_price: Current price of collateral token (None = unavailable)
+            borrow_price: Current price of borrow token (None = unavailable)
 
         Returns:
-            BorrowIntent ready for compilation
+            BorrowIntent ready for compilation, or Intent.hold(...) if refused
         """
+        # VIB-4491 D3.F1: defensive — refuse rather than emit a BORROW with fabricated /
+        # zero / negative price. ``decide()`` already screens for these at the price-read
+        # boundary; this branch protects the ``force_action="borrow"`` test path and any
+        # future direct caller from sizing a borrow on bad oracle output.
+        if (
+            collateral_price is None
+            or borrow_price is None
+            or collateral_price <= 0
+            or borrow_price <= 0
+        ):
+            return Intent.hold(
+                reason=(
+                    "invalid_oracle: refusing BORROW because collateral or borrow price "
+                    f"is None/non-positive (collateral_price={collateral_price!r}, borrow_price={borrow_price!r})"
+                )
+            )
+
         # Calculate collateral value in USD
         collateral_value = self._total_collateral * collateral_price
 
         # Calculate safe borrow amount
-        # We use target_ltv which should be below the market's LLTV (e.g., 75% vs 86%)
+        # We use target_ltv which should be below the market's LLTV (e.g., 50% vs 86%)
         max_borrow_value = collateral_value * self.target_ltv
 
         # Subtract existing borrows
@@ -497,10 +580,28 @@ class MorphoLoopingStrategy(IntentStrategy):
         # Round down for safety
         borrow_amount = borrow_amount.quantize(Decimal("0.01"))
 
+        # VIB-4491: projected-HF guard. Compute the HF that would result from
+        # this BORROW landing on-chain. Refuse if it violates target_min_hf.
+        # Collateral is unchanged by BORROW; debt grows by borrow_amount.
+        projected_borrow_value = existing_borrow_value + (borrow_amount * borrow_price)
+        if projected_borrow_value > 0:
+            projected_hf = (collateral_value * self.lltv) / projected_borrow_value
+        else:
+            projected_hf = Decimal("Infinity")
+        if projected_hf < self.target_min_hf:
+            return Intent.hold(
+                reason=(
+                    f"projected_hf={projected_hf:.4f} below target_min_hf={self.target_min_hf} "
+                    f"(collateral_value=${collateral_value:.2f}, projected_borrow_value=${projected_borrow_value:.2f}, "
+                    f"lltv={self.lltv})"
+                )
+            )
+
         logger.info(
             f"BORROW intent: "
             f"Collateral={format_usd(collateral_value)}, "
             f"LTV={self.target_ltv * 100:.0f}%, "
+            f"projected_HF={projected_hf:.4f}, "
             f"Borrow={format_token_amount_human(borrow_amount, self.borrow_token)}"
         )
 
