@@ -128,7 +128,9 @@ def render_bridge_and_lifecycle(strategy: Strategy) -> None:
     # Imported lazily to avoid a circular import with ``detail``.
     from almanak.framework.dashboard.pages.detail import (
         render_bridge_transfers,
+        render_lp_position_history,
         render_position_lifecycle,
+        render_positions_summary,
         render_timeline_events,
     )
 
@@ -140,9 +142,19 @@ def render_bridge_and_lifecycle(strategy: Strategy) -> None:
         render_bridge_transfers(strategy)
         st.divider()
 
+    # Positions table — one row per position from ``position_registry``,
+    # defaults to open + closed so a torn-down strategy still surfaces what
+    # it held. ``render_position_lifecycle`` (events) follows underneath.
+    _safe_render(render_positions_summary, strategy, "positions summary")
+
     # Position Lifecycle (VIB-2777) - wrapped to surface SQLite/parse errors
     # without taking down the rest of the page.
     _safe_render(render_position_lifecycle, strategy, "position lifecycle")
+
+    # LP position-range history — same plot the LP template uses
+    # (``plot_positions_over_time``), surfaced for strategies that don't
+    # ship a custom dashboard. No-ops when there are no LP events.
+    _safe_render(render_lp_position_history, strategy, "LP position history")
 
     st.divider()
 

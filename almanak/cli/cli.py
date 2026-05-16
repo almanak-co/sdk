@@ -1001,6 +1001,15 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     import subprocess
 
     from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
+    from almanak.framework.local_paths import auto_detect_strategy_folder
+
+    # Auto-pin ``ALMANAK_STRATEGY_FOLDER`` when launched from inside a
+    # strategy folder. Mirrors the cwd-detection ``almanak gateway`` does
+    # so SQLite-backed dashboard renderers (position lifecycle, positions
+    # registry, LP range history) can resolve the local DB. The gateway
+    # already speaks gRPC for everything else; this only matters for the
+    # handful of renderers that read SQLite directly.
+    auto_detect_strategy_folder()
 
     # Check gateway connectivity first
     config = GatewayClientConfig(host=gateway_host, port=gateway_port)

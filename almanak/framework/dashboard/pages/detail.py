@@ -24,7 +24,10 @@ from almanak.framework.dashboard.pages._detail_render import (
     tx_display_fields,
 )
 from almanak.framework.dashboard.plots.lending_plots import plot_health_factor_gauge
-from almanak.framework.dashboard.plots.lp_plots import plot_position_range_status
+from almanak.framework.dashboard.plots.lp_plots import (
+    plot_position_range_status,
+    plot_positions_over_time,
+)
 from almanak.framework.dashboard.plots.perp_plots import plot_leverage_gauge
 from almanak.framework.dashboard.plots.portfolio_plots import plot_portfolio_value_over_time
 from almanak.framework.dashboard.plots.ta_plots import plot_price_with_signals
@@ -676,6 +679,10 @@ def render_position_lifecycle(strategy: Strategy) -> None:
     if not events:
         return
 
+    # token_id → strategy-stamped handle (e.g. "leg_narrow") for multi-position
+    # strategies that name their legs via ``registry_handle``.
+    handles = _fetch_registry_handles(db_path, strategy.id)
+
     st.markdown("### Position Lifecycle")
 
     # Summary metrics
@@ -690,17 +697,25 @@ def render_position_lifecycle(strategy: Strategy) -> None:
         st.metric("Total Events", len(events))
 
     # Events table
+    show_alias = any(handles.values())
     table_data = []
     for evt in events:
-        row = {
+        position_id = str(evt.get("position_id", ""))
+        row: dict[str, Any] = {
             "Time": evt.get("timestamp", "")[:19],
             "Type": evt.get("event_type", ""),
             "Position": evt.get("position_type", ""),
-            "ID": str(evt.get("position_id", ""))[:12],
-            "Protocol": evt.get("protocol", ""),
-            "Value (USD)": evt.get("value_usd", ""),
-            "TX": str(evt.get("tx_hash", ""))[:12] + "..." if evt.get("tx_hash") else "",
+            "ID": position_id[:12],
         }
+        if show_alias:
+            row["Alias"] = handles.get(position_id, "")
+        row.update(
+            {
+                "Protocol": evt.get("protocol", ""),
+                "Value (USD)": evt.get("value_usd", ""),
+                "TX": str(evt.get("tx_hash", ""))[:12] + "..." if evt.get("tx_hash") else "",
+            }
+        )
         table_data.append(row)
 
     st.dataframe(table_data, use_container_width=True, hide_index=True)
@@ -713,9 +728,12 @@ def render_position_lifecycle(strategy: Strategy) -> None:
         for evt in closed_with_attr:
             try:
                 attr = json.loads(evt.get("attribution_json", "{}"))
-                attr_data.append(
+                position_id = str(evt.get("position_id", ""))
+                attr_row: dict[str, Any] = {"Position": position_id[:12]}
+                if show_alias:
+                    attr_row["Alias"] = handles.get(position_id, "")
+                attr_row.update(
                     {
-                        "Position": str(evt.get("position_id", ""))[:12],
                         "Type": attr.get("position_type", ""),
                         "Net PnL": attr.get("net_pnl_usd", "0"),
                         "Price PnL": attr.get("price_pnl_usd", "0"),
@@ -724,6 +742,7 @@ def render_position_lifecycle(strategy: Strategy) -> None:
                         "Version": f"v{attr.get('version', '?')}",
                     }
                 )
+                attr_data.append(attr_row)
             except (json.JSONDecodeError, TypeError):
                 continue
 
@@ -739,6 +758,413 @@ def render_position_lifecycle(strategy: Strategy) -> None:
             file_name=f"position_events_{strategy.id}.csv",
             mime="text/csv",
         )
+
+
+def render_positions_summary(strategy: Strategy) -> None:
+    """Render a Positions table aggregated from ``position_registry``.
+
+    One row per position (handle + physical_identity_hash) with its status,
+    open/close times, NFT/position id, and tx hashes. Defaults to *all*
+    positions so a torn-down strategy still shows what it ever held; an
+    "Open only" toggle filters to live positions for the live-monitoring case.
+
+    Distinct from ``render_position_lifecycle`` (which lists raw OPEN/CLOSE
+    *events* — one row per event, two per round-trip): this table collapses
+    each round-trip to a single row keyed by the registry handle.
+    """
+    db_path = _find_state_db(strategy.id)
+    if not db_path:
+        return
+
+    rows = _fetch_positions_registry(db_path, strategy.id)
+    if not rows:
+        return
+
+    st.markdown("### Positions")
+    show_open_only = st.toggle(
+        "Show open only",
+        value=False,
+        key=f"positions_open_only_{strategy.id}",
+        help="Hide closed and reorg-invalidated rows.",
+    )
+    visible = [r for r in rows if r["status"] == "open"] if show_open_only else rows
+    if not visible:
+        st.info("No open positions." if show_open_only else "No positions on record.")
+        return
+
+    table_data = [
+        {
+            "Alias": r["handle"] or "",
+            "Chain": r["chain"],
+            "Type": r["primitive"],
+            "Status": r["status"],
+            "Opened": (r["opened_at"] or "")[:19],
+            "Closed": (r["closed_at"] or "")[:19],
+            "Position ID": r["position_id"][:18],
+            "Open TX": (r["opened_tx"] or "")[:12] + "…" if r["opened_tx"] else "",
+            "Close TX": (r["closed_tx"] or "")[:12] + "…" if r["closed_tx"] else "",
+        }
+        for r in visible
+    ]
+    st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+
+def _fetch_positions_registry(db_path: str, deployment_id: str) -> list[dict[str, Any]]:
+    """Read ``position_registry`` rows for a deployment, decorated for display.
+
+    Each returned dict carries the original registry columns plus a flattened
+    ``position_id`` (NFT token id when present in the JSON payload, else the
+    physical-identity hash) and a synthesised ``opened_at`` / ``closed_at``
+    pulled from the latest matching ``position_events`` row — the registry
+    itself records block numbers, not wall-clock times.
+    """
+    import json
+    import sqlite3
+
+    out: list[dict[str, Any]] = []
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            # ``status ASC`` would alphabetically rank ``closed`` above ``open`` —
+            # an operator monitoring live risk wants open rows pinned to the top.
+            # The CASE expression also pushes ``reorg_invalidated`` last so
+            # rare-but-noisy reorg rows don't crowd the actionable view.
+            registry_rows = conn.execute(
+                "SELECT chain, primitive, physical_identity_hash, handle, status, "
+                "payload, opened_tx, closed_tx FROM position_registry "
+                "WHERE deployment_id = ? "
+                "ORDER BY CASE status "
+                "WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END ASC, "
+                "(opened_at_block IS NULL) ASC, opened_at_block ASC",
+                (deployment_id,),
+            ).fetchall()
+            # SNAPSHOT / COLLECT_FEES rows can be 100s per long-running strategy
+            # and only OPEN/CLOSE carry the timestamps this function consults —
+            # filtering at the SQL boundary keeps memory + scan cost flat.
+            event_rows = conn.execute(
+                "SELECT position_id, event_type, timestamp FROM position_events "
+                "WHERE deployment_id = ? AND event_type IN ('OPEN', 'CLOSE') "
+                "ORDER BY timestamp ASC",
+                (deployment_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    # position-key → (first_open_ts, last_close_ts) so each registry row can
+    # surface a wall-clock window without a per-row subquery. We key by every
+    # identifier that a position_event might use — NFT token_id when present,
+    # else the registry's physical_identity_hash for non-NFT primitives.
+    timings: dict[str, dict[str, str]] = {}
+    for ev in event_rows:
+        pid = str(ev["position_id"] or "")
+        if not pid:
+            continue
+        slot = timings.setdefault(pid, {})
+        if ev["event_type"] == "OPEN":
+            slot.setdefault("opened_at", ev["timestamp"])
+        elif ev["event_type"] == "CLOSE":
+            slot["closed_at"] = ev["timestamp"]
+
+    for row in registry_rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        token_id = str(payload.get("token_id") or payload.get("position_id") or "")
+        # Match the position_id fallback used a few lines below so the timing
+        # lookup and the displayed identifier always reference the same key.
+        # Non-NFT primitives don't write token_id to the payload and key their
+        # events by ``physical_identity_hash`` instead.
+        lookup_id = token_id or row["physical_identity_hash"]
+        slot = timings.get(lookup_id, {})
+        out.append(
+            {
+                "chain": row["chain"],
+                "primitive": row["primitive"],
+                "physical_identity_hash": row["physical_identity_hash"],
+                "handle": row["handle"],
+                "status": row["status"],
+                "opened_tx": row["opened_tx"],
+                "closed_tx": row["closed_tx"],
+                "position_id": lookup_id,
+                "opened_at": slot.get("opened_at"),
+                "closed_at": slot.get("closed_at"),
+            }
+        )
+    return out
+
+
+def render_lp_position_history(strategy: Strategy) -> None:
+    """Render LP position range overlaid on the pool's price history.
+
+    Sources data directly from local SQLite — ``position_events`` for the
+    OPEN/CLOSE timestamps and tick range, and ``portfolio_snapshots`` for
+    the per-snapshot token prices. Silently no-ops when there are no LP
+    events, no snapshots, or the strategy isn't running locally (hosted
+    deployments don't have a SQLite path to read from).
+
+    The plot itself (``plot_positions_over_time``) is already used by the
+    LP dashboard template (Blueprint 23); this surfaces the same chart on
+    the framework-default detail page so strategies without a custom
+    ``dashboard/ui.py`` get the same view.
+    """
+    db_path = _find_state_db(strategy.id)
+    if not db_path:
+        return
+
+    lp_event_rows, snapshot_rows = _read_lp_history_rows(db_path, strategy.id)
+    if not lp_event_rows or not snapshot_rows:
+        return
+
+    # Default page plots one pool at a time — multi-pool strategies fall
+    # back to the first pool. Callers wanting more should write a custom
+    # dashboard via ``dashboard/ui.py``.
+    first = lp_event_rows[0]
+    token0_sym = (first["token0"] or "").upper()
+    token1_sym = (first["token1"] or "").upper()
+    if not token0_sym or not token1_sym:
+        return
+
+    # Filter events to the chosen pool — without this, multi-pool strategies
+    # would overlay rectangles from other pools onto this pool's price line
+    # with incorrect decimals (audit finding: P2 Codex + Important Claude).
+    pool_event_rows = [
+        r
+        for r in lp_event_rows
+        if (r["token0"] or "").upper() == token0_sym and (r["token1"] or "").upper() == token1_sym
+    ]
+    if not pool_event_rows:
+        return
+
+    price_df, decimals0, decimals1 = _build_lp_price_series(snapshot_rows, token0_sym, token1_sym)
+    if price_df.empty or decimals0 is None or decimals1 is None:
+        return
+
+    handles = _fetch_registry_handles(db_path, strategy.id)
+    positions = _build_lp_position_entries(pool_event_rows, decimals0, decimals1, handles)
+    if not positions:
+        return
+
+    st.markdown("### Position Range History")
+    fig = plot_positions_over_time(
+        positions=positions,
+        price_data=price_df,
+        title=f"{token0_sym}/{token1_sym} price + position ranges",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _read_lp_history_rows(db_path: str, deployment_id: str) -> tuple[list[Any], list[Any]]:
+    """Fetch the two SQL row sets ``render_lp_position_history`` needs."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            # ``_build_lp_position_entries`` only inspects OPEN + CLOSE rows;
+            # SNAPSHOT / COLLECT_FEES events would be scanned and discarded.
+            # Filter at the SQL boundary so the dashboard stays responsive on
+            # strategies with hundreds of intra-position snapshots.
+            lp_event_rows = conn.execute(
+                "SELECT position_id, event_type, timestamp, tick_lower, tick_upper, "
+                "token0, token1, chain "
+                "FROM position_events "
+                "WHERE deployment_id = ? AND position_type = 'LP' "
+                "AND event_type IN ('OPEN', 'CLOSE') "
+                "ORDER BY timestamp ASC",
+                (deployment_id,),
+            ).fetchall()
+            snapshot_rows = conn.execute(
+                "SELECT timestamp, token_prices_json FROM portfolio_snapshots "
+                "WHERE deployment_id = ? ORDER BY timestamp ASC",
+                (deployment_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return [], []
+    return list(lp_event_rows), list(snapshot_rows)
+
+
+def _build_lp_price_series(
+    snapshot_rows: list[Any],
+    token0_sym: str,
+    token1_sym: str,
+) -> tuple["Any", int | None, int | None]:
+    """Build the (timestamp, price) DataFrame + token decimals from snapshots.
+
+    Price is ``price(token0) / price(token1)`` so the y-axis carries the
+    same units as Uniswap V3's pool price (e.g. USDC per WETH for the
+    WETH/USDC pool).
+    """
+    import json
+
+    import pandas as pd
+
+    decimals0: int | None = None
+    decimals1: int | None = None
+    price_rows: list[dict] = []
+    for snap in snapshot_rows:
+        try:
+            prices = json.loads(snap["token_prices_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        price0_dec: Decimal | None = None
+        price1_dec: Decimal | None = None
+        for meta in prices.values():
+            sym = (meta.get("symbol") or "").upper()
+            if sym == token0_sym:
+                price0_dec = Decimal(str(meta.get("price_usd", "0")))
+                if decimals0 is None:
+                    decimals0 = int(meta.get("decimals", 18))
+            elif sym == token1_sym:
+                price1_dec = Decimal(str(meta.get("price_usd", "0")))
+                if decimals1 is None:
+                    decimals1 = int(meta.get("decimals", 18))
+        if price0_dec is None or price1_dec is None or price1_dec == 0:
+            continue
+        price_rows.append(
+            {
+                "timestamp": pd.to_datetime(snap["timestamp"]),
+                "price": float(price0_dec / price1_dec),
+            }
+        )
+    return pd.DataFrame(price_rows), decimals0, decimals1
+
+
+def _build_lp_position_entries(
+    lp_event_rows: list[Any],
+    decimals0: int,
+    decimals1: int,
+    handles: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Group LP OPEN/CLOSE event rows into ``plot_positions_over_time`` dicts."""
+    from math import log
+
+    import pandas as pd
+
+    by_position: dict[str, dict[str, Any]] = {}
+    for row in lp_event_rows:
+        pid = str(row["position_id"] or "")
+        if not pid:
+            continue
+        entry = by_position.setdefault(
+            pid,
+            {"position_id": pid, "tick_lower": None, "tick_upper": None, "date_start": None, "date_end": None},
+        )
+        if row["event_type"] == "OPEN":
+            entry["date_start"] = row["timestamp"]
+            entry["tick_lower"] = row["tick_lower"]
+            entry["tick_upper"] = row["tick_upper"]
+        elif row["event_type"] == "CLOSE":
+            entry["date_end"] = row["timestamp"]
+
+    log1_0001 = log(1.0001)
+    # Use Decimal-typed adjustment so pools where token0 has fewer decimals
+    # than token1 (e.g. USDC/WETH on Ethereum: decimals0=6, decimals1=18) don't
+    # turn ``decimal_adjust`` into a float and crash the ``Decimal × float``
+    # multiplication below. Audit finding: Important Claude.
+    exponent = decimals0 - decimals1
+    decimal_adjust = Decimal(10) ** exponent if exponent >= 0 else Decimal(1) / (Decimal(10) ** (-exponent))
+    positions: list[dict[str, Any]] = []
+    for entry in by_position.values():
+        tick_lower = entry["tick_lower"]
+        tick_upper = entry["tick_upper"]
+        if entry["date_start"] is None or tick_lower is None or tick_upper is None:
+            continue
+        bound_price_lower = float(_safe_exp(tick_lower * log1_0001) * decimal_adjust)
+        bound_price_upper = float(_safe_exp(tick_upper * log1_0001) * decimal_adjust)
+        date_end_raw = entry["date_end"]
+        date_end = pd.to_datetime(date_end_raw) if date_end_raw else None
+        alias = handles.get(entry["position_id"], "")
+        position_label = f"{alias} ({entry['position_id'][:6]})" if alias else entry["position_id"]
+        positions.append(
+            {
+                "position_id": position_label,
+                "date_start": pd.to_datetime(entry["date_start"]),
+                "date_end": date_end,
+                "bound_tick_lower": tick_lower,
+                "bound_tick_upper": tick_upper,
+                "bound_price_lower": bound_price_lower,
+                "bound_price_upper": bound_price_upper,
+                "is_active": date_end is None,
+            }
+        )
+    return positions
+
+
+def _safe_exp(x: float) -> Decimal:
+    """``Decimal(exp(x))`` with overflow / underflow guarded.
+
+    Tick→price conversion uses ``1.0001 ** tick``; extreme ticks (Solana
+    Whirlpool ±443636, Uniswap V3 ±887272) blow past ``float`` range. We
+    fall back to ``0`` / ``inf`` rather than raising — the rectangle just
+    won't be drawn at that bound.
+    """
+    from math import exp as math_exp
+
+    try:
+        return Decimal(str(math_exp(x)))
+    except OverflowError:
+        return Decimal("inf") if x > 0 else Decimal("0")
+
+
+def _fetch_registry_handles(db_path: str, deployment_id: str) -> dict[str, str]:
+    """Return a {position-key → handle} map from ``position_registry``.
+
+    The strategy-stamped ``registry_handle`` (e.g. ``leg_narrow`` /
+    ``leg_wide`` on multi-position fixtures) lives on the registry row, not
+    on ``position_events``. To resolve a handle for any row in
+    ``position_events`` we have to be ready for either key shape that
+    primitives in the wild use:
+
+    * **NFT-backed primitives** (Uniswap V3 LP, Pendle LP, …) write the NFT
+      ``token_id`` to the registry payload AND to ``position_events.position_id``.
+    * **Non-NFT primitives** (Aave V3 lending, perps, future CDP/vault) have
+      no token_id; ``position_events.position_id`` matches the registry's
+      ``physical_identity_hash`` instead.
+
+    Emit BOTH keys whenever they exist so renderers consuming events from
+    either family resolve the alias without per-primitive special-casing.
+
+    Missing handles, malformed payloads, or a missing DB silently yield an
+    empty map — table renderers treat no-alias as "single-leg" and omit the
+    column.
+    """
+    import json
+    import sqlite3
+
+    out: dict[str, str] = {}
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            # Sort so ``closed`` rows are read AFTER ``open`` ones — for a
+            # handle re-bound to a new position the surfaced alias should
+            # reflect the most recent registry write, not whichever row the
+            # SQLite engine happened to return first.
+            cursor = conn.execute(
+                "SELECT handle, payload, physical_identity_hash FROM position_registry "
+                "WHERE deployment_id = ? AND handle IS NOT NULL AND handle != '' "
+                "ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END ASC",
+                (deployment_id,),
+            )
+            for row in cursor:
+                handle = row["handle"]
+                if not handle:
+                    continue
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+                token_id = payload.get("token_id") or payload.get("position_id")
+                if token_id:
+                    out[str(token_id)] = handle
+                # Always also key by physical_identity_hash so non-NFT
+                # primitives (or any consumer that joins by hash) resolve.
+                phys = row["physical_identity_hash"]
+                if phys:
+                    out[str(phys)] = handle
+    except sqlite3.Error:
+        return {}
+    return out
 
 
 def _find_state_db(strategy_id: str) -> str | None:
