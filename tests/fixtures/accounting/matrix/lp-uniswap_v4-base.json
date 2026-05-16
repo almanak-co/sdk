@@ -4,13 +4,14 @@
     "fixture": "lp_uniswap_v4",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/matrix-overnight-new-rows/lp-uniswap_v4-base/accountant.json",
-    "captured_at": "2026-05-13T19:37:58.424097+00:00",
-    "captured_at_commit": "7df7573c4a55a3950d044aa6c9247d74b41504ee",
+    "captured_from": "notes/.tmp/matrix-baseline/lp-uniswap_v4-base/accountant.json",
+    "captured_at": "2026-05-16T06:30:00+00:00",
+    "captured_at_commit": "918a86dec9ba06a1a41a7df2d49b0b8dfe68d806",
     "post_fix_for": [
-      "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)"
+      "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)",
+      "VIB-4426 rebaseline (2026-05-16): LP4 PASS → XFAIL"
     ],
-    "note": "Real-Anvil baseline \u2014 first run on this protocol/chain combo. See docs/internal/VIB-4316-Overnight-2026-05-14.md for the per-cell narrative."
+    "note": "Real-Anvil baseline reflecting post-VIB-4396 reality. VIB-4426 tracks the proper V4 LP accounting fix — V4 receipt parser needs to emit a PoolKey hash so _clean_pool_address_candidate can resolve it, otherwise LP_OPEN/LP_CLOSE events are dropped by lp_handler with 'cannot resolve pool address ... dropping event'. Once VIB-4426 lands, expect LP4=PASS to be restored. Until then this baseline locks the known regression so the matrix can guard against further drift. See almanak/framework/accounting/category_handlers/lp_handler.py:_clean_pool_address_candidate docstring for the architectural constraint."
   },
   "cells": {
     "G1": "PASS",
@@ -32,14 +33,15 @@
     "LP1": "FAIL",
     "LP2": "XFAIL",
     "LP3": "PASS",
-    "LP4": "PASS",
+    "LP4": "XFAIL",
     "LP5": "XFAIL",
     "LP6": "XFAIL"
   },
   "scores": {
-    "passed": 13,
+    "passed": 12,
     "failed": 2,
-    "xfailed": 6,
+    "xfailed": 7,
+    "skipped": 1,
     "total": 22
   }
 }
