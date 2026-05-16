@@ -69,15 +69,17 @@ class TestAddCLLiquidityHappyPath:
         adapter.sdk.build_cl_mint_tx = MagicMock(  # type: ignore[method-assign]
             return_value={"to": adapter.addresses["cl_nft"], "value": 0, "data": b"\x00\x01\x02\x03"},
         )
-        result = adapter.add_cl_liquidity(
-            token_a="USDC",
-            token_b="WETH",
-            tick_spacing=200,
-            tick_lower=-1000,
-            tick_upper=1000,
-            amount_a=Decimal("100"),
-            amount_b=Decimal("0.05"),
-        )
+        # VIB-4468 W7 — Decimal-mode emits a DeprecationWarning.
+        with pytest.warns(DeprecationWarning, match="Decimal-mode"):
+            result = adapter.add_cl_liquidity(
+                token_a="USDC",
+                token_b="WETH",
+                tick_spacing=200,
+                tick_lower=-1000,
+                tick_upper=1000,
+                amount_a=Decimal("100"),
+                amount_b=Decimal("0.05"),
+            )
         assert result.success is True
         assert isinstance(result, CLLiquidityResult)
         # Token sorting: USDC > WETH lex, so token0 should be WETH
@@ -93,15 +95,16 @@ class TestAddCLLiquidityHappyPath:
         adapter.sdk.build_cl_mint_tx = MagicMock(  # type: ignore[method-assign]
             return_value={"to": adapter.addresses["cl_nft"], "data": "0xdeadbeef"},
         )
-        result = adapter.add_cl_liquidity(
-            token_a="USDC",
-            token_b="WETH",
-            tick_spacing=100,
-            tick_lower=-100,
-            tick_upper=100,
-            amount_a=Decimal("1"),
-            amount_b=Decimal("0.001"),
-        )
+        with pytest.warns(DeprecationWarning, match="Decimal-mode"):
+            result = adapter.add_cl_liquidity(
+                token_a="USDC",
+                token_b="WETH",
+                tick_spacing=100,
+                tick_lower=-100,
+                tick_upper=100,
+                amount_a=Decimal("1"),
+                amount_b=Decimal("0.001"),
+            )
         assert result.success
         assert result.transactions[-1].data == "0xdeadbeef"
 
@@ -120,15 +123,19 @@ class TestAddCLLiquidityHappyPath:
 
     def test_add_cl_liquidity_exception_caught(self, adapter: AerodromeAdapter) -> None:
         adapter._get_web3 = MagicMock(side_effect=RuntimeError("no web3"))  # type: ignore[method-assign]
-        result = adapter.add_cl_liquidity(
-            token_a="USDC",
-            token_b="WETH",
-            tick_spacing=200,
-            tick_lower=-100,
-            tick_upper=100,
-            amount_a=Decimal("1"),
-            amount_b=Decimal("0.001"),
-        )
+        # Decimal-mode path: the DeprecationWarning fires before _get_web3
+        # raises, so we still expect the warning to be emitted even though
+        # the overall call ultimately returns success=False.
+        with pytest.warns(DeprecationWarning, match="Decimal-mode"):
+            result = adapter.add_cl_liquidity(
+                token_a="USDC",
+                token_b="WETH",
+                tick_spacing=200,
+                tick_lower=-100,
+                tick_upper=100,
+                amount_a=Decimal("1"),
+                amount_b=Decimal("0.001"),
+            )
         assert result.success is False
         assert "no web3" in (result.error or "")
 
@@ -168,15 +175,16 @@ class TestAddCLLiquidityHappyPath:
             return_value={"to": adapter.addresses["cl_nft"], "data": b""},
         )
         # WETH < USDC lex (4200... < 833...), so token_a=WETH means token_a is lower
-        result = adapter.add_cl_liquidity(
-            token_a="WETH",
-            token_b="USDC",
-            tick_spacing=200,
-            tick_lower=-100,
-            tick_upper=100,
-            amount_a=Decimal("0.05"),
-            amount_b=Decimal("100"),
-        )
+        with pytest.warns(DeprecationWarning, match="Decimal-mode"):
+            result = adapter.add_cl_liquidity(
+                token_a="WETH",
+                token_b="USDC",
+                tick_spacing=200,
+                tick_lower=-100,
+                tick_upper=100,
+                amount_a=Decimal("0.05"),
+                amount_b=Decimal("100"),
+            )
         assert result.success
         # token0 should be WETH (the smaller addr)
         assert result.token0 == WETH_ADDRESS
@@ -355,9 +363,7 @@ class TestTryGetAmountOutOnchain:
         adapter._try_get_amount_out_onchain = MagicMock(  # type: ignore[method-assign]
             return_value=5 * 10**14,
         )
-        quote = adapter._get_quote_exact_input(
-            USDC_ADDRESS, WETH_ADDRESS, 1_000_000, False, skip_onchain=False
-        )
+        quote = adapter._get_quote_exact_input(USDC_ADDRESS, WETH_ADDRESS, 1_000_000, False, skip_onchain=False)
         assert quote.amount_out == 5 * 10**14
         # effective_price = 0.0005 / 1 = 0.0005
         assert quote.effective_price == Decimal("0.0005") / Decimal("1")

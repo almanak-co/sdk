@@ -156,11 +156,12 @@ register_connector(
         # standalone connector entry. Re-add LP_COLLECT_FEES here only when
         # a Slipstream-specific connector is registered alongside it.
     ),
-    # Optimism support (Velodrome V2 alias) is intentionally NOT declared here
-    # yet: the intent-coverage gate enforces every (connector, intent, chain)
-    # triple, and aerodrome declares SWAP + LP_OPEN + LP_CLOSE. VIB-4389 covers
-    # SWAP × optimism; LP coverage lands separately via VIB-4390 (PR #2318).
-    # That sister PR owns the chains=("base", "optimism") flip once both
-    # SWAP and LP tests exist together.
-    chains=("base",),
+    # Optimism support runs through the Velodrome V2 alias map at the
+    # compiler / address-book layer; the same connector module serves both
+    # Base (Aerodrome) and Optimism (Velodrome). With VIB-4389 (SWAP) and
+    # VIB-4390 (LP) intent tests for ``aerodrome × optimism`` both on main,
+    # the intent-coverage gate's required triples for (aerodrome, *, optimism)
+    # are all satisfied — adding ``"optimism"`` here is now a no-debt
+    # registry-truth alignment (VIB-4468 §W5 / audit doc §8.2 W5).
+    chains=("base", "optimism"),
 )

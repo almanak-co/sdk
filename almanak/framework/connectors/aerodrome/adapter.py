@@ -31,6 +31,7 @@ Example:
 """
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -936,6 +937,29 @@ class AerodromeAdapter:
                 use_wei_overload = False
                 a_min_override = None
                 b_min_override = None
+                # VIB-4468 W7 — flag the Decimal-mode entry as deprecated. The
+                # wei-overload path (all four ``amount_*_wei`` kwargs) is the
+                # production path the IntentCompiler uses; it threads through
+                # pool-aligned mins computed after ``slot0`` recomputation,
+                # which the Decimal path cannot replicate. The Decimal path
+                # computes mins as a basis-points cut of user-supplied amounts
+                # (``int(amount * (10000 - slippage_bps) // 10000)`` below) —
+                # a tolerance that does not reflect post-compile price
+                # movement. New callers should pass wei-overload kwargs; this
+                # branch will be removed in a future release.
+                warnings.warn(
+                    "AerodromeAdapter.add_cl_liquidity Decimal-mode "
+                    "(amount_a/amount_b with no wei-overload kwargs) is "
+                    "deprecated. Pass amount_a_wei, amount_b_wei, "
+                    "amount_a_min_wei, amount_b_min_wei instead — the "
+                    "wei-overload accepts pool-aligned mins computed by the "
+                    "IntentCompiler after slot0 recomputation, which the "
+                    "Decimal path's basis-points formula cannot replicate. "
+                    "The Decimal path is targeted for removal once all "
+                    "callers migrate.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 # Get token decimals
                 token_a_decimals = self._get_token_decimals(token_a)
                 token_b_decimals = self._get_token_decimals(token_b)

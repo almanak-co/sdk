@@ -236,7 +236,8 @@ class TestIntentSwapFactory:
 
     def test_swap_factory_cross_chain_enso(self):
         intent = Intent.swap(
-            "USDC", "WETH",
+            "USDC",
+            "WETH",
             amount_usd=Decimal("500"),
             chain="base",
             destination_chain="arbitrum",
@@ -247,7 +248,8 @@ class TestIntentSwapFactory:
 
     def test_swap_factory_with_price_impact(self):
         intent = Intent.swap(
-            "USDC", "ETH",
+            "USDC",
+            "ETH",
             amount_usd=Decimal("500"),
             max_price_impact=Decimal("0.5"),
         )
@@ -372,22 +374,29 @@ class TestLPCloseIntent:
 
 
 class TestCollectFeesIntent:
-    def test_construct_defaults(self):
-        intent = CollectFeesIntent(pool="WAVAX/USDC/20")
+    def test_construct_requires_protocol(self):
+        # VIB-4468 W6 — protocol no longer defaults to "traderjoe_v2"
+        # on the CollectFeesIntent model. The old default was a silent
+        # mis-routing footgun on multi-protocol strategies.
+        with pytest.raises(ValidationError, match="protocol"):
+            CollectFeesIntent(pool="WAVAX/USDC/20")  # type: ignore[call-arg]
+
+    def test_construct_with_protocol(self):
+        intent = CollectFeesIntent(pool="WAVAX/USDC/20", protocol="traderjoe_v2")
         assert intent.protocol == "traderjoe_v2"
         assert intent.intent_type == IntentType.LP_COLLECT_FEES
 
     def test_factory(self):
-        intent = Intent.collect_fees(pool="WAVAX/USDC/20", chain="avalanche")
+        intent = Intent.collect_fees(pool="WAVAX/USDC/20", protocol="traderjoe_v2", chain="avalanche")
         assert intent.pool == "WAVAX/USDC/20"
         assert intent.chain == "avalanche"
 
     def test_empty_pool_raises(self):
         with pytest.raises(ValidationError, match="pool is required"):
-            CollectFeesIntent(pool="")
+            CollectFeesIntent(pool="", protocol="traderjoe_v2")
 
     def test_serialize_roundtrip(self):
-        intent = CollectFeesIntent(pool="WAVAX/USDC/20", chain="avalanche")
+        intent = CollectFeesIntent(pool="WAVAX/USDC/20", protocol="traderjoe_v2", chain="avalanche")
         data = intent.serialize()
         assert data["type"] == "LP_COLLECT_FEES"
         rebuilt = CollectFeesIntent.deserialize(data)
@@ -792,7 +801,7 @@ class TestIntentTopLevelHelpers:
                 range_upper=Decimal("2"),
             ),
             LPCloseIntent(position_id="1"),
-            CollectFeesIntent(pool="WAVAX/USDC/20"),
+            CollectFeesIntent(pool="WAVAX/USDC/20", protocol="traderjoe_v2"),
             BorrowIntent(
                 protocol="aave_v3",
                 collateral_token="WETH",

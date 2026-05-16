@@ -52,7 +52,7 @@ _INTENT_QUICK_REF: dict[str, str] = {
     "SWAP": 'Intent.swap(from_token, to_token, amount_usd=, max_slippage=Decimal("0.005"))',
     "LP_OPEN": 'Intent.lp_open(pool="WETH/USDC/3000", amount0=, amount1=, range_lower=, range_upper=, protocol=)',
     "LP_CLOSE": "Intent.lp_close(position_id=, pool=None, collect_fees=True, protocol=)",
-    "LP_COLLECT_FEES": 'Intent.collect_fees(pool, protocol="traderjoe_v2")',
+    "LP_COLLECT_FEES": "Intent.collect_fees(pool, protocol=)",
     "SUPPLY": "Intent.supply(protocol, token, amount, use_as_collateral=True)",
     "BORROW": "Intent.borrow(protocol, collateral_token, collateral_amount, borrow_token, borrow_amount)",
     "REPAY": "Intent.repay(protocol, token, amount, repay_full=False)",

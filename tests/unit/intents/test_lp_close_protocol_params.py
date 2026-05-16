@@ -5,7 +5,6 @@ protocols like Uniswap V4 that require additional on-chain data
 (liquidity, currency addresses, position_id) for compilation.
 """
 
-from decimal import Decimal
 
 import pytest
 
@@ -114,6 +113,7 @@ class TestCollectFeesIntentProtocolParams:
         """CollectFeesIntent with protocol_params should be immutable."""
         intent = CollectFeesIntent(
             pool="WETH/USDC/3000",
+            protocol="uniswap_v4",
             protocol_params={"position_id": 100},
         )
 

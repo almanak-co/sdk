@@ -563,7 +563,7 @@ class CollectFeesIntent(BaseIntent):
     """
 
     pool: str
-    protocol: str = "traderjoe_v2"
+    protocol: str
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
@@ -984,7 +984,8 @@ class Intent:
     @staticmethod
     def collect_fees(
         pool: str,
-        protocol: str = "traderjoe_v2",
+        *,
+        protocol: str,
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
         registry_handle: str | None = None,
@@ -1009,7 +1010,17 @@ class Intent:
         Args:
             pool: Pool identifier (e.g., "WAVAX/USDC/20" for TraderJoe V2,
                 "WETH/USDC/200" for Aerodrome Slipstream).
-            protocol: LP protocol (default "traderjoe_v2")
+            protocol: LP protocol — required keyword-only argument.
+                Supported literals (see compiler dispatch):
+                ``"traderjoe_v2"``, ``"uniswap_v4"``,
+                ``"aerodrome_slipstream"``, and the Uniswap V3 family
+                (``"uniswap_v3"``, ``"sushiswap_v3"``, ``"pancakeswap_v3"``,
+                ``"agni_finance"``). ``"aerodrome"`` (Classic V1/V2) does
+                NOT support standalone fee collection — fees auto-compound
+                into pool reserves; use ``Intent.lp_close(..., collect_fees=True)``
+                instead. Previously defaulted to ``"traderjoe_v2"`` (the
+                default was dropped to prevent silent mis-routing on
+                multi-protocol strategies).
             chain: Target chain for execution (defaults to strategy's primary chain)
             protocol_params: Optional protocol-specific parameters. See per-protocol
                 requirements above.
