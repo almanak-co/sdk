@@ -66,5 +66,6 @@ register_connector(
     chains=(
         "ethereum",
         "arbitrum",
+        "base",
     ),
 )
