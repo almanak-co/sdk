@@ -15,7 +15,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import grpc
 
@@ -918,6 +918,133 @@ class GatewayStateManager:
         except Exception as e:
             logger.warning("Failed to save position event via gateway: %s", e)
             return False
+
+    # Optional string-serialised fields on PositionStateSnapshotRow — bulk-set
+    # via getattr/setattr in ``_position_state_row_to_proto``. Hoisted to
+    # class scope so the tuple isn't re-allocated per row in a hot bulk save
+    # (Gemini, 2026-05-17).
+    _POSITION_STATE_OPTIONAL_STR_FIELDS: ClassVar[tuple[str, ...]] = (
+        "liquidity",
+        "sqrt_price_x96",
+        "supply_balance",
+        "borrow_balance",
+        "health_factor",
+        "supply_apy_pct",
+        "borrow_apy_pct",
+        "interest_accrued_since_last",
+        "mark_price",
+        "unrealized_pnl",
+        "funding_accrued_since_last",
+        "liquidation_price",
+        "margin_utilisation_pct",
+        "delta_vs_protocol_pct",
+    )
+
+    @classmethod
+    def _position_state_row_to_proto(cls, r: Any) -> "gateway_pb2.PositionStateSnapshotRow":
+        """Map a ``PositionStateRow`` dataclass to its proto wire shape.
+
+        Each nullable field is only set when the source value is non-None
+        so the wire preserves "unmeasured" (HasField==False) vs "measured
+        zero" (HasField==True, value="0") per CLAUDE.md §Accounting
+        "Empty != Zero". Extracted from
+        :meth:`save_position_state_snapshots` to keep that caller's
+        cyclomatic complexity in check — it would otherwise be a flat
+        16-branch optional-field setter ladder.
+        """
+        proto_row = gateway_pb2.PositionStateSnapshotRow(
+            strategy_id=r.strategy_id,
+            deployment_id=r.deployment_id,
+            cycle_id=r.cycle_id,
+            captured_at=r.timestamp.isoformat() if r.timestamp else "",
+            position_id=r.position_id,
+            position_type=r.position_type,
+            value_confidence=r.value_confidence,
+            schema_version=int(r.schema_version),
+            formula_version=int(r.formula_version),
+            matching_policy_version=int(r.matching_policy_version),
+        )
+        # Optional integer + bool — typed setters; checking via "is not None"
+        # is the only way to distinguish missing vs 0 / False.
+        if r.current_tick is not None:
+            proto_row.current_tick = int(r.current_tick)
+        if r.in_range is not None:
+            proto_row.in_range = bool(r.in_range)
+        # Optional string (Decimal/int serialised) — uniform str(...) cast over
+        # the class-level tuple so the method's CC stays linear in the field
+        # count rather than branchy.
+        for fname in cls._POSITION_STATE_OPTIONAL_STR_FIELDS:
+            v = getattr(r, fname, None)
+            if v is not None:
+                setattr(proto_row, fname, str(v))
+        return proto_row
+
+    async def save_position_state_snapshots(
+        self,
+        snapshot_id: int,
+        rows: list,
+    ) -> int:
+        """Track-C bulk write of per-iteration position state rows (VIB-4541).
+
+        Routes the runner's ``_persist_position_state_snapshots`` call
+        (runner_state.py:565) through the gateway's
+        ``SavePositionStateSnapshots`` RPC, which delegates to the warm
+        backend's ``save_position_state_snapshots`` (SQLite implementation
+        at sqlite.py:2686). Returns the number of rows written.
+
+        Capability semantics — gRPC UNIMPLEMENTED on the wire (the hosted
+        Postgres warm backend lacks the method until the metrics-database
+        migration lands, PRD T-DRAFT-25) is mapped to a silent ``return 0``
+        so the runner's deployment-time capability gate at
+        runner_state.py:480 stays observationally identical to the
+        pre-RPC behaviour for hosted runs. Other gRPC errors propagate as
+        exceptions so the runner's live-mode handler can convert them
+        into ``AccountingPersistenceError`` and halt with
+        ACCOUNTING_FAILED rather than masking a real backend regression
+        as "0 rows written".
+
+        Empty ``rows`` returns 0 without sending an RPC.
+        """
+        if not rows:
+            return 0
+
+        proto_rows = [self._position_state_row_to_proto(r) for r in rows]
+        request = gateway_pb2.SavePositionStateSnapshotsRequest(
+            snapshot_id=int(snapshot_id),
+            rows=proto_rows,
+        )
+
+        try:
+            response = self._client.state.SavePositionStateSnapshots(request, timeout=self._timeout)
+        except grpc.RpcError as e:
+            # Hosted Postgres warm backend doesn't yet implement the method
+            # (PRD T-DRAFT-25, Infra-owned metrics-database migration). The
+            # server returns UNIMPLEMENTED; degrade to the capability-gate
+            # equivalent (silent zero) so the cell read side keeps reporting
+            # XFAIL rather than the runner's live-mode handler converting
+            # this into AccountingPersistenceError. All other gRPC errors
+            # propagate so the runner can decide between halt and log per
+            # execution mode.
+            code = e.code() if callable(getattr(e, "code", None)) else None
+            if code == grpc.StatusCode.UNIMPLEMENTED:
+                logger.debug(
+                    "SavePositionStateSnapshots returned UNIMPLEMENTED — backend lacks Track-C "
+                    "support (hosted PG pre-metrics-database migration); skipping %d rows for "
+                    "snapshot_id=%d.",
+                    len(proto_rows),
+                    snapshot_id,
+                )
+                return 0
+            raise
+
+        if not response.success:
+            logger.warning(
+                "SavePositionStateSnapshots returned success=False for snapshot_id=%d: %s",
+                snapshot_id,
+                response.error,
+            )
+            return 0
+        return int(response.rows_written)
 
     # -------------------------------------------------------------------------
     # Cutover storage — VIB-4208 / T22 (SQLite half of T19 / VIB-4205).

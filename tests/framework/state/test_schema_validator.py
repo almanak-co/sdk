@@ -39,8 +39,17 @@ def initialized_sqlite_db(tmp_path) -> str:
     """Create + initialize a fresh SQLite DB so all tables/columns exist."""
     db_path = str(tmp_path / "state.db")
     store = SQLiteStore(SQLiteConfig(db_path=db_path))
-    asyncio.get_event_loop().run_until_complete(store.initialize())
-    asyncio.get_event_loop().run_until_complete(store.close())
+    # ``asyncio.get_event_loop()`` is deprecated in Python 3.12 — using
+    # ``asyncio.new_event_loop()`` avoids the ``RuntimeError: There is no
+    # current event loop in thread 'MainThread'`` flake under pytest-xdist
+    # worker reshuffling (surfaced on CI 2026-05-17 when PR #2347 added
+    # new tests that changed xdist's worker assignment).
+    _loop = asyncio.new_event_loop()
+    try:
+        _loop.run_until_complete(store.initialize())
+        _loop.run_until_complete(store.close())
+    finally:
+        _loop.close()
     return db_path
 
 
@@ -156,8 +165,17 @@ def test_vib_4196_validator_refuses_when_position_reference_missing(tmp_path) ->
 
     # Build a fully-shaped DB, then drop the column.
     store = SQLiteStore(SQLiteConfig(db_path=db_path))
-    asyncio.get_event_loop().run_until_complete(store.initialize())
-    asyncio.get_event_loop().run_until_complete(store.close())
+    # ``asyncio.get_event_loop()`` is deprecated in Python 3.12 — using
+    # ``asyncio.new_event_loop()`` avoids the ``RuntimeError: There is no
+    # current event loop in thread 'MainThread'`` flake under pytest-xdist
+    # worker reshuffling (surfaced on CI 2026-05-17 when PR #2347 added
+    # new tests that changed xdist's worker assignment).
+    _loop = asyncio.new_event_loop()
+    try:
+        _loop.run_until_complete(store.initialize())
+        _loop.run_until_complete(store.close())
+    finally:
+        _loop.close()
 
     # SQLite supports DROP COLUMN since 3.35; if the runtime is older,
     # fall back to a rebuild that omits the column.

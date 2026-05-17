@@ -15,9 +15,10 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import grpc
@@ -1748,6 +1749,264 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SavePositionEventResponse(success=False, error="internal server error")
+
+    @staticmethod
+    def _validate_position_state_rows(
+        rows: Iterable[gateway_pb2.PositionStateSnapshotRow],
+    ) -> str | None:
+        """Boundary-check per-row required fields for
+        :meth:`SavePositionStateSnapshots`. Returns the first violation
+        message or ``None`` if all rows are well-formed.
+
+        Runs BEFORE the warm-backend capability check so malformed input
+        surfaces as ``INVALID_ARGUMENT`` rather than being masked as
+        ``UNIMPLEMENTED`` on hosted backends (CodeRabbit P1, 2026-05-17).
+        Extracted from the handler to keep its CC under threshold.
+        """
+        # Derive accepted enum sets from the SAME Literal type the typed
+        # row uses, so adding a new position_type / confidence value in
+        # ``position_state.py`` automatically flows here without a parallel
+        # hardcoded frozenset (Claude pr-auditor P3, 2026-05-17).
+        from typing import get_args
+
+        from almanak.framework.accounting.position_state import (
+            ConfidenceLiteral,
+        )
+        from almanak.framework.accounting.position_state import (
+            PositionType as PositionTypeLiteral,
+        )
+
+        valid_position_types = frozenset(get_args(PositionTypeLiteral))
+        valid_confidences = frozenset(get_args(ConfidenceLiteral))
+
+        for idx, proto_row in enumerate(rows):
+            if not (proto_row.strategy_id or "").strip():
+                return f"rows[{idx}].strategy_id is required"
+            if not (proto_row.deployment_id or "").strip():
+                return f"rows[{idx}].deployment_id is required"
+            if proto_row.position_type not in valid_position_types:
+                return f"rows[{idx}].position_type unknown: {proto_row.position_type!r}"
+            # Whitespace-only position_id passes ``if not proto_row.position_id``
+            # because Python truthiness on "   " is True; strip first
+            # (CodeRabbit P3, 2026-05-17).
+            stripped_position_id = (proto_row.position_id or "").strip()
+            if not stripped_position_id:
+                return f"rows[{idx}].position_id is required"
+            # position_id is intentionally free-form (materializer's
+            # fallback id can include the human-readable label with spaces,
+            # e.g. "morpho_blue:ethereum:morpho_blue SUPPLY"). Guard
+            # against pathological sizes + ASCII control chars at the
+            # gateway boundary (CodeRabbit P3 / 2026-05-17 second-round
+            # "Gateway is the security boundary").
+            if len(stripped_position_id) > 256:
+                return f"rows[{idx}].position_id rejected: must be ≤256 chars"
+            if any(ord(c) < 32 for c in stripped_position_id if c != "\t"):
+                return f"rows[{idx}].position_id rejected: contains ASCII control character"
+            # ``PositionStateRow.timestamp`` is non-optional (sqlite.py:560
+            # ``captured_at TEXT NOT NULL``). Validate presence AND ISO-8601
+            # shape at the boundary rather than constructing a typed row with
+            # a synthetic timestamp or letting the parse-failure mask as
+            # UNIMPLEMENTED on hosted.
+            captured_at = (proto_row.captured_at or "").strip()
+            if not captured_at:
+                return f"rows[{idx}].captured_at is required"
+            try:
+                datetime.fromisoformat(captured_at)
+            except ValueError:
+                return f"rows[{idx}].captured_at is not ISO-8601: {captured_at!r}"
+            if proto_row.value_confidence and proto_row.value_confidence not in valid_confidences:
+                return (
+                    f"rows[{idx}].value_confidence unknown: {proto_row.value_confidence!r} "
+                    f"(expected one of {sorted(valid_confidences)})"
+                )
+        return None
+
+    async def SavePositionStateSnapshots(
+        self,
+        request: gateway_pb2.SavePositionStateSnapshotsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SavePositionStateSnapshotsResponse:
+        """Bulk-persist Track-C per-iteration position state rows (VIB-3891 / VIB-4541).
+
+        Delegates to the warm backend's ``save_position_state_snapshots``
+        method (SQLite implementation at
+        ``almanak/framework/state/backends/sqlite.py``). When the warm
+        backend lacks the method (hosted Postgres pre-metrics-database
+        migration, PRD T-DRAFT-25) returns UNIMPLEMENTED so the client
+        (GatewayStateManager) can map it to a silent zero — matching the
+        runner's deployment-time capability-gate semantics at
+        runner_state.py:480.
+
+        Boundary validation matches :meth:`SavePositionEvent` — reject
+        blank snapshot_id / per-row strategy_id / per-row deployment_id /
+        unknown position_type values rather than persisting corrupt rows.
+        """
+        if request.snapshot_id <= 0:
+            err = "snapshot_id must be positive"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=err)
+
+        if not request.rows:
+            # Empty rows is a measured zero per AccountingPersistenceError
+            # contract — return success=True so the client's path keeps the
+            # "0 = measured" semantic intact.
+            return gateway_pb2.SavePositionStateSnapshotsResponse(success=True, rows_written=0)
+
+        validation_error = self._validate_position_state_rows(request.rows)
+        if validation_error is not None:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(validation_error)
+            return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=validation_error)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "save_position_state_snapshots"):
+                error = "warm backend does not support save_position_state_snapshots"
+                logger.warning(
+                    "SavePositionStateSnapshots unsupported for snapshot_id=%d: %s "
+                    "(expected on hosted PG pre-metrics-database migration)",
+                    request.snapshot_id,
+                    error,
+                )
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=error)
+
+            from almanak.framework.accounting.position_state import (
+                ConfidenceLiteral,
+                PositionStateRow,
+                PositionType,
+            )
+
+            class _RowFieldInvalid(Exception):
+                """Raised by ``_opt_decimal`` / ``_opt_int`` when a present-but-malformed
+                wire value can't be parsed. Caught in the row-building loop below and
+                surfaced as ``INVALID_ARGUMENT`` rather than the generic ``INTERNAL``
+                error the outer ``except Exception`` would otherwise emit (CodeRabbit
+                P1, 2026-05-17 — "Gateway is the security boundary; verify input
+                validation on all service methods")."""
+
+            def _opt_decimal(field_name: str, row: gateway_pb2.PositionStateSnapshotRow) -> Decimal | None:
+                # HasField()==False ⇒ unmeasured (None). HasField()==True ⇒ measured;
+                # the wire string is a Decimal-parseable representation per the
+                # client-side serializer that wrote it. Empty != Zero (CLAUDE.md
+                # §Accounting): "0" arrives as Decimal("0"), absence as None.
+                # The proto stubs declare HasField with a narrow Literal of valid
+                # field names; the helper signature is intentionally generic
+                # (one helper drives ~14 optional Decimal fields) so the type
+                # ignore is the standard proto-typed-stub trade-off.
+                if not row.HasField(field_name):  # type: ignore[arg-type]
+                    return None
+                raw = getattr(row, field_name)
+                try:
+                    return Decimal(raw)
+                except InvalidOperation as exc:
+                    raise _RowFieldInvalid(f"{field_name}={raw!r} is not a valid Decimal") from exc
+
+            def _opt_int(field_name: str, row: gateway_pb2.PositionStateSnapshotRow) -> int | None:
+                if not row.HasField(field_name):  # type: ignore[arg-type]
+                    return None
+                raw = getattr(row, field_name)
+                try:
+                    # proto int64 already arrives as int; sqrt_price_x96 / liquidity
+                    # ride a string field (uint256 cannot fit int64) — cast handles both.
+                    return int(raw)
+                except (TypeError, ValueError) as exc:
+                    raise _RowFieldInvalid(f"{field_name}={raw!r} is not a valid int") from exc
+
+            warm_rows: list[PositionStateRow] = []
+            for idx, proto_row in enumerate(request.rows):
+                # Strip + validate + resolve identifiers per row (CodeRabbit
+                # P3 + Claude pr-auditor P3, 2026-05-17). validate_strategy_id
+                # blocks 1MB strings / control chars; resolve_agent_id
+                # normalises to platform AGENT_ID on hosted so Track-C rows
+                # share the 1:1 identity invariant the rest of the Save*
+                # handlers honour (blueprints/06-state-management.md §1:1).
+                # captured_at is already ISO-8601 valid per the boundary
+                # validator above — re-parse here just to build the typed value.
+                stripped_strategy_id = (proto_row.strategy_id or "").strip()
+                stripped_deployment_id = (proto_row.deployment_id or "").strip()
+                stripped_position_id = (proto_row.position_id or "").strip()
+                # validate_strategy_id covers character class + length limits
+                # for strategy_id and deployment_id (which share the same
+                # strict shape — see blueprints/06-state-management.md
+                # §"Strategy-ID conventions"). position_id is intentionally
+                # free-form: the Track-C materializer's fallback id is
+                # ``"{protocol}:{chain}:{label}"`` which can contain spaces
+                # via the human-readable label (e.g.
+                # ``"morpho_blue:ethereum:morpho_blue SUPPLY"``).
+                # For position_id we only guard against pathological sizes
+                # and embedded control characters — the symmetric security-
+                # boundary concern (CodeRabbit P3, 2026-05-17 second-round).
+                try:
+                    validate_strategy_id(stripped_strategy_id, f"rows[{idx}].strategy_id")
+                    validate_strategy_id(stripped_deployment_id, f"rows[{idx}].deployment_id")
+                except Exception as ve:  # noqa: BLE001 — surface as INVALID_ARGUMENT
+                    err = f"rows[{idx}] identifier rejected: {ve}"
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(err)
+                    return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=err)
+                resolved_strategy_id = resolve_agent_id(stripped_strategy_id)
+                captured_at = datetime.fromisoformat(proto_row.captured_at.strip())
+
+                try:
+                    warm_rows.append(
+                        PositionStateRow(
+                            snapshot_id=None,  # warm backend stamps from request.snapshot_id
+                            strategy_id=resolved_strategy_id,
+                            deployment_id=stripped_deployment_id,
+                            cycle_id=proto_row.cycle_id,
+                            timestamp=captured_at,
+                            position_id=stripped_position_id,
+                            position_type=cast(PositionType, proto_row.position_type),
+                            current_tick=_opt_int("current_tick", proto_row),
+                            in_range=proto_row.in_range if proto_row.HasField("in_range") else None,
+                            liquidity=_opt_int("liquidity", proto_row),
+                            sqrt_price_x96=_opt_int("sqrt_price_x96", proto_row),
+                            supply_balance=_opt_decimal("supply_balance", proto_row),
+                            borrow_balance=_opt_decimal("borrow_balance", proto_row),
+                            health_factor=_opt_decimal("health_factor", proto_row),
+                            supply_apy_pct=_opt_decimal("supply_apy_pct", proto_row),
+                            borrow_apy_pct=_opt_decimal("borrow_apy_pct", proto_row),
+                            interest_accrued_since_last=_opt_decimal("interest_accrued_since_last", proto_row),
+                            mark_price=_opt_decimal("mark_price", proto_row),
+                            unrealized_pnl=_opt_decimal("unrealized_pnl", proto_row),
+                            funding_accrued_since_last=_opt_decimal("funding_accrued_since_last", proto_row),
+                            liquidation_price=_opt_decimal("liquidation_price", proto_row),
+                            margin_utilisation_pct=_opt_decimal("margin_utilisation_pct", proto_row),
+                            delta_vs_protocol_pct=_opt_decimal("delta_vs_protocol_pct", proto_row),
+                            value_confidence=cast(ConfidenceLiteral, proto_row.value_confidence),
+                            schema_version=int(proto_row.schema_version),
+                            formula_version=int(proto_row.formula_version),
+                            matching_policy_version=int(proto_row.matching_policy_version),
+                        )
+                    )
+                except _RowFieldInvalid as exc:
+                    err = f"rows[{idx}] {exc}"
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(err)
+                    return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=err)
+
+            rows_written = await warm.save_position_state_snapshots(
+                snapshot_id=int(request.snapshot_id),
+                rows=warm_rows,
+            )
+            return gateway_pb2.SavePositionStateSnapshotsResponse(
+                success=True,
+                rows_written=int(rows_written or 0),
+            )
+        except Exception as e:
+            logger.error(
+                "SavePositionStateSnapshots failed for snapshot_id=%d: %s",
+                request.snapshot_id,
+                e,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error="internal server error")
 
     async def GetPositionHistory(
         self,

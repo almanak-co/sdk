@@ -538,6 +538,11 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.SavePositionEventRequest.SerializeToString,
                 response_deserializer=gateway__pb2.SavePositionEventResponse.FromString,
                 _registered_method=True)
+        self.SavePositionStateSnapshots = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SavePositionStateSnapshots',
+                request_serializer=gateway__pb2.SavePositionStateSnapshotsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SavePositionStateSnapshotsResponse.FromString,
+                _registered_method=True)
         self.GetPositionHistory = channel.unary_unary(
                 '/almanak.gateway.proto.StateService/GetPositionHistory',
                 request_serializer=gateway__pb2.GetPositionHistoryRequest.SerializeToString,
@@ -712,6 +717,24 @@ class StateServiceServicer(object):
         """Save a position lifecycle event (VIB-3449).
         Persists LP / perp position events to the position_events table.
         Non-blocking writes; logs warnings on failure.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SavePositionStateSnapshots(self, request, context):
+        """Bulk-save Track-C per-iteration position state snapshots (VIB-3891 / VIB-4541).
+        Tied to a parent portfolio_snapshots.id, one row per open position. Backs
+        accountant cells G14 / G15 / L2 / L3 / L5. Non-blocking writes (logged
+        and swallowed in non-live modes; raises AccountingPersistenceError in
+        live via the runner's mode-aware caller).
+
+        Hosted Postgres path returns UNIMPLEMENTED until the metrics-database
+        migration adds position_state_snapshots there (PRD T-DRAFT-25,
+        Infra-owned). Local SQLite path persists rows. The runner caller at
+        runner_state.py:_persist_position_state_snapshots already treats the
+        capability gate as XFAIL when the method is missing (no behaviour
+        regression on the not-yet-migrated hosted backend).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -940,6 +963,11 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.SavePositionEvent,
                     request_deserializer=gateway__pb2.SavePositionEventRequest.FromString,
                     response_serializer=gateway__pb2.SavePositionEventResponse.SerializeToString,
+            ),
+            'SavePositionStateSnapshots': grpc.unary_unary_rpc_method_handler(
+                    servicer.SavePositionStateSnapshots,
+                    request_deserializer=gateway__pb2.SavePositionStateSnapshotsRequest.FromString,
+                    response_serializer=gateway__pb2.SavePositionStateSnapshotsResponse.SerializeToString,
             ),
             'GetPositionHistory': grpc.unary_unary_rpc_method_handler(
                     servicer.GetPositionHistory,
@@ -1328,6 +1356,33 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/SavePositionEvent',
             gateway__pb2.SavePositionEventRequest.SerializeToString,
             gateway__pb2.SavePositionEventResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SavePositionStateSnapshots(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SavePositionStateSnapshots',
+            gateway__pb2.SavePositionStateSnapshotsRequest.SerializeToString,
+            gateway__pb2.SavePositionStateSnapshotsResponse.FromString,
             options,
             channel_credentials,
             insecure,

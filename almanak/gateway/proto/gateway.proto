@@ -212,6 +212,20 @@ service StateService {
   // Non-blocking writes; logs warnings on failure.
   rpc SavePositionEvent(SavePositionEventRequest) returns (SavePositionEventResponse);
 
+  // Bulk-save Track-C per-iteration position state snapshots (VIB-3891 / VIB-4541).
+  // Tied to a parent portfolio_snapshots.id, one row per open position. Backs
+  // accountant cells G14 / G15 / L2 / L3 / L5. Non-blocking writes (logged
+  // and swallowed in non-live modes; raises AccountingPersistenceError in
+  // live via the runner's mode-aware caller).
+  //
+  // Hosted Postgres path returns UNIMPLEMENTED until the metrics-database
+  // migration adds position_state_snapshots there (PRD T-DRAFT-25,
+  // Infra-owned). Local SQLite path persists rows. The runner caller at
+  // runner_state.py:_persist_position_state_snapshots already treats the
+  // capability gate as XFAIL when the method is missing (no behaviour
+  // regression on the not-yet-migrated hosted backend).
+  rpc SavePositionStateSnapshots(SavePositionStateSnapshotsRequest) returns (SavePositionStateSnapshotsResponse);
+
   // Read full position lifecycle (VIB-3944).
   // Returns OPEN -> SNAPSHOT* -> CLOSE events in chronological order for a
   // single (deployment_id, position_id). Used by ``pnl_attributor`` to pair
@@ -547,6 +561,70 @@ message SavePositionEventRequest {
 message SavePositionEventResponse {
   bool success = 1;
   string error = 2;
+}
+
+// Track-C position-state snapshot messages (VIB-3891 / VIB-4541) -- mirrors
+// PositionStateRow (almanak/framework/accounting/position_state.py) and the
+// SQLite warm-backend save_position_state_snapshots column set
+// (almanak/framework/state/backends/sqlite.py:position_state_snapshots).
+//
+// "Empty != Zero" contract (CLAUDE.md §Accounting): nullable Decimal / int
+// fields are marked `optional` so an absent field on the wire means
+// `None` (unmeasured) on the server side. A present empty string is still
+// "0" / measured-zero where the typed value is "0".
+message PositionStateSnapshotRow {
+  string strategy_id = 1;
+  string deployment_id = 2;
+  string cycle_id = 3;
+  // ISO-8601 UTC timestamp (matches SQLite captured_at TEXT column shape
+  // at sqlite.py:560 — preserves sub-second precision the int64 epoch-seconds
+  // wire shape used by SavePositionEvent would discard).
+  string captured_at = 4;
+  string position_id = 5;
+  string position_type = 6;          // "LP" | "LENDING" | "PERP"
+
+  // LP-specific (None for non-LP rows)
+  optional int64 current_tick = 7;
+  optional bool in_range = 8;
+  optional string liquidity = 9;            // Decimal serialized as string
+  optional string sqrt_price_x96 = 10;      // int serialized as string
+
+  // Lending-specific (None for non-LENDING rows)
+  optional string supply_balance = 11;
+  optional string borrow_balance = 12;
+  optional string health_factor = 13;
+  optional string supply_apy_pct = 14;
+  optional string borrow_apy_pct = 15;
+  optional string interest_accrued_since_last = 16;
+
+  // Perp-specific (None for non-PERP rows)
+  optional string mark_price = 17;
+  optional string unrealized_pnl = 18;
+  optional string funding_accrued_since_last = 19;
+  optional string liquidation_price = 20;
+  optional string margin_utilisation_pct = 21;
+
+  // Shared across LP / perp diagnostic
+  optional string delta_vs_protocol_pct = 22;
+
+  // Provenance + versioning
+  string value_confidence = 23;
+  int32 schema_version = 24;
+  int32 formula_version = 25;
+  int32 matching_policy_version = 26;
+}
+
+message SavePositionStateSnapshotsRequest {
+  // FK to portfolio_snapshots.id -- the parent snapshot was just written
+  // by the runner's save_portfolio_snapshot call in the same iteration.
+  int64 snapshot_id = 1;
+  repeated PositionStateSnapshotRow rows = 2;
+}
+
+message SavePositionStateSnapshotsResponse {
+  bool success = 1;
+  string error = 2;
+  int32 rows_written = 3;
 }
 
 // Position event read messages (VIB-3944) -- the response carries one

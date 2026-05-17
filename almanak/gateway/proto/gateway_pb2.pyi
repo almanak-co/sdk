@@ -1519,6 +1519,231 @@ class SavePositionEventResponse(_message.Message):
 Global___SavePositionEventResponse: _TypeAlias = SavePositionEventResponse  # noqa: Y015
 
 @_typing.final
+class PositionStateSnapshotRow(_message.Message):
+    """Track-C position-state snapshot messages (VIB-3891 / VIB-4541) -- mirrors
+    PositionStateRow (almanak/framework/accounting/position_state.py) and the
+    SQLite warm-backend save_position_state_snapshots column set
+    (almanak/framework/state/backends/sqlite.py:position_state_snapshots).
+
+    "Empty != Zero" contract (CLAUDE.md §Accounting): nullable Decimal / int
+    fields are marked `optional` so an absent field on the wire means
+    `None` (unmeasured) on the server side. A present empty string is still
+    "0" / measured-zero where the typed value is "0".
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    CAPTURED_AT_FIELD_NUMBER: _builtins.int
+    POSITION_ID_FIELD_NUMBER: _builtins.int
+    POSITION_TYPE_FIELD_NUMBER: _builtins.int
+    CURRENT_TICK_FIELD_NUMBER: _builtins.int
+    IN_RANGE_FIELD_NUMBER: _builtins.int
+    LIQUIDITY_FIELD_NUMBER: _builtins.int
+    SQRT_PRICE_X96_FIELD_NUMBER: _builtins.int
+    SUPPLY_BALANCE_FIELD_NUMBER: _builtins.int
+    BORROW_BALANCE_FIELD_NUMBER: _builtins.int
+    HEALTH_FACTOR_FIELD_NUMBER: _builtins.int
+    SUPPLY_APY_PCT_FIELD_NUMBER: _builtins.int
+    BORROW_APY_PCT_FIELD_NUMBER: _builtins.int
+    INTEREST_ACCRUED_SINCE_LAST_FIELD_NUMBER: _builtins.int
+    MARK_PRICE_FIELD_NUMBER: _builtins.int
+    UNREALIZED_PNL_FIELD_NUMBER: _builtins.int
+    FUNDING_ACCRUED_SINCE_LAST_FIELD_NUMBER: _builtins.int
+    LIQUIDATION_PRICE_FIELD_NUMBER: _builtins.int
+    MARGIN_UTILISATION_PCT_FIELD_NUMBER: _builtins.int
+    DELTA_VS_PROTOCOL_PCT_FIELD_NUMBER: _builtins.int
+    VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
+    SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
+    FORMULA_VERSION_FIELD_NUMBER: _builtins.int
+    MATCHING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    deployment_id: _builtins.str
+    cycle_id: _builtins.str
+    captured_at: _builtins.str
+    """ISO-8601 UTC timestamp (matches SQLite captured_at TEXT column shape
+    at sqlite.py:560 — preserves sub-second precision the int64 epoch-seconds
+    wire shape used by SavePositionEvent would discard).
+    """
+    position_id: _builtins.str
+    position_type: _builtins.str
+    """"LP" | "LENDING" | "PERP" """
+    current_tick: _builtins.int
+    """LP-specific (None for non-LP rows)"""
+    in_range: _builtins.bool
+    liquidity: _builtins.str
+    """Decimal serialized as string"""
+    sqrt_price_x96: _builtins.str
+    """int serialized as string"""
+    supply_balance: _builtins.str
+    """Lending-specific (None for non-LENDING rows)"""
+    borrow_balance: _builtins.str
+    health_factor: _builtins.str
+    supply_apy_pct: _builtins.str
+    borrow_apy_pct: _builtins.str
+    interest_accrued_since_last: _builtins.str
+    mark_price: _builtins.str
+    """Perp-specific (None for non-PERP rows)"""
+    unrealized_pnl: _builtins.str
+    funding_accrued_since_last: _builtins.str
+    liquidation_price: _builtins.str
+    margin_utilisation_pct: _builtins.str
+    delta_vs_protocol_pct: _builtins.str
+    """Shared across LP / perp diagnostic"""
+    value_confidence: _builtins.str
+    """Provenance + versioning"""
+    schema_version: _builtins.int
+    formula_version: _builtins.int
+    matching_policy_version: _builtins.int
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        captured_at: _builtins.str = ...,
+        position_id: _builtins.str = ...,
+        position_type: _builtins.str = ...,
+        current_tick: _builtins.int | None = ...,
+        in_range: _builtins.bool | None = ...,
+        liquidity: _builtins.str | None = ...,
+        sqrt_price_x96: _builtins.str | None = ...,
+        supply_balance: _builtins.str | None = ...,
+        borrow_balance: _builtins.str | None = ...,
+        health_factor: _builtins.str | None = ...,
+        supply_apy_pct: _builtins.str | None = ...,
+        borrow_apy_pct: _builtins.str | None = ...,
+        interest_accrued_since_last: _builtins.str | None = ...,
+        mark_price: _builtins.str | None = ...,
+        unrealized_pnl: _builtins.str | None = ...,
+        funding_accrued_since_last: _builtins.str | None = ...,
+        liquidation_price: _builtins.str | None = ...,
+        margin_utilisation_pct: _builtins.str | None = ...,
+        delta_vs_protocol_pct: _builtins.str | None = ...,
+        value_confidence: _builtins.str = ...,
+        schema_version: _builtins.int = ...,
+        formula_version: _builtins.int = ...,
+        matching_policy_version: _builtins.int = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct", "_borrow_balance", b"_borrow_balance", "_current_tick", b"_current_tick", "_delta_vs_protocol_pct", b"_delta_vs_protocol_pct", "_funding_accrued_since_last", b"_funding_accrued_since_last", "_health_factor", b"_health_factor", "_in_range", b"_in_range", "_interest_accrued_since_last", b"_interest_accrued_since_last", "_liquidation_price", b"_liquidation_price", "_liquidity", b"_liquidity", "_margin_utilisation_pct", b"_margin_utilisation_pct", "_mark_price", b"_mark_price", "_sqrt_price_x96", b"_sqrt_price_x96", "_supply_apy_pct", b"_supply_apy_pct", "_supply_balance", b"_supply_balance", "_unrealized_pnl", b"_unrealized_pnl", "borrow_apy_pct", b"borrow_apy_pct", "borrow_balance", b"borrow_balance", "current_tick", b"current_tick", "delta_vs_protocol_pct", b"delta_vs_protocol_pct", "funding_accrued_since_last", b"funding_accrued_since_last", "health_factor", b"health_factor", "in_range", b"in_range", "interest_accrued_since_last", b"interest_accrued_since_last", "liquidation_price", b"liquidation_price", "liquidity", b"liquidity", "margin_utilisation_pct", b"margin_utilisation_pct", "mark_price", b"mark_price", "sqrt_price_x96", b"sqrt_price_x96", "supply_apy_pct", b"supply_apy_pct", "supply_balance", b"supply_balance", "unrealized_pnl", b"unrealized_pnl"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct", "_borrow_balance", b"_borrow_balance", "_current_tick", b"_current_tick", "_delta_vs_protocol_pct", b"_delta_vs_protocol_pct", "_funding_accrued_since_last", b"_funding_accrued_since_last", "_health_factor", b"_health_factor", "_in_range", b"_in_range", "_interest_accrued_since_last", b"_interest_accrued_since_last", "_liquidation_price", b"_liquidation_price", "_liquidity", b"_liquidity", "_margin_utilisation_pct", b"_margin_utilisation_pct", "_mark_price", b"_mark_price", "_sqrt_price_x96", b"_sqrt_price_x96", "_supply_apy_pct", b"_supply_apy_pct", "_supply_balance", b"_supply_balance", "_unrealized_pnl", b"_unrealized_pnl", "borrow_apy_pct", b"borrow_apy_pct", "borrow_balance", b"borrow_balance", "captured_at", b"captured_at", "current_tick", b"current_tick", "cycle_id", b"cycle_id", "delta_vs_protocol_pct", b"delta_vs_protocol_pct", "deployment_id", b"deployment_id", "formula_version", b"formula_version", "funding_accrued_since_last", b"funding_accrued_since_last", "health_factor", b"health_factor", "in_range", b"in_range", "interest_accrued_since_last", b"interest_accrued_since_last", "liquidation_price", b"liquidation_price", "liquidity", b"liquidity", "margin_utilisation_pct", b"margin_utilisation_pct", "mark_price", b"mark_price", "matching_policy_version", b"matching_policy_version", "position_id", b"position_id", "position_type", b"position_type", "schema_version", b"schema_version", "sqrt_price_x96", b"sqrt_price_x96", "strategy_id", b"strategy_id", "supply_apy_pct", b"supply_apy_pct", "supply_balance", b"supply_balance", "unrealized_pnl", b"unrealized_pnl", "value_confidence", b"value_confidence"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__borrow_apy_pct: _TypeAlias = _typing.Literal["borrow_apy_pct"]  # noqa: Y015
+    _WhichOneofArgType__borrow_apy_pct: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct"]  # noqa: Y015
+    _WhichOneofReturnType__borrow_balance: _TypeAlias = _typing.Literal["borrow_balance"]  # noqa: Y015
+    _WhichOneofArgType__borrow_balance: _TypeAlias = _typing.Literal["_borrow_balance", b"_borrow_balance"]  # noqa: Y015
+    _WhichOneofReturnType__current_tick: _TypeAlias = _typing.Literal["current_tick"]  # noqa: Y015
+    _WhichOneofArgType__current_tick: _TypeAlias = _typing.Literal["_current_tick", b"_current_tick"]  # noqa: Y015
+    _WhichOneofReturnType__delta_vs_protocol_pct: _TypeAlias = _typing.Literal["delta_vs_protocol_pct"]  # noqa: Y015
+    _WhichOneofArgType__delta_vs_protocol_pct: _TypeAlias = _typing.Literal["_delta_vs_protocol_pct", b"_delta_vs_protocol_pct"]  # noqa: Y015
+    _WhichOneofReturnType__funding_accrued_since_last: _TypeAlias = _typing.Literal["funding_accrued_since_last"]  # noqa: Y015
+    _WhichOneofArgType__funding_accrued_since_last: _TypeAlias = _typing.Literal["_funding_accrued_since_last", b"_funding_accrued_since_last"]  # noqa: Y015
+    _WhichOneofReturnType__health_factor: _TypeAlias = _typing.Literal["health_factor"]  # noqa: Y015
+    _WhichOneofArgType__health_factor: _TypeAlias = _typing.Literal["_health_factor", b"_health_factor"]  # noqa: Y015
+    _WhichOneofReturnType__in_range: _TypeAlias = _typing.Literal["in_range"]  # noqa: Y015
+    _WhichOneofArgType__in_range: _TypeAlias = _typing.Literal["_in_range", b"_in_range"]  # noqa: Y015
+    _WhichOneofReturnType__interest_accrued_since_last: _TypeAlias = _typing.Literal["interest_accrued_since_last"]  # noqa: Y015
+    _WhichOneofArgType__interest_accrued_since_last: _TypeAlias = _typing.Literal["_interest_accrued_since_last", b"_interest_accrued_since_last"]  # noqa: Y015
+    _WhichOneofReturnType__liquidation_price: _TypeAlias = _typing.Literal["liquidation_price"]  # noqa: Y015
+    _WhichOneofArgType__liquidation_price: _TypeAlias = _typing.Literal["_liquidation_price", b"_liquidation_price"]  # noqa: Y015
+    _WhichOneofReturnType__liquidity: _TypeAlias = _typing.Literal["liquidity"]  # noqa: Y015
+    _WhichOneofArgType__liquidity: _TypeAlias = _typing.Literal["_liquidity", b"_liquidity"]  # noqa: Y015
+    _WhichOneofReturnType__margin_utilisation_pct: _TypeAlias = _typing.Literal["margin_utilisation_pct"]  # noqa: Y015
+    _WhichOneofArgType__margin_utilisation_pct: _TypeAlias = _typing.Literal["_margin_utilisation_pct", b"_margin_utilisation_pct"]  # noqa: Y015
+    _WhichOneofReturnType__mark_price: _TypeAlias = _typing.Literal["mark_price"]  # noqa: Y015
+    _WhichOneofArgType__mark_price: _TypeAlias = _typing.Literal["_mark_price", b"_mark_price"]  # noqa: Y015
+    _WhichOneofReturnType__sqrt_price_x96: _TypeAlias = _typing.Literal["sqrt_price_x96"]  # noqa: Y015
+    _WhichOneofArgType__sqrt_price_x96: _TypeAlias = _typing.Literal["_sqrt_price_x96", b"_sqrt_price_x96"]  # noqa: Y015
+    _WhichOneofReturnType__supply_apy_pct: _TypeAlias = _typing.Literal["supply_apy_pct"]  # noqa: Y015
+    _WhichOneofArgType__supply_apy_pct: _TypeAlias = _typing.Literal["_supply_apy_pct", b"_supply_apy_pct"]  # noqa: Y015
+    _WhichOneofReturnType__supply_balance: _TypeAlias = _typing.Literal["supply_balance"]  # noqa: Y015
+    _WhichOneofArgType__supply_balance: _TypeAlias = _typing.Literal["_supply_balance", b"_supply_balance"]  # noqa: Y015
+    _WhichOneofReturnType__unrealized_pnl: _TypeAlias = _typing.Literal["unrealized_pnl"]  # noqa: Y015
+    _WhichOneofArgType__unrealized_pnl: _TypeAlias = _typing.Literal["_unrealized_pnl", b"_unrealized_pnl"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__borrow_apy_pct) -> _WhichOneofReturnType__borrow_apy_pct | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__borrow_balance) -> _WhichOneofReturnType__borrow_balance | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__current_tick) -> _WhichOneofReturnType__current_tick | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__delta_vs_protocol_pct) -> _WhichOneofReturnType__delta_vs_protocol_pct | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__funding_accrued_since_last) -> _WhichOneofReturnType__funding_accrued_since_last | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__health_factor) -> _WhichOneofReturnType__health_factor | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__in_range) -> _WhichOneofReturnType__in_range | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__interest_accrued_since_last) -> _WhichOneofReturnType__interest_accrued_since_last | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__liquidation_price) -> _WhichOneofReturnType__liquidation_price | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__liquidity) -> _WhichOneofReturnType__liquidity | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__margin_utilisation_pct) -> _WhichOneofReturnType__margin_utilisation_pct | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__mark_price) -> _WhichOneofReturnType__mark_price | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__sqrt_price_x96) -> _WhichOneofReturnType__sqrt_price_x96 | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__supply_apy_pct) -> _WhichOneofReturnType__supply_apy_pct | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__supply_balance) -> _WhichOneofReturnType__supply_balance | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__unrealized_pnl) -> _WhichOneofReturnType__unrealized_pnl | None: ...
+
+Global___PositionStateSnapshotRow: _TypeAlias = PositionStateSnapshotRow  # noqa: Y015
+
+@_typing.final
+class SavePositionStateSnapshotsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SNAPSHOT_ID_FIELD_NUMBER: _builtins.int
+    ROWS_FIELD_NUMBER: _builtins.int
+    snapshot_id: _builtins.int
+    """FK to portfolio_snapshots.id -- the parent snapshot was just written
+    by the runner's save_portfolio_snapshot call in the same iteration.
+    """
+    @_builtins.property
+    def rows(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionStateSnapshotRow]: ...
+    def __init__(
+        self,
+        *,
+        snapshot_id: _builtins.int = ...,
+        rows: _abc.Iterable[Global___PositionStateSnapshotRow] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["rows", b"rows", "snapshot_id", b"snapshot_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SavePositionStateSnapshotsRequest: _TypeAlias = SavePositionStateSnapshotsRequest  # noqa: Y015
+
+@_typing.final
+class SavePositionStateSnapshotsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    ROWS_WRITTEN_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    rows_written: _builtins.int
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        rows_written: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "rows_written", b"rows_written", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SavePositionStateSnapshotsResponse: _TypeAlias = SavePositionStateSnapshotsResponse  # noqa: Y015
+
+@_typing.final
 class GetPositionHistoryRequest(_message.Message):
     """Position event read messages (VIB-3944) -- the response carries one
     PositionEventData per row from the position_events table for a given
