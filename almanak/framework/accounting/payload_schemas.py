@@ -401,8 +401,29 @@ class SwapEventPayload(_Versioned):
     protocol: str
     token_in: str
     token_out: str
-    amount_in: Decimal
-    amount_out: Decimal
+    # VIB-4490: amount_in / amount_out are ``Decimal | None`` to honor the
+    # framework-wide Empty ≠ Zero rule (AGENTS.md §Accounting). A receipt
+    # parser that cannot resolve token decimals (or a teardown swap whose
+    # output amount is genuinely unmeasured) emits ``None`` here and stamps
+    # the reason on ``unavailable_reason``. The cell-level reconciliation
+    # (G6 / L6 / G13) already null-checks before computing; rejecting None
+    # at schema validation short-circuited the whole cell and surfaced as
+    # a false-positive "data unusable" FAIL even when amount_in was measured
+    # and the SWAP's USD basis could still be reconciled.
+    #
+    # Codex audit (PR #2338): the fields are required-but-nullable via
+    # ``Field(...)`` rather than defaulted to ``None``. This matches the
+    # WithdrawEventPayload precedent (line 260) and preserves the
+    # Empty ≠ Zero discipline at validation:
+    #   * Decimal value → measured amount.
+    #   * Explicit None → measured-but-unavailable (reason MUST be set,
+    #                     enforced by ``_enforce_unmeasured_reason`` below).
+    #   * key omitted   → writer contract drift; FAIL loud.
+    # ``Field(...)`` carries the same "required" semantic as the bare
+    # ``= ...`` shorthand but mypy doesn't recognize ``EllipsisType`` as
+    # compatible with ``Decimal | None``.
+    amount_in: Decimal | None = Field(...)
+    amount_out: Decimal | None = Field(...)
     amount_in_usd: Decimal | None = None
     amount_out_usd: Decimal | None = None
     effective_price: Decimal | None = None
@@ -413,6 +434,31 @@ class SwapEventPayload(_Versioned):
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
     swap_position_key: str | None = None
+
+    @model_validator(mode="after")
+    def _enforce_unmeasured_reason(self) -> SwapEventPayload:
+        """Require ``unavailable_reason`` when an amount is None.
+
+        Gemini audit (PR #2338). Widening ``amount_in`` / ``amount_out`` to
+        ``Decimal | None`` makes "measured-but-unmeasured" representable; this
+        validator makes it auditable. The SWAP writer
+        (``swap_handler._determine_confidence``) already populates
+        ``unavailable_reason`` whenever amounts are unmeasured (the
+        ``amounts_unmeasured`` branch composes a typed reason), so this rule
+        is a structural safety net rather than a tightening of the existing
+        path. Pairs with the inherited ``_enforce_confidence_exclusivity``
+        which rejects ``confidence=HIGH`` alongside a non-empty reason —
+        together they make "amount None" ↔ "confidence ≠ HIGH" ↔ "reason
+        populated" a tri-invariant. Rejecting silent ``None`` here prevents
+        a future writer regression from producing a payload that validates
+        but tells auditors nothing about why the amount disappeared.
+        """
+        if (self.amount_in is None or self.amount_out is None) and not self.unavailable_reason:
+            raise ValueError(
+                "SwapEventPayload: unavailable_reason is required when "
+                "amount_in or amount_out is None (Empty ≠ Zero audit trail)."
+            )
+        return self
 
 
 # ─── Validation registry ───────────────────────────────────────────────────
