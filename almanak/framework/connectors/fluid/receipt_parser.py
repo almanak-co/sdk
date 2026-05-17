@@ -335,8 +335,10 @@ class FluidReceiptParser:
         return LPCloseData(
             amount0_collected=amount0,
             amount1_collected=amount1,
-            fees0=0,  # Fluid pools include fees in the withdrawal amount
-            fees1=0,
+            # VIB-4470 — Fluid bundles fees into the withdrawal amount;
+            # fees are not separately measured (Empty ≠ Zero).
+            fees0=None,
+            fees1=None,
             liquidity_removed=None,
         )
 

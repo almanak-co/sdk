@@ -1531,8 +1531,10 @@ class AerodromeReceiptParser:
                 return LPCloseData(
                     amount0_collected=total_amount0,
                     amount1_collected=total_amount1,
-                    fees0=0,  # Aerodrome V1 doesn't separate fees
-                    fees1=0,
+                    # VIB-4470 — Aerodrome V1 doesn't separate fees from
+                    # principal; fees are unmeasured (Empty ≠ Zero).
+                    fees0=None,
+                    fees1=None,
                     liquidity_removed=None,
                 )
 
@@ -1597,8 +1599,10 @@ class AerodromeReceiptParser:
                 return LPCloseData(
                     amount0_collected=amount0,
                     amount1_collected=amount1,
-                    fees0=0,
-                    fees1=0,
+                    # VIB-4470 — Transfer-event fallback doesn't separate
+                    # fees from principal (Empty ≠ Zero).
+                    fees0=None,
+                    fees1=None,
                     liquidity_removed=None,
                 )
 
@@ -1622,8 +1626,10 @@ class AerodromeReceiptParser:
                 return LPCloseData(
                     amount0_collected=amounts[0],
                     amount1_collected=amounts[1],
-                    fees0=0,
-                    fees1=0,
+                    # VIB-4470 — Transfer-event fallback doesn't separate fees
+                    # from principal (Empty ≠ Zero).
+                    fees0=None,
+                    fees1=None,
                     liquidity_removed=None,
                 )
 
@@ -2277,8 +2283,12 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
-                        fees0=0,
-                        fees1=0,
+                        # VIB-4470 — Slipstream's Collect event bundles
+                        # principal+fees in ``amount0/amount1Collected``;
+                        # fees are not separately observable here. Honest
+                        # ``None`` (Empty ≠ Zero) vs the prior ``0`` lie.
+                        fees0=None,
+                        fees1=None,
                         source="collect",
                     )
 
@@ -2307,8 +2317,11 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
-                        fees0=0,
-                        fees1=0,
+                        # VIB-4470 — DecreaseLiquidity carries principal
+                        # only; fees haven't been Collected yet so they are
+                        # unmeasured (Empty ≠ Zero) rather than zero.
+                        fees0=None,
+                        fees1=None,
                         liquidity_removed=liquidity,
                         source="decrease_liquidity",
                     )

@@ -130,14 +130,14 @@ _FIXTURE_MATRIX: list[tuple[AccountingCategory, str, dict[str, Any], dict[str, A
     (
         AccountingCategory.LP,
         "open",
-        _base_outbox(position_key="lp:arbitrum:0xabcd…:uni"),
+        _base_outbox(position_key="lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111"),
         _base_ledger(intent_type="LP_OPEN", protocol="uniswap_v3", token_in="USDC", token_out="WETH"),
         "LPAccountingEvent",
     ),
     (
         AccountingCategory.LP,
         "close",
-        _base_outbox(position_key="lp:arbitrum:0xabcd…:uni"),
+        _base_outbox(position_key="lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111"),
         _base_ledger(intent_type="LP_CLOSE", protocol="uniswap_v3", token_in="USDC", token_out="WETH"),
         "LPAccountingEvent",
     ),

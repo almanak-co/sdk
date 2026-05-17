@@ -680,7 +680,9 @@ class TestLPCloseDataModel:
 
         data = LPCloseData(amount0_collected=100, amount1_collected=200)
         assert data.all_amounts == [100, 200]
-        assert data.all_fees == [0, 0]
+        # VIB-4470 — fees default flipped from int=0 to int|None=None
+        # (Empty ≠ Zero). Unmeasured fees surface as None, not zero.
+        assert data.all_fees == [None, None]
 
     def test_all_amounts_4coin(self):
         """4-coin pool should return all 4 amounts in order."""

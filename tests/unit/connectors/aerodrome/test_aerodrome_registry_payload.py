@@ -425,11 +425,12 @@ class TestExtractRegistryPayloadClose:
         # principal-only. extract_lp_close_data prefers Collect over Burn.
         assert payload["amount0_close"] == "1000500"
         assert payload["amount1_close"] == "500000000000100"
-        # fees0 / fees1 collapse to "0" in the Collect-only path — the
-        # parser doesn't split fees from principal at this layer
-        # (extract_fees0/1 gate on absence of DecreaseLiquidity).
-        assert payload["fee_owed_0"] == "0"
-        assert payload["fee_owed_1"] == "0"
+        # VIB-4470 — fees0 / fees1 surface as JSON null in the Collect-only
+        # path; the parser doesn't split fees from principal at this layer
+        # (extract_fees0/1 gate on absence of DecreaseLiquidity). Honest
+        # "unmeasured" per Empty ≠ Zero (was "0" / measured-zero lie).
+        assert payload["fee_owed_0"] is None
+        assert payload["fee_owed_1"] is None
         assert payload["nft_manager_addr"] == _SLIPSTREAM_NPM_BASE
 
     def test_returns_none_when_lp_close_data_missing(self) -> None:

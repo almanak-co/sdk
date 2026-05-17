@@ -954,10 +954,12 @@ class CurveReceiptParser:
                     amount0 = token_amounts[0] if len(token_amounts) > 0 else 0
                     amount1 = token_amounts[1] if len(token_amounts) > 1 else 0
 
-                    # Get fees if available
+                    # Get fees if available. VIB-4470 — Empty ≠ Zero: emit
+                    # ``None`` when the Curve event did not carry a fee for
+                    # the leg (an unmeasured field is not a measured zero).
                     fees = event.data.get("fees", [])
-                    fees0 = fees[0] if len(fees) > 0 else 0
-                    fees1 = fees[1] if len(fees) > 1 else 0
+                    fees0: int | None = fees[0] if len(fees) > 0 else None
+                    fees1: int | None = fees[1] if len(fees) > 1 else None
 
                     # Capture additional amounts for 3/4-coin pools
                     additional_amounts = None

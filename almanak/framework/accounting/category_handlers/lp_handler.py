@@ -193,48 +193,48 @@ def _parse_lp_timestamp(raw_ts: Any) -> datetime:
 
 
 def _clean_pool_address_candidate(value: Any) -> str:
-    """Allow bare addresses + Solidly-style descriptors; reject V3 fee tiers.
+    """Accept 20-byte EVM addresses and 32-byte V4 PoolId hashes; reject V3 fee tiers.
 
     Heuristic:
 
     - Empty / whitespace → ``""``.
-    - No ``/`` → bare identifier, accept (VIB-4396-followup will tighten
-      this to ``0x[0-9a-fA-F]{40}``).
+    - No ``/`` → require a structured 0x-prefixed lowercase-hex value of
+      one of two specific lengths (VIB-4471):
+
+      * ``^0x[0-9a-f]{40}$`` — 20-byte EVM address (V3 / Aerodrome /
+        classic AMM pool contract).
+      * ``^0x[0-9a-f]{64}$`` — 32-byte V4 ``pool_id`` hash
+        (VIB-4426; ``keccak256(abi.encode(PoolKey))`` carried in
+        ``topics[1]`` of V4 ``Swap`` / ``ModifyLiquidity`` events).
+
+      Anything else (arbitrary identifiers, mixed-case hex, wrong
+      length, non-hex characters) returns ``""``. This is the
+      defense-in-depth point caught by Codex P2 on the VIB-4426 design
+      review: the pre-VIB-4471 implementation returned the input
+      unchanged for any non-slash string, which let arbitrary
+      identifiers slip through into ``payload.pool_address`` and
+      surface as downstream null-key bugs.
     - Has ``/`` AND the last segment is purely numeric → V3 fee-tier
       descriptor (``weth/usdc/500``). Reject (VIB-4274 / VIB-4396).
     - Otherwise the slash-bearing value is a canonical Solidly-style
       descriptor (``TOKEN0/TOKEN1/stable|volatile``) — the only stable
       position identifier classic Aerodrome surfaces. Accept (Codex P1
       on PR #2289).
-
-    KNOWN LIMITATION — Uniswap V4 (VIB-4426):
-        V4 uses descriptors of the form ``WETH/USDC/3000`` (numeric
-        last segment = fee tier) and there is NO per-pool contract
-        address (singleton ``PoolManager``; pools identified by hashed
-        ``PoolKey``). The descriptor IS the canonical V4 position
-        identifier — same architectural shape as classic Aerodrome /
-        Velodrome — but it is rejected by the numeric-tail rule above.
-        Result: every V4 LP_OPEN / LP_CLOSE / LP_COLLECT_FEES event
-        currently returns ``None`` from ``_resolve_lp_pool_address``
-        and is dropped by ``handle_lp`` with a structured warning log.
-
-        Pre-VIB-4396 behaviour on ``main`` wrote the descriptor into
-        ``pool_address`` but lot-matching could never reconcile it
-        (zero V4 LP accounting tests existed and still don't); the
-        post-VIB-4396 dropping is an observable regression vs the
-        silently-wrong pre-state.
-
-        VIB-4426 tracks the proper end-to-end V4 LP accounting fix:
-        plumb protocol context into this filter (or have the V4
-        receipt parser emit a PoolKey hash), add unit + Accountant
-        Test fixture coverage, and ship as one E2E integration. Do
-        NOT add a quick V4 carve-out here — protocol-aware filtering
-        is a design call that needs proper coverage to land safely.
     """
     text = str(value or "").strip()
     if not text:
         return ""
     if "/" not in text:
+        # VIB-4471: accept only 20-byte EVM addresses (V3 / Aerodrome /
+        # classic AMM) or 32-byte V4 pool_id hashes (VIB-4426). The shape
+        # is self-describing — no protocol context argument required.
+        if not text.startswith("0x"):
+            return ""
+        body = text[2:]
+        if len(body) not in (40, 64):
+            return ""
+        if not all(c in "0123456789abcdef" for c in body):
+            return ""
         return text
     last_segment = text.rsplit("/", 1)[-1].strip()
     if not last_segment:
@@ -696,9 +696,12 @@ def _compute_lp_impermanent_loss(
     # principal + fees per ``LPCloseData.amount*_collected`` semantics)
     # to recover the principal-only V_lp, so any il_usd we emit would
     # double-count fees as IL gain. ``fees_total_usd == Decimal("0")`` is
-    # the legitimate "measured zero fees" case (default
-    # ``LPCloseData.fees0/fees1 = 0`` priced against any oracle yields
-    # exactly zero) and proceeds as ``V_lp == cost_basis_usd``.
+    # the legitimate "measured zero fees" case (parser emitted
+    # ``LPCloseData.fees0/fees1 = 0`` from a real observation and
+    # multiplying by any oracle yields exactly zero) and proceeds as
+    # ``V_lp == cost_basis_usd``. Post-VIB-4470, parsers emit ``None``
+    # instead of fabricating a zero, so this path collapses to the "fees
+    # not separated from principal" case (e.g. V4, Fluid, Aerodrome V1).
     if fees_total_usd is None:
         return None, hodl
 

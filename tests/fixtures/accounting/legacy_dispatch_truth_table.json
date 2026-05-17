@@ -46,8 +46,9 @@
       "expected_event_type": "LP_OPEN",
       "expected_payload": {
         "event_type": "LP_OPEN",
-        "position_key": "lp:arbitrum:0xabcd\u2026:uni",
-        "pool_address": "uni",
+        "protocol": "uniswap_v3",
+        "position_key": "lp:arbitrum:0xabcd\u2026:0x1111111111111111111111111111111111111111",
+        "pool_address": "0x1111111111111111111111111111111111111111",
         "token0": "USDC",
         "token1": "WETH",
         "amount0": null,
@@ -67,6 +68,7 @@
         "in_range": null,
         "il_usd": null,
         "hodl_value_usd": null,
+        "position_hash": null,
         "schema_version": 1,
         "primitive_version": 1
       }
@@ -80,8 +82,9 @@
       "expected_event_type": "LP_CLOSE",
       "expected_payload": {
         "event_type": "LP_CLOSE",
-        "position_key": "lp:arbitrum:0xabcd\u2026:uni",
-        "pool_address": "uni",
+        "protocol": "uniswap_v3",
+        "position_key": "lp:arbitrum:0xabcd\u2026:0x1111111111111111111111111111111111111111",
+        "pool_address": "0x1111111111111111111111111111111111111111",
         "token0": "USDC",
         "token1": "WETH",
         "amount0": null,
@@ -101,6 +104,7 @@
         "in_range": null,
         "il_usd": null,
         "hodl_value_usd": null,
+        "position_hash": null,
         "schema_version": 1,
         "primitive_version": 1
       }

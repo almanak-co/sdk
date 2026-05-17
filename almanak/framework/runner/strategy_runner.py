@@ -663,6 +663,39 @@ class StrategyRunner:
 
         return get_gateway_client(self)
 
+    def _build_v4_pool_key_lookup(self) -> Any | None:
+        """Build a sync ``(pool_id_hex, chain) -> PoolKey | None`` callable.
+
+        VIB-4477 (T08). Wraps the async ``lookup_v4_pool_key`` gateway RPC so
+        the sync ResultEnricher pipeline can call it from the Uniswap V4
+        receipt parser without blocking on its own event-loop management.
+
+        Returns ``None`` when no gateway client is configured (paper / dry-run
+        / unit-test modes). The V4 parser then drops LP_CLOSE events with a
+        structured ``missing_pool_key_lookup`` log (Empty != Zero — fail loud
+        rather than misattribute amounts).
+        """
+        client = self._get_gateway_client()
+        if client is None:
+            return None
+        try:
+            from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+                make_sync_pool_key_lookup,
+            )
+        except Exception as exc:
+            # Bridge import / wiring failure: a configured gateway client exists but
+            # we cannot construct the V4 PoolKey bridge. V4 LP closes that need
+            # PoolKey-driven attribution will drop with MISSING_POOL_KEY_LOOKUP
+            # rather than misattribute amounts. Surface loudly so operators can
+            # distinguish "no gateway configured" from "gateway misconfigured".
+            logger.error(
+                "V4 pool_key_lookup bridge unavailable: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        return make_sync_pool_key_lookup(client)
+
     def _register_with_gateway(self, strategy: StrategyProtocol) -> None:
         from .runner_gateway import register_with_gateway
 
@@ -4439,7 +4472,19 @@ class StrategyRunner:
         # Enrich result with intent-specific extracted data
         if state.last_execution_result and state.last_execution_context:
             try:
-                enricher = ResultEnricher(live_mode=self._is_live_mode())
+                # VIB-4477 (T08): thread a sync ``pool_key_lookup`` bridge so
+                # the V4 receipt parser can resolve ``ModifyLiquidity.pool_id``
+                # back to its canonical PoolKey via the gateway during
+                # enrichment. The bridge is bound to this runner's
+                # ``GatewayClient``; ``None`` when no gateway client is
+                # configured (paper / dry-run modes), in which case V4
+                # LP_CLOSE events drop with a structured warning and the
+                # rest of the pipeline degrades cleanly.
+                pool_key_lookup = self._build_v4_pool_key_lookup()
+                enricher = ResultEnricher(
+                    live_mode=self._is_live_mode(),
+                    pool_key_lookup=pool_key_lookup,
+                )
                 # VIB-3203: thread compiler bundle metadata so swap_amounts
                 # extractors can compute realized slippage_bps from the
                 # persisted expected_output_human quote. We use the

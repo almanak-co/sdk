@@ -20,6 +20,7 @@ Example:
 from almanak.framework.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
+    UniswapV4UnsupportedPoolError,
 )
 from almanak.framework.connectors.uniswap_v4.hooks import (
     HookDataEncoder,
@@ -44,6 +45,7 @@ __all__ = [
     "UniswapV4Config",
     "UniswapV4ReceiptParser",
     "UniswapV4SDK",
+    "UniswapV4UnsupportedPoolError",
     "discover_pool",
 ]
 

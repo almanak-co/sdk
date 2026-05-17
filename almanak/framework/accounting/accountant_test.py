@@ -41,6 +41,7 @@ from almanak.framework.accounting.payload_schemas import (
 from almanak.framework.primitives.taxonomy import (
     TAXONOMY,
     UnknownIntentTypeError,
+    primitive_for,
     record_for,
 )
 from almanak.framework.primitives.taxonomy import (
@@ -1359,10 +1360,17 @@ def _g13_collect_versions(
         et = r.get("event_type") or p.get("event_type")
         if not isinstance(et, str) or not et:
             continue
+        # VIB-4477: protocol-aware bucket resolution. ``record_for(et)`` returns
+        # ``Primitive.LP`` for every LP event_type; ``primitive_for(et, proto)``
+        # overrides LP → LP_V4 when ``payload.protocol`` is ``uniswap_v4`` so V3
+        # and V4 rows land in distinct G13 buckets. Falls back to the plain
+        # ``record_for`` lookup (no override) when the event_type is unknown.
         try:
-            primitive = record_for(et).primitive
+            record_for(et)
         except UnknownIntentTypeError:
             continue
+        proto = r.get("protocol") or p.get("protocol") or ""
+        primitive = primitive_for(et, proto if isinstance(proto, str) else "")
         per_primitive.setdefault(primitive, set()).add(v)
 
     return per_primitive, bad_rows

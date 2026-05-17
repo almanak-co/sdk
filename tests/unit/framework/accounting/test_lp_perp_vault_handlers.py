@@ -126,13 +126,13 @@ class TestDrainOneWritesLPEvent:
     async def test_drain_one_writes_lp_open_event(self) -> None:
         """drain_one on LP_OPEN outbox row produces an LPAccountingEvent, not None."""
         led_id = str(uuid.uuid4())
-        position_key = "lp:aerodrome:base:0xwallet:0xpool"
+        position_key = "lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111"
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
             wallet_address="0xwallet",
             position_key=position_key,
-            market_id="0xpool",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -155,18 +155,18 @@ class TestDrainOneWritesLPEvent:
         written_event = store.save_accounting_event.call_args[0][0]
         assert isinstance(written_event, LPAccountingEvent)
         assert written_event.event_type == LPEventType.LP_OPEN.value
-        assert written_event.pool_address == "0xpool"
+        assert written_event.pool_address == "0x1111111111111111111111111111111111111111"
 
     @pytest.mark.asyncio
     async def test_drain_one_writes_lp_close_event(self) -> None:
         """drain_one on LP_CLOSE outbox row produces an LPAccountingEvent."""
         led_id = str(uuid.uuid4())
-        position_key = "lp:uniswap_v3:arbitrum:0xwallet:0xpool2"
+        position_key = "lp:uniswap_v3:arbitrum:0xwallet:0x2222222222222222222222222222222222222222"
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
             position_key=position_key,
-            market_id="0xpool2",
+            market_id="0x2222222222222222222222222222222222222222",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -328,8 +328,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -349,8 +349,8 @@ class TestHandleLpOpen:
         assert result.event_type == LPEventType.LP_OPEN.value
         assert result.token0 == "USDC"
         assert result.token1 == "DAI"
-        assert result.pool_address == "0xpool"
-        assert result.position_key == "lp:aerodrome:base:0xwallet:0xpool"
+        assert result.pool_address == "0x1111111111111111111111111111111111111111"
+        assert result.position_key == "lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111"
 
     def test_pendle_lp_returns_none(self) -> None:
         led_id = str(uuid.uuid4())
@@ -382,8 +382,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -422,8 +422,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpooladdr",
-            market_id="0xpooladdr",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x3333333333333333333333333333333333333333",
+            market_id="0x3333333333333333333333333333333333333333",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -438,7 +438,7 @@ class TestHandleLpOpen:
 
         assert result is not None
         assert result.event_type == LPEventType.LP_CLOSE.value
-        assert result.pool_address == "0xpooladdr"
+        assert result.pool_address == "0x3333333333333333333333333333333333333333"
 
     def test_lp_open_with_lp_open_data_and_resolver(self) -> None:
         """LPOpenData in extracted_data_json with a mocked token resolver scales raw ints."""
@@ -448,8 +448,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # Build a serialized LPOpenData in extracted_data_json.
         extracted = json.dumps({
@@ -498,7 +498,7 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:curve:mainnet:0xwallet:0xstablepool",
+            position_key="lp:curve:mainnet:0xwallet:0x4444444444444444444444444444444444444444",
             market_id="",
         )
         ledger_row = _make_ledger_row(
@@ -511,16 +511,16 @@ class TestHandleLpOpen:
         result = handle_lp(outbox_row, ledger_row)
 
         assert result is not None
-        assert result.pool_address == "0xstablepool"
+        assert result.pool_address == "0x4444444444444444444444444444444444444444"
 
     @pytest.mark.parametrize(
         ("position_key", "market_id", "expected_pool_address"),
         [
             pytest.param(
                 # Aerodrome / V2-family — position-key tail IS the pool address.
-                "lp:aerodrome:base:0xwallet:0xpool",
+                "lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
                 "",
-                "0xpool",
+                "0x1111111111111111111111111111111111111111",
                 id="aerodrome_v2_address_in_position_key",
             ),
             pytest.param(
@@ -698,7 +698,7 @@ class TestHandleLpOpen:
         """When the prior OPEN payload itself was written under the
         pre-VIB-4396 regime (``pool_address`` = descriptor), recover the
         canonical address from ``position_reference.semantic_grouping_key``
-        (= ``"chain:0xpool"``). Closes the migration window for in-flight
+        (= ``"chain:0x1111111111111111111111111111111111111111"``). Closes the migration window for in-flight
         OPENs whose accounting rows already carry the descriptor leak.
         """
         led_id = str(uuid.uuid4())
@@ -1027,8 +1027,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # Receipt-parser shape: position_id, amounts, ticks, liquidity, and
         # the slot0-derived current_tick. Bracket [-1000, +1000] with
@@ -1085,8 +1085,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # Receipt-parser shape for a close: principal collected, fees, the
         # liquidity removed, plus the new VIB-3940 fields current_tick +
@@ -1100,7 +1100,7 @@ class TestHandleLpOpen:
                 "fees1": "0",
                 "liquidity_removed": "12345678901234",
                 "current_tick": 0,
-                "pool_address": "0xpool",
+                "pool_address": "0x1111111111111111111111111111111111111111",
             }
         })
         ledger_row = _make_ledger_row(
@@ -1146,8 +1146,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         extracted = json.dumps({
             "lp_close_data": {
@@ -1158,7 +1158,7 @@ class TestHandleLpOpen:
                 "fees1": "0",
                 "liquidity_removed": "12345",
                 "current_tick": 1000,  # equal to tick_upper -> OUT
-                "pool_address": "0xpool",
+                "pool_address": "0x1111111111111111111111111111111111111111",
             }
         })
         ledger_row = _make_ledger_row(
@@ -1186,8 +1186,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         extracted = json.dumps({
             "lp_close_data": {
@@ -1226,8 +1226,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         extracted = json.dumps({
             "lp_open_data": {
@@ -1263,8 +1263,8 @@ class TestHandleLpOpen:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         extracted = json.dumps({
             "lp_open_data": {
@@ -1314,8 +1314,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # USDC ≈ $1.00, WETH ≈ $3000.00; 100 USDC + 0.05 WETH = $250.
         ledger_row = _make_ledger_row(
@@ -1345,8 +1345,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # WETH is missing from the oracle.
         ledger_row = _make_ledger_row(
@@ -1378,8 +1378,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1405,8 +1405,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # Lowercase tokens in the row, uppercase in the oracle.
         ledger_row = _make_ledger_row(
@@ -1432,8 +1432,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool2",
-            market_id="0xpool2",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x2222222222222222222222222222222222222222",
+            market_id="0x2222222222222222222222222222222222222222",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1465,8 +1465,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # extracted_data_json forces the resolver path; resolver returns None
         # → assumed_decimals = True.
@@ -1507,8 +1507,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1539,8 +1539,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1574,8 +1574,8 @@ class TestHandleLpCostBasisUsd:
         outbox_row = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:aerodrome:base:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger_row = _make_ledger_row(
             led_id,
@@ -1977,7 +1977,7 @@ class TestHandleLpWalletBasisHooks:
             led_id,
             intent_type="LP_OPEN",
             position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-            market_id="0xpool",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2000,7 +2000,7 @@ class TestHandleLpWalletBasisHooks:
         # V3 position key tail is "USDC/WETH/500" (descriptor, not address) —
         # pool_address must come from outbox.market_id, not the position-key
         # tail. Locks in the _resolve_lp_pool_address fix (CodeRabbit 2026-05-11).
-        assert result.pool_address == "0xpool"
+        assert result.pool_address == "0x1111111111111111111111111111111111111111"
         # Both token legs were drained from the wallet-basis pool.
         assert after_usdc == before_usdc - Decimal("50"), (
             f"USDC remaining: {before_usdc} → {after_usdc}; expected −50"
@@ -2032,7 +2032,7 @@ class TestHandleLpWalletBasisHooks:
             led_id,
             intent_type="LP_CLOSE",
             position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-            market_id="0xpool",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         # LP_CLOSE has no token_in/token_out (returns BOTH tokens) — handler
         # falls back to position-key descriptor.
@@ -2108,7 +2108,7 @@ class TestHandleLpWalletBasisHooks:
                 open_id,
                 intent_type="LP_OPEN",
                 position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-                market_id="0xpool",
+                market_id="0x1111111111111111111111111111111111111111",
             ),
             _make_ledger_row(
                 open_id,
@@ -2132,7 +2132,7 @@ class TestHandleLpWalletBasisHooks:
                 close_id,
                 intent_type="LP_CLOSE",
                 position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-                market_id="0xpool",
+                market_id="0x1111111111111111111111111111111111111111",
             ),
             _make_ledger_row(
                 close_id,
@@ -2176,7 +2176,7 @@ class TestHandleLpWalletBasisHooks:
             led_id,
             intent_type="LP_OPEN",
             position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-            market_id="0xpool",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2216,7 +2216,7 @@ class TestHandleLpWalletBasisHooks:
             led_id,
             intent_type="LP_COLLECT_FEES",
             position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
-            market_id="0xpool",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2282,8 +2282,8 @@ class TestHandleLpWalletBasisHooks:
             amount_out="0.02",
         )
         # Force pool resolution to succeed via market_id.
-        outbox["market_id"] = "0xpool"
-        outbox["position_key"] = "lp:uniswap_v3::0xwallet:0xpool"
+        outbox["market_id"] = "0x1111111111111111111111111111111111111111"
+        outbox["position_key"] = "lp:uniswap_v3::0xwallet:0x1111111111111111111111111111111111111111"
 
         result = handle_lp(outbox, ledger, basis_store=basis)
 
@@ -2332,8 +2332,8 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         lp_close_data: dict[str, Any] = {
             "_type": "LPCloseData",
@@ -2530,8 +2530,8 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2562,8 +2562,8 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_OPEN",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2725,8 +2725,8 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
@@ -2785,8 +2785,8 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_COLLECT_FEES",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-            market_id="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
         )
         extracted = json.dumps({
             "lp_close_data": {

@@ -449,6 +449,69 @@ def compute_pool_id(pool_key: PoolKey) -> str:
     return "0x" + pool_id
 
 
+def _pack_int24(value: int) -> str:
+    """Pack a signed int24 as exactly 3 bytes (two's complement) for abi.encodePacked.
+
+    Solidity's ``abi.encodePacked`` truncates int24 to 3 bytes -- distinct from
+    ``abi.encode`` / ``_pad_int24`` which left-pads to 32 bytes. The V4
+    ``Position.calculatePositionKey`` hash uses encodePacked, so this helper
+    is required for the position-hash computation to match on-chain.
+    """
+    if value < -(1 << 23) or value > (1 << 23) - 1:
+        raise ValueError(f"int24 out of range: {value}")
+    if value < 0:
+        value = (1 << 24) + value
+    return format(value, "06x")
+
+
+def _normalize_bytes32(value: bytes | str) -> str:
+    """Return ``value`` as 64 lowercase hex chars (32 bytes), no 0x prefix."""
+    if isinstance(value, bytes):
+        if len(value) != 32:
+            raise ValueError(f"bytes32 must be 32 bytes, got {len(value)}")
+        return value.hex()
+    if isinstance(value, str):
+        clean = value.lower().removeprefix("0x")
+        if len(clean) != 64:
+            raise ValueError(f"bytes32 hex must be 64 chars, got {len(clean)}")
+        int(clean, 16)
+        return clean
+    raise TypeError(f"bytes32 must be bytes or str, got {type(value).__name__}")
+
+
+def compute_position_hash(
+    owner: str,
+    tick_lower: int,
+    tick_upper: int,
+    salt: bytes | str,
+) -> str:
+    """Compute V4 ``Position.calculatePositionKey`` per v4-core.
+
+    ``keccak256(abi.encodePacked(owner, int24(tickLower), int24(tickUpper), bytes32(salt)))``
+
+    For PositionManager-mediated positions, ``owner`` is the V4 PositionManager
+    contract address (the PoolManager records owner as ``msg.sender``) and
+    ``salt`` is ``bytes32(tokenId)`` per v4-periphery ``PositionManager._mint()``.
+
+    Args:
+        owner: Position owner (PositionManager address for the PM-mediated flow).
+        tick_lower: Signed int24 lower tick.
+        tick_upper: Signed int24 upper tick.
+        salt: 32-byte salt, accepted as raw bytes or hex string.
+
+    Returns:
+        32-byte position key as 0x-prefixed lowercase hex (66 chars).
+    """
+    raw = owner.lower().removeprefix("0x")
+    # Validate length BEFORE any normalization — `zfill` would silently pad
+    # short inputs (e.g. "ab" → "00...00ab"), accepting malformed callers.
+    if len(raw) != 40:
+        raise ValueError(f"owner address must be 20 bytes, got {len(raw) // 2}")
+    int(raw, 16)
+    packed = raw + _pack_int24(tick_lower) + _pack_int24(tick_upper) + _normalize_bytes32(salt)
+    return "0x" + Web3.keccak(bytes.fromhex(packed)).hex()
+
+
 def build_get_slot0_calldata(pool_key: PoolKey) -> str:
     """Build calldata for StateView.getSlot0(PoolKey).
 
@@ -607,6 +670,7 @@ __all__ = [
     "PoolState",
     "build_get_slot0_calldata",
     "compute_pool_id",
+    "compute_position_hash",
     "decode_slot0_response",
     "discover_pool",
     "warn_empty_hook_data",

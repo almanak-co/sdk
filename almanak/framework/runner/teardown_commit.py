@@ -199,7 +199,13 @@ async def commit_teardown_intent(
         try:
             from ..execution.result_enricher import ResultEnricher
 
-            enricher = ResultEnricher(live_mode=runner._is_live_mode())
+            # VIB-4477 (T08): thread V4 pool_key_lookup bridge so teardown-lane
+            # V4 LP_CLOSE receipts get the same PoolKey-driven attribution as
+            # the iteration-lane closes.
+            enricher = ResultEnricher(
+                live_mode=runner._is_live_mode(),
+                pool_key_lookup=runner._build_v4_pool_key_lookup(),
+            )
             enriched_result = enricher.enrich(
                 execution_result,
                 intent,

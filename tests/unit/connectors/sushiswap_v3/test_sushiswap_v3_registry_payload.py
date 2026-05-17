@@ -435,9 +435,11 @@ class TestExtractRegistryPayloadClose:
         # Burn-only: amount{0,1}_close fall back to burn principal amounts.
         assert out["amount0_close"] == "80"
         assert out["amount1_close"] == "160"
-        # Fees cannot be disentangled without the Collect receipt — leave at 0.
-        assert out["fee_owed_0"] == "0"
-        assert out["fee_owed_1"] == "0"
+        # VIB-4470 — fees cannot be disentangled without the Collect
+        # receipt; emit JSON null (unmeasured) rather than the prior "0"
+        # measured-zero lie (Empty ≠ Zero).
+        assert out["fee_owed_0"] is None
+        assert out["fee_owed_1"] is None
         assert out["liquidity"] == "1000000000000"
 
 

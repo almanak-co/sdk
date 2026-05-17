@@ -354,6 +354,7 @@ class ResultEnricher:
         parser_registry: ReceiptParserRegistry | None = None,
         *,
         live_mode: bool = True,
+        pool_key_lookup: Any = None,
     ) -> None:
         """Initialize the ResultEnricher.
 
@@ -367,9 +368,21 @@ class ResultEnricher:
                 and counted on result.extraction_warnings but does not halt
                 execution. Default True is a deliberate fail-closed choice —
                 paper trading entry points must opt into permissive mode.
+            pool_key_lookup: VIB-4477 (T08). Sync ``(pool_id_hex, chain) ->
+                PoolKey | None`` callable injected into the Uniswap V4 receipt
+                parser so ``extract_lp_close_data`` can resolve V4
+                ``ModifyLiquidity.pool_id`` back to its canonical PoolKey via
+                the gateway. ``None`` (default) skips the wiring — V4
+                LP_CLOSE events then drop with a structured
+                ``missing_pool_key_lookup`` warning (Empty != Zero per
+                blueprint 27, the parser fails loud rather than misattribute).
+                The strategy runner builds this from its
+                ``GatewayClient`` via
+                :func:`almanak.framework.connectors.uniswap_v4.gateway_pool_key_client.make_sync_pool_key_lookup`.
         """
         self.parser_registry = parser_registry or ReceiptParserRegistry()
         self.live_mode = live_mode
+        self._pool_key_lookup = pool_key_lookup
         # Counter for ExtractError occurrences in non-live mode. Exposed so
         # monitoring / paper engines can surface the total.
         self.extract_error_count: int = 0
@@ -498,9 +511,9 @@ class ResultEnricher:
             chain_str = str(getattr(context, "chain", "")).lower()
             is_solana = "solana" in chain_str
 
-            # Get parser for protocol
+            parser_kwargs = self._build_parser_kwargs(protocol, context.chain)
             try:
-                parser = self.parser_registry.get(protocol, chain=context.chain)
+                parser = self.parser_registry.get(protocol, **parser_kwargs)
             except ValueError as e:
                 warning = f"Parser not found for {protocol}: {e}"
                 logger.info(warning)
@@ -1690,6 +1703,23 @@ class ResultEnricher:
         current = getattr(parser, "parse_receipt", None)
         if current is not None and getattr(current, "_is_cached_wrapper", False):
             parser.parse_receipt = current._original
+
+    def _build_parser_kwargs(self, protocol: str, chain: str) -> dict[str, Any]:
+        """Build kwargs for ReceiptParserRegistry.get(protocol, **kwargs).
+
+        VIB-4477 (T08): thread ``pool_key_lookup`` into the V4 parser so it
+        can resolve ``ModifyLiquidity.pool_id`` -> canonical ``PoolKey`` via
+        the gateway. Without this, V4 LP_CLOSE events drop with a structured
+        ``missing_pool_key_lookup`` warning and the lp_accounting pipeline
+        never sees V4 events. The kwarg is only sent for the V4 parser to
+        keep other parsers' caching behaviour unchanged --
+        ``ReceiptParserRegistry.get`` bypasses its protocol cache when any
+        kwarg is provided (see ``_load_builtin``).
+        """
+        kwargs: dict[str, Any] = {"chain": chain}
+        if protocol.lower() == "uniswap_v4" and self._pool_key_lookup is not None:
+            kwargs["pool_key_lookup"] = self._pool_key_lookup
+        return kwargs
 
     def _collect_receipts(self, result: ExecutionResult) -> list[dict[str, Any]]:
         """Collect receipts from successful transaction results.

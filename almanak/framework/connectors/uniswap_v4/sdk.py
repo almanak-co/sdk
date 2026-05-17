@@ -172,8 +172,21 @@ ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["universal_router"] for chain, 
 
 QUOTER_ADDRESSES: dict[str, str] = {chain: addrs["quoter"] for chain, addrs in UNISWAP_V4.items()}
 
-# PositionManager addresses per chain
+# PositionManager addresses per chain. The values here are the canonical
+# v4-periphery PositionManager deployments published at
+# https://docs.uniswap.org/contracts/v4/deployments and registered in
+# ``almanak.core.contracts.UNISWAP_V4``. The V4 receipt parser's
+# ``extract_lp_open_data`` allowlist treats these as the only acceptable
+# ``ModifyLiquidity.sender`` values for V0 -- non-PositionManager flows
+# (router/hook-initiated mints) are intentionally rejected until V1 lifts
+# the constraint (see VIB-4484 P-V1-C).
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["position_manager"] for chain, addrs in UNISWAP_V4.items()}
+
+# Lowercase frozenset for O(1) cross-chain allowlist checks (V4 receipt parser
+# uses this to validate ``ModifyLiquidity.sender`` against ANY registered V4
+# PositionManager, not just the chain-bound one -- mirrors the
+# ``extract_position_id`` fallback that already accepts known V4 PMs).
+POSITION_MANAGER_ADDRESS_SET: frozenset[str] = frozenset(addr.lower() for addr in POSITION_MANAGER_ADDRESSES.values())
 
 # Wrapped native token addresses per chain (for WETH <-> native ETH routing in V4).
 # V4's primary liquidity uses native ETH (address(0)), not WETH. When users swap

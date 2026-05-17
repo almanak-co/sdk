@@ -172,7 +172,7 @@ def _outbox_for_label(label: str, category: str) -> dict[str, Any]:
     if category == "lending":
         return _build_outbox(position_key="lending:aave_v3:arbitrum:USDC")
     if category == "lp":
-        return _build_outbox(position_key="lp:arbitrum:0xabcd…:uni")
+        return _build_outbox(position_key="lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111")
     if category == "pendle_lp":
         return _build_outbox(position_key="pendle_lp:arbitrum:WETH-PT")
     if category == "pendle_pt":
@@ -281,7 +281,7 @@ def test_lp_dispatch_uses_prior_open_lookup_on_close() -> None:
     spy = MagicMock(return_value=_PRIOR_OPEN_PAYLOAD)
     processor._lookup_prior_lp_open = spy  # type: ignore[method-assign]
 
-    outbox = _build_outbox(position_key="lp:arbitrum:0xabcd…:uni")
+    outbox = _build_outbox(position_key="lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111")
     ledger_open = _build_ledger(intent_type="LP_OPEN", protocol="uniswap_v3", token_in="USDC", token_out="WETH")
     processor._dispatch(outbox, ledger_open)
     assert spy.call_count == 0, "LP_OPEN must NOT trigger prior_open lookup"
@@ -289,7 +289,7 @@ def test_lp_dispatch_uses_prior_open_lookup_on_close() -> None:
     ledger_close = _build_ledger(intent_type="LP_CLOSE", protocol="uniswap_v3", token_in="USDC", token_out="WETH")
     processor._dispatch(outbox, ledger_close)
     assert spy.call_count == 1
-    assert spy.call_args.args == ("lp:arbitrum:0xabcd…:uni",)
+    assert spy.call_args.args == ("lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111",)
 
 
 # ─── D2.M3 — Every reachable category routes to the matching handler module ──

@@ -69,6 +69,14 @@ service MarketService {
 
   // Get technical indicator value.
   rpc GetIndicator(IndicatorRequest) returns (IndicatorResponse);
+
+  // Resolve a Uniswap V4 pool_id (keccak256 of abi.encode(PoolKey)) back to
+  // its canonical PoolKey (currency0, currency1, fee, tickSpacing, hooks).
+  // VIB-4472 (T03) — needed by the V4 receipt parser to enrich LP / SWAP
+  // events whose on-chain log payload carries the bytes32 id rather than
+  // the structured key. The gateway populates the cache from observed
+  // PoolManager.Initialize events; unknown ids return NOT_FOUND.
+  rpc LookupV4PoolKey(LookupV4PoolKeyRequest) returns (LookupV4PoolKeyResponse);
 }
 
 message PriceRequest {
@@ -128,6 +136,34 @@ message IndicatorResponse {
   string value = 1;  // Primary indicator value as string
   map<string, string> metadata = 2;  // Additional data (e.g., signal line for MACD)
   int64 timestamp = 3;
+}
+
+// Uniswap V4 pool key resolution (VIB-4472 / T03).
+//
+// In V4, a pool is identified on-chain by ``pool_id =
+// keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))``.
+// The hash is irreversible, so resolving an id back to the structured key
+// requires an external source. The gateway maintains a derivation cache
+// populated from observed ``PoolManager.Initialize`` events.
+message LookupV4PoolKeyRequest {
+  bytes pool_id = 1;  // 32 raw bytes
+  string chain = 2;   // e.g. "base"
+}
+
+// PoolKey serialization matches the V4 PoolManager struct layout. The
+// ``currency0 < currency1`` invariant is enforced by the gateway on every
+// response.
+message PoolKey {
+  string currency0 = 1;     // EVM address (lowercased 0x-prefixed hex)
+  string currency1 = 2;     // EVM address (lowercased 0x-prefixed hex)
+  uint32 fee = 3;           // Fee in hundredths of a bip (uint24)
+  int32 tick_spacing = 4;   // Tick spacing (int24)
+  string hooks = 5;         // Hook contract address (zero address = no hooks)
+}
+
+message LookupV4PoolKeyResponse {
+  PoolKey pool_key = 1;
+  string chain = 2;
 }
 
 // =============================================================================

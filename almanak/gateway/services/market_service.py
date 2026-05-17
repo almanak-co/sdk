@@ -156,6 +156,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # Negative-miss cache: (chain, symbol) -> expiry monotonic time.
         # Prevents repeated slow API calls for symbols that don't exist.
         self._dynamic_miss_cache: dict[tuple[str, str], float] = {}
+        # Uniswap V4 pool_id -> PoolKey cache (VIB-4472 / T03). Lazy-built
+        # via observed PoolManager.Initialize events on first lookup miss.
+        # VIB-4426 — ``_v4_pool_key_cache_lock`` serialises concurrent
+        # first-call construction. Without it, two concurrent
+        # ``LookupV4PoolKey`` requests could both observe ``None``, both
+        # instantiate, and the second one would silently overwrite the
+        # first — discarding any in-flight backfill progress.
+        self._v4_pool_key_cache: Any = None
+        self._v4_pool_key_cache_lock = asyncio.Lock()
 
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""
@@ -912,3 +921,132 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.IndicatorResponse()
+
+    async def _get_v4_pool_key_cache(self):
+        """Lazy-construct the V4 pool key cache (VIB-4472 / T03).
+
+        Constructed on first ``LookupV4PoolKey`` call so the gateway boot
+        path is unaffected when no caller exercises V4. Single instance
+        shared across the gateway lifecycle so the backfill cursor and the
+        in-memory index survive between requests.
+
+        VIB-4426 — construction is guarded by ``_v4_pool_key_cache_lock``
+        so two concurrent first-callers cannot each instantiate (which
+        would discard the loser's in-flight backfill state).
+        """
+        if self._v4_pool_key_cache is not None:
+            return self._v4_pool_key_cache
+        async with self._v4_pool_key_cache_lock:
+            # Double-checked: another coroutine may have constructed while
+            # we were waiting on the lock.
+            if self._v4_pool_key_cache is None:
+                from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyCache
+
+                self._v4_pool_key_cache = V4PoolKeyCache(network=self.settings.network)
+            return self._v4_pool_key_cache
+
+    async def LookupV4PoolKey(
+        self,
+        request: gateway_pb2.LookupV4PoolKeyRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.LookupV4PoolKeyResponse:
+        """Resolve a Uniswap V4 ``pool_id`` to its canonical ``PoolKey``.
+
+        Validation:
+        - ``pool_id`` must be exactly 32 bytes (INVALID_ARGUMENT otherwise).
+        - ``chain`` must be one of the validator-accepted chains
+          (INVALID_ARGUMENT otherwise).
+
+        Cache miss -> bounded backfill against the chain's PoolManager
+        Initialize logs -> re-check. If still unknown, returns NOT_FOUND
+        with an empty body. Callers MUST distinguish NOT_FOUND from a
+        zero-valued PoolKey (Empty != Zero, per AGENTS.md §Accounting).
+        """
+        # Validate pool_id shape up front. Empty bytes / wrong length is a
+        # caller contract violation, not a "not found".
+        if not request.pool_id or len(request.pool_id) != 32:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"pool_id must be 32 bytes, got {len(request.pool_id)}")
+            return gateway_pb2.LookupV4PoolKeyResponse()
+
+        # Chain is required (no implicit fallback). V4 PoolManager is
+        # deployed per chain with different addresses; "I don't know which
+        # chain" is unrecoverable.
+        if not request.chain:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required for LookupV4PoolKey")
+            return gateway_pb2.LookupV4PoolKeyResponse()
+
+        try:
+            chain = validate_chain(request.chain)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.LookupV4PoolKeyResponse()
+
+        cache = await self._get_v4_pool_key_cache()
+        try:
+            cached = await cache.lookup(chain, request.pool_id)
+        except Exception as exc:  # noqa: BLE001
+            # VIB-4426 P1 #2 — distinguish typed cache-refresh failures
+            # (config / upstream-RPC) from genuinely unknown pools. Pre-fix,
+            # both surfaced as ``NOT_FOUND``, which made operator
+            # observability lie ("pool not found" when actually the gateway
+            # had no RPC URL or could not call ``eth_blockNumber``).
+            from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyLookupError
+
+            if isinstance(exc, V4PoolKeyLookupError):
+                logger.warning(
+                    "LookupV4PoolKey: refresh failed for chain=%s pool_id=0x%s code=%s: %s",
+                    chain,
+                    request.pool_id.hex(),
+                    exc.code,
+                    exc,
+                )
+                if exc.code == "failed_precondition":
+                    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                    context.set_details(
+                        f"V4 pool key resolution unavailable on chain {chain}: "
+                        "gateway is not configured to query this chain"
+                    )
+                else:  # "unavailable"
+                    context.set_code(grpc.StatusCode.UNAVAILABLE)
+                    context.set_details(
+                        f"V4 pool key resolution temporarily unavailable on chain {chain}: "
+                        "upstream RPC failed; see gateway logs"
+                    )
+                return gateway_pb2.LookupV4PoolKeyResponse()
+
+            # VIB-4426 — log full diagnostic context server-side; return a
+            # sanitised generic message to the gRPC client. ``str(exc)`` on
+            # an unexpected backend error can leak SDK paths, RPC URLs, or
+            # provider-specific status strings across the trust boundary
+            # (CodeRabbit Major on PR #2335). ``logger.exception`` attaches
+            # the full traceback to the gateway log.
+            logger.exception(
+                "LookupV4PoolKey: unexpected error for chain=%s pool_id=0x%s",
+                chain,
+                request.pool_id.hex(),
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal error resolving V4 pool key; see gateway logs")
+            return gateway_pb2.LookupV4PoolKeyResponse()
+
+        if cached is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"V4 pool_id 0x{request.pool_id.hex()} not found on chain {chain}")
+            return gateway_pb2.LookupV4PoolKeyResponse()
+
+        # currency0 < currency1 invariant is enforced inside CachedPoolKey;
+        # an out-of-order pair would have failed at decode time and never
+        # reached the cache. No defence-in-depth check needed here.
+        return gateway_pb2.LookupV4PoolKeyResponse(
+            pool_key=gateway_pb2.PoolKey(
+                currency0=cached.currency0,
+                currency1=cached.currency1,
+                fee=cached.fee,
+                tick_spacing=cached.tick_spacing,
+                hooks=cached.hooks,
+            ),
+            chain=chain,
+        )

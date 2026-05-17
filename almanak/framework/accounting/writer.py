@@ -43,6 +43,7 @@ from almanak.framework.accounting.position_reference import (
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
+    primitive_for,
     record_for,
 )
 from almanak.framework.primitives.types import EventKind, Primitive, PrimitiveRecord
@@ -239,6 +240,19 @@ def augment_accounting_payload(
             )
             primitive = Primitive.UTILITY
             record = None
+        else:
+            # VIB-4477: protocol-aware refinement for parallel LP version
+            # streams (V3 vs V4). The plain ``record.primitive`` is
+            # ``Primitive.LP`` for every LP event_type regardless of venue;
+            # ``primitive_for`` overrides to ``Primitive.LP_V4`` when the
+            # payload's protocol is ``uniswap_v4`` so V4 rows stamp from
+            # ``PRIMITIVE_VERSIONS[Primitive.LP_V4]`` while V3 / Aerodrome /
+            # TraderJoe / Curve continue to stamp from
+            # ``PRIMITIVE_VERSIONS[Primitive.LP]``. Other primitives are
+            # untouched by the override.
+            protocol = d.get("protocol")
+            if isinstance(protocol, str) and protocol:
+                primitive = primitive_for(event_type, protocol)
 
     d["schema_version"] = SCHEMA_VERSION
     d["formula_version"] = FORMULA_VERSION

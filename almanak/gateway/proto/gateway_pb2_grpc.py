@@ -237,6 +237,11 @@ class MarketServiceStub(object):
                 request_serializer=gateway__pb2.IndicatorRequest.SerializeToString,
                 response_deserializer=gateway__pb2.IndicatorResponse.FromString,
                 _registered_method=True)
+        self.LookupV4PoolKey = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/LookupV4PoolKey',
+                request_serializer=gateway__pb2.LookupV4PoolKeyRequest.SerializeToString,
+                response_deserializer=gateway__pb2.LookupV4PoolKeyResponse.FromString,
+                _registered_method=True)
 
 
 class MarketServiceServicer(object):
@@ -274,6 +279,18 @@ class MarketServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def LookupV4PoolKey(self, request, context):
+        """Resolve a Uniswap V4 pool_id (keccak256 of abi.encode(PoolKey)) back to
+        its canonical PoolKey (currency0, currency1, fee, tickSpacing, hooks).
+        VIB-4472 (T03) — needed by the V4 receipt parser to enrich LP / SWAP
+        events whose on-chain log payload carries the bytes32 id rather than
+        the structured key. The gateway populates the cache from observed
+        PoolManager.Initialize events; unknown ids return NOT_FOUND.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MarketServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -296,6 +313,11 @@ def add_MarketServiceServicer_to_server(servicer, server):
                     servicer.GetIndicator,
                     request_deserializer=gateway__pb2.IndicatorRequest.FromString,
                     response_serializer=gateway__pb2.IndicatorResponse.SerializeToString,
+            ),
+            'LookupV4PoolKey': grpc.unary_unary_rpc_method_handler(
+                    servicer.LookupV4PoolKey,
+                    request_deserializer=gateway__pb2.LookupV4PoolKeyRequest.FromString,
+                    response_serializer=gateway__pb2.LookupV4PoolKeyResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -410,6 +432,33 @@ class MarketService(object):
             '/almanak.gateway.proto.MarketService/GetIndicator',
             gateway__pb2.IndicatorRequest.SerializeToString,
             gateway__pb2.IndicatorResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LookupV4PoolKey(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/LookupV4PoolKey',
+            gateway__pb2.LookupV4PoolKeyRequest.SerializeToString,
+            gateway__pb2.LookupV4PoolKeyResponse.FromString,
             options,
             channel_credentials,
             insecure,

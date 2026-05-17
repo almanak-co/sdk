@@ -1000,9 +1000,16 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
 
             # principal = burn amounts (zero on fee-only collect — that's correct)
             # fees = collect - burn (clamped at zero in case of pre-existing
-            # tokensOwed dust we can't separate cleanly)
-            fees0 = max(collect_amount0 - burn_amount0, 0) if saw_collect else 0
-            fees1 = max(collect_amount1 - burn_amount1, 0) if saw_collect else 0
+            # tokensOwed dust we can't separate cleanly).
+            # VIB-4470 — when ``saw_collect`` is False the parser has not
+            # observed a Collect event; emit ``None`` (unmeasured) per Empty
+            # ≠ Zero rather than fabricating ``0``.
+            if saw_collect:
+                fees0: int | None = max(collect_amount0 - burn_amount0, 0)
+                fees1: int | None = max(collect_amount1 - burn_amount1, 0)
+            else:
+                fees0 = None
+                fees1 = None
 
             # Try to recover ``current_tick`` from any Swap event in the same
             # receipt (multicall close that includes a router swap will emit

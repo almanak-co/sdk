@@ -32,15 +32,30 @@ V4 ModifyLiquidity event:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import HexDecoder
+from almanak.framework.observability.metrics import (
+    V4LPDropOutcome,
+    V4LPDropReason,
+    record_v4_lp_parser_drop,
+)
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.connectors.uniswap_v4.sdk import PoolKey
+    from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
+
+# Sync ``(pool_id_hex, chain) -> PoolKey | None`` callable injected by the
+# framework so the V4 receipt parser can resolve a ``ModifyLiquidity.pool_id``
+# back to its canonical PoolKey (currency0 < currency1) without performing
+# any network I/O itself. Production callers wrap
+# ``gateway_pool_key_client.lookup_v4_pool_key`` (async); tests inject a
+# direct dict-backed lambda.
+PoolKeyLookup = Callable[[str, str], "PoolKey | None"]
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +206,11 @@ class UniswapV4ReceiptParser:
         pool_manager_address: str | None = None,
         position_manager_address: str | None = None,
         token_resolver: Any | None = None,
+        pool_key_lookup: PoolKeyLookup | None = None,
     ) -> None:
         self.chain = chain.lower()
         self._token_resolver = token_resolver
+        self._pool_key_lookup = pool_key_lookup
 
         from almanak.core.contracts import UNISWAP_V4
 
@@ -238,6 +255,47 @@ class UniswapV4ReceiptParser:
         if wrapped_native:
             infra_addresses.add(wrapped_native.lower())
         self._infra_addresses: frozenset[str] = frozenset(infra_addresses)
+
+    def _emit_drop_telemetry(
+        self,
+        *,
+        outcome: V4LPDropOutcome,
+        reason: V4LPDropReason,
+        pool_id: str,
+        tx_hash: str,
+        extras: str = "",
+    ) -> None:
+        """Emit a structured WARNING and increment the parser-drops counter.
+
+        The single chokepoint for every V4 LP parser drop path. Every drop
+        site MUST go through here so the WARNING fields and the counter
+        label set stay locked together. ``outcome="drop"`` for return-None
+        paths; ``outcome="raise"`` for the native-ETH typed-error path
+        (counter is still incremented BEFORE the raise so dashboards see
+        the event).
+
+        Args:
+            outcome: "drop" or "raise".
+            reason: ``V4LPDropReason`` member; its string value is the
+                stable error code in both the log and the counter label.
+            pool_id: 32-byte canonical V4 pool_id (lowercase 66-char hex).
+            tx_hash: Receipt transaction hash for traceability.
+            extras: Free-form ``key=value`` tokens already formatted by the
+                caller, appended verbatim to the WARNING. Stays optional so
+                the helper does not lock down per-reason payload shape.
+        """
+        record_v4_lp_parser_drop(chain=self.chain, reason=reason, outcome=outcome)
+        suffix = f" {extras}" if extras else ""
+        logger.warning(
+            "V4 LP parser %s: pool_id=%s tx=%s outcome=%s reason=%s chain=%s%s",
+            "raised" if outcome == "raise" else "dropped",
+            pool_id,
+            tx_hash,
+            outcome,
+            reason.value,
+            self.chain,
+            suffix,
+        )
 
     def parse_receipt(
         self,
@@ -467,53 +525,340 @@ class UniswapV4ReceiptParser:
 
         return None
 
-    def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
-        """Extract LP close data from ModifyLiquidity and Transfer events.
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:
+        """Extract LP open data from a V4 mint receipt.
 
-        Called by ResultEnricher for LP_CLOSE intents.
+        VIB-4474 / V4 LP accounting V0. Walks the receipt for the canonical
+        PositionManager-mediated mint shape:
+
+        1. ``ModifyLiquidity`` with ``liquidity_delta > 0`` (a mint, not a burn)
+           and ``sender`` in ``POSITION_MANAGER_ADDRESS_SET`` (allowlist).
+        2. ERC-721 ``Transfer(from=0x0, ...)`` emitted by the PositionManager
+           NFT contract to recover the position ``tokenId``.
+        3. Salt/tokenId consistency check: ``salt == bytes32(tokenId)`` per
+           v4-periphery ``PositionManager._mint()``. Mismatched salt is the
+           failure signal -- non-zero salt that matches the tokenId is the
+           CANONICAL V4 path and must pass.
+        4. ``position_hash = keccak(packed(positionManager, tickLower, tickUpper, salt))``
+           per v4-core ``Position.calculatePositionKey``.
+
+        Amount attribution for V0: sum ERC-20 Transfers landing in the
+        PoolManager grouped by token, then assign by sorted-address order
+        (currency0 < currency1 invariant). This mirrors ``extract_lp_close_data``
+        and avoids requiring a gateway PoolKey lookup on the open side --
+        T07 owns the PoolKey-driven attribution for closes.
+
+        Non-allowlisted ``sender`` or salt/tokenId mismatch → structured
+        WARNING + returns None. The writer must not crash on a parser miss
+        (Empty != Zero / blueprint 27).
 
         Args:
-            receipt: Transaction receipt dict.
+            receipt: Transaction receipt dict with 'logs' field.
 
         Returns:
-            LPCloseData with collected amounts, or None if not found.
+            ``LPOpenData`` with ``pool_address`` set to the 32-byte V4 pool_id
+            (66-char lowercase hex) and ``position_hash`` set to the v4-core
+            position key. ``None`` when no eligible mint was found or any
+            validation gate fired.
         """
+        from almanak.framework.connectors.uniswap_v4.hooks import compute_position_hash
+        from almanak.framework.connectors.uniswap_v4.sdk import POSITION_MANAGER_ADDRESS_SET
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        parsed = self.parse_receipt(receipt)
+        tx_hash = receipt.get("transactionHash", "unknown")
+
+        mint_event: ModifyLiquidityEventData | None = None
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta > 0:
+                mint_event = event
+                break
+        if mint_event is None:
+            return None
+
+        sender_lower = mint_event.sender.lower()
+        if sender_lower not in POSITION_MANAGER_ADDRESS_SET:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.NON_POSITION_MANAGER_SENDER,
+                pool_id=mint_event.pool_id,
+                tx_hash=tx_hash,
+                extras=f"sender={sender_lower}",
+            )
+            return None
+
+        token_id = self.extract_position_id(receipt)
+        if token_id is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.MISSING_POSITION_ID,
+                pool_id=mint_event.pool_id,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        expected_salt = "0x" + format(token_id, "064x")
+        if mint_event.salt.lower() != expected_salt:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.SALT_TOKENID_MISMATCH,
+                pool_id=mint_event.pool_id,
+                tx_hash=tx_hash,
+                extras=f"salt={mint_event.salt} expected={expected_salt} token_id={token_id}",
+            )
+            return None
+
+        position_hash = compute_position_hash(
+            owner=sender_lower,
+            tick_lower=mint_event.tick_lower,
+            tick_upper=mint_event.tick_upper,
+            salt=mint_event.salt,
+        )
+
+        amount0, amount1, currency0, currency1 = self._sum_deposit_transfers_by_currency_order(parsed.transfer_events)
+        if amount0 is not None and amount1 is None:
+            # V0 limitation: single-sided mints cannot be reliably attributed
+            # to currency0 vs currency1 without a gateway PoolKey lookup
+            # (the close side has this via T07; the open side does not yet).
+            # The amount lands on amount0 by sorted-address convention. V1
+            # follow-up: extend extract_lp_open_data to consume the gateway
+            # PoolKey lookup the same way T07 does (VIB-4486 family).
+            logger.warning(
+                "v4_lp_open_data: ambiguous single-sided attribution pool_id=%s tx=%s "
+                "amount0=%s amount1=None (V0 known-limitation; V1 follow-up filed)",
+                mint_event.pool_id,
+                tx_hash,
+                amount0,
+            )
+
+        current_tick: int | None = None
+        for swap in parsed.swap_events:
+            if swap.pool_id.lower() == mint_event.pool_id.lower():
+                current_tick = swap.tick
+                break
+
+        return LPOpenData(
+            position_id=token_id,
+            tick_lower=mint_event.tick_lower,
+            tick_upper=mint_event.tick_upper,
+            liquidity=mint_event.liquidity_delta,
+            amount0=amount0,
+            amount1=amount1,
+            current_tick=current_tick,
+            pool_address=mint_event.pool_id.lower(),
+            position_hash=position_hash,
+            # VIB-4426 P1 #4 — emit canonical sorted currency addresses so
+            # build_lp_accounting_event resolves token symbols/decimals by
+            # address (not user-intent index). currency1 may be None on a
+            # single-sided open (V0 known-limitation tracked under VIB-4486).
+            currency0=currency0,
+            currency1=currency1,
+        )
+
+    def _sum_deposit_transfers_by_currency_order(
+        self, transfer_events: list[TransferEventData]
+    ) -> tuple[int | None, int | None, str | None, str | None]:
+        """Aggregate deposit ERC-20 transfers (TO PoolManager) by token, then
+        return ``(amount0, amount1, currency0, currency1)`` ordered by
+        ascending token address.
+
+        Matches the V4 PoolKey invariant ``currency0 < currency1`` and the
+        symmetric logic in ``extract_lp_close_data``. Returns
+        ``(None, None, None, None)`` when no transfers landed in PoolManager
+        -- ``None`` is the honest "unmeasured" signal per blueprint 27
+        §Empty ≠ Zero (callers must not substitute zero). On a single-sided
+        deposit, currency1 is ``None`` (we know one address transferred but
+        cannot infer the unobserved currency without a PoolKey lookup —
+        that V1 follow-up is tracked under VIB-4486).
+        """
+        deposited_by_token: dict[str, int] = {}
+        for transfer in transfer_events:
+            if transfer.to_address.lower() == self.pool_manager:
+                token = transfer.token.lower()
+                deposited_by_token[token] = deposited_by_token.get(token, 0) + transfer.amount
+
+        if not deposited_by_token:
+            return None, None, None, None
+
+        sorted_tokens = sorted(deposited_by_token.keys())
+        amount0 = deposited_by_token[sorted_tokens[0]]
+        currency0 = sorted_tokens[0]
+        amount1 = deposited_by_token[sorted_tokens[1]] if len(sorted_tokens) >= 2 else None
+        currency1 = sorted_tokens[1] if len(sorted_tokens) >= 2 else None
+        return amount0, amount1, currency0, currency1
+
+    def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
+        """Extract LP close data from a V4 burn receipt.
+
+        VIB-4476 / V4 LP accounting V0. Token attribution is driven by the
+        canonical ``PoolKey`` resolved via the gateway
+        ``LookupV4PoolKey`` RPC (T03), NOT by sorting observed Transfer
+        logs. Sorted-Transfer attribution is broken for (a) native ETH
+        (which emits no ERC-20 Transfer) and (b) any non-trivial pair
+        ordering where the on-chain ``currency0 < currency1`` invariant
+        does not match the order the transfers happen to appear in.
+
+        Walks the receipt for:
+
+        1. ``ModifyLiquidity`` with ``liquidity_delta < 0`` (a burn, not a
+           mint). Pull ``pool_id`` from ``topics[1]``.
+        2. Canonical ``PoolKey`` for that ``pool_id`` via the injected
+           ``pool_key_lookup`` callable.
+        3. Native-ETH currency leg (``currency0 == 0x0`` after PoolKey's
+           sorted-order normalisation) → raise
+           :class:`UniswapV4UnsupportedPoolError` citing VIB-4483 (P-V1-B),
+           consistent with the T06 adapter guard.
+        4. Transfer-set integrity check: the set of token addresses in
+           observed ``Transfer`` logs leaving the PoolManager MUST match
+           ``{currency0, currency1}`` from the PoolKey. On mismatch:
+           structured WARNING + return ``None`` (fail-loud over silent
+           misattribution).
+        5. PoolKey-ordered amount assignment: ``amount0_collected`` =
+           sum of transfers of ``currency0``; ``amount1_collected`` =
+           sum of transfers of ``currency1``.
+
+        Emits:
+
+        - ``pool_address`` = 32-byte canonical pool_id (66-char lowercase hex)
+        - ``source = "modify_liquidity"``
+        - ``fees0 = None``, ``fees1 = None`` — V4 bundles fees into the
+          withdrawal Transfer in V0; explicit ``None`` is the honest signal
+          (Empty ≠ Zero, blueprint 27). Separate fee measurement is V1
+          P-V1-A (VIB-4482).
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``LPCloseData`` with PoolKey-driven amount attribution, or
+            ``None`` when no eligible burn is found, the PoolKey lookup
+            fails, or the observed Transfer set does not match the PoolKey.
+
+        Raises:
+            UniswapV4UnsupportedPoolError: PoolKey has native-ETH
+                ``currency0``. Lifting tracked by VIB-4483 (P-V1-B).
+        """
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
+        from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
         from almanak.framework.execution.extracted_data import LPCloseData
 
         parsed = self.parse_receipt(receipt)
+        tx_hash = receipt.get("transactionHash", "unknown")
 
-        # Find the decrease event (negative liquidity delta)
-        liquidity_removed = None
+        burn_event: ModifyLiquidityEventData | None = None
         for event in parsed.modify_liquidity_events:
             if event.liquidity_delta < 0:
-                liquidity_removed = abs(event.liquidity_delta)
+                burn_event = event
                 break
-
-        if liquidity_removed is None and not parsed.modify_liquidity_events:
+        if burn_event is None:
             return None
 
-        # Sum Transfer events FROM the pool manager TO the wallet (tokens collected)
-        amount0_collected = 0
-        amount1_collected = 0
+        liquidity_removed = abs(burn_event.liquidity_delta)
+        pool_id_hex = burn_event.pool_id.lower()
 
-        # Group transfers from PoolManager by token address
+        if self._pool_key_lookup is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.MISSING_POOL_KEY_LOOKUP,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        try:
+            pool_key = self._pool_key_lookup(pool_id_hex, self.chain)
+        except Exception as exc:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_LOOKUP_ERROR,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"error={type(exc).__name__}",
+            )
+            return None
+
+        if pool_key is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_NOT_FOUND,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        currency0 = pool_key.currency0.lower()
+        currency1 = pool_key.currency1.lower()
+
+        if currency0 == NATIVE_CURRENCY:
+            self._emit_drop_telemetry(
+                outcome="raise",
+                reason=V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"currency0={pool_key.currency0}",
+            )
+            raise UniswapV4UnsupportedPoolError(
+                f"Uniswap V4 LP close has currency0={pool_key.currency0} (native ETH) but "
+                f"native-ETH legs are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 "
+                f"pools. Native-ETH currency support is tracked by VIB-4483 (P-V1-B). "
+                f"pool_id={pool_id_hex} chain={self.chain}"
+            )
+
         collected_by_token: dict[str, int] = {}
         for transfer in parsed.transfer_events:
             if transfer.from_address.lower() == self.pool_manager:
                 token = transfer.token.lower()
                 collected_by_token[token] = collected_by_token.get(token, 0) + transfer.amount
 
-        # Assign to amount0/amount1 by sorted token address order
-        sorted_tokens = sorted(collected_by_token.keys())
-        if len(sorted_tokens) >= 1:
-            amount0_collected = collected_by_token[sorted_tokens[0]]
-        if len(sorted_tokens) >= 2:
-            amount1_collected = collected_by_token[sorted_tokens[1]]
+        observed_tokens = set(collected_by_token.keys())
+        expected_tokens = {currency0, currency1}
+        # VIB-4426 P1 #3 — allow legitimate single-sided closes. A
+        # concentrated-liquidity position that is out of range at burn time
+        # legitimately returns only one of {currency0, currency1}; the
+        # missing leg is a measured zero, not a "transfer-set mismatch".
+        # Pre-fix the strict equality check dropped these as
+        # ``transfer_set_mismatch`` and the LP_CLOSE accounting event was
+        # silently lost.
+        #
+        # The drop predicate is now: observed tokens must be a non-empty
+        # SUBSET of expected. An observation outside the PoolKey currency
+        # set IS a real attribution error (could be a token the parser
+        # mis-extracted) and stays as a drop.
+        if not observed_tokens or not observed_tokens.issubset(expected_tokens):
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.TRANSFER_SET_MISMATCH,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"expected={sorted(expected_tokens)} observed={sorted(observed_tokens)}",
+            )
+            return None
+
+        # Missing leg = measured zero (Empty ≠ Zero only applies when we
+        # don't know; here the PoolKey lookup succeeded AND we observed all
+        # transfers from the PoolManager so a non-observed currency truly
+        # received zero in this burn).
+        amount0_collected = collected_by_token.get(currency0, 0)
+        amount1_collected = collected_by_token.get(currency1, 0)
 
         return LPCloseData(
             amount0_collected=amount0_collected,
             amount1_collected=amount1_collected,
+            # VIB-4470 / VIB-4476 — V4 currently bundles fees into the
+            # withdrawal Transfer; fee separation is V1 P-V1-A (VIB-4482).
+            # Explicit ``None`` is the honest signal (Empty ≠ Zero).
+            fees0=None,
+            fees1=None,
             liquidity_removed=liquidity_removed,
+            pool_address=pool_id_hex,
+            source="modify_liquidity",
+            # VIB-4426 P1 #4 — emit canonical PoolKey-sorted currency
+            # addresses so the LP handler can resolve symbols/decimals by
+            # address (not by user-intent index). Without these the
+            # handler would mis-pair amount0 (in PoolKey order) with the
+            # intent's token0 (in user-supplied order).
+            currency0=currency0,
+            currency1=currency1,
         )
 
     # -- Decoding helpers -----------------------------------------------------

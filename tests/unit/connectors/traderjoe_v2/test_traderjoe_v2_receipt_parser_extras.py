@@ -555,8 +555,10 @@ class TestExtractLPCloseData:
         assert result is not None
         assert result.amount0_collected == 10**18
         assert result.amount1_collected == 2 * 10**18
-        assert result.fees0 == 0
-        assert result.fees1 == 0
+        # VIB-4470 — TraderJoe doesn't separate fees in events; fees are
+        # unmeasured (None), not a fabricated zero (Empty ≠ Zero).
+        assert result.fees0 is None
+        assert result.fees1 is None
 
     def test_returns_none_when_event_is_add(self, parser: TraderJoeV2ReceiptParser) -> None:
         bin_ids = [8388608]

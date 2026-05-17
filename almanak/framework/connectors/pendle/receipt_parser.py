@@ -1368,6 +1368,12 @@ class PendleReceiptParser:
             return LPCloseData(
                 amount0_collected=burn.net_sy_out,
                 amount1_collected=burn.net_pt_out,
+                # VIB-4470 — Pendle's Burn event does not surface fees
+                # separately from the SY/PT amounts out; emit ``None``
+                # (unmeasured) rather than relying on the prior measured-zero
+                # default (Empty ≠ Zero).
+                fees0=None,
+                fees1=None,
                 liquidity_removed=burn.net_lp_burned,
             )
         except Exception as e:

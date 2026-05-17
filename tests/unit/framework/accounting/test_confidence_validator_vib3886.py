@@ -38,8 +38,8 @@ def test_high_with_empty_reason_accepted():
     """The valid happy-path: all USD fields populated, no reason needed."""
     payload = LPOpenEventPayload(
         protocol="uniswap_v3",
-        position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
-        pool_address="0xpool",
+        position_key="lp:uniswap_v3:arbitrum:0xw:0x1111111111111111111111111111111111111111",
+        pool_address="0x1111111111111111111111111111111111111111",
         token0="WETH",
         token1="USDC",
         amount0=Decimal("1"),
@@ -73,8 +73,8 @@ def test_high_with_non_empty_reason_rejected():
     with pytest.raises(ValueError, match="confidence=HIGH is incompatible"):
         LPOpenEventPayload(
             protocol="uniswap_v3",
-            position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
-            pool_address="0xpool",
+            position_key="lp:uniswap_v3:arbitrum:0xw:0x1111111111111111111111111111111111111111",
+            pool_address="0x1111111111111111111111111111111111111111",
             token0="WETH",
             token1="USDC",
             amount0=Decimal("1"),
@@ -130,8 +130,8 @@ def _make_outbox_row(led_id: str) -> dict:
         "id": led_id,
         "intent_type": "LP_OPEN",
         "wallet_address": "0xwallet",
-        "position_key": "lp:uniswap_v3:arbitrum:0xwallet:0xpool",
-        "market_id": "0xpool",
+        "position_key": "lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+        "market_id": "0x1111111111111111111111111111111111111111",
     }
 
 
@@ -251,8 +251,8 @@ def test_vib3938_lp_event_high_serializes_unavailable_reason_as_null():
     ev = LPAccountingEvent(
         identity=_identity(),
         event_type=LPEventType.LP_OPEN,
-        position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
-        pool_address="0xpool",
+        position_key="lp:uniswap_v3:arbitrum:0xw:0x1111111111111111111111111111111111111111",
+        pool_address="0x1111111111111111111111111111111111111111",
         token0="WETH",
         token1="USDC",
         amount0=Decimal("0.001"),
@@ -280,8 +280,8 @@ def test_vib3938_lp_event_estimated_keeps_real_reason():
     ev = LPAccountingEvent(
         identity=_identity(),
         event_type=LPEventType.LP_OPEN,
-        position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
-        pool_address="0xpool",
+        position_key="lp:uniswap_v3:arbitrum:0xw:0x1111111111111111111111111111111111111111",
+        pool_address="0x1111111111111111111111111111111111111111",
         token0="WETH",
         token1="USDC",
         amount0=Decimal("0.001"),

@@ -100,6 +100,12 @@ MATCHING_POLICY_VERSION = 3
 # Every Primitive value MUST appear here so a writer lookup never KeyError-s.
 MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     Primitive.LP: 3,
+    # VIB-4477: V4 starts its lot-matching stream fresh — no historical V4 rows
+    # exist (V0 lands with this change). Same FIFO policy as Primitive.LP today;
+    # the parallel slot exists so a future V4-specific algorithm change (e.g.
+    # fee separation lands and the lot model gains a fee leg) cannot retro-
+    # baseline the V3 fixture set.
+    Primitive.LP_V4: 1,
     Primitive.LENDING: 3,
     Primitive.CDP: 1,
     Primitive.LIQUIDATION: 1,
@@ -134,6 +140,12 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
 PRIMITIVE_VERSION_DEFAULT = 1
 PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.LP: PRIMITIVE_VERSION_DEFAULT,
+    # VIB-4477: Uniswap V4 LP primitive contract — fresh v1 stream parallel to
+    # Primitive.LP (V3 / Aerodrome / TraderJoe / Curve / etc. stays at v1 too,
+    # but on its own dict slot so a future LP_V4 contract bump cannot
+    # retro-baseline V3). See ``Primitive.LP_V4`` in
+    # ``almanak.framework.primitives.types`` for the resolution contract.
+    Primitive.LP_V4: PRIMITIVE_VERSION_DEFAULT,
     Primitive.LENDING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.CDP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.LIQUIDATION: PRIMITIVE_VERSION_DEFAULT,

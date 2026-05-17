@@ -917,8 +917,10 @@ class TraderJoeV2ReceiptParser:
                 return LPCloseData(
                     amount0_collected=amount_x,
                     amount1_collected=amount_y,
-                    fees0=0,  # TraderJoe doesn't separate fees in events
-                    fees1=0,
+                    # VIB-4470 — TraderJoe doesn't separate fees in events;
+                    # fees are unmeasured (Empty ≠ Zero) rather than zero.
+                    fees0=None,
+                    fees1=None,
                     liquidity_removed=None,
                 )
 

@@ -1688,6 +1688,7 @@ class UniswapV3ReceiptParser:
                 amount1=amount1,
                 current_tick=current_tick,
                 pool_address=pool_address,  # VIB-3893: framework slot0 fallback
+                position_hash=None,  # VIB-4473: V4-only — V3 lot-matches on position_token_id
             )
 
         return None
@@ -1898,9 +1899,17 @@ class UniswapV3ReceiptParser:
 
             # principal = burn amounts (zero on fee-only collect — that's correct)
             # fees = collect - burn (clamped at zero in case of pre-existing
-            # tokensOwed dust we can't separate cleanly)
-            fees0 = max(collect_amount0 - burn_amount0, 0) if saw_collect else 0
-            fees1 = max(collect_amount1 - burn_amount1, 0) if saw_collect else 0
+            # tokensOwed dust we can't separate cleanly).
+            # VIB-4470 — when ``saw_collect`` is False the parser has not
+            # observed a Collect event in this receipt and therefore cannot
+            # measure fees; emit ``None`` (unmeasured) rather than fabricating
+            # ``0`` (measured zero). See blueprint 27 §Empty ≠ Zero.
+            if saw_collect:
+                fees0: int | None = max(collect_amount0 - burn_amount0, 0)
+                fees1: int | None = max(collect_amount1 - burn_amount1, 0)
+            else:
+                fees0 = None
+                fees1 = None
 
             # VIB-3940: try to recover ``current_tick`` from any Swap event
             # in the same receipt (multicall close that includes a router
@@ -2174,14 +2183,19 @@ class UniswapV3ReceiptParser:
         alongside. Round-3 attempted to subtract fees out; that
         contradicted the T08 goldens — see audit m8 in the L2 contract
         test for the full rationale.
+
+        VIB-4470 — when ``lp_close.fees{0,1}`` is ``None`` (unmeasured per
+        Empty ≠ Zero) emit JSON ``null`` rather than the literal string
+        ``"None"``. Downstream registry consumers distinguish unmeasured
+        from measured-zero via ``null`` vs ``"0"``.
         """
         payload: dict[str, Any] = {
             "token_id": str(token_id),
             "pool_address": pool_address,
             "amount0_close": str(lp_close.amount0_collected),
             "amount1_close": str(lp_close.amount1_collected),
-            "fee_owed_0": str(lp_close.fees0),
-            "fee_owed_1": str(lp_close.fees1),
+            "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,
+            "fee_owed_1": str(lp_close.fees1) if lp_close.fees1 is not None else None,
             "nft_manager_addr": nft_manager_addr,
         }
         if lp_close.liquidity_removed is not None:

@@ -592,6 +592,39 @@ def record_for(intent_type: str) -> PrimitiveRecord:
         raise UnknownIntentTypeError(intent_type) from e
 
 
+def primitive_for(intent_type: str, protocol: str = "") -> Primitive:
+    """Return the :class:`Primitive` for ``intent_type``, protocol-overridden.
+
+    VIB-4477. The plain :func:`record_for` lookup maps every LP event_type to
+    :attr:`Primitive.LP` because the AccountingCategory dispatcher (which is
+    the consumer of :func:`record_for`) does not need to distinguish V3 from
+    V4 — both route through ``lp_handler``. The version-stamping sites
+    (``writer.augment_accounting_payload`` and the Accountant Test's G13
+    per-primitive bucket collector) DO need that distinction so V3's
+    ``primitive_version`` stream cannot retroactively re-baseline when V4's
+    contract advances (and vice-versa).
+
+    The override is currently scoped to Uniswap V4 (``protocol`` contains
+    ``"uniswap_v4"``): the V4 contract is the only LP venue with a separate
+    primitive slot in
+    :data:`almanak.framework.accounting.payload_schemas.PRIMITIVE_VERSIONS`
+    today. Other LP venues continue to resolve to :attr:`Primitive.LP`.
+
+    Falls back to :attr:`Primitive.UTILITY` for unknown intent strings —
+    same fallback as the augment chokepoint's non-live branch so callers do
+    not see a KeyError they cannot resolve. Live callers should use
+    :func:`record_for` first when they need a hard fail on unknown event
+    types.
+    """
+    key = _resolve_alias(intent_type)
+    record = TAXONOMY.get(key)
+    if record is None:
+        return Primitive.UTILITY
+    if record.primitive is Primitive.LP and "uniswap_v4" in protocol.lower():
+        return Primitive.LP_V4
+    return record.primitive
+
+
 def classify(
     intent_type: str,
     protocol: str = "",
@@ -673,6 +706,14 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     statement about teardown coverage.
     """
     s = position_type_str.upper().strip()
+    # VIB-4477: V4 position-type strings resolve to Primitive.LP_V4 (parallel
+    # version stream). The materializer's caller in
+    # ``accounting.position_state._classify_position`` collapses LP_V4 back to
+    # the ``"LP"`` materializer bucket — the materializer code is V3/V4-shared
+    # because the LP position state machine is the same. The primitive split
+    # only matters at the version-stamping sites.
+    if s in {"UNI_V4", "UNISWAP_V4"}:
+        return Primitive.LP_V4
     if s in {"LP", "UNI_V3", "UNISWAP_V3", "AERODROME", "AERODROME_LP", "TRADERJOE_LP"}:
         return Primitive.LP
     if s in {

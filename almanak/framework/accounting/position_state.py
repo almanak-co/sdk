@@ -207,7 +207,12 @@ def _classify_position(position: Any) -> PositionType | None:
     primitive = materializer_primitive_for(str(pt))
     if primitive is None:
         return None
-    if primitive.value == "lp":
+    # VIB-4477: Primitive.LP_V4 is the parallel version-stream for V4 only —
+    # the materializer code is V3/V4-shared (same LP position state machine),
+    # so collapse LP_V4 back to the materializer's "LP" bucket here. The
+    # version split only matters where ``primitive_version`` /
+    # ``matching_policy_version`` are stamped or audited.
+    if primitive.value in ("lp", "lp_v4"):
         return "LP"
     if primitive.value == "lending":
         return "LENDING"

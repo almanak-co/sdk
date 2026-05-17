@@ -219,6 +219,10 @@ class TestUniswapV4LPCloseIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard; native-ETH currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
+        strict=True,
+    )
     async def test_lp_close_avax_usdc(
         self,
         web3: Web3,

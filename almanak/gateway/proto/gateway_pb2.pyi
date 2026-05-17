@@ -434,6 +434,96 @@ class IndicatorResponse(_message.Message):
 Global___IndicatorResponse: _TypeAlias = IndicatorResponse  # noqa: Y015
 
 @_typing.final
+class LookupV4PoolKeyRequest(_message.Message):
+    """Uniswap V4 pool key resolution (VIB-4472 / T03).
+
+    In V4, a pool is identified on-chain by ``pool_id =
+    keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))``.
+    The hash is irreversible, so resolving an id back to the structured key
+    requires an external source. The gateway maintains a derivation cache
+    populated from observed ``PoolManager.Initialize`` events.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    pool_id: _builtins.bytes
+    """32 raw bytes"""
+    chain: _builtins.str
+    """e.g. "base" """
+    def __init__(
+        self,
+        *,
+        pool_id: _builtins.bytes = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "pool_id", b"pool_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LookupV4PoolKeyRequest: _TypeAlias = LookupV4PoolKeyRequest  # noqa: Y015
+
+@_typing.final
+class PoolKey(_message.Message):
+    """PoolKey serialization matches the V4 PoolManager struct layout. The
+    ``currency0 < currency1`` invariant is enforced by the gateway on every
+    response.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CURRENCY0_FIELD_NUMBER: _builtins.int
+    CURRENCY1_FIELD_NUMBER: _builtins.int
+    FEE_FIELD_NUMBER: _builtins.int
+    TICK_SPACING_FIELD_NUMBER: _builtins.int
+    HOOKS_FIELD_NUMBER: _builtins.int
+    currency0: _builtins.str
+    """EVM address (lowercased 0x-prefixed hex)"""
+    currency1: _builtins.str
+    """EVM address (lowercased 0x-prefixed hex)"""
+    fee: _builtins.int
+    """Fee in hundredths of a bip (uint24)"""
+    tick_spacing: _builtins.int
+    """Tick spacing (int24)"""
+    hooks: _builtins.str
+    """Hook contract address (zero address = no hooks)"""
+    def __init__(
+        self,
+        *,
+        currency0: _builtins.str = ...,
+        currency1: _builtins.str = ...,
+        fee: _builtins.int = ...,
+        tick_spacing: _builtins.int = ...,
+        hooks: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["currency0", b"currency0", "currency1", b"currency1", "fee", b"fee", "hooks", b"hooks", "tick_spacing", b"tick_spacing"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolKey: _TypeAlias = PoolKey  # noqa: Y015
+
+@_typing.final
+class LookupV4PoolKeyResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_KEY_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    @_builtins.property
+    def pool_key(self) -> Global___PoolKey: ...
+    def __init__(
+        self,
+        *,
+        pool_key: Global___PoolKey | None = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["pool_key", b"pool_key"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "pool_key", b"pool_key"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LookupV4PoolKeyResponse: _TypeAlias = LookupV4PoolKeyResponse  # noqa: Y015
+
+@_typing.final
 class LoadStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

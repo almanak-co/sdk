@@ -85,6 +85,11 @@ class LPAccountingEvent:
         # post-IL on-chain outcome.
         il_usd: Decimal | None = None,
         hodl_value_usd: Decimal | None = None,
+        # VIB-4473 — V4 lot-matching anchor (keccak of
+        # owner ‖ tickLower ‖ tickUpper ‖ salt per V4 ``Position.calculatePositionKey``).
+        # V3 callers leave this None and lot-matching falls back to
+        # ``position_token_id``; V4 receipt parser populates it (T05).
+        position_hash: str | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -109,6 +114,7 @@ class LPAccountingEvent:
         self.in_range = in_range
         self.il_usd = il_usd
         self.hodl_value_usd = hodl_value_usd
+        self.position_hash = position_hash
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -119,6 +125,13 @@ class LPAccountingEvent:
         return json.dumps(
             {
                 "event_type": self.event_type,
+                # VIB-4426 — protocol MUST be on the payload (not only on
+                # ``identity``) so the augment chokepoint's
+                # ``primitive_for(event_type, protocol)`` override can refine
+                # ``Primitive.LP`` to ``Primitive.LP_V4`` for Uniswap V4 rows.
+                # Without this key the V4 per-primitive version stream is
+                # silently dead code (CodeRabbit Major on PR #2335).
+                "protocol": self.identity.protocol,
                 "position_key": self.position_key,
                 "pool_address": self.pool_address,
                 "token0": self.token0,
@@ -167,6 +180,10 @@ class LPAccountingEvent:
                 # quantity).
                 "il_usd": _enc(self.il_usd),
                 "hodl_value_usd": _enc(self.hodl_value_usd),
+                # VIB-4473 — V4 lot-matching anchor. Always emitted (None for
+                # V3, populated for V4) so downstream JSON consumers see a
+                # stable key shape across protocols.
+                "position_hash": self.position_hash,
                 "schema_version": self.schema_version,
                 "primitive_version": self.primitive_version,
             }
@@ -208,6 +225,78 @@ def _get_pool_address(intent: Any) -> str:
     # Last segment is a pool type ("stable", "volatile") or similar label.
     # Return the full lowercased string as a stable position key component.
     return pool_str.lower()
+
+
+def _v4_align_tokens_to_currency_order(
+    lp_data: Any,
+    chain: str,
+    token0: str,
+    token1: str,
+    dec0: int,
+    dec1: int,
+    assumed_decimals: bool,
+) -> tuple[str, str, int, int, bool]:
+    """VIB-4426 P1 #4 — re-pair (token, decimals) by canonical PoolKey address order.
+
+    The V4 receipt parser emits ``amount0`` / ``amount1`` in PoolKey-sorted
+    order (``int(currency0, 16) < int(currency1, 16)``). The user's intent
+    may carry the pool string in the OPPOSITE order
+    (``"USDC/WETH/3000"`` when canonical is WETH<USDC). Pre-fix
+    ``amount0`` (the WETH amount in raw units) got scaled with the user's
+    ``token0_decimals`` (USDC's 6 decimals) and labelled as USDC — silent
+    misattribution and wrong cost basis.
+
+    This helper resolves the canonical currency addresses (when populated
+    by the V4 receipt parser) into symbols + decimals via the token
+    resolver and returns ``(token0, token1, dec0, dec1, assumed_decimals)``
+    aligned to PoolKey order. If the resolver fails or the currency
+    addresses aren't present (V3 callers), returns the inputs unchanged.
+
+    Args:
+        lp_data: ``LPOpenData`` or ``LPCloseData`` carrying optional
+            ``currency0`` / ``currency1`` addresses.
+        chain: Chain name forwarded to the token resolver.
+        token0, token1, dec0, dec1, assumed_decimals: Current values
+            derived from the intent, returned unchanged on the V3 / no-data
+            path.
+    """
+    c0 = getattr(lp_data, "currency0", None)
+    c1 = getattr(lp_data, "currency1", None)
+    if not c0 or not c1:
+        # V3 or single-sided V4 open — no canonical address pair available.
+        return token0, token1, dec0, dec1, assumed_decimals
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        ti0 = resolver.resolve(c0, chain=chain, log_errors=False)
+        ti1 = resolver.resolve(c1, chain=chain, log_errors=False)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "V4 LP accounting: token resolver failed for currency pair (%s, %s) on %s; "
+            "falling back to user-intent token order — amounts may be misattributed",
+            c0,
+            c1,
+            chain,
+        )
+        return token0, token1, dec0, dec1, assumed_decimals
+
+    if ti0 is None or ti1 is None:
+        logger.warning(
+            "V4 LP accounting: token resolver returned None for (%s, %s) on %s; "
+            "falling back to user-intent token order",
+            c0,
+            c1,
+            chain,
+        )
+        return token0, token1, dec0, dec1, assumed_decimals
+
+    aligned_token0 = (ti0.symbol or c0).upper()
+    aligned_token1 = (ti1.symbol or c1).upper()
+    aligned_dec0 = int(ti0.decimals) if ti0.decimals is not None else dec0
+    aligned_dec1 = int(ti1.decimals) if ti1.decimals is not None else dec1
+    aligned_assumed = ti0.decimals is None or ti1.decimals is None
+    return aligned_token0, aligned_token1, aligned_dec0, aligned_dec1, aligned_assumed
 
 
 def _to_human(raw: int | None, decimals: int) -> Decimal | None:
@@ -271,6 +360,14 @@ def compute_lp_cost_basis(
 _compute_cost_basis = compute_lp_cost_basis
 
 
+# crap-allowlist: VIB-4426 — build_lp_accounting_event is the canonical LP event
+# constructor. The high cc reflects the breadth of the LP payload (V3 + V4
+# branches, LP_OPEN vs LP_CLOSE, optional fees / IL / HODL value / position_hash
+# fields, fallback paths for older receipt parsers). Decomposing would shred
+# legibility for marginal cc gain — the function is already grouped by intent
+# direction (LP_OPEN vs LP_CLOSE) and field family. Coverage stays > 85%.
+# Refactor will be considered as part of a future accounting-writer rework
+# epic, NOT inside the VIB-4426 PR-1 scope.
 def build_lp_accounting_event(  # noqa: C901
     *,
     intent: Any,
@@ -355,12 +452,28 @@ def build_lp_accounting_event(  # noqa: C901
     lp_token_amount: Decimal | None = None
     fees0_collected: Decimal | None = None
     fees1_collected: Decimal | None = None
+    # VIB-4473 — V4 lot-matching anchor read from ``lp_open_data`` on
+    # LP_OPEN. V3 parsers leave it None and the field is forwarded as-is
+    # so the payload key is stable. LP_CLOSE leaves it None: the close
+    # leg matches against the prior OPEN payload by position_key, not by
+    # re-reading the hash off the burn receipt.
+    position_hash: str | None = None
 
     if intent_type_str == "LP_OPEN":
         lp_data = getattr(result, "lp_open_data", None)
         if lp_data is not None:
+            # VIB-4426 P1 #4 — for V4 (currency0/currency1 populated),
+            # re-resolve (token0, token1, dec0, dec1) by canonical PoolKey
+            # address order so amount0 (in PoolKey order) is paired with
+            # the correct symbol/decimals. Otherwise a user pool string in
+            # the opposite order (e.g. "USDC/WETH" when canonical is WETH<USDC)
+            # silently mis-scales and mis-prices.
+            token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
+                lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
+            )
             amount0 = _to_human(getattr(lp_data, "amount0", None), dec0)
             amount1 = _to_human(getattr(lp_data, "amount1", None), dec1)
+            position_hash = getattr(lp_data, "position_hash", None)
         else:
             # Fall back to extracted_data dict (older receipt parsers)
             extracted = getattr(result, "extracted_data", None) or {}
@@ -369,6 +482,10 @@ def build_lp_accounting_event(  # noqa: C901
     else:
         lp_data = getattr(result, "lp_close_data", None)
         if lp_data is not None:
+            # VIB-4426 P1 #4 — same alignment as LP_OPEN (see above).
+            token0, token1, dec0, dec1, assumed_decimals = _v4_align_tokens_to_currency_order(
+                lp_data, chain, token0, token1, dec0, dec1, assumed_decimals
+            )
             amount0 = _to_human(getattr(lp_data, "amount0_collected", None), dec0)
             amount1 = _to_human(getattr(lp_data, "amount1_collected", None), dec1)
             fees0_collected = _to_human(getattr(lp_data, "fees0", None), dec0)
@@ -417,4 +534,5 @@ def build_lp_accounting_event(  # noqa: C901
         fees1_collected=fees1_collected,
         confidence=confidence,
         unavailable_reason=unavailable_reason,
+        position_hash=position_hash,
     )

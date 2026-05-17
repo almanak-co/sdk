@@ -428,6 +428,10 @@ class TestUniswapV4CollectFeesIntent:
         IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES
     )
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard at test setup; native-BNB currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
+        strict=True,
+    )
     async def test_collect_fees_bnb_usdt(
         self,
         web3: Web3,

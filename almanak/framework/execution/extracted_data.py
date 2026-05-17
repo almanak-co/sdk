@@ -192,14 +192,29 @@ class LPCloseData:
 
     amount0_collected: int
     amount1_collected: int
-    fees0: int = 0
-    fees1: int = 0
+    # VIB-4470 — Empty ≠ Zero. ``None`` means the parser did not measure fees
+    # separately (the canonical case for protocols that bundle fees into the
+    # withdrawal amount). A numeric value — including ``0`` — is a measured
+    # observation. Flipping the default from ``0`` to ``None`` removes the
+    # silent measured-zero lie that propagated through to LP accounting events.
+    fees0: int | None = None
+    fees1: int | None = None
     liquidity_removed: int | None = None
     additional_amounts: dict[int, int] | None = None
     additional_fees: dict[int, int] | None = None
     current_tick: int | None = None  # VIB-3940
     pool_address: str = ""  # VIB-3940 — for framework slot0 fallback
     source: str | None = None  # VIB-4310 — "collect" | "decrease_liquidity" | None
+    # VIB-4426 P1 #4 — V4 canonical currency addresses in PoolKey-sorted order
+    # (``int(currency0, 16) < int(currency1, 16)``). The V4 receipt parser
+    # populates these from the PoolKey lookup so the LP accounting handler can
+    # resolve symbols / decimals by ADDRESS instead of by user-intent index.
+    # Pre-fix: a user-supplied pool string like ``"USDC/WETH/3000"`` would
+    # silently mis-attribute ``amount0`` (the WETH leg) to ``token0=USDC``
+    # — wrong decimals, wrong USD price. V3 parsers leave these ``None``;
+    # the handler falls back to user-intent order in that case.
+    currency0: str | None = None
+    currency1: str | None = None
 
     @property
     def all_amounts(self) -> list[int]:
@@ -211,9 +226,12 @@ class LPCloseData:
         return result
 
     @property
-    def all_fees(self) -> list[int]:
-        """Return all fee amounts as a list, including additional coins."""
-        result = [self.fees0, self.fees1]
+    def all_fees(self) -> list[int | None]:
+        """Return all fee amounts as a list, including additional coins.
+
+        Per Empty ≠ Zero: ``None`` slots stand for "unmeasured by this parser".
+        """
+        result: list[int | None] = [self.fees0, self.fees1]
         if self.additional_fees:
             for i in sorted(self.additional_fees):
                 result.append(self.additional_fees[i])
@@ -224,8 +242,10 @@ class LPCloseData:
         d: dict[str, Any] = {
             "amount0_collected": str(self.amount0_collected),
             "amount1_collected": str(self.amount1_collected),
-            "fees0": str(self.fees0),
-            "fees1": str(self.fees1),
+            # VIB-4470 — preserve None as JSON null (unmeasured), distinct
+            # from the string "0" (measured zero) per Empty ≠ Zero.
+            "fees0": (str(self.fees0) if self.fees0 is not None else None),
+            "fees1": (str(self.fees1) if self.fees1 is not None else None),
             # Preserve measured zero per the "Empty != Zero" invariant
             # (CLAUDE.md §Accounting). A truthy check would collapse the
             # measured 0 case to None — CodeRabbit pushback on PR #2256.
@@ -233,6 +253,9 @@ class LPCloseData:
             "current_tick": self.current_tick,  # VIB-3940
             "pool_address": self.pool_address,  # VIB-3940
             "source": self.source,  # VIB-4310
+            # VIB-4426 P1 #4
+            "currency0": self.currency0,
+            "currency1": self.currency1,
         }
         if self.additional_amounts:
             d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}
@@ -267,6 +290,8 @@ class LPOpenData:
             had no Swap event (pure NPM.mint LP_OPEN — the canonical
             Almanak swap-then-mint-across-cycles path produces this).
             Empty string when the parser couldn't identify the pool.
+        position_hash: V3: always None. V4: keccak-hashed position key —
+            see VIB-4473.
 
     Example:
         if result.position_id:  # Core field
@@ -284,6 +309,10 @@ class LPOpenData:
     amount1: int | None = None
     current_tick: int | None = None  # VIB-3887
     pool_address: str = ""  # VIB-3893 — for framework slot0 fallback
+    position_hash: str | None = None  # VIB-4473 — V4 lot-matching anchor
+    # VIB-4426 P1 #4 — V4 canonical currency addresses (see LPCloseData).
+    currency0: str | None = None
+    currency1: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -296,6 +325,10 @@ class LPOpenData:
             "amount1": str(self.amount1) if self.amount1 else None,
             "current_tick": self.current_tick,
             "pool_address": self.pool_address,
+            "position_hash": self.position_hash,
+            # VIB-4426 P1 #4
+            "currency0": self.currency0,
+            "currency1": self.currency1,
         }
 
 

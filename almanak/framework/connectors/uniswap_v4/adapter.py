@@ -54,6 +54,30 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Exceptions
+# =============================================================================
+
+
+class UniswapV4UnsupportedPoolError(ValueError):
+    """Pool shape is outside the V0 supported surface (hookless ERC20-ERC20).
+
+    Raised at compile time by the adapter before any transaction is built, so
+    strategies fail loud on unsupported pool shapes instead of submitting
+    transactions that the receipt parser / accounting layer cannot interpret.
+
+    V0 (VIB-4426) supports only:
+    - hooks == 0x0000…0000 (no hook contract attached)
+    - currency0 != 0x0000…0000 (no native-ETH currency leg)
+
+    Salt is intentionally NOT validated here: per VIB-4426 design §Q7,
+    salt = bytes32(tokenId) is the canonical PositionManager._mint path, so
+    a non-zero salt is the normal case and must not be rejected.
+    """
+
+    pass
+
+
+# =============================================================================
 # Config
 # =============================================================================
 
@@ -368,6 +392,14 @@ class UniswapV4Adapter:
             metadata=metadata,
         )
 
+    # crap-allowlist: VIB-4426 — compile_lp_open_intent is the canonical V4 LP-open
+    # compilation pipeline (resolve tokens, normalize pool key, validate slippage,
+    # encode multicall, build calldata, simulate). T06 added 2 V0 scope guards
+    # (hooks != 0, native-ETH currency0) inline at the natural validation point;
+    # extracting them into a helper would not change cc materially because the
+    # function's cc is dominated by the sequential pipeline. Coverage at 84% with
+    # 9 inline test files; a connector-pipeline refactor is the right epic for
+    # this and lives outside VIB-4426 PR-1 scope.
     def compile_lp_open_intent(  # noqa: C901
         self,
         intent: LPOpenIntent,
@@ -472,6 +504,12 @@ class UniswapV4Adapter:
                     )
 
             pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
+
+            # V0 scope guard (VIB-4475): reject pool shapes outside hookless ERC20-ERC20.
+            # Salt is NOT validated — per VIB-4426 §Q7, salt = bytes32(tokenId) is the
+            # canonical PositionManager._mint path (see v4-periphery _mint() source) and
+            # is the normal case for any minted position.
+            self._reject_unsupported_v0_pool(pool_key)
 
             # Try on-chain query via StateView.getSlot0()
             if self.rpc_url:
@@ -592,6 +630,10 @@ class UniswapV4Adapter:
                 metadata=metadata,
             )
 
+        except UniswapV4UnsupportedPoolError:
+            # VIB-4475: V0 scope violations are fail-loud, not soft-error bundles.
+            # The strategy author needs to see an exception, not a silent empty bundle.
+            raise
         except Exception as e:
             logger.error("V4 LP_OPEN compilation failed: %s", e)
             return ActionBundle(
@@ -627,6 +669,18 @@ class UniswapV4Adapter:
 
         if not self.wallet_address:
             raise ValueError("wallet_address must be set before building LP close transactions.")
+
+        # V0 scope guard (VIB-4475): reject native-ETH currency leg before building tx.
+        # Hooks are not visible at close (the position is identified by token_id alone),
+        # so only the currency check is enforceable here; the hook guard lives in
+        # compile_lp_open_intent. Salt is intentionally not validated — per VIB-4426
+        # §Q7, salt = bytes32(tokenId) is the canonical PositionManager._mint path.
+        if currency0 and currency0.lower() == NATIVE_CURRENCY:
+            raise UniswapV4UnsupportedPoolError(
+                f"Uniswap V4 LP close has currency0={currency0} (native ETH) but native-ETH legs "
+                "are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 pools. "
+                "Native-ETH currency support is tracked by VIB-4483 (P-V1-B)."
+            )
 
         try:
             token_id = int(intent.position_id)
@@ -740,6 +794,33 @@ class UniswapV4Adapter:
                 "protocol_version": "v4",
             },
         )
+
+    @staticmethod
+    def _reject_unsupported_v0_pool(pool_key: Any) -> None:
+        """Fail-loud guard for VIB-4426 V0 pool shapes (hookless ERC20-ERC20).
+
+        Rejects:
+        - hooks != 0x0000…0000 — VIB-4485 (P-V1-D) will lift this.
+        - currency0 == 0x0000…0000 (native-ETH leg) — VIB-4483 (P-V1-B) will lift this.
+
+        Does NOT validate salt: per VIB-4426 §Q7, salt = bytes32(tokenId) is the
+        canonical PositionManager._mint path and is always non-zero for a minted
+        position. Rejecting non-zero salt would break every real LP open.
+        """
+        hooks_norm = pool_key.hooks.lower() if isinstance(pool_key.hooks, str) else pool_key.hooks
+        currency0_norm = pool_key.currency0.lower() if isinstance(pool_key.currency0, str) else pool_key.currency0
+        if hooks_norm != NATIVE_CURRENCY:
+            raise UniswapV4UnsupportedPoolError(
+                f"Uniswap V4 pool has hooks={pool_key.hooks} but hook support is not in V0 scope. "
+                "V0 (VIB-4426) supports only hookless ERC20-ERC20 pools. "
+                "Hook support is tracked by VIB-4485 (P-V1-D)."
+            )
+        if currency0_norm == NATIVE_CURRENCY:
+            raise UniswapV4UnsupportedPoolError(
+                f"Uniswap V4 pool has currency0={pool_key.currency0} (native ETH) but native-ETH legs "
+                "are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 pools. "
+                "Native-ETH currency support is tracked by VIB-4483 (P-V1-B)."
+            )
 
     @staticmethod
     def _parse_pool(pool: str) -> tuple[str, str, int]:
@@ -862,4 +943,5 @@ __all__ = [
     "SwapResult",
     "UniswapV4Adapter",
     "UniswapV4Config",
+    "UniswapV4UnsupportedPoolError",
 ]

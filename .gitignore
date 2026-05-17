@@ -84,3 +84,4 @@ strategies/demo/*/uv.lock
 secrets.yaml
 .env.nightly
 platform-plugins/almanak_platform_plugins.egg-info/
+.claude/scheduled_tasks.lock

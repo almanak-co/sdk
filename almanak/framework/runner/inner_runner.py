@@ -505,8 +505,27 @@ class IntentExecutionService:
             # VIB-3203: extract compiler bundle metadata for realized slippage math.
             bundle_metadata = self._decode_bundle_metadata(compile_resp)
 
-            # Run enrichment
-            enricher = ResultEnricher()
+            # Run enrichment. VIB-4477 (T08): pass a sync V4 pool_key_lookup
+            # bridge bound to this runner's GatewayClient so V4 LP_CLOSE
+            # receipts can resolve their canonical PoolKey via gateway RPC.
+            try:
+                from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+                    make_sync_pool_key_lookup,
+                )
+
+                pool_key_lookup = make_sync_pool_key_lookup(self._client)
+            except Exception as exc:
+                # Bridge import / wiring failure: surface loudly so operators can
+                # distinguish "no gateway configured" from "gateway misconfigured".
+                # V4 LP closes that need PoolKey-driven attribution will drop with
+                # MISSING_POOL_KEY_LOOKUP rather than misattribute amounts.
+                logger.error(
+                    "V4 pool_key_lookup bridge unavailable: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                pool_key_lookup = None
+            enricher = ResultEnricher(pool_key_lookup=pool_key_lookup)
             enriched = enricher.enrich(exec_result, intent_obj, context, bundle_metadata=bundle_metadata)
 
             # Transfer enriched data to our result

@@ -932,8 +932,11 @@ class TestExtractLPCloseData:
         assert result is not None
         assert result.amount0_collected == 100
         assert result.amount1_collected == 200
-        assert result.fees0 == 0
-        assert result.fees1 == 0
+        # VIB-4470: without both saw_collect AND saw_burn, the parser
+        # cannot disentangle fees from principal (3-TX Sushi bundle); fees
+        # are unmeasured (None), not a fabricated zero (Empty ≠ Zero).
+        assert result.fees0 is None
+        assert result.fees1 is None
         # No burn -> liquidity_removed=None
         assert result.liquidity_removed is None
 

@@ -40,6 +40,19 @@ class Primitive(StrEnum):
 
     SWAP = "swap"
     LP = "lp"
+    # VIB-4477: parallel LP primitive for Uniswap V4 so its version stream is
+    # isolated from V3 / Aerodrome / TraderJoe / etc. V4 introduces a new
+    # contract shape (PoolKey-driven attribution, 32-byte pool_id, singleton
+    # PoolManager) and a new lot-matching anchor (position_hash); bumping
+    # Primitive.LP from v1 to v2 would silently re-baseline every legacy V3
+    # row. Resolution happens via ``primitive_for(event_type, protocol)`` —
+    # the augment chokepoint and the Accountant Test's per-primitive bucket
+    # collector both consume that helper so V4 rows land under LP_V4 and V3
+    # rows stay under LP. ``record_for(event_type)`` is unchanged (returns
+    # Primitive.LP for LP_OPEN regardless of protocol) so the
+    # AccountingCategory dispatcher continues routing both into
+    # ``lp_handler`` — the handler logic does not differ between V3 and V4.
+    LP_V4 = "lp_v4"
     LENDING = "lending"
     CDP = "cdp"
     LIQUIDATION = "liquidation"

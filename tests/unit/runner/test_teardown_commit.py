@@ -110,8 +110,18 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
     enricher_calls: list[dict] = []
 
     class _SpyEnricher:
-        def __init__(self, live_mode: bool = True) -> None:
+        def __init__(
+            self,
+            live_mode: bool = True,
+            *,
+            # VIB-4477 (T08): teardown_commit now threads a sync
+            # pool_key_lookup bridge so V4 LP_CLOSE receipts can resolve
+            # PoolKey via gateway. The spy records it but does not exercise
+            # it (the spy never invokes a parser).
+            pool_key_lookup=None,
+        ) -> None:
             self.live_mode = live_mode
+            self.pool_key_lookup = pool_key_lookup
 
         def enrich(self, result, intent, context, *, bundle_metadata=None):
             enricher_calls.append(
@@ -449,7 +459,7 @@ async def test_enrich_failure_does_not_block_ledger_outbox_sidecar(
     runner = _make_runner(live_mode=True)
 
     class _BoomEnricher:
-        def __init__(self, live_mode: bool = True) -> None: ...
+        def __init__(self, live_mode: bool = True, *, pool_key_lookup=None) -> None: ...
         def enrich(self, *args, **kwargs):
             raise RuntimeError("parser explosion")
 
@@ -496,7 +506,7 @@ async def test_sidecar_failure_captured_not_raised(
     runner = _make_runner(live_mode=True)
 
     class _SpyEnricher:
-        def __init__(self, live_mode: bool = True) -> None: ...
+        def __init__(self, live_mode: bool = True, *, pool_key_lookup=None) -> None: ...
         def enrich(self, result, *args, **kwargs):
             return result
 

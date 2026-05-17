@@ -558,7 +558,9 @@ class TestAdapterLPCompilation:
         assert len(bundle.transactions) == 0
         assert "error" in bundle.metadata
 
-    def test_compile_lp_open_with_hooks_warning(self, adapter):
+    def test_compile_lp_open_with_hooks_rejects(self, adapter):
+        """VIB-4475: hooked pools are hard-rejected at V0 (was a soft warning pre-VIB-4475)."""
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         # Hook address with before_add_liquidity (bit 11 = 0x800)
@@ -574,11 +576,8 @@ class TestAdapterLPCompilation:
             },
         )
         price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
-        bundle = adapter.compile_lp_open_intent(intent, price_oracle)
-
-        # Should have a warning about empty hookData
-        assert bundle.metadata.get("warnings")
-        assert any("hook" in w.lower() for w in bundle.metadata["warnings"])
+        with pytest.raises(UniswapV4UnsupportedPoolError, match="VIB-4485"):
+            adapter.compile_lp_open_intent(intent, price_oracle)
 
     def test_compile_lp_close_intent(self, adapter):
         from almanak.framework.intents.vocabulary import LPCloseIntent
@@ -797,11 +796,30 @@ class TestReceiptParserLP:
         receipt = {"logs": []}
         assert parser.extract_liquidity(receipt) is None
 
-    def test_extract_lp_close_data(self, parser):
+    def test_extract_lp_close_data(self):
+        """T07 (VIB-4476): PoolKey-driven token attribution.
+
+        The parser MUST be given a ``pool_key_lookup`` so it can resolve the
+        ModifyLiquidity ``pool_id`` back to its canonical PoolKey and assign
+        ``amount0_collected`` / ``amount1_collected`` by ``currency0`` /
+        ``currency1`` order (not by sorting observed Transfer addresses).
+        """
+        from almanak.framework.connectors.uniswap_v4.sdk import PoolKey
+
         token_a = "0x000000000000000000000000000000000000000a"  # sorted first
         token_b = "0x000000000000000000000000000000000000000b"
+        pool_id_hex = "0x" + "ab" * 32
+        pool_key = PoolKey(currency0=token_a, currency1=token_b, fee=500, tick_spacing=10)
+
+        parser = UniswapV4ReceiptParser(
+            chain="arbitrum",
+            pool_manager_address=self.POOL_MANAGER,
+            position_manager_address=self.POSITION_MANAGER,
+            pool_key_lookup=lambda pid, chain: pool_key if pid.lower() == pool_id_hex else None,
+        )
 
         receipt = {
+            "transactionHash": "0xclose",
             "logs": [
                 # Decrease liquidity event (negative delta)
                 self._modify_liquidity_log(liquidity_delta=-500_000),
@@ -815,6 +833,11 @@ class TestReceiptParserLP:
         assert lp_close_data.liquidity_removed == 500_000
         assert lp_close_data.amount0_collected == 1000
         assert lp_close_data.amount1_collected == 2000
+        # T07 contract: 32-byte pool_address + source marker + fees None
+        assert lp_close_data.pool_address == pool_id_hex
+        assert lp_close_data.source == "modify_liquidity"
+        assert lp_close_data.fees0 is None
+        assert lp_close_data.fees1 is None
 
     def test_extract_lp_close_data_none_when_no_events(self, parser):
         receipt = {"logs": []}

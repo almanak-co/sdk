@@ -1823,11 +1823,16 @@ class SushiSwapV3ReceiptParser:
             # principal = burn amounts; fees = collect - burn when both are
             # in the same receipt (UV3 single-TX close path), clamped at
             # zero. On Sushi V3 the 3-TX bundle splits Burn and Collect into
-            # separate receipts; a Burn-only receipt yields fees={0,0}, a
-            # Collect-only receipt yields full collect as ``amount{0,1}_collected``
-            # (we cannot disentangle without the burn).
-            fees0 = max(collect_amount0 - burn_amount0, 0) if (saw_collect and saw_burn) else 0
-            fees1 = max(collect_amount1 - burn_amount1, 0) if (saw_collect and saw_burn) else 0
+            # separate receipts; a single receipt that lacks either side
+            # cannot disentangle fees from principal.
+            # VIB-4470 — emit ``None`` rather than fabricating ``0`` when fees
+            # cannot be measured from this receipt (Empty ≠ Zero).
+            if saw_collect and saw_burn:
+                fees0: int | None = max(collect_amount0 - burn_amount0, 0)
+                fees1: int | None = max(collect_amount1 - burn_amount1, 0)
+            else:
+                fees0 = None
+                fees1 = None
 
             return LPCloseData(
                 amount0_collected=collect_amount0 if saw_collect else burn_amount0,

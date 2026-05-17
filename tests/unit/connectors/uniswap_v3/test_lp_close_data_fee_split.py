@@ -146,12 +146,14 @@ def test_collect_only_treats_full_amount_as_fees(
     assert out.liquidity_removed is None
 
 
-def test_burn_only_yields_principal_with_zero_fees(
+def test_burn_only_yields_principal_with_unmeasured_fees(
     parser: UniswapV3ReceiptParser,
 ) -> None:
     """A Burn without a matching Collect (uncommon — would require explicit
-    decreaseLiquidity without collecting) yields principal amounts and
-    zero fees, not None."""
+    decreaseLiquidity without collecting) yields principal amounts. Per
+    VIB-4470 (Empty ≠ Zero) fees are UNMEASURED in this branch, not zero:
+    no Collect event means the parser did not observe fee amounts and
+    must emit ``None`` rather than fabricate a measured-zero claim."""
     receipt = {
         "logs": [
             _make_burn_log(amount=LIQUIDITY, amount0=PRINCIPAL0, amount1=PRINCIPAL1),
@@ -162,8 +164,8 @@ def test_burn_only_yields_principal_with_zero_fees(
     assert out is not None
     assert out.amount0_collected == PRINCIPAL0
     assert out.amount1_collected == PRINCIPAL1
-    assert out.fees0 == 0
-    assert out.fees1 == 0
+    assert out.fees0 is None
+    assert out.fees1 is None
     assert out.liquidity_removed == LIQUIDITY
 
 
