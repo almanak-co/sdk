@@ -72,6 +72,22 @@ HISTORICAL_BACKFILL_WINDOW = 50_000
 MAX_HISTORICAL_BACKFILL_BLOCKS = 500_000
 
 
+class V4CanonicalSeedCollisionError(RuntimeError):
+    """``register_canonical`` was called with a pool_id already present in
+    the cache, but the new :class:`CachedPoolKey` differs from the existing
+    one. Indicates a programming error in the canonical seed registry — a
+    duplicate row that produces the same pool_id hash from different PoolKey
+    fields (genuine keccak collisions are vanishingly unlikely; far more
+    common is a duplicate symbol pair, a wrong fee tier, or a token-resolver
+    address change). The cache refuses to silently overwrite because doing
+    so would mask the bug at boot.
+
+    Defined in this module rather than :mod:`v4_canonical_pools` to keep
+    the cache's collision contract co-located with the cache itself — the
+    cache is the one enforcing the invariant, not the seed module.
+    """
+
+
 class V4PoolKeyLookupError(Exception):
     """Refresh-time failure that prevented the cache from being able to
     answer the lookup. VIB-4426 P1 #2 — distinguishes "we cannot query
@@ -259,6 +275,45 @@ class V4PoolKeyCache:
         chain_l = chain.lower()
         idx = self._index.setdefault(chain_l, {})
         idx[_normalize_pool_id(pool_id)] = pool_key
+
+    def register_canonical(self, chain: str, pool_id: bytes | str, pool_key: CachedPoolKey) -> str:
+        """Insert a deterministically-computed canonical PoolKey.
+
+        Used by :mod:`almanak.gateway.data.v4_canonical_pools` at gateway
+        boot to pre-seed pools whose ``Initialize`` event lives outside the
+        bounded backfill window (VIB-4534). Differs from :meth:`register`
+        in two ways:
+
+        1. **Idempotent on identical input** — repeated calls with the same
+           ``(chain, pool_id, pool_key)`` return ``"already_present"`` and
+           do not mutate the cache.
+        2. **Collision-detecting on conflicting input** — calling with a
+           pool_id already present BUT a different :class:`CachedPoolKey`
+           raises :class:`V4CanonicalSeedCollisionError`. This protects
+           against duplicate / mis-fielded rows in the seed registry that
+           would otherwise silently corrupt the cache.
+
+        Returns:
+            ``"registered"`` if the entry was newly inserted, or
+            ``"already_present"`` if an identical entry was already cached.
+
+        Raises:
+            V4CanonicalSeedCollisionError: pool_id already present with a
+                different :class:`CachedPoolKey`.
+        """
+        chain_l = chain.lower()
+        pid = _normalize_pool_id(pool_id)
+        idx = self._index.setdefault(chain_l, {})
+        existing = idx.get(pid)
+        if existing is not None:
+            if existing == pool_key:
+                return "already_present"
+            raise V4CanonicalSeedCollisionError(
+                f"V4 canonical seed collision: chain={chain_l} pool_id={pid} "
+                f"existing={existing!r} attempted={pool_key!r}"
+            )
+        idx[pid] = pool_key
+        return "registered"
 
     async def lookup(self, chain: str, pool_id: bytes | str) -> CachedPoolKey | None:
         """Resolve a pool_id to a PoolKey on the given chain.
@@ -589,6 +644,7 @@ __all__ = [
     "MAX_HISTORICAL_BACKFILL_BLOCKS",
     "NO_HOOKS",
     "CachedPoolKey",
+    "V4CanonicalSeedCollisionError",
     "V4PoolKeyCache",
     "V4PoolKeyLookupError",
     "_decode_initialize_log",

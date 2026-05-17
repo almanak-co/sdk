@@ -933,6 +933,16 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         VIB-4426 — construction is guarded by ``_v4_pool_key_cache_lock``
         so two concurrent first-callers cannot each instantiate (which
         would discard the loser's in-flight backfill state).
+
+        VIB-4534 — immediately after construction, the canonical PoolKey
+        seed registry (:mod:`almanak.gateway.data.v4_canonical_pools`) is
+        loaded so that WETH/USDC and other common pairs resolve on the
+        first ``LookupV4PoolKey`` without an eth_getLogs scan. The seed is
+        in-memory only (no network I/O); pre-seeding happens INSIDE the
+        lock so the seed is visible to the very first lookup. A
+        configuration failure in the seed table fails loudly here
+        (V4CanonicalSeedConfigError / V4CanonicalSeedCollisionError) — a
+        misconfigured seed is a boot-time bug, not a runtime degradation.
         """
         if self._v4_pool_key_cache is not None:
             return self._v4_pool_key_cache
@@ -940,9 +950,19 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Double-checked: another coroutine may have constructed while
             # we were waiting on the lock.
             if self._v4_pool_key_cache is None:
+                from almanak.gateway.data.v4_canonical_pools import (
+                    seed_canonical_pool_keys,
+                )
                 from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyCache
 
-                self._v4_pool_key_cache = V4PoolKeyCache(network=self.settings.network)
+                cache = V4PoolKeyCache(network=self.settings.network)
+                # Pre-seed canonical pairs BEFORE publishing the cache to
+                # ``self._v4_pool_key_cache``. A concurrent reader observing
+                # a partially-seeded cache could mis-classify a canonical
+                # pool as "not found"; doing the work before the assignment
+                # closes that window.
+                seed_canonical_pool_keys(cache)
+                self._v4_pool_key_cache = cache
             return self._v4_pool_key_cache
 
     async def LookupV4PoolKey(
