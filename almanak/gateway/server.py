@@ -443,8 +443,8 @@ class GatewayServer:
         self._integration_servicer = IntegrationServiceServicer(self.settings)
         gateway_pb2_grpc.add_IntegrationServiceServicer_to_server(self._integration_servicer, self.server)
 
-        dashboard_servicer = DashboardServiceServicer(self.settings)
-        gateway_pb2_grpc.add_DashboardServiceServicer_to_server(dashboard_servicer, self.server)
+        self._dashboard_servicer = DashboardServiceServicer(self.settings)
+        gateway_pb2_grpc.add_DashboardServiceServicer_to_server(self._dashboard_servicer, self.server)
 
         self._funding_rate_servicer = FundingRateServiceServicer(self.settings)
         gateway_pb2_grpc.add_FundingRateServiceServicer_to_server(self._funding_rate_servicer, self.server)
@@ -483,6 +483,12 @@ class GatewayServer:
         self._position_servicer.state_servicer = self._state_servicer
         self._position_servicer.wallet_registry = wallet_registry
         gateway_pb2_grpc.add_PositionServiceServicer_to_server(self._position_servicer, self.server)
+
+        # VIB-4493 Phase 1C/D: wire PositionService into DashboardService so
+        # GetReconciliationReport / PreviewReconcile / ApplyReconcile /
+        # RefreshRegistryFromChain can invoke Reconcile in-process. Same
+        # cross-servicer pattern as PositionService's own state/rpc refs above.
+        self._dashboard_servicer.position_servicer = self._position_servicer
 
         logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
         logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")

@@ -274,6 +274,12 @@ class IntentEventContext:
     # context lets the position_event seeder reuse the same data without
     # round-tripping back through the gateway.
     post_state: dict[str, Any] | None = None
+    # VIB-4493 — pre_state is needed for CLOSE event value_usd: post-state
+    # leg value is 0 by definition when refined to CLOSE (that's WHY it's
+    # CLOSE), so stamping post-state would write ``0E-8`` and the dashboard
+    # cannot tell "how much was closed". pre_state's leg value IS the
+    # closed amount. Same dict shape / resolver as ``post_state``.
+    pre_state: dict[str, Any] | None = None
     # VIB-4085 — wallet address scopes the lending position_id so two
     # strategies on different wallets don't collide on the same chain +
     # protocol + asset.
@@ -943,7 +949,71 @@ def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.value_usd = str(leg_value)
 
     _refine_lending_event_type(event, intent_type, leg_value, ctx.recent_open_events or {})
+
+    action_delta = _compute_lending_action_delta(
+        pre_state=ctx.pre_state,
+        leg_value=leg_value,
+        position_type=event.position_type,
+    )
+    if action_delta is not None:
+        event.value_usd = action_delta
+
     _build_lending_attribution(event, post, asset, intent_type)
+
+
+def _compute_lending_action_delta(
+    *,
+    pre_state: dict | None,
+    leg_value: Any,
+    position_type: str,
+) -> str | None:
+    """Return ``abs(pre - post)`` as a decimal string, or None to keep the
+    post-state stamp.
+
+    VIB-4493 / VIB-4529 — every lending event should stamp the **action
+    delta** into ``value_usd``, not the post-state remaining balance.
+    Post-state semantics break in three ways for an operator scanning
+    the Position Lifecycle table:
+
+      * CLOSE    — post is 0 by definition (that's WHY it's CLOSE), so
+                   every row reads ``0E-8`` and you can't tell the close
+                   size at a glance.
+      * DECREASE — post is the remaining balance after the partial
+                   WITHDRAW, NOT the amount withdrawn. Reader has to diff
+                   against the prior row to find the action size.
+      * OPEN / INCREASE — post conflates the pre-existing balance with
+                   this action's contribution. Surfaces as inflated
+                   opening values when the wallet already had a position
+                   from a previous run on the same shared Anvil fork.
+
+    LP_OPEN / LP_CLOSE already write action-related values; this aligns
+    lending with that contract. The unified ``abs(pre - post)`` formula
+    collapses to ``pre`` for CLOSE (post=0) and to ``post - pre`` /
+    ``pre - post`` for INCREASE / DECREASE / OPEN — i.e. the size of
+    what the action moved on-chain.
+
+    Opt-in via ``pre_state``: callers that don't pass it (legacy paper
+    / dry-run, third-party harnesses, fixtures) get ``None`` back and
+    keep the pre-fix post-state semantics. Tests pin both paths.
+    """
+    if pre_state is None or leg_value is None:
+        return None
+    pre = _resolve_lending_post_state(pre_state)
+    pre_leg_value = (
+        pre.get("collateral_value_usd")
+        if position_type == PositionType.LENDING_COLLATERAL
+        else pre.get("debt_value_usd")
+    )
+    if pre_leg_value is None:
+        return None
+    try:
+        delta = abs(Decimal(str(pre_leg_value)) - Decimal(str(leg_value)))
+    except (InvalidOperation, ValueError, TypeError):
+        # Non-finite or unparseable pre/post → keep post-state stamp.
+        return None
+    if not delta.is_finite():
+        return None
+    return str(delta)
 
 
 def _stringify_or_none(v: Any) -> str | None:
@@ -968,6 +1038,7 @@ def build_position_event_from_intent(
     price_oracle: dict | None = None,
     recent_open_events: dict | None = None,
     post_state: dict | None = None,
+    pre_state: dict | None = None,
     wallet_address: str = "",
 ) -> PositionEvent | None:
     """Build a PositionEvent from an intent and execution result.
@@ -1006,6 +1077,7 @@ def build_position_event_from_intent(
         ledger_entry_id=ledger_entry_id,
         price_oracle=price_oracle,
         post_state=post_state,
+        pre_state=pre_state,
         wallet_address=wallet_address,
         recent_open_events=recent_open_events,
     )

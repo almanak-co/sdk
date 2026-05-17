@@ -1631,6 +1631,40 @@ service DashboardService {
   // NOT recompose by reading the two streams separately, or the timestamp
   // cursor and dedup logic will drift. (VIB-4042 / PR3)
   rpc GetActivityFeed(GetActivityFeedRequest) returns (GetActivityFeedResponse);
+
+  // Positions — registry-authoritative identity (position_registry) joined
+  // with snapshot-authoritative valuation (portfolio_snapshots +
+  // position_state_snapshots). Replaces SQLite-direct reads in
+  // framework/dashboard/pages/detail.py. Carries cutover_state per
+  // accounting_category so renderers can split authoritative positions
+  // from pre-cutover "Unverified Holdings". (VIB-4493)
+  rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
+
+  // Per-position range / fee / balance history. Source-routes by primitive:
+  // LP/PERP from position_events, lending from accounting_events.
+  // Swap/prediction return empty + stub_message (history concept N/A). (VIB-4493)
+  rpc GetPositionRangeHistory(GetPositionRangeHistoryRequest) returns (GetPositionRangeHistoryResponse);
+
+  // Three-way diff across transaction_ledger / portfolio_snapshots /
+  // position_registry. Read-only. LP-only in v1; non-LP primitives surface
+  // per-primitive stubs (pending VIB-4202/4209/4501). 5s TTL cache. (VIB-4493)
+  rpc GetReconciliationReport(GetReconciliationReportRequest) returns (GetReconciliationReportResponse);
+
+  // Dry-run reconciliation. Thin wrapper over PositionService.Reconcile(apply=false).
+  // Returns a preview_token bound to current registry/ledger state hashes —
+  // pass to ApplyReconcile to apply. Operator-only. (VIB-4493)
+  rpc PreviewReconcile(PreviewReconcileRequest) returns (PreviewReconcileResponse);
+
+  // Applies a previously-issued preview. Fails STATE_DRIFT if registry/
+  // ledger state changed since preview was issued. Operator-only. (VIB-4493)
+  rpc ApplyReconcile(ApplyReconcileRequest) returns (ApplyReconcileResponse);
+
+  // Forces fresh on-chain reads for every position in position_registry for
+  // the strategy. Updates on_chain_verified_at, re-emits divergent events.
+  // Rate-limited at the DashboardService layer to one in-flight per strategy
+  // (PositionService.Reconcile itself has no concurrency guard). Operator-only.
+  // (VIB-4493)
+  rpc RefreshRegistryFromChain(RefreshRegistryFromChainRequest) returns (RefreshRegistryFromChainResponse);
 }
 
 // =============================================================================
@@ -2202,6 +2236,285 @@ message ActivityFeedItem {
     TimelineEventInfo timeline_event = 10;
     LedgerEntryInfo ledger_entry = 11;
   }
+}
+
+// =============================================================================
+// VIB-4493 — Dashboard Production-Ready Rewrite messages
+//
+// Six new RPCs that expose position_registry / migration_state / reconciliation
+// state through the gateway so that framework/dashboard/** has zero direct
+// SQLite or .dashboard_events.json access. See parent epic VIB-4492 and
+// PortfolioManager/DashboardMay16.md v5 for design.
+// =============================================================================
+
+// Cutover state for a (deployment_id, accounting_category) pair. Derived
+// gateway-side from migration_state (almanak/framework/state/backends/sqlite.py:720-737)
+// plus on-chain reconciliation freshness. NOT a runtime-flippable flag —
+// computed live from durable counters.
+enum CutoverState {
+  CUTOVER_STATE_UNSPECIFIED = 0;
+  // migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NULL
+  CUTOVER_STATE_PRE_BACKFILL = 1;
+  // migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NOT NULL
+  CUTOVER_STATE_BACKFILL_IN_PROGRESS = 2;
+  // migration_state.position_registry_backfill_complete=1 AND on-chain reconciliation < 24h AND parity tests pass
+  CUTOVER_STATE_BACKFILL_COMPLETE = 3;
+  // All deployments for the accounting category at BACKFILL_COMPLETE for ≥ N
+  // consecutive snapshots. Legacy lane safe to delete (Phase 6).
+  CUTOVER_STATE_REGISTRY_AUTHORITATIVE = 4;
+}
+
+// Where a position row was sourced from. Renderers paint provenance badges
+// based on this + PositionConfidence.
+enum PositionSource {
+  POSITION_SOURCE_UNSPECIFIED = 0;
+  POSITION_SOURCE_REGISTRY = 1;     // position_registry (authoritative post-cutover)
+  POSITION_SOURCE_SNAPSHOT = 2;     // portfolio_snapshots / position_state_snapshots (transitional)
+  POSITION_SOURCE_LEGACY = 3;       // pre-cutover evidence set (Unverified Holdings lane)
+}
+
+// Cross-source agreement. HIGH = registry + ledger + snapshot agree. LOW =
+// single-source (no cross-check yet). DIVERGED = sources disagree (red row).
+enum PositionConfidence {
+  POSITION_CONFIDENCE_UNSPECIFIED = 0;
+  POSITION_CONFIDENCE_HIGH = 1;
+  POSITION_CONFIDENCE_MEDIUM = 2;
+  POSITION_CONFIDENCE_LOW = 3;
+  POSITION_CONFIDENCE_DIVERGED = 4;
+}
+
+// Mirrors position_registry.status CHECK constraint (sqlite.py:644-645).
+enum PositionStatus {
+  POSITION_STATUS_UNSPECIFIED = 0;
+  POSITION_STATUS_OPEN = 1;
+  POSITION_STATUS_CLOSED = 2;
+  POSITION_STATUS_REORG_INVALIDATED = 3;
+}
+
+message GetPositionsRequest {
+  string strategy_id = 1;                  // required
+  string chain = 2;                        // optional filter
+  string primitive = 3;                    // optional filter ("lp", "lending", "perp", ...)
+  string accounting_category = 4;          // optional filter ("LP_UNIV3", "AAVE_COLLATERAL", ...)
+  PositionStatus status = 5;               // optional; UNSPECIFIED = all statuses
+  // Include pre-cutover evidence-set rows (Unverified Holdings) in the
+  // `unverified` field of the response. Renderer must surface these under
+  // a separate header — they are NEVER mixed with the authoritative lane.
+  bool include_legacy_unverified = 6;
+}
+
+message GetPositionsResponse {
+  // Authoritative / near-authoritative positions (REGISTRY or SNAPSHOT source).
+  repeated PositionEntry positions = 1;
+  // LEGACY-sourced rows (PRE_BACKFILL). Only populated when
+  // include_legacy_unverified=true. Renderer shows under a separate
+  // "Unverified Holdings — Registry Pending" header.
+  repeated PositionEntry unverified = 2;
+  // Per-accounting_category cutover snapshot for this strategy. Renderer
+  // uses this to pick the right header per group + render audit badges.
+  repeated CutoverStateEntry cutover_states = 3;
+}
+
+// Per-(accounting_category) cutover snapshot for a strategy. Exposes the
+// raw counters from migration_state so the dashboard audit surface can
+// render them directly (no derivation/aggregation outside the gateway).
+message CutoverStateEntry {
+  string accounting_category = 1;
+  CutoverState state = 2;
+  int64 rows_synthesized = 3;
+  int64 rows_skipped_already_present = 4;
+  string backfill_started_at = 5;          // ISO-8601 UTC; empty when never started
+  string backfill_completed_at = 6;        // ISO-8601 UTC; empty when not complete
+  int32 backfill_reader_version = 7;
+  int64 last_reconciled_at_block = 8;      // most-recent reconcile across the category
+  int64 last_reconciled_unix_seconds = 9;  // wall-clock approximation for freshness pill
+}
+
+// A single position row. Identity from position_registry, valuation from
+// portfolio_snapshots + position_state_snapshots. Carries provenance +
+// cutover_state so renderers can paint trust badges and route to the
+// right header.
+message PositionEntry {
+  // Display key — registry handle when set, else position_id. Display only.
+  string handle = 1;
+  // Primary key component. Stable across renames. Use this for follow-up
+  // RPC calls (e.g. GetPositionRangeHistory).
+  string physical_identity_hash = 2;
+  string deployment_id = 3;
+  string chain = 4;
+  string primitive = 5;
+  string accounting_category = 6;
+  PositionStatus status = 7;
+  int64 opened_at_block = 8;
+  int64 closed_at_block = 9;
+  string opened_tx = 10;
+  string closed_tx = 11;
+  string value_usd = 12;                   // decimal-string
+  string value_token0 = 13;                // decimal-string; LP-only, empty otherwise
+  string value_token1 = 14;                // decimal-string; LP-only, empty otherwise
+  PositionSource source = 15;
+  PositionConfidence confidence = 16;
+  int64 last_reconciled_at_block = 17;
+  CutoverState cutover_state = 18;
+  // Primitive-specific fields, JSON-encoded. Renderer parses per primitive:
+  //   LP      → {tick_lower, tick_upper, liquidity, in_range, fees_token0, fees_token1}
+  //   LENDING → {supply_balance, borrow_balance, health_factor, ltv}
+  //   PERP    → {leverage, entry_price, mark_price, unrealized_pnl, is_long}
+  bytes primitive_payload_json = 19;
+  // ISO-8601 "as of" timestamp for the valuation. Drives the freshness pill.
+  string value_as_of = 20;
+}
+
+message GetPositionRangeHistoryRequest {
+  string strategy_id = 1;                  // required
+  string chain = 2;                        // required (history is per-chain)
+  string accounting_category = 3;          // required
+  // Either handle OR physical_identity_hash. If both supplied,
+  // physical_identity_hash wins (it's the stable key). At least one is required.
+  string handle = 4;
+  string physical_identity_hash = 5;
+  int64 from_unix_seconds = 6;             // optional; 0 = since position open
+  int64 to_unix_seconds = 7;               // optional; 0 = now
+}
+
+message GetPositionRangeHistoryResponse {
+  // Source-routed by primitive — see RangeHistoryEntry.source_table.
+  repeated RangeHistoryEntry entries = 1;
+  // Populated for swap/prediction primitives where history concept doesn't
+  // apply ("no held position, only intent log"). Renderer shows this instead
+  // of an empty table. Empty entries + empty stub_message = genuinely no
+  // history (e.g., position just opened in this block).
+  string stub_message = 2;
+}
+
+message RangeHistoryEntry {
+  int64 timestamp_unix_seconds = 1;
+  int64 block_number = 2;
+  string event_type = 3;                   // OPEN | ADJUST | COLLECT | CLOSE | TRANSFER | NONE
+  // Which canonical table this row came from. Renderers MAY render slightly
+  // differently per source (e.g., lending events lack tick fields).
+  string source_table = 4;                 // "position_events" | "accounting_events"
+  // Strong join key back to transaction_ledger.id. Always populated.
+  string ledger_entry_id = 5;
+  string tx_hash = 6;
+  // Primitive-specific payload, JSON-encoded:
+  //   LP/PERP  (position_events)  → tick_lower/upper, liquidity, fees, in_range, leverage, entry_price
+  //   LENDING  (accounting_events)→ supply_balance, borrow_balance, health_factor, apy
+  bytes payload_json = 7;
+}
+
+// =============================================================================
+// Reconciliation messages (LP-only in v1; stubs for GMX/Pendle/Aave)
+// =============================================================================
+
+enum ReconciliationSeverity {
+  RECONCILIATION_SEVERITY_UNSPECIFIED = 0;
+  RECONCILIATION_SEVERITY_INFO = 1;        // all sources agree
+  RECONCILIATION_SEVERITY_WARN = 2;        // 2-of-3 agree, minor drift
+  RECONCILIATION_SEVERITY_DIVERGED = 3;    // sources disagree (red row)
+}
+
+message GetReconciliationReportRequest {
+  string strategy_id = 1;
+}
+
+message GetReconciliationReportResponse {
+  // Three-way-diff findings across (ledger × snapshots × registry).
+  // LP-only in v1; non-LP primitives surface stubs below instead.
+  repeated ReconciliationFinding findings = 1;
+  // Per-primitive stubs for primitives where the parser isn't shipped yet.
+  // Renderer displays one stub card per entry. Today: GMX (VIB-4202),
+  // Pendle (VIB-4209), Aave (VIB-4501).
+  repeated PrimitiveCoverageStub primitive_stubs = 2;
+  // Matches PositionService.Reconcile shape for forensic correlation.
+  string reconciliation_id = 3;
+  int64 source_block_number = 4;
+  // ISO-8601 "computed at". Drives the freshness pill.
+  string as_of = 5;
+}
+
+message ReconciliationFinding {
+  string accounting_category = 1;
+  string physical_identity_hash = 2;
+  ReconciliationSeverity severity = 3;
+  // Human-readable: "ledger says 100 USDC, registry says 95"
+  string delta = 4;
+  // Three-way coverage flags so operator sees which sources contributed.
+  bool ledger_has_row = 5;
+  bool snapshot_has_row = 6;
+  bool registry_has_row = 7;
+  // Display-only suggested next action: e.g. "PreviewReconcile to inspect rebuilt rows".
+  string suggested_action = 8;
+}
+
+// Per-primitive stub rendered when a reconciliation parser isn't shipped.
+message PrimitiveCoverageStub {
+  string primitive = 1;                    // "lending" | "perp" | "pendle_lp" | etc.
+  string message = 2;                      // "Reconciliation for lending — pending VIB-4501"
+  string ticket = 3;                       // "VIB-4501"
+}
+
+message PreviewReconcileRequest {
+  string strategy_id = 1;
+}
+
+message PreviewReconcileResponse {
+  // Idempotency key. Bound at preview time to current registry + ledger state
+  // hashes. Pass to ApplyReconcile to apply this exact preview. Token
+  // invalidates (STATE_DRIFT) if registry or ledger changes between
+  // preview and apply.
+  string preview_token = 1;
+  // The diff that would be applied. Same buckets as
+  // PositionService.ReconcileResponse — reused intentionally so renderers
+  // can share rendering code.
+  repeated MatchedPosition matched = 2;
+  repeated PhantomMissingPosition phantom_missing = 3;
+  repeated StrandedRow stranded = 4;
+  // Non-LP primitives surface stubs (LP-only in v1).
+  repeated PrimitiveCoverageStub primitive_stubs = 5;
+  // Forensic correlation with PositionService.Reconcile audit trail.
+  string reconciliation_id = 6;
+  int64 source_block_number = 7;
+  // Server-side TTL on the preview_token. Default 5 minutes.
+  int64 expires_at_unix_seconds = 8;
+}
+
+message ApplyReconcileRequest {
+  string strategy_id = 1;
+  // Token issued by PreviewReconcile. INVALID_ARGUMENT if empty.
+  string preview_token = 2;
+}
+
+message ApplyReconcileResponse {
+  // "SUCCESS"          — all phantom_missing rows applied cleanly.
+  // "STATE_DRIFT"      — registry/ledger state changed since preview was issued.
+  //                      Operator must re-issue PreviewReconcile.
+  // "PARTIAL_SUCCESS"  — some phantom_missing rows applied, others failed
+  //                      (existing per-phantom error isolation; see
+  //                      primitive_errors for the failures).
+  // "EXPIRED"          — preview_token TTL elapsed.
+  // "NOT_FOUND"        — preview_token unrecognized.
+  string result = 1;
+  string detail = 2;
+  repeated RebuiltRow rebuilt = 3;
+  repeated PrimitiveError primitive_errors = 4;
+  string reconciliation_id = 5;
+}
+
+message RefreshRegistryFromChainRequest {
+  string strategy_id = 1;
+}
+
+message RefreshRegistryFromChainResponse {
+  // "SUCCESS"      — fresh chain reads completed; on_chain_verified_at updated.
+  // "RATE_LIMITED" — another refresh is already in flight for this strategy.
+  // "FAILED"       — see `detail` for diagnostic.
+  string result = 1;
+  string detail = 2;
+  int32 positions_refreshed = 3;
+  int32 events_emitted = 4;                // count of divergent position_events re-emitted
+  int64 source_block_number = 5;
+  string reconciliation_id = 6;
 }
 
 // =============================================================================

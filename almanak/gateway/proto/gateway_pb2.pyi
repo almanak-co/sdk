@@ -19,6 +19,154 @@ else:
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class _CutoverState:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _CutoverStateEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_CutoverState.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    CUTOVER_STATE_UNSPECIFIED: _CutoverState.ValueType  # 0
+    CUTOVER_STATE_PRE_BACKFILL: _CutoverState.ValueType  # 1
+    """migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NULL"""
+    CUTOVER_STATE_BACKFILL_IN_PROGRESS: _CutoverState.ValueType  # 2
+    """migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NOT NULL"""
+    CUTOVER_STATE_BACKFILL_COMPLETE: _CutoverState.ValueType  # 3
+    """migration_state.position_registry_backfill_complete=1 AND on-chain reconciliation < 24h AND parity tests pass"""
+    CUTOVER_STATE_REGISTRY_AUTHORITATIVE: _CutoverState.ValueType  # 4
+    """All deployments for the accounting category at BACKFILL_COMPLETE for ≥ N
+    consecutive snapshots. Legacy lane safe to delete (Phase 6).
+    """
+
+class CutoverState(_CutoverState, metaclass=_CutoverStateEnumTypeWrapper):
+    """=============================================================================
+    VIB-4493 — Dashboard Production-Ready Rewrite messages
+
+    Six new RPCs that expose position_registry / migration_state / reconciliation
+    state through the gateway so that framework/dashboard/** has zero direct
+    SQLite or .dashboard_events.json access. See parent epic VIB-4492 and
+    PortfolioManager/DashboardMay16.md v5 for design.
+    =============================================================================
+
+    Cutover state for a (deployment_id, accounting_category) pair. Derived
+    gateway-side from migration_state (almanak/framework/state/backends/sqlite.py:720-737)
+    plus on-chain reconciliation freshness. NOT a runtime-flippable flag —
+    computed live from durable counters.
+    """
+
+CUTOVER_STATE_UNSPECIFIED: CutoverState.ValueType  # 0
+CUTOVER_STATE_PRE_BACKFILL: CutoverState.ValueType  # 1
+"""migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NULL"""
+CUTOVER_STATE_BACKFILL_IN_PROGRESS: CutoverState.ValueType  # 2
+"""migration_state.position_registry_backfill_complete=0 AND backfill_started_at IS NOT NULL"""
+CUTOVER_STATE_BACKFILL_COMPLETE: CutoverState.ValueType  # 3
+"""migration_state.position_registry_backfill_complete=1 AND on-chain reconciliation < 24h AND parity tests pass"""
+CUTOVER_STATE_REGISTRY_AUTHORITATIVE: CutoverState.ValueType  # 4
+"""All deployments for the accounting category at BACKFILL_COMPLETE for ≥ N
+consecutive snapshots. Legacy lane safe to delete (Phase 6).
+"""
+Global___CutoverState: _TypeAlias = CutoverState  # noqa: Y015
+
+class _PositionSource:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _PositionSourceEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_PositionSource.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    POSITION_SOURCE_UNSPECIFIED: _PositionSource.ValueType  # 0
+    POSITION_SOURCE_REGISTRY: _PositionSource.ValueType  # 1
+    """position_registry (authoritative post-cutover)"""
+    POSITION_SOURCE_SNAPSHOT: _PositionSource.ValueType  # 2
+    """portfolio_snapshots / position_state_snapshots (transitional)"""
+    POSITION_SOURCE_LEGACY: _PositionSource.ValueType  # 3
+    """pre-cutover evidence set (Unverified Holdings lane)"""
+
+class PositionSource(_PositionSource, metaclass=_PositionSourceEnumTypeWrapper):
+    """Where a position row was sourced from. Renderers paint provenance badges
+    based on this + PositionConfidence.
+    """
+
+POSITION_SOURCE_UNSPECIFIED: PositionSource.ValueType  # 0
+POSITION_SOURCE_REGISTRY: PositionSource.ValueType  # 1
+"""position_registry (authoritative post-cutover)"""
+POSITION_SOURCE_SNAPSHOT: PositionSource.ValueType  # 2
+"""portfolio_snapshots / position_state_snapshots (transitional)"""
+POSITION_SOURCE_LEGACY: PositionSource.ValueType  # 3
+"""pre-cutover evidence set (Unverified Holdings lane)"""
+Global___PositionSource: _TypeAlias = PositionSource  # noqa: Y015
+
+class _PositionConfidence:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _PositionConfidenceEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_PositionConfidence.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    POSITION_CONFIDENCE_UNSPECIFIED: _PositionConfidence.ValueType  # 0
+    POSITION_CONFIDENCE_HIGH: _PositionConfidence.ValueType  # 1
+    POSITION_CONFIDENCE_MEDIUM: _PositionConfidence.ValueType  # 2
+    POSITION_CONFIDENCE_LOW: _PositionConfidence.ValueType  # 3
+    POSITION_CONFIDENCE_DIVERGED: _PositionConfidence.ValueType  # 4
+
+class PositionConfidence(_PositionConfidence, metaclass=_PositionConfidenceEnumTypeWrapper):
+    """Cross-source agreement. HIGH = registry + ledger + snapshot agree. LOW =
+    single-source (no cross-check yet). DIVERGED = sources disagree (red row).
+    """
+
+POSITION_CONFIDENCE_UNSPECIFIED: PositionConfidence.ValueType  # 0
+POSITION_CONFIDENCE_HIGH: PositionConfidence.ValueType  # 1
+POSITION_CONFIDENCE_MEDIUM: PositionConfidence.ValueType  # 2
+POSITION_CONFIDENCE_LOW: PositionConfidence.ValueType  # 3
+POSITION_CONFIDENCE_DIVERGED: PositionConfidence.ValueType  # 4
+Global___PositionConfidence: _TypeAlias = PositionConfidence  # noqa: Y015
+
+class _PositionStatus:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _PositionStatusEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_PositionStatus.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    POSITION_STATUS_UNSPECIFIED: _PositionStatus.ValueType  # 0
+    POSITION_STATUS_OPEN: _PositionStatus.ValueType  # 1
+    POSITION_STATUS_CLOSED: _PositionStatus.ValueType  # 2
+    POSITION_STATUS_REORG_INVALIDATED: _PositionStatus.ValueType  # 3
+
+class PositionStatus(_PositionStatus, metaclass=_PositionStatusEnumTypeWrapper):
+    """Mirrors position_registry.status CHECK constraint (sqlite.py:644-645)."""
+
+POSITION_STATUS_UNSPECIFIED: PositionStatus.ValueType  # 0
+POSITION_STATUS_OPEN: PositionStatus.ValueType  # 1
+POSITION_STATUS_CLOSED: PositionStatus.ValueType  # 2
+POSITION_STATUS_REORG_INVALIDATED: PositionStatus.ValueType  # 3
+Global___PositionStatus: _TypeAlias = PositionStatus  # noqa: Y015
+
+class _ReconciliationSeverity:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ReconciliationSeverityEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ReconciliationSeverity.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    RECONCILIATION_SEVERITY_UNSPECIFIED: _ReconciliationSeverity.ValueType  # 0
+    RECONCILIATION_SEVERITY_INFO: _ReconciliationSeverity.ValueType  # 1
+    """all sources agree"""
+    RECONCILIATION_SEVERITY_WARN: _ReconciliationSeverity.ValueType  # 2
+    """2-of-3 agree, minor drift"""
+    RECONCILIATION_SEVERITY_DIVERGED: _ReconciliationSeverity.ValueType  # 3
+    """sources disagree (red row)"""
+
+class ReconciliationSeverity(_ReconciliationSeverity, metaclass=_ReconciliationSeverityEnumTypeWrapper):
+    """=============================================================================
+    Reconciliation messages (LP-only in v1; stubs for GMX/Pendle/Aave)
+    =============================================================================
+    """
+
+RECONCILIATION_SEVERITY_UNSPECIFIED: ReconciliationSeverity.ValueType  # 0
+RECONCILIATION_SEVERITY_INFO: ReconciliationSeverity.ValueType  # 1
+"""all sources agree"""
+RECONCILIATION_SEVERITY_WARN: ReconciliationSeverity.ValueType  # 2
+"""2-of-3 agree, minor drift"""
+RECONCILIATION_SEVERITY_DIVERGED: ReconciliationSeverity.ValueType  # 3
+"""sources disagree (red row)"""
+Global___ReconciliationSeverity: _TypeAlias = ReconciliationSeverity  # noqa: Y015
+
 @_typing.final
 class HealthCheckRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
@@ -6504,6 +6652,642 @@ class ActivityFeedItem(_message.Message):
     def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
 
 Global___ActivityFeedItem: _TypeAlias = ActivityFeedItem  # noqa: Y015
+
+@_typing.final
+class GetPositionsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    STATUS_FIELD_NUMBER: _builtins.int
+    INCLUDE_LEGACY_UNVERIFIED_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    """required"""
+    chain: _builtins.str
+    """optional filter"""
+    primitive: _builtins.str
+    """optional filter ("lp", "lending", "perp", ...)"""
+    accounting_category: _builtins.str
+    """optional filter ("LP_UNIV3", "AAVE_COLLATERAL", ...)"""
+    status: Global___PositionStatus.ValueType
+    """optional; UNSPECIFIED = all statuses"""
+    include_legacy_unverified: _builtins.bool
+    """Include pre-cutover evidence-set rows (Unverified Holdings) in the
+    `unverified` field of the response. Renderer must surface these under
+    a separate header — they are NEVER mixed with the authoritative lane.
+    """
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        status: Global___PositionStatus.ValueType = ...,
+        include_legacy_unverified: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "include_legacy_unverified", b"include_legacy_unverified", "primitive", b"primitive", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionsRequest: _TypeAlias = GetPositionsRequest  # noqa: Y015
+
+@_typing.final
+class GetPositionsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POSITIONS_FIELD_NUMBER: _builtins.int
+    UNVERIFIED_FIELD_NUMBER: _builtins.int
+    CUTOVER_STATES_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionEntry]:
+        """Authoritative / near-authoritative positions (REGISTRY or SNAPSHOT source)."""
+
+    @_builtins.property
+    def unverified(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionEntry]:
+        """LEGACY-sourced rows (PRE_BACKFILL). Only populated when
+        include_legacy_unverified=true. Renderer shows under a separate
+        "Unverified Holdings — Registry Pending" header.
+        """
+
+    @_builtins.property
+    def cutover_states(self) -> _containers.RepeatedCompositeFieldContainer[Global___CutoverStateEntry]:
+        """Per-accounting_category cutover snapshot for this strategy. Renderer
+        uses this to pick the right header per group + render audit badges.
+        """
+
+    def __init__(
+        self,
+        *,
+        positions: _abc.Iterable[Global___PositionEntry] | None = ...,
+        unverified: _abc.Iterable[Global___PositionEntry] | None = ...,
+        cutover_states: _abc.Iterable[Global___CutoverStateEntry] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cutover_states", b"cutover_states", "positions", b"positions", "unverified", b"unverified"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionsResponse: _TypeAlias = GetPositionsResponse  # noqa: Y015
+
+@_typing.final
+class CutoverStateEntry(_message.Message):
+    """Per-(accounting_category) cutover snapshot for a strategy. Exposes the
+    raw counters from migration_state so the dashboard audit surface can
+    render them directly (no derivation/aggregation outside the gateway).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    STATE_FIELD_NUMBER: _builtins.int
+    ROWS_SYNTHESIZED_FIELD_NUMBER: _builtins.int
+    ROWS_SKIPPED_ALREADY_PRESENT_FIELD_NUMBER: _builtins.int
+    BACKFILL_STARTED_AT_FIELD_NUMBER: _builtins.int
+    BACKFILL_COMPLETED_AT_FIELD_NUMBER: _builtins.int
+    BACKFILL_READER_VERSION_FIELD_NUMBER: _builtins.int
+    LAST_RECONCILED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    LAST_RECONCILED_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
+    accounting_category: _builtins.str
+    state: Global___CutoverState.ValueType
+    rows_synthesized: _builtins.int
+    rows_skipped_already_present: _builtins.int
+    backfill_started_at: _builtins.str
+    """ISO-8601 UTC; empty when never started"""
+    backfill_completed_at: _builtins.str
+    """ISO-8601 UTC; empty when not complete"""
+    backfill_reader_version: _builtins.int
+    last_reconciled_at_block: _builtins.int
+    """most-recent reconcile across the category"""
+    last_reconciled_unix_seconds: _builtins.int
+    """wall-clock approximation for freshness pill"""
+    def __init__(
+        self,
+        *,
+        accounting_category: _builtins.str = ...,
+        state: Global___CutoverState.ValueType = ...,
+        rows_synthesized: _builtins.int = ...,
+        rows_skipped_already_present: _builtins.int = ...,
+        backfill_started_at: _builtins.str = ...,
+        backfill_completed_at: _builtins.str = ...,
+        backfill_reader_version: _builtins.int = ...,
+        last_reconciled_at_block: _builtins.int = ...,
+        last_reconciled_unix_seconds: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "backfill_completed_at", b"backfill_completed_at", "backfill_reader_version", b"backfill_reader_version", "backfill_started_at", b"backfill_started_at", "last_reconciled_at_block", b"last_reconciled_at_block", "last_reconciled_unix_seconds", b"last_reconciled_unix_seconds", "rows_skipped_already_present", b"rows_skipped_already_present", "rows_synthesized", b"rows_synthesized", "state", b"state"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CutoverStateEntry: _TypeAlias = CutoverStateEntry  # noqa: Y015
+
+@_typing.final
+class PositionEntry(_message.Message):
+    """A single position row. Identity from position_registry, valuation from
+    portfolio_snapshots + position_state_snapshots. Carries provenance +
+    cutover_state so renderers can paint trust badges and route to the
+    right header.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    HANDLE_FIELD_NUMBER: _builtins.int
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    STATUS_FIELD_NUMBER: _builtins.int
+    OPENED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    CLOSED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    OPENED_TX_FIELD_NUMBER: _builtins.int
+    CLOSED_TX_FIELD_NUMBER: _builtins.int
+    VALUE_USD_FIELD_NUMBER: _builtins.int
+    VALUE_TOKEN0_FIELD_NUMBER: _builtins.int
+    VALUE_TOKEN1_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    LAST_RECONCILED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    CUTOVER_STATE_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    VALUE_AS_OF_FIELD_NUMBER: _builtins.int
+    handle: _builtins.str
+    """Display key — registry handle when set, else position_id. Display only."""
+    physical_identity_hash: _builtins.str
+    """Primary key component. Stable across renames. Use this for follow-up
+    RPC calls (e.g. GetPositionRangeHistory).
+    """
+    deployment_id: _builtins.str
+    chain: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    status: Global___PositionStatus.ValueType
+    opened_at_block: _builtins.int
+    closed_at_block: _builtins.int
+    opened_tx: _builtins.str
+    closed_tx: _builtins.str
+    value_usd: _builtins.str
+    """decimal-string"""
+    value_token0: _builtins.str
+    """decimal-string; LP-only, empty otherwise"""
+    value_token1: _builtins.str
+    """decimal-string; LP-only, empty otherwise"""
+    source: Global___PositionSource.ValueType
+    confidence: Global___PositionConfidence.ValueType
+    last_reconciled_at_block: _builtins.int
+    cutover_state: Global___CutoverState.ValueType
+    primitive_payload_json: _builtins.bytes
+    """Primitive-specific fields, JSON-encoded. Renderer parses per primitive:
+      LP      → {tick_lower, tick_upper, liquidity, in_range, fees_token0, fees_token1}
+      LENDING → {supply_balance, borrow_balance, health_factor, ltv}
+      PERP    → {leverage, entry_price, mark_price, unrealized_pnl, is_long}
+    """
+    value_as_of: _builtins.str
+    """ISO-8601 "as of" timestamp for the valuation. Drives the freshness pill."""
+    def __init__(
+        self,
+        *,
+        handle: _builtins.str = ...,
+        physical_identity_hash: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        status: Global___PositionStatus.ValueType = ...,
+        opened_at_block: _builtins.int = ...,
+        closed_at_block: _builtins.int = ...,
+        opened_tx: _builtins.str = ...,
+        closed_tx: _builtins.str = ...,
+        value_usd: _builtins.str = ...,
+        value_token0: _builtins.str = ...,
+        value_token1: _builtins.str = ...,
+        source: Global___PositionSource.ValueType = ...,
+        confidence: Global___PositionConfidence.ValueType = ...,
+        last_reconciled_at_block: _builtins.int = ...,
+        cutover_state: Global___CutoverState.ValueType = ...,
+        primitive_payload_json: _builtins.bytes = ...,
+        value_as_of: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "closed_at_block", b"closed_at_block", "closed_tx", b"closed_tx", "confidence", b"confidence", "cutover_state", b"cutover_state", "deployment_id", b"deployment_id", "handle", b"handle", "last_reconciled_at_block", b"last_reconciled_at_block", "opened_at_block", b"opened_at_block", "opened_tx", b"opened_tx", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive", "primitive_payload_json", b"primitive_payload_json", "source", b"source", "status", b"status", "value_as_of", b"value_as_of", "value_token0", b"value_token0", "value_token1", b"value_token1", "value_usd", b"value_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PositionEntry: _TypeAlias = PositionEntry  # noqa: Y015
+
+@_typing.final
+class GetPositionRangeHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    HANDLE_FIELD_NUMBER: _builtins.int
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    FROM_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
+    TO_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    """required"""
+    chain: _builtins.str
+    """required (history is per-chain)"""
+    accounting_category: _builtins.str
+    """required"""
+    handle: _builtins.str
+    """Either handle OR physical_identity_hash. If both supplied,
+    physical_identity_hash wins (it's the stable key). At least one is required.
+    """
+    physical_identity_hash: _builtins.str
+    from_unix_seconds: _builtins.int
+    """optional; 0 = since position open"""
+    to_unix_seconds: _builtins.int
+    """optional; 0 = now"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        handle: _builtins.str = ...,
+        physical_identity_hash: _builtins.str = ...,
+        from_unix_seconds: _builtins.int = ...,
+        to_unix_seconds: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "from_unix_seconds", b"from_unix_seconds", "handle", b"handle", "physical_identity_hash", b"physical_identity_hash", "strategy_id", b"strategy_id", "to_unix_seconds", b"to_unix_seconds"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionRangeHistoryRequest: _TypeAlias = GetPositionRangeHistoryRequest  # noqa: Y015
+
+@_typing.final
+class GetPositionRangeHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ENTRIES_FIELD_NUMBER: _builtins.int
+    STUB_MESSAGE_FIELD_NUMBER: _builtins.int
+    stub_message: _builtins.str
+    """Populated for swap/prediction primitives where history concept doesn't
+    apply ("no held position, only intent log"). Renderer shows this instead
+    of an empty table. Empty entries + empty stub_message = genuinely no
+    history (e.g., position just opened in this block).
+    """
+    @_builtins.property
+    def entries(self) -> _containers.RepeatedCompositeFieldContainer[Global___RangeHistoryEntry]:
+        """Source-routed by primitive — see RangeHistoryEntry.source_table."""
+
+    def __init__(
+        self,
+        *,
+        entries: _abc.Iterable[Global___RangeHistoryEntry] | None = ...,
+        stub_message: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries", "stub_message", b"stub_message"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionRangeHistoryResponse: _TypeAlias = GetPositionRangeHistoryResponse  # noqa: Y015
+
+@_typing.final
+class RangeHistoryEntry(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
+    BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    SOURCE_TABLE_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    timestamp_unix_seconds: _builtins.int
+    block_number: _builtins.int
+    event_type: _builtins.str
+    """OPEN | ADJUST | COLLECT | CLOSE | TRANSFER | NONE"""
+    source_table: _builtins.str
+    """Which canonical table this row came from. Renderers MAY render slightly
+    differently per source (e.g., lending events lack tick fields).
+    "position_events" | "accounting_events"
+    """
+    ledger_entry_id: _builtins.str
+    """Strong join key back to transaction_ledger.id. Always populated."""
+    tx_hash: _builtins.str
+    payload_json: _builtins.bytes
+    """Primitive-specific payload, JSON-encoded:
+      LP/PERP  (position_events)  → tick_lower/upper, liquidity, fees, in_range, leverage, entry_price
+      LENDING  (accounting_events)→ supply_balance, borrow_balance, health_factor, apy
+    """
+    def __init__(
+        self,
+        *,
+        timestamp_unix_seconds: _builtins.int = ...,
+        block_number: _builtins.int = ...,
+        event_type: _builtins.str = ...,
+        source_table: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        payload_json: _builtins.bytes = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "event_type", b"event_type", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "source_table", b"source_table", "timestamp_unix_seconds", b"timestamp_unix_seconds", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RangeHistoryEntry: _TypeAlias = RangeHistoryEntry  # noqa: Y015
+
+@_typing.final
+class GetReconciliationReportRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetReconciliationReportRequest: _TypeAlias = GetReconciliationReportRequest  # noqa: Y015
+
+@_typing.final
+class GetReconciliationReportResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FINDINGS_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_STUBS_FIELD_NUMBER: _builtins.int
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    SOURCE_BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    AS_OF_FIELD_NUMBER: _builtins.int
+    reconciliation_id: _builtins.str
+    """Matches PositionService.Reconcile shape for forensic correlation."""
+    source_block_number: _builtins.int
+    as_of: _builtins.str
+    """ISO-8601 "computed at". Drives the freshness pill."""
+    @_builtins.property
+    def findings(self) -> _containers.RepeatedCompositeFieldContainer[Global___ReconciliationFinding]:
+        """Three-way-diff findings across (ledger × snapshots × registry).
+        LP-only in v1; non-LP primitives surface stubs below instead.
+        """
+
+    @_builtins.property
+    def primitive_stubs(self) -> _containers.RepeatedCompositeFieldContainer[Global___PrimitiveCoverageStub]:
+        """Per-primitive stubs for primitives where the parser isn't shipped yet.
+        Renderer displays one stub card per entry. Today: GMX (VIB-4202),
+        Pendle (VIB-4209), Aave (VIB-4501).
+        """
+
+    def __init__(
+        self,
+        *,
+        findings: _abc.Iterable[Global___ReconciliationFinding] | None = ...,
+        primitive_stubs: _abc.Iterable[Global___PrimitiveCoverageStub] | None = ...,
+        reconciliation_id: _builtins.str = ...,
+        source_block_number: _builtins.int = ...,
+        as_of: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["as_of", b"as_of", "findings", b"findings", "primitive_stubs", b"primitive_stubs", "reconciliation_id", b"reconciliation_id", "source_block_number", b"source_block_number"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetReconciliationReportResponse: _TypeAlias = GetReconciliationReportResponse  # noqa: Y015
+
+@_typing.final
+class ReconciliationFinding(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    SEVERITY_FIELD_NUMBER: _builtins.int
+    DELTA_FIELD_NUMBER: _builtins.int
+    LEDGER_HAS_ROW_FIELD_NUMBER: _builtins.int
+    SNAPSHOT_HAS_ROW_FIELD_NUMBER: _builtins.int
+    REGISTRY_HAS_ROW_FIELD_NUMBER: _builtins.int
+    SUGGESTED_ACTION_FIELD_NUMBER: _builtins.int
+    accounting_category: _builtins.str
+    physical_identity_hash: _builtins.str
+    severity: Global___ReconciliationSeverity.ValueType
+    delta: _builtins.str
+    """Human-readable: "ledger says 100 USDC, registry says 95" """
+    ledger_has_row: _builtins.bool
+    """Three-way coverage flags so operator sees which sources contributed."""
+    snapshot_has_row: _builtins.bool
+    registry_has_row: _builtins.bool
+    suggested_action: _builtins.str
+    """Display-only suggested next action: e.g. "PreviewReconcile to inspect rebuilt rows"."""
+    def __init__(
+        self,
+        *,
+        accounting_category: _builtins.str = ...,
+        physical_identity_hash: _builtins.str = ...,
+        severity: Global___ReconciliationSeverity.ValueType = ...,
+        delta: _builtins.str = ...,
+        ledger_has_row: _builtins.bool = ...,
+        snapshot_has_row: _builtins.bool = ...,
+        registry_has_row: _builtins.bool = ...,
+        suggested_action: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "delta", b"delta", "ledger_has_row", b"ledger_has_row", "physical_identity_hash", b"physical_identity_hash", "registry_has_row", b"registry_has_row", "severity", b"severity", "snapshot_has_row", b"snapshot_has_row", "suggested_action", b"suggested_action"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReconciliationFinding: _TypeAlias = ReconciliationFinding  # noqa: Y015
+
+@_typing.final
+class PrimitiveCoverageStub(_message.Message):
+    """Per-primitive stub rendered when a reconciliation parser isn't shipped."""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    MESSAGE_FIELD_NUMBER: _builtins.int
+    TICKET_FIELD_NUMBER: _builtins.int
+    primitive: _builtins.str
+    """"lending" | "perp" | "pendle_lp" | etc."""
+    message: _builtins.str
+    """"Reconciliation for lending — pending VIB-4501" """
+    ticket: _builtins.str
+    """"VIB-4501" """
+    def __init__(
+        self,
+        *,
+        primitive: _builtins.str = ...,
+        message: _builtins.str = ...,
+        ticket: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["message", b"message", "primitive", b"primitive", "ticket", b"ticket"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PrimitiveCoverageStub: _TypeAlias = PrimitiveCoverageStub  # noqa: Y015
+
+@_typing.final
+class PreviewReconcileRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PreviewReconcileRequest: _TypeAlias = PreviewReconcileRequest  # noqa: Y015
+
+@_typing.final
+class PreviewReconcileResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PREVIEW_TOKEN_FIELD_NUMBER: _builtins.int
+    MATCHED_FIELD_NUMBER: _builtins.int
+    PHANTOM_MISSING_FIELD_NUMBER: _builtins.int
+    STRANDED_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_STUBS_FIELD_NUMBER: _builtins.int
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    SOURCE_BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    EXPIRES_AT_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
+    preview_token: _builtins.str
+    """Idempotency key. Bound at preview time to current registry + ledger state
+    hashes. Pass to ApplyReconcile to apply this exact preview. Token
+    invalidates (STATE_DRIFT) if registry or ledger changes between
+    preview and apply.
+    """
+    reconciliation_id: _builtins.str
+    """Forensic correlation with PositionService.Reconcile audit trail."""
+    source_block_number: _builtins.int
+    expires_at_unix_seconds: _builtins.int
+    """Server-side TTL on the preview_token. Default 5 minutes."""
+    @_builtins.property
+    def matched(self) -> _containers.RepeatedCompositeFieldContainer[Global___MatchedPosition]:
+        """The diff that would be applied. Same buckets as
+        PositionService.ReconcileResponse — reused intentionally so renderers
+        can share rendering code.
+        """
+
+    @_builtins.property
+    def phantom_missing(self) -> _containers.RepeatedCompositeFieldContainer[Global___PhantomMissingPosition]: ...
+    @_builtins.property
+    def stranded(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrandedRow]: ...
+    @_builtins.property
+    def primitive_stubs(self) -> _containers.RepeatedCompositeFieldContainer[Global___PrimitiveCoverageStub]:
+        """Non-LP primitives surface stubs (LP-only in v1)."""
+
+    def __init__(
+        self,
+        *,
+        preview_token: _builtins.str = ...,
+        matched: _abc.Iterable[Global___MatchedPosition] | None = ...,
+        phantom_missing: _abc.Iterable[Global___PhantomMissingPosition] | None = ...,
+        stranded: _abc.Iterable[Global___StrandedRow] | None = ...,
+        primitive_stubs: _abc.Iterable[Global___PrimitiveCoverageStub] | None = ...,
+        reconciliation_id: _builtins.str = ...,
+        source_block_number: _builtins.int = ...,
+        expires_at_unix_seconds: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["expires_at_unix_seconds", b"expires_at_unix_seconds", "matched", b"matched", "phantom_missing", b"phantom_missing", "preview_token", b"preview_token", "primitive_stubs", b"primitive_stubs", "reconciliation_id", b"reconciliation_id", "source_block_number", b"source_block_number", "stranded", b"stranded"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PreviewReconcileResponse: _TypeAlias = PreviewReconcileResponse  # noqa: Y015
+
+@_typing.final
+class ApplyReconcileRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    PREVIEW_TOKEN_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    preview_token: _builtins.str
+    """Token issued by PreviewReconcile. INVALID_ARGUMENT if empty."""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        preview_token: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["preview_token", b"preview_token", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ApplyReconcileRequest: _TypeAlias = ApplyReconcileRequest  # noqa: Y015
+
+@_typing.final
+class ApplyReconcileResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    RESULT_FIELD_NUMBER: _builtins.int
+    DETAIL_FIELD_NUMBER: _builtins.int
+    REBUILT_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_ERRORS_FIELD_NUMBER: _builtins.int
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    result: _builtins.str
+    """"SUCCESS"          — all phantom_missing rows applied cleanly.
+    "STATE_DRIFT"      — registry/ledger state changed since preview was issued.
+                         Operator must re-issue PreviewReconcile.
+    "PARTIAL_SUCCESS"  — some phantom_missing rows applied, others failed
+                         (existing per-phantom error isolation; see
+                         primitive_errors for the failures).
+    "EXPIRED"          — preview_token TTL elapsed.
+    "NOT_FOUND"        — preview_token unrecognized.
+    """
+    detail: _builtins.str
+    reconciliation_id: _builtins.str
+    @_builtins.property
+    def rebuilt(self) -> _containers.RepeatedCompositeFieldContainer[Global___RebuiltRow]: ...
+    @_builtins.property
+    def primitive_errors(self) -> _containers.RepeatedCompositeFieldContainer[Global___PrimitiveError]: ...
+    def __init__(
+        self,
+        *,
+        result: _builtins.str = ...,
+        detail: _builtins.str = ...,
+        rebuilt: _abc.Iterable[Global___RebuiltRow] | None = ...,
+        primitive_errors: _abc.Iterable[Global___PrimitiveError] | None = ...,
+        reconciliation_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["detail", b"detail", "primitive_errors", b"primitive_errors", "rebuilt", b"rebuilt", "reconciliation_id", b"reconciliation_id", "result", b"result"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ApplyReconcileResponse: _TypeAlias = ApplyReconcileResponse  # noqa: Y015
+
+@_typing.final
+class RefreshRegistryFromChainRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RefreshRegistryFromChainRequest: _TypeAlias = RefreshRegistryFromChainRequest  # noqa: Y015
+
+@_typing.final
+class RefreshRegistryFromChainResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    RESULT_FIELD_NUMBER: _builtins.int
+    DETAIL_FIELD_NUMBER: _builtins.int
+    POSITIONS_REFRESHED_FIELD_NUMBER: _builtins.int
+    EVENTS_EMITTED_FIELD_NUMBER: _builtins.int
+    SOURCE_BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    result: _builtins.str
+    """"SUCCESS"      — fresh chain reads completed; on_chain_verified_at updated.
+    "RATE_LIMITED" — another refresh is already in flight for this strategy.
+    "FAILED"       — see `detail` for diagnostic.
+    """
+    detail: _builtins.str
+    positions_refreshed: _builtins.int
+    events_emitted: _builtins.int
+    """count of divergent position_events re-emitted"""
+    source_block_number: _builtins.int
+    reconciliation_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        result: _builtins.str = ...,
+        detail: _builtins.str = ...,
+        positions_refreshed: _builtins.int = ...,
+        events_emitted: _builtins.int = ...,
+        source_block_number: _builtins.int = ...,
+        reconciliation_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["detail", b"detail", "events_emitted", b"events_emitted", "positions_refreshed", b"positions_refreshed", "reconciliation_id", b"reconciliation_id", "result", b"result", "source_block_number", b"source_block_number"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RefreshRegistryFromChainResponse: _TypeAlias = RefreshRegistryFromChainResponse  # noqa: Y015
 
 @_typing.final
 class PolymarketGetMarketRequest(_message.Message):

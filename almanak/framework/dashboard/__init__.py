@@ -70,6 +70,15 @@ if TYPE_CHECKING:
         render_pnl_section,
         render_trade_tape_section,
     )
+    from almanak.framework.dashboard.sections_operator import (
+        render_reconciliation_operator_panel,
+    )
+    from almanak.framework.dashboard.sections_reconciliation import (
+        render_position_range_history_section,
+        render_positions_section,
+        render_reconciliation_report_section,
+        render_unverified_holdings_section,
+    )
 
 # Submodules whose import drags in streamlit. Resolved lazily so the
 # package init stays streamlit-free; the gateway sidecar image (which
@@ -79,6 +88,13 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "render_cost_stack_section": ".sections",
     "render_pnl_section": ".sections",
     "render_trade_tape_section": ".sections",
+    # Phase 3 (VIB-4495) — Phase 1 RPC-backed section helpers
+    "render_position_range_history_section": ".sections_reconciliation",
+    "render_positions_section": ".sections_reconciliation",
+    "render_reconciliation_report_section": ".sections_reconciliation",
+    "render_unverified_holdings_section": ".sections_reconciliation",
+    # Operator-only — Phase 4's CI lint enforces no renderer-side imports
+    "render_reconciliation_operator_panel": ".sections_operator",
 }
 
 __getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())
@@ -106,6 +122,12 @@ __all__ = [
     # Custom-dashboard section helpers (lazy — pull streamlit on first access)
     "render_cost_stack_section",
     "render_pnl_section",
+    # Phase 3 / VIB-4495 — Phase 1 RPC-backed sections (lazy)
+    "render_position_range_history_section",
+    "render_positions_section",
+    "render_reconciliation_operator_panel",
+    "render_reconciliation_report_section",
+    "render_unverified_holdings_section",
     # PM integration
     "render_strategy_detail",
     "render_strategy_timeline",

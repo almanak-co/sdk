@@ -3362,6 +3362,36 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.GetActivityFeedRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetActivityFeedResponse.FromString,
                 _registered_method=True)
+        self.GetPositions = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetPositions',
+                request_serializer=gateway__pb2.GetPositionsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetPositionsResponse.FromString,
+                _registered_method=True)
+        self.GetPositionRangeHistory = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetPositionRangeHistory',
+                request_serializer=gateway__pb2.GetPositionRangeHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetPositionRangeHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetReconciliationReport = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetReconciliationReport',
+                request_serializer=gateway__pb2.GetReconciliationReportRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetReconciliationReportResponse.FromString,
+                _registered_method=True)
+        self.PreviewReconcile = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/PreviewReconcile',
+                request_serializer=gateway__pb2.PreviewReconcileRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PreviewReconcileResponse.FromString,
+                _registered_method=True)
+        self.ApplyReconcile = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/ApplyReconcile',
+                request_serializer=gateway__pb2.ApplyReconcileRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ApplyReconcileResponse.FromString,
+                _registered_method=True)
+        self.RefreshRegistryFromChain = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/RefreshRegistryFromChain',
+                request_serializer=gateway__pb2.RefreshRegistryFromChainRequest.SerializeToString,
+                response_deserializer=gateway__pb2.RefreshRegistryFromChainResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -3494,6 +3524,64 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPositions(self, request, context):
+        """Positions — registry-authoritative identity (position_registry) joined
+        with snapshot-authoritative valuation (portfolio_snapshots +
+        position_state_snapshots). Replaces SQLite-direct reads in
+        framework/dashboard/pages/detail.py. Carries cutover_state per
+        accounting_category so renderers can split authoritative positions
+        from pre-cutover "Unverified Holdings". (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPositionRangeHistory(self, request, context):
+        """Per-position range / fee / balance history. Source-routes by primitive:
+        LP/PERP from position_events, lending from accounting_events.
+        Swap/prediction return empty + stub_message (history concept N/A). (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetReconciliationReport(self, request, context):
+        """Three-way diff across transaction_ledger / portfolio_snapshots /
+        position_registry. Read-only. LP-only in v1; non-LP primitives surface
+        per-primitive stubs (pending VIB-4202/4209/4501). 5s TTL cache. (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PreviewReconcile(self, request, context):
+        """Dry-run reconciliation. Thin wrapper over PositionService.Reconcile(apply=false).
+        Returns a preview_token bound to current registry/ledger state hashes —
+        pass to ApplyReconcile to apply. Operator-only. (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ApplyReconcile(self, request, context):
+        """Applies a previously-issued preview. Fails STATE_DRIFT if registry/
+        ledger state changed since preview was issued. Operator-only. (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RefreshRegistryFromChain(self, request, context):
+        """Forces fresh on-chain reads for every position in position_registry for
+        the strategy. Updates on_chain_verified_at, re-emits divergent events.
+        Rate-limited at the DashboardService layer to one in-flight per strategy
+        (PositionService.Reconcile itself has no concurrency guard). Operator-only.
+        (VIB-4493)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3576,6 +3664,36 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetActivityFeed,
                     request_deserializer=gateway__pb2.GetActivityFeedRequest.FromString,
                     response_serializer=gateway__pb2.GetActivityFeedResponse.SerializeToString,
+            ),
+            'GetPositions': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPositions,
+                    request_deserializer=gateway__pb2.GetPositionsRequest.FromString,
+                    response_serializer=gateway__pb2.GetPositionsResponse.SerializeToString,
+            ),
+            'GetPositionRangeHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPositionRangeHistory,
+                    request_deserializer=gateway__pb2.GetPositionRangeHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.GetPositionRangeHistoryResponse.SerializeToString,
+            ),
+            'GetReconciliationReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetReconciliationReport,
+                    request_deserializer=gateway__pb2.GetReconciliationReportRequest.FromString,
+                    response_serializer=gateway__pb2.GetReconciliationReportResponse.SerializeToString,
+            ),
+            'PreviewReconcile': grpc.unary_unary_rpc_method_handler(
+                    servicer.PreviewReconcile,
+                    request_deserializer=gateway__pb2.PreviewReconcileRequest.FromString,
+                    response_serializer=gateway__pb2.PreviewReconcileResponse.SerializeToString,
+            ),
+            'ApplyReconcile': grpc.unary_unary_rpc_method_handler(
+                    servicer.ApplyReconcile,
+                    request_deserializer=gateway__pb2.ApplyReconcileRequest.FromString,
+                    response_serializer=gateway__pb2.ApplyReconcileResponse.SerializeToString,
+            ),
+            'RefreshRegistryFromChain': grpc.unary_unary_rpc_method_handler(
+                    servicer.RefreshRegistryFromChain,
+                    request_deserializer=gateway__pb2.RefreshRegistryFromChainRequest.FromString,
+                    response_serializer=gateway__pb2.RefreshRegistryFromChainResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -4014,6 +4132,168 @@ class DashboardService(object):
             '/almanak.gateway.proto.DashboardService/GetActivityFeed',
             gateway__pb2.GetActivityFeedRequest.SerializeToString,
             gateway__pb2.GetActivityFeedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPositions(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetPositions',
+            gateway__pb2.GetPositionsRequest.SerializeToString,
+            gateway__pb2.GetPositionsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPositionRangeHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetPositionRangeHistory',
+            gateway__pb2.GetPositionRangeHistoryRequest.SerializeToString,
+            gateway__pb2.GetPositionRangeHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetReconciliationReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetReconciliationReport',
+            gateway__pb2.GetReconciliationReportRequest.SerializeToString,
+            gateway__pb2.GetReconciliationReportResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PreviewReconcile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/PreviewReconcile',
+            gateway__pb2.PreviewReconcileRequest.SerializeToString,
+            gateway__pb2.PreviewReconcileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ApplyReconcile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/ApplyReconcile',
+            gateway__pb2.ApplyReconcileRequest.SerializeToString,
+            gateway__pb2.ApplyReconcileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RefreshRegistryFromChain(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/RefreshRegistryFromChain',
+            gateway__pb2.RefreshRegistryFromChainRequest.SerializeToString,
+            gateway__pb2.RefreshRegistryFromChainResponse.FromString,
             options,
             channel_credentials,
             insecure,

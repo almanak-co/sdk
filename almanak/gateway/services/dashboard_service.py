@@ -551,6 +551,22 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
         self._portfolio_chain: PortfolioProviderChain | None = None
 
+        # VIB-4493 Phase 1C/D: cross-servicer reference to PositionService for
+        # the reconciliation triad (Preview/Apply/Report) and
+        # RefreshRegistryFromChain. Wired by GatewayServer._register_services
+        # after both servicers exist (same pattern as PositionService's own
+        # cross-refs to rpc_servicer + state_servicer at server.py:482-484).
+        # Lazy-typed (forward import) to avoid a circular import at module load.
+        self.position_servicer: Any = None
+        # In-memory caches + concurrency guards for the Phase 1C/D RPCs.
+        # Lazily constructed on first use so unit tests can patch easily.
+        self._reconciliation_report_cache: Any = None
+        self._preview_token_store: Any = None
+        # Per-strategy asyncio.Lock for RefreshRegistryFromChain. The
+        # underlying PositionService.Reconcile has zero concurrency guard
+        # (audit A2.8) so the lock has to live here.
+        self._registry_refresh_locks: dict[str, Any] = {}
+
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of dependencies."""
         if self._initialized:
@@ -2816,3 +2832,1092 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 if item.timestamp < before_ts or (item.timestamp == before_ts and key < before_id)
             ]
         return [(item, key) for (item, key) in items if item.timestamp < before_ts]
+
+    # =========================================================================
+    # VIB-4493 Phase 1 RPCs — Dashboard Production-Ready Rewrite
+    # =========================================================================
+    #
+    # Six new RPCs that replace SQLite-direct reads in framework/dashboard/**.
+    # Source-of-truth design doc: PortfolioManager/DashboardMay16.md v5.
+    # Parent epic: VIB-4492.
+    #
+    # Phase 1B (this commit) adds:
+    #   - GetPositions
+    #   - GetPositionRangeHistory
+    # Phase 1C / 1D land the reconciliation triad + RefreshRegistryFromChain.
+    #
+    # Pattern matches existing handlers (GetTransactionLedger, GetTradeTape):
+    # validate_strategy_id → _ensure_initialized → resolve_agent_id →
+    # extract params → state_manager calls → build proto response.
+
+    async def _build_snapshot_position_index(
+        self,
+        strategy_id: str,
+    ) -> tuple[dict[str, dict[str, Any]], int]:
+        """Return ``(position_id → snapshot dict, snapshot_taken_at_unix)``.
+
+        Empty dict + 0 on any failure — caller treats both as "no snapshot
+        valuation available" and renders POSITION_SOURCE_SNAPSHOT confidence
+        accordingly. Extracted from GetPositions to keep its complexity below
+        the project's CC=15 gate (VIB-4493 Phase 1 follow-up).
+        """
+        snapshot_by_id: dict[str, dict[str, Any]] = {}
+        # Callers (GetPositions) already short-circuit on `_state_manager is None`;
+        # the assert pins that contract for mypy without a runtime guard cost.
+        assert self._state_manager is not None
+        try:
+            latest = await self._state_manager.get_latest_snapshot(strategy_id)
+        except Exception as e:
+            logger.warning("get_latest_snapshot failed in GetPositions: %s", e)
+            return snapshot_by_id, 0
+        if latest is None:
+            return snapshot_by_id, 0
+        snapshot_taken_at_unix = int(latest.timestamp.timestamp()) if latest.timestamp else 0
+        for pos in latest.positions or []:
+            if hasattr(pos, "to_dict"):
+                pos_dict = pos.to_dict()
+            elif isinstance(pos, dict):
+                pos_dict = dict(pos)
+            else:
+                # Object with __dict__ (dataclass without to_dict); copy attrs.
+                # Slot-based classes have no __dict__ → vars() raises TypeError;
+                # skip rather than fail the whole RPC for one malformed row.
+                try:
+                    pos_dict = dict(vars(pos))
+                except TypeError:
+                    logger.debug(
+                        "Skipping snapshot position without mappable fields: %r",
+                        type(pos).__name__,
+                    )
+                    continue
+            pos_id = pos_dict.get("position_id") or pos_dict.get("handle") or pos_dict.get("symbol", "")
+            if pos_id:
+                snapshot_by_id[str(pos_id)] = pos_dict
+        return snapshot_by_id, snapshot_taken_at_unix
+
+    async def _collect_cutover_derivations(
+        self,
+        *,
+        strategy_id: str,
+        accounting_categories: set[str],
+        registry_rows: list[dict[str, Any]],
+        now_unix: int,
+    ) -> dict[str, Any]:
+        """Build the per-category cutover derivations map for GetPositions.
+
+        Returns category → ``CutoverDerivation``. Extracted from GetPositions
+        to keep its complexity below the project's CC=15 gate; the per-category
+        try/except + cutover lookup + max() reduction collapses to a single
+        await + comprehension at the call site.
+        """
+        from almanak.gateway.services._dashboard_phase1 import (
+            CutoverDerivation,
+            cutover_lookup_key,
+            derive_cutover_state,
+        )
+
+        assert self._state_manager is not None  # caller (GetPositions) guards
+        cutover_by_category: dict[str, CutoverDerivation] = {}
+        for category in accounting_categories:
+            if not category:
+                continue
+            primitive, cutover_key = cutover_lookup_key(category)
+            try:
+                ms_row = await self._state_manager.get_migration_state(
+                    deployment_id=strategy_id,
+                    primitive=primitive,
+                    cutover_key=cutover_key,
+                )
+            except Exception as e:
+                logger.warning(
+                    "get_migration_state failed for (%s, %s) in GetPositions: %s",
+                    primitive,
+                    cutover_key,
+                    e,
+                )
+                ms_row = None
+            last_reconciled_block = max(
+                (
+                    int(row.get("last_reconciled_at_block") or 0)
+                    for row in registry_rows
+                    if row.get("accounting_category") == category
+                ),
+                default=0,
+            )
+            state = derive_cutover_state(
+                ms_row,
+                last_reconciled_unix_seconds=0,
+                now_unix_seconds=now_unix,
+            )
+            cutover_by_category[category] = CutoverDerivation(
+                state=state,
+                migration_state_row=ms_row,
+                last_reconciled_at_block=last_reconciled_block,
+                last_reconciled_unix_seconds=0,
+            )
+        return cutover_by_category
+
+    async def _build_unverified_lane(
+        self,
+        *,
+        strategy_id: str,
+        registry_rows: list[dict[str, Any]],
+        cutover_by_category: dict[str, Any],
+        chain_filter: str | None = None,
+        primitive_filter: str | None = None,
+        accounting_category_filter: str | None = None,
+    ) -> list[gateway_pb2.PositionEntry]:
+        """Build LEGACY-source PRE_BACKFILL rows from position_events.
+
+        Returns the rows that exist in ``position_events`` but NOT in
+        ``position_registry`` — pre-cutover evidence that the registry
+        backfill hasn't picked up yet. Lending-events path is deferred to
+        VIB-4501; v1 covers LP + PERP only.
+
+        Codex review note (medium): the request's chain / primitive /
+        accounting_category filters are honored here so a filtered
+        positions request doesn't surface unrelated unverified rows.
+        ``position_types`` we pass to the state-manager fetch is
+        narrowed by ``primitive_filter`` when set; the per-event
+        post-filter then enforces chain + accounting_category since
+        ``get_position_events_filtered`` doesn't support those today.
+        """
+        from almanak.gateway.services._dashboard_phase1 import (
+            CutoverDerivation,
+            build_unverified_entry_from_position_event,
+        )
+
+        assert self._state_manager is not None  # caller (GetPositions) guards
+
+        # Narrow position_types based on the primitive filter so we don't
+        # pull rows we'll just discard. Unknown / empty filter → full LP+PERP set.
+        if primitive_filter == "lp":
+            position_types: frozenset[str] = frozenset({"LP"})
+        elif primitive_filter == "perp":
+            position_types = frozenset({"PERP"})
+        elif primitive_filter in (None, ""):
+            position_types = frozenset({"LP", "PERP"})
+        else:
+            # Filter asks for something we have no evidence-set support for
+            # (e.g., "lending") — return empty, not a wrong-primitive lane.
+            return []
+
+        try:
+            events = await self._state_manager.get_position_events_filtered(
+                deployment_id=strategy_id,
+                position_types=position_types,
+            )
+        except Exception as e:
+            logger.warning("get_position_events_filtered failed in GetPositions: %s", e)
+            return []
+
+        registry_handles_present = {
+            str(row.get("handle") or row.get("physical_identity_hash") or "") for row in registry_rows
+        }
+        unverified: list[gateway_pb2.PositionEntry] = []
+        seen_event_position_ids: set[str] = set()
+        for event in events:
+            pos_id = str(event.get("position_id") or "")
+            if not pos_id or pos_id in seen_event_position_ids:
+                continue
+            if pos_id in registry_handles_present:
+                continue
+            # Apply the request's chain + accounting_category filters per-event.
+            # `get_position_events_filtered` doesn't support these today, so we
+            # enforce them in the post-filter to honor the wire contract.
+            # Strict: events missing the typed field are dropped when the
+            # corresponding filter is set — letting "" through would mix
+            # unrelated unverified rows into a filtered response.
+            evt_chain = str(event.get("chain") or "").strip()
+            evt_category = (event.get("accounting_category") or "").strip()
+            if chain_filter and evt_chain != chain_filter:
+                continue
+            if accounting_category_filter and evt_category != accounting_category_filter:
+                continue
+            seen_event_position_ids.add(pos_id)
+            cutover = cutover_by_category.get(
+                evt_category,
+                CutoverDerivation(
+                    state=gateway_pb2.CUTOVER_STATE_PRE_BACKFILL,
+                    migration_state_row=None,
+                    last_reconciled_at_block=0,
+                    last_reconciled_unix_seconds=0,
+                ),
+            )
+            unverified.append(build_unverified_entry_from_position_event(event=event, cutover=cutover))
+        return unverified
+
+    async def GetPositions(
+        self,
+        request: gateway_pb2.GetPositionsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionsResponse:
+        """Registry-authoritative identity + snapshot-authoritative valuation.
+
+        Identity from `position_registry` (via `get_position_registry_open_rows`).
+        Valuation from latest portfolio_snapshot (via `get_latest_snapshot`,
+        positions matched by `position_id` / `handle`). Cutover state per
+        accounting_category derived from `migration_state` (via
+        `get_migration_state`).
+
+        Phase 1 v1 constraints (documented in design doc v5 and Phase 1A audit):
+          - Returns OPEN positions only. Closed/reorg_invalidated rows require
+            a new state-manager method (deferred to Phase 1+1).
+          - `cutover_key` is currently always `'lp'` for LP categories until
+            VIB-4202/4209/4501 add typed cutover keys.
+          - REGISTRY_AUTHORITATIVE promotion (multi-snapshot stability gate)
+            is not asserted in v1; handler reports BACKFILL_COMPLETE for
+            complete+fresh, leaves the multi-snapshot stability to a future
+            aggregation layer.
+        """
+        from almanak.gateway.services._dashboard_phase1 import (
+            build_authoritative_positions as _build_authoritative_positions,
+        )
+        from almanak.gateway.services._dashboard_phase1 import (
+            build_cutover_state_entry,
+        )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetPositions: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetPositionsResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        if self._state_manager is None:
+            # No backend — return empty response with a single PRE_BACKFILL
+            # cutover entry (handler is degraded but renderer can still paint).
+            return gateway_pb2.GetPositionsResponse()
+
+        chain_filter = (request.chain or "").strip() or None
+        primitive_filter = (request.primitive or "").strip() or None
+        accounting_category_filter = (request.accounting_category or "").strip() or None
+
+        try:
+            registry_rows = await self._state_manager.get_position_registry_open_rows(
+                strategy_id,
+                chain=chain_filter,
+                primitive=primitive_filter,
+                accounting_category=accounting_category_filter,
+            )
+        except Exception as e:
+            logger.warning("get_position_registry_open_rows failed in GetPositions: %s", e)
+            registry_rows = []
+
+        # Snapshot index — used for valuation matching on the authoritative
+        # lane. Snapshot.positions[*] uses ``position_id`` as its primary key;
+        # registry rows use ``handle`` (display) or ``physical_identity_hash``
+        # (PK). The gateway-side LP backfill writes ``handle = position_id``
+        # today (cutover.py:69 / backfill.py:861), so a single dict suffices.
+        snapshot_by_id, snapshot_taken_at_unix = await self._build_snapshot_position_index(strategy_id)
+
+        # Per-category cutover derivations.
+        now_unix = int(datetime.now(tz=UTC).timestamp())
+        accounting_categories = {row.get("accounting_category", "") for row in registry_rows}
+        if accounting_category_filter:
+            accounting_categories.add(accounting_category_filter)
+        cutover_by_category = await self._collect_cutover_derivations(
+            strategy_id=strategy_id,
+            accounting_categories=accounting_categories,
+            registry_rows=registry_rows,
+            now_unix=now_unix,
+        )
+
+        # Authoritative lane.
+        positions = _build_authoritative_positions(
+            registry_rows=registry_rows,
+            cutover_by_category=cutover_by_category,
+            snapshot_by_id=snapshot_by_id,
+            snapshot_taken_at_unix=snapshot_taken_at_unix,
+        )
+
+        # Optional: LEGACY-source PRE_BACKFILL lane. Honors the request's
+        # chain / primitive / accounting_category filters (Codex review fix).
+        unverified: list[gateway_pb2.PositionEntry] = []
+        if request.include_legacy_unverified:
+            unverified = await self._build_unverified_lane(
+                strategy_id=strategy_id,
+                registry_rows=registry_rows,
+                cutover_by_category=cutover_by_category,
+                chain_filter=chain_filter,
+                primitive_filter=primitive_filter,
+                accounting_category_filter=accounting_category_filter,
+            )
+
+        # Build the cutover state entries for the response. Always returned —
+        # the renderer uses them to label per-category headers.
+        cutover_entries = [
+            build_cutover_state_entry(accounting_category=category, derivation=derivation)
+            for category, derivation in cutover_by_category.items()
+        ]
+
+        # Apply optional PositionStatus filter to both lanes. OPEN only is
+        # supported in v1 anyway (state-manager method constraint); request
+        # status_filter is honored for forward-compat. Apply to `unverified`
+        # too — the legacy lane hardcodes OPEN today, so a request for
+        # CLOSED must NOT return rows from the unverified lane either.
+        if request.status != gateway_pb2.POSITION_STATUS_UNSPECIFIED:
+            positions = [p for p in positions if p.status == request.status]
+            unverified = [p for p in unverified if p.status == request.status]
+
+        return gateway_pb2.GetPositionsResponse(
+            positions=positions,
+            unverified=unverified,
+            cutover_states=cutover_entries,
+        )
+
+    async def GetPositionRangeHistory(
+        self,
+        request: gateway_pb2.GetPositionRangeHistoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionRangeHistoryResponse:
+        """Per-position range / fee / balance history.
+
+        Source-routes by primitive:
+          - LP, PERP   → `position_events` via `get_position_history(...)`
+          - LENDING    → `accounting_events` (Phase 1 v1: returns stub,
+                         pending VIB-4501 for the state-manager method)
+          - SWAP / PREDICTION → empty + RANGE_HISTORY_NA_STUB
+
+        Lookup primary key per v5 design: `(strategy_id, chain,
+        accounting_category, handle | physical_identity_hash)`. v1 honors the
+        physical_identity_hash when supplied; falls back to handle (display
+        key) otherwise. `position_id` from the wire is treated as
+        equivalent to handle.
+        """
+        from almanak.gateway.services._dashboard_phase1 import (
+            LENDING_RANGE_HISTORY_V1_STUB,
+            RANGE_HISTORY_NA_STUB,
+            build_range_history_entry_from_position_event,
+            filter_events_by_time_window,
+            infer_primitive_from_accounting_category,
+        )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetPositionRangeHistory: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetPositionRangeHistoryResponse()
+
+        if not request.chain:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required")
+            return gateway_pb2.GetPositionRangeHistoryResponse()
+        if not request.accounting_category:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("accounting_category is required")
+            return gateway_pb2.GetPositionRangeHistoryResponse()
+        if not request.handle and not request.physical_identity_hash:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("either handle or physical_identity_hash is required")
+            return gateway_pb2.GetPositionRangeHistoryResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        if self._state_manager is None:
+            return gateway_pb2.GetPositionRangeHistoryResponse(stub_message="state manager unavailable")
+
+        primitive = infer_primitive_from_accounting_category(request.accounting_category)
+
+        # Source routing — non-LP/PERP primitives short-circuit to a stub
+        # message rather than empty entries, so renderers can show a
+        # purpose-built explanation instead of a blank table.
+        if primitive == "lending":
+            return gateway_pb2.GetPositionRangeHistoryResponse(stub_message=LENDING_RANGE_HISTORY_V1_STUB)
+        if primitive == "swap":
+            return gateway_pb2.GetPositionRangeHistoryResponse(stub_message=RANGE_HISTORY_NA_STUB)
+
+        # LP/PERP: resolve the wire identifier to the position_events
+        # `position_id` we can query with. The state manager's
+        # `get_position_history` only filters by (strategy_id, position_id),
+        # so we (a) translate physical_identity_hash → handle via the
+        # registry when needed, and (b) post-filter the events by chain
+        # and accounting_category to honor the wire contract — handles can
+        # collide across chains / categories (Codex review fix).
+        position_id = await self._resolve_position_history_key(
+            strategy_id=strategy_id,
+            chain=request.chain,
+            accounting_category=request.accounting_category,
+            handle=request.handle,
+            physical_identity_hash=request.physical_identity_hash,
+        )
+        if not position_id:
+            # Hash supplied but no matching registry row (or registry lookup
+            # failed). Surface as "no events" rather than 500 — caller can
+            # decide to retry with a handle.
+            return gateway_pb2.GetPositionRangeHistoryResponse(
+                stub_message=(
+                    "no registry row matched the supplied identifier on this "
+                    f"chain / accounting_category ({request.chain} / "
+                    f"{request.accounting_category})"
+                ),
+            )
+
+        try:
+            # Positional args — base StateManager uses `strategy_id`, the runtime
+            # GatewayStateManager uses `deployment_id`. Positional binding works
+            # for both and keeps mypy from picking the base-class signature.
+            events = await self._state_manager.get_position_history(
+                strategy_id,
+                position_id,
+            )
+        except Exception as e:
+            logger.warning("get_position_history failed in GetPositionRangeHistory: %s", e)
+            events = []
+
+        # Post-filter by chain + accounting_category since the state-manager
+        # method doesn't accept them. Without this, two positions sharing a
+        # handle across chains would have their lifecycles commingled.
+        # Permissive: an event missing chain / accounting_category (legacy
+        # schema, pre-typed cutover) is left in — we already constrained
+        # the position_id via the registry lookup above, so the remaining
+        # ambiguity is only "events with no chain stamp" which can't
+        # collide on the typed dimensions anyway.
+        def _matches(e: dict, key: str, expected: str) -> bool:
+            if not expected:
+                return True
+            value = str(e.get(key) or "")
+            return value == "" or value == expected
+
+        events = [
+            e
+            for e in events
+            if _matches(e, "chain", request.chain) and _matches(e, "accounting_category", request.accounting_category)
+        ]
+
+        filtered_events = filter_events_by_time_window(
+            events,
+            from_unix_seconds=request.from_unix_seconds,
+            to_unix_seconds=request.to_unix_seconds,
+        )
+        entries = [build_range_history_entry_from_position_event(e) for e in filtered_events]
+
+        return gateway_pb2.GetPositionRangeHistoryResponse(
+            entries=entries,
+            stub_message="" if entries else "no events found for this position in the requested window",
+        )
+
+    async def _resolve_position_history_key(
+        self,
+        *,
+        strategy_id: str,
+        chain: str,
+        accounting_category: str,
+        handle: str,
+        physical_identity_hash: str,
+    ) -> str:
+        """Translate the wire identifier to the ``position_events.position_id`` value.
+
+        Behaviour:
+          * ``physical_identity_hash`` wins when both are supplied (it's
+            the stable primary key). We look it up in the position_registry
+            filtered by (strategy_id, chain, accounting_category) and
+            return the matching row's ``handle`` — which IS the
+            ``position_id`` used in position_events (writer convention,
+            cutover.py:69 / backfill.py:861).
+          * If only ``handle`` is supplied: return it verbatim.
+          * Empty string return = "no row matched"; caller surfaces a
+            stub message rather than running an empty query.
+
+        State manager unavailability (`None`) returns the raw handle so
+        the degraded path still works.
+        """
+        if not physical_identity_hash:
+            return handle
+        if self._state_manager is None:
+            return handle  # degraded; let the caller try the raw input
+        try:
+            rows = await self._state_manager.get_position_registry_open_rows(
+                strategy_id,
+                chain=chain or None,
+                accounting_category=accounting_category or None,
+            )
+        except Exception as e:
+            logger.warning(
+                "get_position_registry_open_rows failed in _resolve_position_history_key: %s",
+                e,
+            )
+            return handle  # best effort fallback
+        for row in rows:
+            if row.get("physical_identity_hash") == physical_identity_hash:
+                resolved = row.get("handle") or row.get("physical_identity_hash") or ""
+                return str(resolved)
+        # No registry match — caller decides whether to fall back or stub.
+        return ""
+
+    # =========================================================================
+    # VIB-4493 Phase 1C — Reconciliation triad
+    # =========================================================================
+
+    async def _resolve_chain_and_wallet(self, strategy_id: str) -> tuple[str, str]:
+        """Resolve (chain, wallet_address) for a reconciliation call.
+
+        v1 sources both from the latest portfolio_snapshot. Multi-chain
+        strategies get reconciled against their primary chain only — v1
+        limit, documented. Returns ("", "") when neither can be resolved
+        (caller surfaces this as FAILED_PRECONDITION).
+        """
+        if self._state_manager is None:
+            return ("", "")
+        try:
+            snap = await self._state_manager.get_latest_snapshot(strategy_id)
+        except Exception as e:
+            logger.warning("get_latest_snapshot failed in _resolve_chain_and_wallet: %s", e)
+            return ("", "")
+        if snap is None:
+            return ("", "")
+        chain = getattr(snap, "chain", "") or ""
+        wallet = ""
+        # PortfolioSnapshot may carry wallet_address directly or on the
+        # first wallet_balance entry (multi-chain snapshots vary). Try both.
+        wallet = getattr(snap, "wallet_address", "") or ""
+        if not wallet and getattr(snap, "wallet_balances", None):
+            try:
+                first = snap.wallet_balances[0]
+                wallet = getattr(first, "wallet_address", "") or ""
+            except (IndexError, AttributeError):
+                wallet = ""
+        return (chain, wallet)
+
+    async def _invoke_reconcile(
+        self,
+        *,
+        strategy_id: str,
+        chain: str,
+        wallet_address: str,
+        apply: bool,
+        operator_note: str = "",
+        trigger: str = "dashboard",
+    ) -> gateway_pb2.ReconcileResponse | None:
+        """Call PositionService.Reconcile in-process.
+
+        Returns None when position_servicer is unwired (degraded mode —
+        unit-test friendly, surfaced as empty findings to the caller).
+        Wired by GatewayServer._register_services after construction.
+        """
+        if self.position_servicer is None:
+            logger.warning("position_servicer unwired — Reconcile RPC unavailable in this DashboardService instance")
+            return None
+        req = gateway_pb2.ReconcileRequest(
+            deployment_id=strategy_id,
+            chain=chain,
+            wallet_address=wallet_address,
+            primitives=["lp"],  # v1: LP-only; non-LP surface stubs
+            apply=apply,
+            operator_note=operator_note,
+            trigger=trigger,
+        )
+        # The in-process call uses a stub context — PositionService.Reconcile
+        # only uses context.set_code / set_details for INVALID_ARGUMENT paths,
+        # which surface as response-with-empty-buckets when we hand a
+        # MagicMock-equivalent. Use a minimal real context wrapper that
+        # logs but doesn't abort.
+        import grpc as _grpc  # local for type clarity
+
+        class _PassthroughContext:
+            """Minimal ServicerContext-like — captures set_code / set_details
+            without aborting (in-process callers handle errors via response shape)."""
+
+            def __init__(self) -> None:
+                self.code: _grpc.StatusCode | None = None
+                self.details: str = ""
+
+            def set_code(self, code: _grpc.StatusCode) -> None:
+                self.code = code
+
+            def set_details(self, details: str) -> None:
+                self.details = details
+
+            def set_trailing_metadata(self, _metadata: Any) -> None:
+                pass
+
+            async def abort(self, _code: Any, _details: str) -> None:
+                # PositionService.Reconcile shouldn't reach abort() but we
+                # implement it for safety — raise so the in-process caller
+                # sees the same failure shape as a real gRPC client would.
+                raise _grpc.RpcError(f"Reconcile aborted: {_details}")
+
+        ctx = _PassthroughContext()
+        return await self.position_servicer.Reconcile(req, ctx)
+
+    async def GetReconciliationReport(
+        self,
+        request: gateway_pb2.GetReconciliationReportRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetReconciliationReportResponse:
+        """Three-way diff across ledger / snapshots / registry.
+
+        LP-only in v1 — non-LP primitives surface PrimitiveCoverageStub
+        cards (see _dashboard_phase1.PER_PRIMITIVE_STUBS for the catalogue).
+        5-second gateway-side cache per (strategy_id) per v5 design.
+        """
+        from almanak.gateway.services._dashboard_phase1 import (
+            ReconciliationReportCache,
+            reconcile_response_to_report,
+        )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetReconciliationReport: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetReconciliationReportResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+        now_unix = int(datetime.now(tz=UTC).timestamp())
+
+        if self._reconciliation_report_cache is None:
+            self._reconciliation_report_cache = ReconciliationReportCache(ttl_seconds=5)
+
+        cached = self._reconciliation_report_cache.get(strategy_id, now_unix_seconds=now_unix)
+        if cached is not None:
+            return cached
+
+        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        if not chain or not wallet:
+            # No snapshot yet — return empty findings with a clear stub message
+            # via the primitive_stubs surface. The renderer's empty-state copy
+            # surfaces the "no data yet" case.
+            return gateway_pb2.GetReconciliationReportResponse(
+                as_of=datetime.fromtimestamp(now_unix, tz=UTC).isoformat(),
+            )
+
+        reconcile_response = await self._invoke_reconcile(
+            strategy_id=strategy_id,
+            chain=chain,
+            wallet_address=wallet,
+            apply=False,
+            trigger="dashboard",
+        )
+        if reconcile_response is None:
+            return gateway_pb2.GetReconciliationReportResponse(
+                as_of=datetime.fromtimestamp(now_unix, tz=UTC).isoformat(),
+            )
+
+        report = reconcile_response_to_report(
+            reconcile_response=reconcile_response,
+            now_unix_seconds=now_unix,
+        )
+        self._reconciliation_report_cache.put(strategy_id, report, now_unix_seconds=now_unix)
+        return report
+
+    async def _require_operator_authorization(self, context: grpc.aio.ServicerContext) -> bool:
+        """Server-side gate for the three mutation RPCs (Codex review fix).
+
+        The single-token gateway interceptor (`almanak/gateway/auth.py`)
+        treats every caller equally — any client holding
+        `ALMANAK_GATEWAY_AUTH_TOKEN` can in principle invoke
+        `PreviewReconcile` / `ApplyReconcile` / `RefreshRegistryFromChain`.
+        The client-side two-tier split (`DashboardServiceClient` vs
+        `OperatorDashboardServiceClient`) is only a typing convention.
+
+        This helper adds an opt-in second factor for hosted multi-tenant
+        deployments:
+
+          * If env `ALMANAK_GATEWAY_OPERATOR_TOKEN` is unset → return
+            True. Single-user / local deployments keep current behaviour.
+          * If env is set → require the matching value in the request's
+            `x-operator-token` metadata header. Mismatch / missing →
+            abort with PERMISSION_DENIED.
+
+        A proper RBAC system (per-RPC role check, per-strategy scope,
+        signed bearer tokens) is the next ticket. This is the
+        minimum-viable defense-in-depth that closes Codex's HIGH
+        finding without forcing every existing deployment to rotate
+        tokens. Reads via the central ``GatewaySettings.operator_token``
+        (env ``ALMANAK_GATEWAY_OPERATOR_TOKEN``) — not ``os.environ``
+        directly — to respect the project's config-boundary lint.
+        """
+        required = (self.settings.operator_token or "").strip()
+        if not required:
+            return True  # opt-out: no operator token configured
+
+        metadata = dict(context.invocation_metadata() or [])
+        provided = metadata.get("x-operator-token", "")
+        if isinstance(provided, bytes):
+            provided = provided.decode("utf-8", errors="ignore")
+        if provided != required:
+            logger.warning("operator-only RPC rejected: x-operator-token missing or wrong")
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "operator-only RPC requires the x-operator-token metadata header",
+            )
+            return False
+        return True
+
+    async def PreviewReconcile(
+        self,
+        request: gateway_pb2.PreviewReconcileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PreviewReconcileResponse:
+        """Dry-run reconciliation. Returns a preview_token + diff buckets.
+
+        Token bound to a (registry_count, registry_max_block, ledger_max_id,
+        source_block_number) fingerprint. ApplyReconcile recomputes the
+        fingerprint and rejects with STATE_DRIFT if it has changed.
+
+        Operator-only. v1 token TTL: 5 minutes.
+        """
+        if not await self._require_operator_authorization(context):
+            return gateway_pb2.PreviewReconcileResponse()
+        from almanak.gateway.services._dashboard_phase1 import (
+            PreviewTokenStore,
+            build_per_primitive_stubs,
+            compute_state_fingerprint,
+        )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in PreviewReconcile: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.PreviewReconcileResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+        now_unix = int(datetime.now(tz=UTC).timestamp())
+
+        if self._preview_token_store is None:
+            self._preview_token_store = PreviewTokenStore(default_ttl_seconds=300)
+        # Opportunistic GC to keep the store bounded.
+        self._preview_token_store.gc_expired(now_unix_seconds=now_unix)
+
+        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        if not chain or not wallet:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("could not resolve chain/wallet from latest snapshot — strategy may not be initialized")
+            return gateway_pb2.PreviewReconcileResponse()
+
+        reconcile_response = await self._invoke_reconcile(
+            strategy_id=strategy_id,
+            chain=chain,
+            wallet_address=wallet,
+            apply=False,
+            trigger="dashboard",
+        )
+        if reconcile_response is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("position_servicer unwired on this gateway instance")
+            return gateway_pb2.PreviewReconcileResponse()
+
+        # Build the fingerprint that ApplyReconcile will re-validate against.
+        registry_rows: list[dict[str, Any]] = []
+        ledger_max_id = ""
+        if self._state_manager is not None:
+            try:
+                registry_rows = await self._state_manager.get_position_registry_open_rows(strategy_id)
+            except Exception as e:
+                logger.warning("get_position_registry_open_rows failed in PreviewReconcile: %s", e)
+                registry_rows = []
+            try:
+                latest_entries = await self._state_manager.get_ledger_entries(
+                    strategy_id=strategy_id,
+                    limit=1,
+                )
+                if latest_entries:
+                    ledger_max_id = str(getattr(latest_entries[0], "id", "") or "")
+            except Exception as e:
+                logger.warning("get_ledger_entries failed in PreviewReconcile: %s", e)
+
+        fingerprint = compute_state_fingerprint(
+            registry_rows=registry_rows,
+            ledger_max_id=ledger_max_id,
+            source_block_number=reconcile_response.source_block_number,
+        )
+        token, expires_at = self._preview_token_store.issue(
+            strategy_id=strategy_id,
+            fingerprint=fingerprint,
+            reconcile_response=reconcile_response,
+            now_unix_seconds=now_unix,
+        )
+
+        primitive_stubs = build_per_primitive_stubs(
+            {err.primitive for err in reconcile_response.primitive_errors if err.code == "PARSER_UNSUPPORTED"}
+        )
+
+        return gateway_pb2.PreviewReconcileResponse(
+            preview_token=token,
+            matched=list(reconcile_response.matched),
+            phantom_missing=list(reconcile_response.phantom_missing),
+            stranded=list(reconcile_response.stranded),
+            primitive_stubs=primitive_stubs,
+            reconciliation_id=reconcile_response.reconciliation_id,
+            source_block_number=reconcile_response.source_block_number,
+            expires_at_unix_seconds=expires_at,
+        )
+
+    async def ApplyReconcile(
+        self,
+        request: gateway_pb2.ApplyReconcileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.ApplyReconcileResponse:
+        """Apply a previously-issued PreviewReconcile.
+
+        Validates token → fingerprint match → calls Reconcile(apply=true).
+        Returns SUCCESS / PARTIAL_SUCCESS / STATE_DRIFT / EXPIRED / NOT_FOUND
+        per the ApplyReconcileResponse.result string contract.
+
+        Operator-only.
+        """
+        if not await self._require_operator_authorization(context):
+            return gateway_pb2.ApplyReconcileResponse(
+                result="PERMISSION_DENIED",
+                detail="operator-only RPC",
+            )
+
+        from almanak.gateway.services._dashboard_phase1 import (
+            PreviewTokenStore,
+            categorize_apply_result,
+            compute_state_fingerprint,
+        )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in ApplyReconcile: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.ApplyReconcileResponse(result="INVALID_ARGUMENT", detail=str(e))
+
+        if not request.preview_token:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("preview_token is required")
+            return gateway_pb2.ApplyReconcileResponse(result="INVALID_ARGUMENT", detail="preview_token is required")
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+        now_unix = int(datetime.now(tz=UTC).timestamp())
+
+        if self._preview_token_store is None:
+            # Token was never issued by this process — most likely a gateway
+            # restart between Preview and Apply. Surface clearly.
+            self._preview_token_store = PreviewTokenStore(default_ttl_seconds=300)
+
+        status, entry = self._preview_token_store.consume(
+            token=request.preview_token,
+            strategy_id=strategy_id,
+            now_unix_seconds=now_unix,
+        )
+        if status != "OK" or entry is None:
+            return gateway_pb2.ApplyReconcileResponse(
+                result=status,
+                detail={
+                    "NOT_FOUND": "preview_token unrecognized — likely expired or gateway restarted; re-issue PreviewReconcile",
+                    "EXPIRED": "preview_token TTL elapsed; re-issue PreviewReconcile",
+                    "WRONG_STRATEGY": "preview_token does not belong to this strategy",
+                }.get(status, "unknown token state"),
+            )
+
+        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        if not chain or not wallet:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("could not resolve chain/wallet from latest snapshot")
+            return gateway_pb2.ApplyReconcileResponse(
+                result="STATE_DRIFT",
+                detail="chain/wallet resolution failed between preview and apply",
+            )
+
+        # CRITICAL: detect drift BEFORE mutating. Earlier implementations
+        # called Reconcile(apply=True) and only checked the fingerprint
+        # afterwards — which meant STATE_DRIFT responses could lie about
+        # whether rows had already been written.
+        #
+        # Sequence:
+        #   1. Dry-run Reconcile (apply=False) to sample the current
+        #      source_block_number atomically with the diff buckets.
+        #   2. Read current registry + ledger state. Order matters: doing
+        #      the state reads AFTER the dry-run keeps all three fingerprint
+        #      inputs sampled in the same forward direction (block_number
+        #      → registry → ledger). Reading state first would let a write
+        #      that lands between the reads and the dry-run slip through
+        #      fingerprint equality (CodeRabbit TOCTOU finding).
+        #   3. Build the current fingerprint and compare to the token's.
+        #      Any mismatch → STATE_DRIFT, NO writes performed.
+        #   4. Only on match: invoke Reconcile(apply=True).
+        #
+        # There remains a small race window between step 3 and step 4
+        # (chain head can advance, another writer can fire); v1 accepts
+        # this. A future ticket can teach PositionService.Reconcile to
+        # take an expected source_block_number / fingerprint and reject
+        # atomically — that closes the window entirely. Today, any
+        # in-window drift surfaces as PARTIAL_SUCCESS / per-primitive
+        # errors from Reconcile rather than as silent corruption.
+        dry_run_response = await self._invoke_reconcile(
+            strategy_id=strategy_id,
+            chain=chain,
+            wallet_address=wallet,
+            apply=False,
+            operator_note=f"ApplyReconcile drift check via preview_token={request.preview_token[:16]}...",
+            trigger="dashboard",
+        )
+        if dry_run_response is None:
+            return gateway_pb2.ApplyReconcileResponse(
+                result="STATE_DRIFT",
+                detail="position_servicer unwired on this gateway instance",
+            )
+
+        registry_rows: list[dict[str, Any]] = []
+        ledger_max_id = ""
+        if self._state_manager is not None:
+            try:
+                registry_rows = await self._state_manager.get_position_registry_open_rows(strategy_id)
+            except Exception as e:
+                logger.warning("get_position_registry_open_rows failed in ApplyReconcile fingerprint: %s", e)
+            try:
+                latest_entries = await self._state_manager.get_ledger_entries(
+                    strategy_id=strategy_id,
+                    limit=1,
+                )
+                if latest_entries:
+                    ledger_max_id = str(getattr(latest_entries[0], "id", "") or "")
+            except Exception as e:
+                logger.warning("get_ledger_entries failed in ApplyReconcile fingerprint: %s", e)
+
+        current_fingerprint = compute_state_fingerprint(
+            registry_rows=registry_rows,
+            ledger_max_id=ledger_max_id,
+            source_block_number=dry_run_response.source_block_number,
+        )
+        if not entry.fingerprint.equals(current_fingerprint):
+            return gateway_pb2.ApplyReconcileResponse(
+                result="STATE_DRIFT",
+                detail=(
+                    "state advanced between preview and apply (registry / ledger / "
+                    "chain head moved); no changes applied. Re-issue PreviewReconcile."
+                ),
+                reconciliation_id=dry_run_response.reconciliation_id,
+            )
+
+        # Fingerprint matches — safe to apply. The second Reconcile will
+        # write registry rows for any phantom_missing it still sees.
+        reconcile_response = await self._invoke_reconcile(
+            strategy_id=strategy_id,
+            chain=chain,
+            wallet_address=wallet,
+            apply=True,
+            operator_note=f"ApplyReconcile via preview_token={request.preview_token[:16]}...",
+            trigger="dashboard",
+        )
+        if reconcile_response is None:
+            return gateway_pb2.ApplyReconcileResponse(
+                result="STATE_DRIFT",
+                detail="position_servicer unwired on this gateway instance",
+            )
+
+        # The drift check already gated us here. fingerprint_matched=True
+        # is the contract for categorize_apply_result on the post-apply
+        # response.
+        result_code, detail = categorize_apply_result(
+            reconcile_response=reconcile_response,
+            fingerprint_matched=True,
+        )
+
+        return gateway_pb2.ApplyReconcileResponse(
+            result=result_code,
+            detail=detail,
+            rebuilt=list(reconcile_response.rebuilt),
+            primitive_errors=list(reconcile_response.primitive_errors),
+            reconciliation_id=reconcile_response.reconciliation_id,
+        )
+
+    # =========================================================================
+    # VIB-4493 Phase 1D — RefreshRegistryFromChain
+    # =========================================================================
+
+    async def RefreshRegistryFromChain(
+        self,
+        request: gateway_pb2.RefreshRegistryFromChainRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.RefreshRegistryFromChainResponse:
+        """Force fresh on-chain reads for every position in position_registry.
+
+        Per v5 design + A2 audit: PositionService.Reconcile has NO
+        concurrency guard, so the per-strategy in-flight lock lives here.
+        Implementation is a thin wrapper around Reconcile(apply=true) —
+        the same engine that PreviewReconcile/ApplyReconcile use, but
+        invoked directly without a preview_token (operator explicitly
+        wants a fresh chain read + register-divergence-as-events pass).
+
+        Rate-limited: one in-flight per strategy. Concurrent calls return
+        RATE_LIMITED with the in-flight reconciliation_id in detail.
+
+        Operator-only.
+        """
+        if not await self._require_operator_authorization(context):
+            return gateway_pb2.RefreshRegistryFromChainResponse(
+                result="PERMISSION_DENIED",
+                detail="operator-only RPC",
+            )
+
+        import asyncio as _asyncio
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in RefreshRegistryFromChain: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.RefreshRegistryFromChainResponse(result="INVALID_ARGUMENT", detail=str(e))
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        # Per-strategy lock construction is itself thread-safe in asyncio
+        # (single event loop) — no extra synchronization needed.
+        lock = self._registry_refresh_locks.get(strategy_id)
+        if lock is None:
+            lock = _asyncio.Lock()
+            self._registry_refresh_locks[strategy_id] = lock
+
+        if lock.locked():
+            return gateway_pb2.RefreshRegistryFromChainResponse(
+                result="RATE_LIMITED",
+                detail="another RefreshRegistryFromChain is in flight for this strategy",
+            )
+
+        async with lock:
+            chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+            if not chain or not wallet:
+                return gateway_pb2.RefreshRegistryFromChainResponse(
+                    result="FAILED",
+                    detail="could not resolve chain/wallet from latest snapshot",
+                )
+
+            reconcile_response = await self._invoke_reconcile(
+                strategy_id=strategy_id,
+                chain=chain,
+                wallet_address=wallet,
+                apply=True,
+                operator_note="RefreshRegistryFromChain (explicit operator action)",
+                trigger="dashboard",
+            )
+            if reconcile_response is None:
+                return gateway_pb2.RefreshRegistryFromChainResponse(
+                    result="FAILED",
+                    detail="position_servicer unwired on this gateway instance",
+                )
+
+            # positions_refreshed = matched + rebuilt (rows whose on_chain_verified_at
+            # was just updated). events_emitted = rebuilt_count (registry rows
+            # newly inserted, each emits a corresponding event in the writer path).
+            positions_refreshed = int(reconcile_response.matched_count) + int(reconcile_response.rebuilt_count)
+            events_emitted = int(reconcile_response.rebuilt_count)
+
+            return gateway_pb2.RefreshRegistryFromChainResponse(
+                result="SUCCESS",
+                detail=f"refreshed {positions_refreshed} positions, emitted {events_emitted} events",
+                positions_refreshed=positions_refreshed,
+                events_emitted=events_emitted,
+                source_block_number=reconcile_response.source_block_number,
+                reconciliation_id=reconcile_response.reconciliation_id,
+            )

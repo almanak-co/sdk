@@ -2324,6 +2324,7 @@ class StrategyRunner:
                     cycle_id=cycle_id,
                     price_oracle=price_oracle,
                     post_state=post_state,
+                    pre_state=pre_state,
                 )
 
             # Signal that this iteration executed a trade — forces snapshot
@@ -3139,6 +3140,7 @@ class StrategyRunner:
         cycle_id: str,
         price_oracle: dict | None,
         post_state: dict | None,
+        pre_state: dict | None = None,
     ) -> None:
         """VIB-2775 / VIB-3919 / VIB-4085 — build a position_event from a
         successful intent result and persist it, then run the OPEN/CLOSE
@@ -3173,6 +3175,9 @@ class StrategyRunner:
                 recent_open_events=self._recent_open_events,
                 # VIB-4085: lending CLOSE-vs-DECREASE refinement.
                 post_state=post_state,
+                # VIB-4493: lending CLOSE value_usd derives pre-close
+                # balance from pre_state (post-state is 0 at CLOSE).
+                pre_state=pre_state,
                 wallet_address=wallet_address,
             )
             if pos_event is None:

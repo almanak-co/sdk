@@ -161,6 +161,17 @@ class GatewaySettings(BaseSettings):
     # When False (default), gateway will fail to start without auth_token configured
     allow_insecure: bool = False
 
+    # VIB-4493 Phase 1 — second-factor token for mutation RPCs on
+    # DashboardService (PreviewReconcile / ApplyReconcile /
+    # RefreshRegistryFromChain). When set, those handlers require the
+    # caller to send the same value in the ``x-operator-token``
+    # metadata header in addition to the regular ``auth_token``;
+    # mismatch / missing → PERMISSION_DENIED. When unset (default),
+    # the handlers fall back to ``auth_token``-only authentication —
+    # safe for single-user / local deployments where the operator IS
+    # the only caller. A proper RBAC system is the next ticket.
+    operator_token: str | None = None
+
     # VIB-3761/-3835: standalone-mode opt-in. When True, the gateway resolves
     # its local SQLite path through the lenient ``local_db_path`` helper —
     # which can fall back to ``~/.local/share/almanak/utility/almanak_state.db``.

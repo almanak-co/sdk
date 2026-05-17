@@ -37,7 +37,6 @@ from almanak.framework.observability.position_events import (
     lending_position_id,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # Static dispatch — VIB-4085 added five new keys
 # ──────────────────────────────────────────────────────────────────────────
@@ -147,9 +146,7 @@ def test_first_supply_emits_open():
     assert event is not None
     assert event.event_type == PositionEventType.OPEN.value
     assert event.position_type == PositionType.LENDING_COLLATERAL.value
-    assert event.position_id == (
-        "lending:arbitrum:aave_v3:0x1234567890123456789012345678901234567890:usdc"
-    )
+    assert event.position_id == ("lending:arbitrum:aave_v3:0x1234567890123456789012345678901234567890:usdc")
     assert event.token0 == "USDC"
     assert event.amount0 == "2000000"
     assert event.value_usd == "2.0"
@@ -312,6 +309,195 @@ def test_close_at_dust_threshold():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# VIB-4493 — lending CLOSE.value_usd stamps pre-close balance, not 0
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_repay_close_value_usd_uses_pre_close_debt():
+    """A full REPAY drains debt to dust ⇒ post-state ``debt_value_usd`` is 0
+    by definition. Stamping post-state into ``PositionEvent.value_usd``
+    leaves the dashboard with ``0E-8`` in the "Value (USD)" column, which
+    tells the operator nothing about how much was closed. When ``pre_state``
+    is supplied, the writer must promote the PRE-close debt (= the closed
+    amount) instead. LP_CLOSE already writes market-value-at-close;
+    lending CLOSE should match that contract.
+
+    Reproduces the dashboard finding from the VIB-4316 17-row audit
+    (loop_lp_same / looping rows showed CLOSE rows with ``0E-8``).
+    """
+    intent = _make_lending_intent("REPAY", asset="USDT")
+    result = _make_result("REPAY", amount=1_200_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-repay-close",
+        chain="arbitrum",
+        recent_open_events={},
+        pre_state={"collateral_value_usd": "5.18679622", "debt_value_usd": "1.19944358"},
+        post_state={"collateral_value_usd": "5.18679622", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.CLOSE.value
+    assert event.position_type == PositionType.LENDING_DEBT.value
+    # Must surface pre-close debt, not post-close (which is 0).
+    assert event.value_usd == "1.19944358"
+
+
+def test_withdraw_close_value_usd_uses_pre_close_collateral():
+    """A full WITHDRAW closes the collateral leg. ``pre_state`` carries the
+    pre-close collateral; that's what the dashboard should display."""
+    intent = _make_lending_intent("WITHDRAW", asset="USDC")
+    result = _make_result("WITHDRAW", amount=5_200_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-withdraw-close",
+        chain="arbitrum",
+        recent_open_events={},
+        pre_state={"collateral_value_usd": "5.18679622", "debt_value_usd": "0"},
+        post_state={"collateral_value_usd": "0", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.CLOSE.value
+    assert event.position_type == PositionType.LENDING_COLLATERAL.value
+    assert event.value_usd == "5.18679622"
+
+
+def test_decrease_stamps_action_delta_not_post_state():
+    """Partial WITHDRAW ⇒ DECREASE. The dashboard's "Value (USD)" column
+    means the *size of the action*, not the post-state remaining. Stamping
+    post-state (= 4.0 in this fixture) reads to an operator as "the
+    DECREASE moved 4.0 USDC" — wrong; the action actually moved 1.0.
+
+    Reproduces the dashboard finding from the looping-aave_v3-base row in
+    the VIB-4316 batch-2 audit: a 1.39-USDC partial WITHDRAW displayed as
+    5.63 USDC (= post-state remaining), which collided visually with the
+    subsequent full-close row that also displayed 5.63.
+    """
+    intent = _make_lending_intent("WITHDRAW", asset="USDC")
+    result = _make_result("WITHDRAW", amount=1_000_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-withdraw-partial",
+        chain="arbitrum",
+        recent_open_events={},
+        pre_state={"collateral_value_usd": "5.0", "debt_value_usd": "0"},
+        post_state={"collateral_value_usd": "4.0", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.DECREASE.value
+    # Action delta (|5.0 - 4.0|), not post-state remaining (4.0).
+    assert event.value_usd == "1.0"
+
+
+def test_increase_stamps_action_delta_not_post_state():
+    """Second SUPPLY on the same collateral leg ⇒ INCREASE. The action
+    delta = pre - post (with abs) = the supply amount, not the post-state
+    new total. Pre-fix the dashboard read "INCREASE 5.0 USDC" when the
+    action only added 3.0 to a pre-existing 2.0 balance."""
+    intent = _make_lending_intent("SUPPLY")
+    result = _make_result("SUPPLY", amount=3_000_000)
+
+    pid = lending_position_id(
+        chain="arbitrum",
+        protocol="aave_v3",
+        wallet="0xWALLET",
+        asset="USDC",
+    )
+    cache = {(pid, str(PositionType.LENDING_COLLATERAL)): {"value_usd": "2.0"}}
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-increase",
+        chain="arbitrum",
+        recent_open_events=cache,
+        pre_state={"collateral_value_usd": "2.0", "debt_value_usd": "0"},
+        post_state={"collateral_value_usd": "5.0", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.INCREASE.value
+    # Action delta (|2.0 - 5.0|), not post-state total (5.0).
+    assert event.value_usd == "3.0"
+
+
+def test_open_with_preexisting_balance_stamps_action_delta():
+    """OPEN where the wallet had a pre-existing collateral balance from a
+    prior run on the same shared Anvil fork. Pre-fix the dashboard stamped
+    the post-state (= pre-existing + new contribution), making the OPEN
+    look bigger than the action actually was. Reproduces the OPEN
+    COLLATERAL row in looping-aave_v3-base where value_usd=7.018 but the
+    SUPPLY itself only moved 4.0 (because pre-existing collat was 3.018).
+    """
+    intent = _make_lending_intent("SUPPLY")
+    result = _make_result("SUPPLY", amount=4_000_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-open-with-preexisting",
+        chain="arbitrum",
+        recent_open_events={},  # empty cache → static dispatch keeps OPEN
+        pre_state={"collateral_value_usd": "3.01849760", "debt_value_usd": "0"},
+        post_state={
+            "collateral_value_usd": "7.01789752",
+            "debt_value_usd": "0",
+            "health_factor": "999999",
+        },
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.OPEN.value
+    # Action delta (|3.01849760 - 7.01789752|), not post-state (7.01789752).
+    assert event.value_usd == "3.99939992"
+
+
+def test_close_without_pre_state_falls_back_to_post_state():
+    """Backward-compat: callers that don't yet pass ``pre_state`` (legacy
+    paper / dry-run paths, third-party harnesses, fixtures) keep the
+    pre-fix behaviour — post-state leg value lands in ``value_usd`` even
+    if that's 0. The fix is opt-in via ``pre_state``."""
+    intent = _make_lending_intent("REPAY", asset="USDT")
+    result = _make_result("REPAY", amount=1_000_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-no-prestate",
+        chain="arbitrum",
+        recent_open_events={},
+        # pre_state intentionally omitted
+        post_state={"collateral_value_usd": "5.0", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0xWALLET",
+    )
+
+    assert event is not None
+    assert event.event_type == PositionEventType.CLOSE.value
+    # No pre_state ⇒ keep legacy post-state stamp (0). Test pins this so
+    # we know if a future refactor accidentally tightens the contract.
+    assert event.value_usd == "0"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # attribution_json — v1 lending payload
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -435,9 +621,9 @@ def test_borrow_intent_field_name_resolves_asset():
     assert event is not None
     assert event.position_type == PositionType.LENDING_DEBT.value
     assert event.token0 == "USDT", "BORROW must read borrow_token (not collateral_token)"
-    assert event.position_id == (
-        "lending:arbitrum:aave_v3:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266:usdt"
-    ), "position_id asset segment must come from borrow_token"
+    assert event.position_id == ("lending:arbitrum:aave_v3:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266:usdt"), (
+        "position_id asset segment must come from borrow_token"
+    )
     assert event.value_usd == "1.2"
 
 
