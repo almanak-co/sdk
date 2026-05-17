@@ -9769,16 +9769,43 @@ class MarkTeardownFailedRequest(_message.Message):
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
+    POSITIONS_CLOSED_FIELD_NUMBER: _builtins.int
+    POSITIONS_FAILED_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     error_message: _builtins.str
+    positions_closed: _builtins.int
+    """VIB-4542: intent-landing counts, parallel to UpdateTeardownProgressRequest.
+    Proto3 `optional` gives presence-tracked scalars — an omitted field
+    round-trips back as "not set" instead of the proto3-scalar default 0.
+    That preserves the existing counter value for legacy callers (and the
+    runner's safety-validation early-fail path that has no intent counts)
+    instead of accidentally zeroing out a prior progress write.
+    Audit (PR #2343): the prior `-1` sentinel was unsafe — proto3 scalar
+    defaults are 0, not -1, so a legacy client sending only strategy_id +
+    error_message would have arrived as positions_closed=0 (overwrite),
+    not -1 (preserve).
+    """
+    positions_failed: _builtins.int
     def __init__(
         self,
         *,
         strategy_id: _builtins.str = ...,
         error_message: _builtins.str = ...,
+        positions_closed: _builtins.int | None = ...,
+        positions_failed: _builtins.int | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error_message", b"error_message", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed", "_positions_failed", b"_positions_failed", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed", "_positions_failed", b"_positions_failed", "error_message", b"error_message", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__positions_closed: _TypeAlias = _typing.Literal["positions_closed"]  # noqa: Y015
+    _WhichOneofArgType__positions_closed: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed"]  # noqa: Y015
+    _WhichOneofReturnType__positions_failed: _TypeAlias = _typing.Literal["positions_failed"]  # noqa: Y015
+    _WhichOneofArgType__positions_failed: _TypeAlias = _typing.Literal["_positions_failed", b"_positions_failed"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__positions_closed) -> _WhichOneofReturnType__positions_closed | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__positions_failed) -> _WhichOneofReturnType__positions_failed | None: ...
 
 Global___MarkTeardownFailedRequest: _TypeAlias = MarkTeardownFailedRequest  # noqa: Y015
 

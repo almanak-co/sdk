@@ -20,7 +20,10 @@ import json
 import sys
 from pathlib import Path
 
-from almanak.framework.accounting.accountant_test import run_against_sqlite
+from almanak.framework.accounting.accountant_test import (
+    MultipleDeploymentsError,
+    run_against_sqlite,
+)
 
 
 # crap-allowlist: Phase 5e (#2097) swaps four direct ``os.environ.<get|pop|set>``
@@ -94,7 +97,7 @@ def _resolve_db_path(strategy_folder: str | None, explicit_db: str | None) -> Pa
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="almanak-accountant-test",
         description="Run the Accountant Test (Accounting-AttemptNo17 §1) against a strategy DB.",
@@ -112,6 +115,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=["lp", "looping", "perp"],
         required=True,
         help="Which primitive's cell matrix to evaluate.",
+    )
+    p.add_argument(
+        "--deployment-id",
+        dest="deployment_id",
+        default=None,
+        help="Scope cell reads to a single deployment_id (VIB-4540). When the DB "
+        "carries rows from multiple strategy deployments, this flag is required "
+        "— silent cross-deployment contamination of cell scores was the bug this "
+        "flag closes. Single-deployment fixture DBs auto-pick the singleton.",
     )
     p.add_argument(
         "--report-out",
@@ -148,15 +160,10 @@ def main(argv: list[str] | None = None) -> int:
         "Exits non-zero if any listed cell is not PASS. Mutually exclusive with --strict; "
         "use this when only a subset of cells is meaningful for a given deploy gate.",
     )
-    args = p.parse_args(argv)
+    return p
 
-    if args.strict and args.require_cells:
-        sys.stderr.write("error: --strict and --require-cells are mutually exclusive — pick one\n")
-        return 2
 
-    db_path = _resolve_db_path(args.working_dir, args.db)
-    report = run_against_sqlite(db_path, primitive=args.primitive)
-
+def _emit_output(report, args) -> None:
     if args.json_out is not None:
         payload = json.dumps(report.to_json(), indent=2, sort_keys=True, default=str)
         if args.json_out == "-":
@@ -176,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.json_out is None:
         sys.stdout.write(report.format_markdown() + "\n")
 
+
+def _compute_exit_code(report, args) -> int:
     # Default: exit non-zero only on FAIL. XFAIL/SKIP are deferred-tracking
     # statuses per AttemptNo17 §6 and don't gate the progress scorecard.
     if args.require_cells:
@@ -203,6 +212,31 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     return 1 if report.failed > 0 else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    if args.strict and args.require_cells:
+        sys.stderr.write("error: --strict and --require-cells are mutually exclusive — pick one\n")
+        return 2
+
+    db_path = _resolve_db_path(args.working_dir, args.db)
+    try:
+        report = run_against_sqlite(
+            db_path,
+            primitive=args.primitive,
+            deployment_id=args.deployment_id,
+        )
+    except MultipleDeploymentsError as e:
+        # VIB-4540: surface as exit-code 2 (config error) — same class as
+        # ``--strict and --require-cells are mutually exclusive`` above —
+        # so CI can distinguish "ambiguous run" from "cells failed".
+        sys.stderr.write(f"error: {e}\nPass --deployment-id <id> to scope the report.\n")
+        return 2
+
+    _emit_output(report, args)
+    return _compute_exit_code(report, args)
 
 
 if __name__ == "__main__":

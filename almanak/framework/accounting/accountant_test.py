@@ -86,9 +86,21 @@ class FixtureLifecycleError(AssertionError):
     """
 
 
-def _assert_fixture_lifecycle(conn: sqlite3.Connection, primitive: Primitive) -> None:
+def _assert_fixture_lifecycle(
+    conn: sqlite3.Connection,
+    primitive: Primitive,
+    *,
+    deployment_id: str | None = None,
+) -> None:
     """Read transaction_ledger.intent_type for success=1 rows and assert
     every canonical lifecycle step is present. Extra steps are allowed.
+
+    VIB-4540 (audit PR #2343): when ``deployment_id`` is supplied, the
+    lifecycle query is scoped to that deployment — otherwise a fixture
+    DB containing multiple deployments could falsely pass a target
+    deployment that is missing a step because another unrelated
+    deployment supplied it (or falsely fail based on rows from a
+    different deployment).
 
     Raises :class:`FixtureLifecycleError` with a structured diagnostic that
     names the missing step(s) AND the steps that were observed.
@@ -96,7 +108,13 @@ def _assert_fixture_lifecycle(conn: sqlite3.Connection, primitive: Primitive) ->
     expected = set(_LIFECYCLE_BY_PRIMITIVE.get(primitive, ()))
     if not expected:
         return
-    cur = conn.execute("SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1")
+    if deployment_id is None:
+        cur = conn.execute("SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1")
+    else:
+        cur = conn.execute(
+            "SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1 AND deployment_id = ?",
+            (deployment_id,),
+        )
     actual = {row[0] for row in cur.fetchall() if row[0]}
     missing = expected - actual
     if missing:
@@ -313,14 +331,27 @@ _ALLOWED_READ_TABLES: frozenset[str] = frozenset(
 )
 
 
-def _table_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
-    """Read all rows from one of the SDK's read-only accounting tables.
+def _table_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    deployment_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read rows from one of the SDK's read-only accounting tables.
 
     The table name is interpolated into the SQL string because sqlite3 does
     not parameterize identifiers. The whitelist below makes that safe — only
     the small set of SDK-owned accounting tables this module ever needs to
     read are permitted, and any other input raises ``ValueError`` rather
     than silently issuing a query against an attacker-controlled identifier.
+
+    VIB-4540: when ``deployment_id`` is supplied, rows are scoped via
+    ``WHERE deployment_id = ?``. Without that filter, a folder-scoped DB
+    accumulated across multiple deployments would leak older rows into the
+    current run's cell scores (caught when L3 reported ``min(HF) = 0.997``
+    from a prior deployment instead of from this run's ``HF = 1.71``).
+    Back-compat: passing ``None`` preserves the original unfiltered shape
+    for any callers that pre-date the scoping flag.
     """
     if table not in _ALLOWED_READ_TABLES:
         raise ValueError(
@@ -328,10 +359,106 @@ def _table_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
         )
     cur = conn.cursor()
     try:
-        cur.execute(f"SELECT * FROM {table}")  # noqa: S608 — whitelisted identifier
+        if deployment_id is None:
+            cur.execute(f"SELECT * FROM {table}")  # noqa: S608 — whitelisted identifier
+        else:
+            cur.execute(
+                f"SELECT * FROM {table} WHERE deployment_id = ?",  # noqa: S608 — whitelisted identifier
+                (deployment_id,),
+            )
     except sqlite3.OperationalError:
+        # Table missing or (when ``deployment_id`` is supplied) the column
+        # is absent on an older schema. Either case collapses to "no rows"
+        # so callers get the same back-compat shape they had before VIB-4540.
         return []
     return [dict(r) for r in cur.fetchall()]
+
+
+# VIB-4540: the small subset of tables whose ``deployment_id`` column is
+# the canonical identity key — querying any one of them is enough to
+# enumerate the deployments present in a folder DB. ``SELECT DISTINCT
+# deployment_id`` on these tables performs a full table scan on an
+# unindexed column, so the cost is O(rows), not O(deployments). For the
+# CLI's interactive case that's fine (one call per invocation); a future
+# hot-path caller should add an index or maintain a separate
+# ``deployments`` table (gemini review on PR #2343).
+_DEPLOYMENT_SCAN_TABLES: tuple[str, ...] = (
+    "transaction_ledger",
+    "accounting_events",
+    "portfolio_snapshots",
+)
+
+
+class MultipleDeploymentsError(RuntimeError):
+    """Raised when ``run_against_sqlite`` sees >1 deployment in the DB and
+    the caller did not supply ``deployment_id``.
+
+    Auto-picking would silently contaminate the score with rows from an
+    unrelated deployment (the bug VIB-4540 fixes); raising forces the
+    caller to choose explicitly. The candidate deployment ids are
+    exposed on ``deployment_ids`` so a CLI / UI can render its own
+    selection prompt without re-parsing the error string.
+    """
+
+    def __init__(self, deployment_ids: list[str]) -> None:
+        self.deployment_ids = list(deployment_ids)
+        super().__init__(
+            "Multiple deployments present in this DB; the Accountant Test must "
+            "score against one. Pass deployment_id explicitly. Candidates: "
+            f"{sorted(self.deployment_ids)}"
+        )
+
+
+def _deployment_exists(conn: sqlite3.Connection, deployment_id: str) -> bool:
+    """Return True iff ``deployment_id`` appears in at least one of the
+    canonical accounting tables. Used to validate an explicit ``--deployment-id``
+    flag before scoping reads — without this, a typo would fall through to
+    empty filtered reads and produce a misleading FAIL/XFAIL report instead
+    of a config error (audit PR #2343 finding)."""
+    for table in _DEPLOYMENT_SCAN_TABLES:
+        try:
+            cur = conn.execute(
+                f"SELECT 1 FROM {table} WHERE deployment_id = ? LIMIT 1",  # noqa: S608 — whitelisted identifier
+                (deployment_id,),
+            )
+            if cur.fetchone() is not None:
+                return True
+        except sqlite3.OperationalError:
+            continue
+    return False
+
+
+def _resolve_singleton_deployment_id(conn: sqlite3.Connection) -> str | None:
+    """Discover the deployment to score against when the caller didn't pick one.
+
+    Returns:
+      * ``None`` when no deployment is found (empty DB, or a fixture predating
+        the canonical ``deployment_id`` column). Callers proceed unfiltered —
+        same back-compat shape as before VIB-4540.
+      * The singleton id when exactly one deployment is present (the
+        matrix-runner case — every fixture DB carries one deployment).
+
+    Raises:
+      :class:`MultipleDeploymentsError` when the DB has >1 deployment. Silent
+      auto-pick of "first" or "latest" would re-introduce the contamination
+      this helper exists to prevent; raising forces the caller to choose.
+    """
+    deployments: set[str] = set()
+    for table in _DEPLOYMENT_SCAN_TABLES:
+        try:
+            cur = conn.execute(
+                f"SELECT DISTINCT deployment_id FROM {table} "  # noqa: S608 — whitelisted identifier
+                "WHERE deployment_id IS NOT NULL AND deployment_id != ''"
+            )
+            deployments.update(row[0] for row in cur.fetchall() if row[0])
+        except sqlite3.OperationalError:
+            # Table or column missing — partial schema is fine, keep scanning.
+            continue
+    if not deployments:
+        return None
+    if len(deployments) == 1:
+        return next(iter(deployments))
+    raise MultipleDeploymentsError(sorted(deployments))
 
 
 def _dec(v: Any) -> Decimal | None:
@@ -407,7 +534,19 @@ def _project_payload_for_v1_validation(payload: dict[str, Any], row: dict[str, A
             out["protocol"] = row_protocol
 
     # Lending: amount_token → amount (SUPPLY/REPAY/WITHDRAW) or borrowed_amount (BORROW)
-    if et in {"SUPPLY", "REPAY", "DELEVERAGE", "WITHDRAW"} and "amount" not in out:
+    #
+    # VIB-4539: forward ``amount_token`` even when it is None **for WITHDRAW
+    # only**. ``WithdrawEventPayload.amount`` is widened to ``Decimal | None``
+    # per the AGENTS.md Empty ≠ Zero rule because the Morpho receipt parser
+    # cannot always resolve assets amount on shares-mode withdraws / unresolved
+    # decimals. SUPPLY / REPAY / DELEVERAGE / BORROW schemas remain strictly
+    # ``Decimal`` — keep the prior "only forward when non-None" behaviour for
+    # them so an unmeasured row fails Pydantic loudly with "field required"
+    # instead of silently aliasing None onto a still-required field (audit
+    # PR #2343 Claude finding 3).
+    if et == "WITHDRAW" and "amount" not in out and "amount_token" in out:
+        out["amount"] = out["amount_token"]
+    if et in {"SUPPLY", "REPAY", "DELEVERAGE"} and "amount" not in out:
         if out.get("amount_token") is not None:
             out["amount"] = out["amount_token"]
     if et == "BORROW" and "borrowed_amount" not in out:
@@ -2532,6 +2671,7 @@ def run_against_sqlite(
     *,
     primitive: Primitive,
     strict_lifecycle: bool = False,
+    deployment_id: str | None = None,
 ) -> AccountantReport:
     """Run the Accountant Test against a SQLite DB file.
 
@@ -2550,27 +2690,48 @@ def run_against_sqlite(
     against real DBs that may exercise only part of a lifecycle); the
     Accountant Test test-suite (``test_accountant_test_baseline.py``)
     opts in.
+
+    VIB-4540: when ``deployment_id`` is supplied, every row read is
+    scoped to that deployment. When unspecified, the helper auto-picks
+    the singleton if exactly one deployment is present (preserves the
+    matrix-runner contract — every fixture DB is single-deployment) and
+    raises :class:`MultipleDeploymentsError` otherwise. Silent contamination
+    across deployments was the original bug; auto-picking "first" or
+    "latest" would just hide it.
     """
     conn = _connect(db_path)
     try:
+        # VIB-4540 (audit PR #2343): resolve deployment_id BEFORE the
+        # lifecycle check so strict mode evaluates the same scoped row
+        # set as the cells, and validate an explicit id so a typo
+        # surfaces as a config error instead of an empty-filter FAIL.
+        if deployment_id is None:
+            deployment_id = _resolve_singleton_deployment_id(conn)
+        elif not _deployment_exists(conn, deployment_id):
+            raise ValueError(
+                f"Unknown deployment_id: {deployment_id!r}. "
+                "No rows for this id were found in any of the canonical "
+                "accounting tables; check for a typo or pass --deployment-id "
+                "with one of the candidates surfaced by MultipleDeploymentsError."
+            )
         if strict_lifecycle:
-            _assert_fixture_lifecycle(conn, primitive)
-        ledger = _table_rows(conn, "transaction_ledger")
-        pos_events = _table_rows(conn, "position_events")
-        acct_events = _table_rows(conn, "accounting_events")
-        snapshots = _table_rows(conn, "portfolio_snapshots")
-        metrics = _table_rows(conn, "portfolio_metrics")
+            _assert_fixture_lifecycle(conn, primitive, deployment_id=deployment_id)
+        ledger = _table_rows(conn, "transaction_ledger", deployment_id=deployment_id)
+        pos_events = _table_rows(conn, "position_events", deployment_id=deployment_id)
+        acct_events = _table_rows(conn, "accounting_events", deployment_id=deployment_id)
+        snapshots = _table_rows(conn, "portfolio_snapshots", deployment_id=deployment_id)
+        metrics = _table_rows(conn, "portfolio_metrics", deployment_id=deployment_id)
         # Track C surface — empty list when the materializer hasn't been
         # wired (current state on this branch). Both G14 and G15 stay
         # XFAIL in that case by design.
-        position_state_rows = _table_rows(conn, "position_state_snapshots")
+        position_state_rows = _table_rows(conn, "position_state_snapshots", deployment_id=deployment_id)
         # VIB-4201 (T15): cell #22 preflight + reads.
-        position_registry_rows = _table_rows(conn, "position_registry")
+        position_registry_rows = _table_rows(conn, "position_registry", deployment_id=deployment_id)
         (
             position_reference_column_present,
             position_registry_table_present,
             malformed_position_reference_row_ids,
-        ) = _cell22_preflight(conn)
+        ) = _cell22_preflight(conn, deployment_id=deployment_id)
     finally:
         conn.close()
     return evaluate_cells(
@@ -2589,7 +2750,11 @@ def run_against_sqlite(
     )
 
 
-def _cell22_preflight(conn: sqlite3.Connection) -> tuple[bool, bool, list[Any]]:
+def _cell22_preflight(
+    conn: sqlite3.Connection,
+    *,
+    deployment_id: str | None = None,
+) -> tuple[bool, bool, list[Any]]:
     """Run the cell #22 preflight checks against an open SQLite connection.
 
     Returns ``(position_reference_column_present, position_registry_table_present,
@@ -2598,6 +2763,14 @@ def _cell22_preflight(conn: sqlite3.Connection) -> tuple[bool, bool, list[Any]]:
     ``try/except`` so a missing table / column fails to ``False`` / ``[]``
     rather than raising into the caller; the cell predicate's branches
     interpret the flags into PASS / FAIL / XFAIL verdicts.
+
+    VIB-4540 (audit PR #2343): when ``deployment_id`` is supplied, the
+    malformed-JSON scan is scoped to that deployment. Without scoping, a
+    bad row in an older/unrelated deployment would cause L5_22 to FAIL
+    for an otherwise clean target deployment — re-introducing the cross-
+    deployment contamination this fix is supposed to prevent. P1 (column
+    existence) and P2 (table existence) are schema-level checks that
+    apply DB-wide and don't need scoping.
     """
     # P1: position_reference column exists?
     try:
@@ -2619,10 +2792,18 @@ def _cell22_preflight(conn: sqlite3.Connection) -> tuple[bool, bool, list[Any]]:
     malformed_ids: list[Any] = []
     if position_reference_column_present:
         try:
-            cur = conn.execute(
-                "SELECT id FROM accounting_events "
-                "WHERE position_reference IS NOT NULL AND json_valid(position_reference) = 0"
-            )
+            if deployment_id is None:
+                cur = conn.execute(
+                    "SELECT id FROM accounting_events "
+                    "WHERE position_reference IS NOT NULL AND json_valid(position_reference) = 0"
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT id FROM accounting_events "
+                    "WHERE deployment_id = ? "
+                    "AND position_reference IS NOT NULL AND json_valid(position_reference) = 0",
+                    (deployment_id,),
+                )
             malformed_ids = [row[0] for row in cur.fetchall()]
         except sqlite3.OperationalError:
             # ``json_valid`` is missing on ancient SQLite builds (<3.38;
@@ -2644,6 +2825,7 @@ __all__ = [
     "AccountantReport",
     "CellResult",
     "FixtureLifecycleError",
+    "MultipleDeploymentsError",
     "Primitive",
     "evaluate_cells",
     "run_against_sqlite",

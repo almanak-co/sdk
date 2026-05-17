@@ -99,13 +99,18 @@ def test_g13_fail_on_intra_primitive_drift(tmp_path: Path) -> None:
             "formula_version": payload_schemas.FORMULA_VERSION,
             "matching_policy_version": 2,  # the drift
         }
+        # VIB-4540: drift must stamp the SAME deployment_id as the fixture
+        # rows, otherwise ``run_against_sqlite`` sees 2 deployments and
+        # raises before G13 evaluates. Drift is intra-primitive within
+        # one deployment, never cross-deployment.
         conn.execute(
             """
             INSERT INTO accounting_events
             (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
              chain, protocol, wallet_address, event_type, position_key,
              ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
-            VALUES ('drift-1', 'd', 's', 'c', 'paper', '2026-05-09T00:00:00+00:00',
+            VALUES ('drift-1', 'AccountantBaseline:fixture', 'AccountantBaseline:fixture',
+                    'c', 'paper', '2026-05-09T00:00:00+00:00',
                     'arbitrum', 'aave_v3', 'wallet', 'SUPPLY',
                     'lending:arbitrum:aave_v3:wallet:USDC',
                     'le-drift', '0xdrift', 'HIGH', ?, 1)

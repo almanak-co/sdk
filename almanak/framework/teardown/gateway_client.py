@@ -146,9 +146,28 @@ class GatewayTeardownStateManager:
         )
         return _mutation_from_response(response, "MarkTeardownCompleted")
 
-    def mark_failed(self, strategy_id: str, error: str) -> TeardownRequest | None:
+    def mark_failed(
+        self,
+        strategy_id: str,
+        error: str,
+        *,
+        positions_closed: int | None = None,
+        positions_failed: int | None = None,
+    ) -> TeardownRequest | None:
+        # VIB-4542 (audit PR #2343): the proto fields are ``optional int32``
+        # so absence is presence-tracked on the wire. Build the request
+        # without the field set when the caller passed None; the server
+        # uses ``HasField`` to distinguish "preserve existing value" from
+        # "overwrite to 0". The earlier ``-1`` sentinel was unsafe — proto3
+        # scalar defaults are 0, not -1, so a legacy client would have
+        # zeroed counters instead of preserving them.
+        kwargs: dict[str, Any] = {"strategy_id": strategy_id, "error_message": error}
+        if positions_closed is not None:
+            kwargs["positions_closed"] = positions_closed
+        if positions_failed is not None:
+            kwargs["positions_failed"] = positions_failed
         response = self._client.teardown.MarkTeardownFailed(
-            gateway_pb2.MarkTeardownFailedRequest(strategy_id=strategy_id, error_message=error),
+            gateway_pb2.MarkTeardownFailedRequest(**kwargs),
             timeout=_timeout(self._client),
         )
         return _mutation_from_response(response, "MarkTeardownFailed")

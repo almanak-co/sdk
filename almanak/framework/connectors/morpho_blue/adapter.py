@@ -1302,17 +1302,64 @@ class MorphoBlueAdapter:
                 if self._sdk_enabled:
                     try:
                         actual_debt_wei = self.sdk.get_borrow_assets(market_id, owner)
-                        if assets_wei > actual_debt_wei:
+                    except Exception as e:
+                        logger.warning(
+                            "Could not query on-chain debt for repay cap, proceeding with requested amount: %s",
+                            e,
+                        )
+                        actual_debt_wei = None
+                    if actual_debt_wei is not None and assets_wei > actual_debt_wei:
+                        if actual_debt_wei == 0:
+                            # VIB-4531: the SDK occasionally reports 0 debt
+                            # (stale view / wrong owner / RPC race). Capping
+                            # ``assets_wei`` to 0 would produce ``repay(0, 0)``
+                            # calldata that violates Morpho's
+                            # ``exactlyOneZero(assets, shares)`` invariant and
+                            # reverts with ``INCONSISTENT_INPUT``.
+                            #
+                            # Skip the cap and proceed with the originally
+                            # requested ``assets_wei``. Three possible
+                            # outcomes, all preferable to silent (0, 0):
+                            #
+                            # 1. SDK was wrong + real debt covers the request →
+                            #    Morpho accepts and repays the requested
+                            #    amount (the production case VIB-4531 was
+                            #    filed for).
+                            # 2. SDK was wrong + real debt is below the
+                            #    request → Morpho's own underflow guard
+                            #    reverts with a clear error. The caller
+                            #    sees the revert reason and can re-plan.
+                            # 3. SDK was right + there's genuinely no debt →
+                            #    Morpho rejects with a clear "no debt to
+                            #    repay" error. Same observable outcome as a
+                            #    pre-flight refusal but cheaper.
+                            #
+                            # Audit PR #2343 (CI repro): an earlier draft of
+                            # this branch refused at compile-time when
+                            # actual_debt_wei was 0. That broke the synthetic
+                            # intent discovery used by the Zodiac manifest
+                            # builder: synthetic owners have no debt by
+                            # construction, so every synthetic ``RepayIntent``
+                            # got rejected, the ``repay`` selector dropped
+                            # from the manifest, and real teardown repays
+                            # failed authz. Skipping the cap (rather than
+                            # refusing) keeps the calldata shape intact for
+                            # the discovery path while still avoiding the
+                            # (0, 0) shape the original bug produced.
+                            logger.info(
+                                "Morpho repay: SDK reports debt=0 for %s on %s but caller requested %d wei; "
+                                "skipping cap to avoid (0, 0) calldata (VIB-4531)",
+                                owner,
+                                market_id,
+                                assets_wei,
+                            )
+                        else:
                             logger.info(
                                 "Morpho repay amount %d exceeds actual debt %d, capping to actual debt",
                                 assets_wei,
                                 actual_debt_wei,
                             )
                             assets_wei = actual_debt_wei
-                    except Exception as e:
-                        logger.warning(
-                            "Could not query on-chain debt for repay cap, proceeding with requested amount: %s", e
-                        )
 
             # Build calldata: repay(MarketParams,uint256,uint256,address,bytes)
             calldata = self._build_repay_calldata(market_params, assets_wei, shares_wei, owner, b"")

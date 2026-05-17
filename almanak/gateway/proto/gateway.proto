@@ -3359,6 +3359,18 @@ message MarkTeardownCompletedRequest {
 message MarkTeardownFailedRequest {
   string strategy_id = 1;
   string error_message = 2;
+  // VIB-4542: intent-landing counts, parallel to UpdateTeardownProgressRequest.
+  // Proto3 `optional` gives presence-tracked scalars — an omitted field
+  // round-trips back as "not set" instead of the proto3-scalar default 0.
+  // That preserves the existing counter value for legacy callers (and the
+  // runner's safety-validation early-fail path that has no intent counts)
+  // instead of accidentally zeroing out a prior progress write.
+  // Audit (PR #2343): the prior `-1` sentinel was unsafe — proto3 scalar
+  // defaults are 0, not -1, so a legacy client sending only strategy_id +
+  // error_message would have arrived as positions_closed=0 (overwrite),
+  // not -1 (preserve).
+  optional int32 positions_closed = 3;
+  optional int32 positions_failed = 4;
 }
 
 message MarkTeardownCancelledRequest {

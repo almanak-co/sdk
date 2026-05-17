@@ -222,10 +222,24 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("error_message must be non-empty")
             return gateway_pb2.TeardownRequestMutationResponse(success=False, error="error_message must be non-empty")
+        # VIB-4542 (audit PR #2343): use proto3 ``optional`` field presence to
+        # distinguish "caller supplied a count" from "caller omitted the field"
+        # — the prior ``-1`` sentinel was unsafe because proto3 scalar defaults
+        # are 0 (not -1), so a legacy client sending only strategy_id +
+        # error_message would have arrived as positions_closed=0 (overwrite)
+        # instead of "preserve". HasField returns False for absent optional
+        # scalars on both unset and not-yet-set messages.
+        closed = request.positions_closed if request.HasField("positions_closed") else None
+        failed = request.positions_failed if request.HasField("positions_failed") else None
         return await self._strategy_mutation(
             context,
             request.strategy_id,
-            lambda manager, strategy_id: manager.mark_failed(strategy_id, error=request.error_message),
+            lambda manager, strategy_id: manager.mark_failed(
+                strategy_id,
+                error=request.error_message,
+                positions_closed=closed,
+                positions_failed=failed,
+            ),
         )
 
     async def RequestTeardownCancel(self, request, context):

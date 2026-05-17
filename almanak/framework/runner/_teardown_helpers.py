@@ -569,7 +569,21 @@ def map_teardown_result(
 
     logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
     if request:
-        _safe_mark(state_manager, "mark_failed", strategy_id, error=teardown_result.error or "teardown failed")
+        # VIB-4542: pass intent-landing counts so postmortem readers see
+        # "6 of 7 landed" instead of "0 / 0 with error_message='1 intents failed'".
+        # ``teardown_result.intents_total / intents_succeeded`` are populated
+        # by ``_execute_intents`` for both partial-success and full-failure
+        # terminal paths.
+        intents_total = teardown_result.intents_total or 0
+        intents_succeeded = teardown_result.intents_succeeded or 0
+        _safe_mark(
+            state_manager,
+            "mark_failed",
+            strategy_id,
+            error=teardown_result.error or "teardown failed",
+            positions_closed=intents_succeeded,
+            positions_failed=max(intents_total - intents_succeeded, 0),
+        )
     runner._request_teardown_failure_shutdown(teardown_result.error or "teardown failed")
     return IterationResult(
         status=IterationStatus.STRATEGY_ERROR,

@@ -108,7 +108,21 @@ class TeardownStateManagerProtocol(Protocol):
         result: dict | None = None,
     ) -> TeardownRequest | None: ...
 
-    def mark_failed(self, strategy_id: str, error: str) -> TeardownRequest | None: ...
+    def mark_failed(
+        self,
+        strategy_id: str,
+        error: str,
+        *,
+        positions_closed: int | None = None,
+        positions_failed: int | None = None,
+    ) -> TeardownRequest | None:
+        """VIB-4542: keyword-only ``positions_closed`` / ``positions_failed``
+        accept the failed-path peer to ``mark_completed``'s
+        ``result["intents"]`` lift. ``None`` keeps the pre-call counters
+        intact (back-compat with legacy call sites that don't track the
+        breakdown). Implementations MUST persist non-None values; both
+        SQLite and gateway-backed adapters share this contract."""
+        ...
 
     def request_cancel(self, strategy_id: str) -> bool: ...
 
@@ -622,15 +636,33 @@ class SQLiteTeardownStateManager:
         self,
         strategy_id: str,
         error: str,
+        *,
+        positions_closed: int | None = None,
+        positions_failed: int | None = None,
     ) -> TeardownRequest | None:
         """Mark a teardown as failed.
 
         Args:
             strategy_id: The strategy ID
             error: Error message describing the failure
+            positions_closed: (VIB-4542) intents that landed on-chain before
+                the failure. ``None`` preserves the row's pre-call value
+                (e.g. whatever ``update_progress`` last wrote). The runner
+                terminal-failed path passes ``teardown_result.intents_succeeded``
+                so postmortem readers can distinguish a teardown that
+                failed at intent 2 of 7 from one that failed before any
+                intent landed.
+            positions_failed: (VIB-4542) intents that reverted on-chain.
+                Same None-preserves-prior-value contract.
 
         Returns:
             The updated request, or None if not found
+
+        Semantic-clash note (VIB-4542 doc Item 6): the column is named
+        ``positions_*`` but the runtime counts **intents**. One position
+        can be closed by multiple intents (REPAY + WITHDRAW) and one
+        intent can affect multiple positions. Follow-up tracks the
+        column rename / position-level bookkeeping; out of scope here.
         """
         request = self.get_active_request(strategy_id)
         if not request:
@@ -638,6 +670,10 @@ class SQLiteTeardownStateManager:
 
         request.status = TeardownStatus.FAILED
         request.completed_at = datetime.now(UTC)
+        if positions_closed is not None:
+            request.positions_closed = positions_closed
+        if positions_failed is not None:
+            request.positions_failed = positions_failed
 
         with _open_connection(self.db_path) as conn:
             conn.execute(
@@ -646,8 +682,20 @@ class SQLiteTeardownStateManager:
             )
             conn.commit()
 
+        # update_request persists positions_closed / positions_failed (plus
+        # status / completed_at) — see the full UPDATE statement above.
         self.update_request(request)
-        logger.error(f"Failed teardown for {strategy_id}: {error}")
+        # Use %s for the counter fields — they default to 0 on the dataclass
+        # so %d would also work today, but %s is the safer style: a future
+        # schema migration that allows None on those columns won't crash the
+        # error-path log (gemini review on PR #2343).
+        logger.error(
+            "Failed teardown for %s (closed=%s, failed=%s): %s",
+            strategy_id,
+            request.positions_closed,
+            request.positions_failed,
+            error,
+        )
         return request
 
     def request_cancel(self, strategy_id: str) -> bool:

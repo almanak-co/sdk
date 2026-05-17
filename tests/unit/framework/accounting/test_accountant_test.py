@@ -867,16 +867,21 @@ def _make_db_with_n_swaps(
     path = Path(tmp.name)
     conn = sqlite3.connect(path)
     cur = conn.cursor()
+    # VIB-4540: tables that ``run_against_sqlite`` scans for deployment
+    # ids (``transaction_ledger`` / ``accounting_events`` / ``portfolio_snapshots``)
+    # must carry the ``deployment_id`` column so the scoped reads find rows.
+    # Pre-VIB-4540 this fixture was unfiltered and the column could be omitted.
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
+            deployment_id TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, success INTEGER, price_inputs_json TEXT,
             schema_version INTEGER, formula_version INTEGER, matching_policy_version INTEGER
         );
-        CREATE TABLE position_events (id TEXT, cycle_id TEXT, event_type TEXT, position_id TEXT);
+        CREATE TABLE position_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (
             id TEXT, cycle_id TEXT, deployment_id TEXT, strategy_id TEXT,
             timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
@@ -884,17 +889,17 @@ def _make_db_with_n_swaps(
             confidence TEXT, payload_json TEXT
         );
         CREATE TABLE portfolio_snapshots (
-            id INTEGER PRIMARY KEY, total_value_usd TEXT,
+            id INTEGER PRIMARY KEY, deployment_id TEXT, total_value_usd TEXT,
             available_cash_usd TEXT, value_confidence TEXT,
             iteration_number INTEGER, timestamp TEXT, chain TEXT
         );
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (strategy_id TEXT, deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     for i, pj in enumerate(payloads):
         cur.execute(
             "INSERT INTO transaction_ledger VALUES "
-            "(?, 'cyc-1', 's', ?, 'SWAP', 'WETH', '0.001', 'USDC', '3.0', "
+            "(?, 'cyc-1', 's', 's', ?, 'SWAP', 'WETH', '0.001', 'USDC', '3.0', "
             "100000, '0', ?, 'arbitrum', 1, "
             "'{\"WETH\": {\"price_usd\": \"3000\", \"oracle_source\": \"chainlink\"}}', 1, 1, 1)",
             (f"led-{i}", f"2026-05-01T00:0{i}:00Z", f"0x{i:x}"),
@@ -906,15 +911,15 @@ def _make_db_with_n_swaps(
             (f"ae-{i}", f"2026-05-01T00:0{i}:00Z", f"led-{i}", f"0x{i:x}", pj),
         )
     cur.execute(
-        "INSERT INTO portfolio_snapshots (total_value_usd, available_cash_usd, "
+        "INSERT INTO portfolio_snapshots (deployment_id, total_value_usd, available_cash_usd, "
         "value_confidence, iteration_number, timestamp, chain) "
-        "VALUES (?, '0', 'HIGH', 0, '2026-05-01T00:00:00Z', 'arbitrum')",
+        "VALUES ('s', ?, '0', 'HIGH', 0, '2026-05-01T00:00:00Z', 'arbitrum')",
         (initial_equity,),
     )
     cur.execute(
-        "INSERT INTO portfolio_snapshots (total_value_usd, available_cash_usd, "
+        "INSERT INTO portfolio_snapshots (deployment_id, total_value_usd, available_cash_usd, "
         "value_confidence, iteration_number, timestamp, chain) "
-        "VALUES (?, '0', 'HIGH', 1, '2026-05-01T00:10:00Z', 'arbitrum')",
+        "VALUES ('s', ?, '0', 'HIGH', 1, '2026-05-01T00:10:00Z', 'arbitrum')",
         (final_equity,),
     )
     conn.commit()

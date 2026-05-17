@@ -51,7 +51,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, model_validator
+    from pydantic import BaseModel, ConfigDict, Field, model_validator
 except ImportError:  # pragma: no cover — pydantic is a hard dep
     raise
 
@@ -234,7 +234,30 @@ class WithdrawEventPayload(_Versioned):
     event_type: Literal["WITHDRAW"] = "WITHDRAW"
     protocol: str
     asset: str
-    amount: Decimal
+    # VIB-4539: amount is Decimal | None per AGENTS.md Empty ≠ Zero —
+    # same rule the SwapEventPayload widening (VIB-4490 / PR #2338)
+    # applies to the swap side. The Morpho receipt parser cannot always
+    # resolve the assets amount when shares-mode withdraws are used or
+    # when loan_token decimals are unresolved; ``None`` is a valid
+    # measured-unmeasured state. Without this, the projection helper
+    # at ``accountant_test.py:_project_payload_for_v1_validation`` cannot
+    # forward ``amount_token=None`` through to the spec name and the row
+    # FAILs Pydantic validation, blocking G6 / G13 / L1 / L4 / L6.
+    #
+    # Audit PR #2343 (CodeRabbit): use ``Field(...)`` — Pydantic v2's
+    # "required key, no default" marker — so an absent ``amount`` field
+    # raises ValidationError. Explicit ``None`` is still accepted. This
+    # preserves Empty ≠ Zero discipline: a parser bug that drops the
+    # field entirely (`""` shape) FAILs loud, while a measured-unmeasured
+    # row with explicit ``None`` validates. The writer always emits
+    # ``amount_token`` (``LendingAccountingEvent.to_payload_json``), and
+    # the v1 projection helper aliases ``amount_token -> amount`` for
+    # WITHDRAW regardless of value, so the key is always present in
+    # validation input on the production path. We use ``Field(...)``
+    # rather than the bare ``= ...`` shorthand because mypy doesn't
+    # recognize ``EllipsisType`` as compatible with ``Decimal | None``;
+    # ``Field(...)`` carries the same semantics with the correct type.
+    amount: Decimal | None = Field(...)
     amount_usd: Decimal | None = None
     interest_accrued_usd: Decimal | None = None
     # Legacy field name preserved for grep compatibility — `_project_lending_aliases`
