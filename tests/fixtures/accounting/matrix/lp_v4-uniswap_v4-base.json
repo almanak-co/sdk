@@ -4,25 +4,28 @@
     "fixture": "lp_v4",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/uat-vib-4478/lp-uniswap_v4-base/accountant.json",
-    "captured_at": "2026-05-17T07:25:00+00:00",
-    "captured_at_commit": "866f77735 + feat/VIB-4478-lp-v4-fixture",
+    "captured_from": "notes/.tmp/v4538-rebaseline/lp_v4-uniswap_v4-base/accountant.json",
+    "captured_at": "2026-05-17T15:04:09+00:00",
+    "captured_at_commit": "43f6866da (main, post-PRs #2339/#2340/#2341/#2342/#2343)",
     "post_fix_for": [
       "VIB-4426 V0 scaffold (PR #2335 merged 2026-05-17)",
-      "VIB-4478 lp_v4 fixture + Anvil-Base E2E proof (PR 2)"
+      "VIB-4478 lp_v4 fixture + Anvil-Base E2E proof (PR #2339 merged 2026-05-17)",
+      "VIB-4534 canonical V4 PoolKey seed registry (PR #2342 merged 2026-05-17)",
+      "VIB-4535 LP_OPEN gateway PoolKey lookup (PR #2341 merged 2026-05-17)",
+      "VIB-4538 drop WETH from anvil_funding so closing SWAP realized_pnl_usd is non-null (this PR)"
     ],
-    "note": "Real-Anvil-Base baseline for the lp_v4 fixture. V0 (VIB-4426) ships LP_OPEN with full token attribution and LP_CLOSE with PoolKey-driven attribution; the 32-byte PoolId hash flows end-to-end and matching_policy_version=1 (Primitive.LP_V4) is stamped on every V4 LP event. LP1 flipped FAIL -> PASS thanks to the V4 parser landing real LP events (vs the pre-VIB-4426 LP-dropped state). G3/G6/G13/LP3/LP4 remain non-PASS in V0 because the LP_CLOSE accounting path needs (a) fee separation from PoolManager.getPositionInfo (VIB-4482 / P-V1-A) and (b) PoolKey lookup for historically-deployed pools (a separate follow-up filed by VIB-4478 against this PR — see PR description). These cells are V0-honest non-PASSes locked in this baseline so future V1 progress can demonstrate forward motion."
+    "note": "Real-Anvil-Base baseline for the lp_v4 fixture after the V0 closer. Movement vs the previous lp_v4 baseline (10/5/6/1 captured during PR #2339 review): G3 FAIL->PASS and G13 FAIL->PASS (VIB-4534 canonical PoolKey seed unblocked the historical-pool lookup so V4 LP_CLOSE now emits a yield event and pool_address carries the canonical 32-byte PoolId hash). LP4 FAIL->XFAIL (accountant_test reclassified IL_USD divergence as XFAIL once attribution wired through; V1 fee separation will flip it to PASS). G6 and LP3 remain FAIL: both require fee/principal separation from PoolManager.getPositionInfo (V1 work, VIB-4482 / P-V1-A) — see diagnostics: G6 'component buckets contain unmeasured nulls: Sigma_swaps_usd_null_count=2, Sigma_lp_fees_null_count=1'; LP3 'no fees_token0/1 on any position_event'. L5_22 remains XFAIL (registry mode not yet toggled on, independent of V4). These two cells are V0-honest non-PASSes locked in this baseline so V1 progress (VIB-4482) can demonstrate forward motion."
   },
   "cells": {
     "G1": "PASS",
     "G10": "PASS",
     "G11": "SKIP",
     "G12": "PASS",
-    "G13": "FAIL",
+    "G13": "PASS",
     "G14": "XFAIL",
     "G15": "XFAIL",
     "G2": "PASS",
-    "G3": "FAIL",
+    "G3": "PASS",
     "G4": "PASS",
     "G5": "PASS",
     "G6": "FAIL",
@@ -33,14 +36,14 @@
     "LP1": "PASS",
     "LP2": "XFAIL",
     "LP3": "FAIL",
-    "LP4": "FAIL",
+    "LP4": "XFAIL",
     "LP5": "XFAIL",
     "LP6": "XFAIL"
   },
   "scores": {
-    "passed": 10,
-    "failed": 5,
-    "xfailed": 6,
+    "passed": 12,
+    "failed": 2,
+    "xfailed": 7,
     "skipped": 1,
     "total": 22
   }
