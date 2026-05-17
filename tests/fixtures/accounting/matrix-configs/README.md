@@ -46,5 +46,7 @@ the `config:` field entirely.
 | `loop_lp_*` | (TBD — Phase 4) |
 
 Exceptions (own algo folder, own default config, no override needed):
-`lp_aerodrome`, `lp_aerodrome_dual`, `lp_curve` — protocol-specific
-lifecycles (integer-tick math, dual swap/LP keys, stableswap mechanics).
+`lp_aerodrome`, `lp_aerodrome_dual`, `lp_curve`, `lp_v4` — protocol-specific
+lifecycles or per-primitive matching_policy_version isolation (integer-tick
+math; dual swap/LP keys; stableswap mechanics; V4 PoolKey-hash pool_address
+shape + `Primitive.LP_V4` matching_policy_version=1 lane).

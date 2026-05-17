@@ -1,0 +1,47 @@
+{
+  "_provenance": {
+    "row_id": "lp_v4-uniswap_v4-base",
+    "fixture": "lp_v4",
+    "chain": "base",
+    "primitive": "lp",
+    "captured_from": "notes/.tmp/uat-vib-4478/lp-uniswap_v4-base/accountant.json",
+    "captured_at": "2026-05-17T07:25:00+00:00",
+    "captured_at_commit": "866f77735 + feat/VIB-4478-lp-v4-fixture",
+    "post_fix_for": [
+      "VIB-4426 V0 scaffold (PR #2335 merged 2026-05-17)",
+      "VIB-4478 lp_v4 fixture + Anvil-Base E2E proof (PR 2)"
+    ],
+    "note": "Real-Anvil-Base baseline for the lp_v4 fixture. V0 (VIB-4426) ships LP_OPEN with full token attribution and LP_CLOSE with PoolKey-driven attribution; the 32-byte PoolId hash flows end-to-end and matching_policy_version=1 (Primitive.LP_V4) is stamped on every V4 LP event. LP1 flipped FAIL -> PASS thanks to the V4 parser landing real LP events (vs the pre-VIB-4426 LP-dropped state). G3/G6/G13/LP3/LP4 remain non-PASS in V0 because the LP_CLOSE accounting path needs (a) fee separation from PoolManager.getPositionInfo (VIB-4482 / P-V1-A) and (b) PoolKey lookup for historically-deployed pools (a separate follow-up filed by VIB-4478 against this PR — see PR description). These cells are V0-honest non-PASSes locked in this baseline so future V1 progress can demonstrate forward motion."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "FAIL",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "FAIL",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "LP1": "PASS",
+    "LP2": "XFAIL",
+    "LP3": "FAIL",
+    "LP4": "FAIL",
+    "LP5": "XFAIL",
+    "LP6": "XFAIL"
+  },
+  "scores": {
+    "passed": 10,
+    "failed": 5,
+    "xfailed": 6,
+    "skipped": 1,
+    "total": 22
+  }
+}

@@ -461,6 +461,15 @@ class V4PoolKeyCache:
     ) -> int | None:
         """Fetch Initialize logs in [from_block, to_block] and ingest them.
 
+        Self-chunking: providers (Alchemy, Infura, …) cap `eth_getLogs`
+        response size before they cap the block range. The single-window
+        request can fail with a "response size exceeded" /
+        "block range should work" hint even on a 50k-block window
+        — observed against Alchemy Base post VIB-4426 #2335 with the
+        WETH/USDC v4 PoolManager. We retry by halving the window down to
+        a minimum chunk of 1k blocks. Errors that aren't size-limit shaped
+        (e.g. transport failures) bubble up after the first attempt.
+
         Returns:
             int: count of newly inserted entries (duplicates count once); may be 0
                  if the range was empty but the fetch succeeded.
@@ -468,24 +477,14 @@ class V4PoolKeyCache:
                   MUST NOT advance the scan watermark over a failed range.
         """
         chain_l = chain.lower()
-        try:
-            raw_logs = await w3.eth.get_logs(
-                {
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": AsyncWeb3.to_checksum_address(pool_manager),
-                    "topics": [INITIALIZE_EVENT_TOPIC],
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "V4PoolKeyCache: eth_getLogs failed chain=%s pool_manager=%s [%d..%d]: %s",
-                chain,
-                pool_manager,
-                from_block,
-                to_block,
-                exc,
-            )
+        raw_logs = await self._get_initialize_logs_chunked(
+            chain=chain,
+            w3=w3,
+            pool_manager=pool_manager,
+            from_block=from_block,
+            to_block=to_block,
+        )
+        if raw_logs is None:
             return None
 
         added = 0
@@ -503,6 +502,84 @@ class V4PoolKeyCache:
                 idx[pid] = key
                 added += 1
         return added
+
+    async def _get_initialize_logs_chunked(
+        self,
+        *,
+        chain: str,
+        w3: AsyncWeb3,
+        pool_manager: str,
+        from_block: int,
+        to_block: int,
+        min_chunk_blocks: int = 1_000,
+    ) -> list[Any] | None:
+        """Fetch Initialize logs across [from_block, to_block], bisecting on
+        provider response-size errors.
+
+        Returns the aggregated raw log list on success, or ``None`` if any
+        sub-window fails after reaching the minimum chunk size — that's a
+        genuine transport / configuration failure, not a size issue, and the
+        caller must NOT advance the scan watermark.
+        """
+        address = AsyncWeb3.to_checksum_address(pool_manager)
+        # Stack-based iterative bisection — keeps memory bounded and
+        # preserves chronological ordering of accumulated logs (depth-first
+        # left-to-right).
+        pending: list[tuple[int, int]] = [(from_block, to_block)]
+        collected: list[Any] = []
+        while pending:
+            lo, hi = pending.pop()
+            try:
+                raw_logs = await w3.eth.get_logs(
+                    {
+                        "fromBlock": lo,
+                        "toBlock": hi,
+                        "address": address,
+                        "topics": [INITIALIZE_EVENT_TOPIC],
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Bisect on any failure as long as the window can still be
+                # halved above the min chunk. Many providers report
+                # response-size issues with a variety of error strings
+                # (Alchemy: "Log response size exceeded"; Infura/Quicknode:
+                # different wording; some clients raise on `code: -32602`
+                # nested inside `-32603 Fork Error: Transport(HttpError)`
+                # — observed on Anvil + Alchemy fork). Cheaper to bisect
+                # than to enumerate provider error taxonomies.
+                span = hi - lo + 1
+                if span > min_chunk_blocks:
+                    mid = lo + span // 2 - 1
+                    # Push right-half first so the left-half is processed
+                    # first when popped — preserves chronological order.
+                    pending.append((mid + 1, hi))
+                    pending.append((lo, mid))
+                    logger.info(
+                        "V4PoolKeyCache: eth_getLogs window [%d..%d] failed, bisecting to "
+                        "[%d..%d] + [%d..%d] (chain=%s, exc=%s)",
+                        lo,
+                        hi,
+                        lo,
+                        mid,
+                        mid + 1,
+                        hi,
+                        chain,
+                        type(exc).__name__,
+                    )
+                    continue
+                logger.warning(
+                    "V4PoolKeyCache: eth_getLogs failed chain=%s pool_manager=%s [%d..%d] "
+                    "at min chunk size (span=%d): %s",
+                    chain,
+                    pool_manager,
+                    lo,
+                    hi,
+                    span,
+                    exc,
+                )
+                return None
+            collected.extend(raw_logs)
+        return collected
 
 
 __all__ = [

@@ -358,6 +358,82 @@ class TestV4PoolKeyCache:
         assert added == 1
 
     @pytest.mark.asyncio
+    async def test_populate_from_logs_bisects_on_response_size_error(self) -> None:
+        """VIB-4478 — Alchemy and similar providers cap eth_getLogs response
+        size at fewer than 50k blocks of Initialize logs on busy chains. The
+        cache must self-bisect the request window rather than dropping the
+        scan (which corrupts LP_CLOSE attribution downstream).
+
+        Pre-fix: the single-window request failed with the provider's
+        ``Log response size exceeded`` error and ``populate_from_logs``
+        returned ``None``; LP_CLOSE receipts then dropped with
+        ``pool_key_lookup_error`` and produced ``amount0=None, amount1=None``
+        accounting events. Caught by the lp_v4 fixture's first Anvil-Base
+        E2E run.
+        """
+        cache = V4PoolKeyCache()
+        # Simulate: first call (full 50k window) raises; halves succeed.
+        call_log: list[tuple[int, int]] = []
+
+        async def fake_get_logs(params: dict) -> list[dict]:
+            lo, hi = params["fromBlock"], params["toBlock"]
+            call_log.append((lo, hi))
+            span = hi - lo + 1
+            # Provider rejects anything larger than 25k blocks.
+            if span > 25_000:
+                raise RuntimeError(
+                    "Log response size exceeded. ... should work: ["
+                    f"{hex(lo)}, {hex(lo + 25_000)}]"
+                )
+            # Only the second half carries the target log; verifies that
+            # bisection preserves the full range.
+            if lo >= 25_000:
+                return [_make_initialize_log()]
+            return []
+
+        w3 = MagicMock()
+        w3.eth.get_logs = AsyncMock(side_effect=fake_get_logs)
+        added = await cache.populate_from_logs(
+            chain="base",
+            w3=w3,
+            pool_manager="0x498581fF718922c3f8e6A244956aF099B2652b2b",
+            from_block=0,
+            to_block=49_999,  # 50k blocks
+        )
+        # The pool from the second half must be ingested.
+        assert added == 1, f"expected 1 added; got {added}; calls={call_log}"
+        # First call must be the full window (proves we tried unbisected first).
+        assert call_log[0] == (0, 49_999)
+        # Subsequent calls must be smaller and cover the full range.
+        smaller = [c for c in call_log[1:] if c[1] - c[0] + 1 <= 25_000]
+        assert smaller, f"no bisection observed; calls={call_log}"
+        covered = sorted(smaller)
+        assert covered[0][0] == 0 and covered[-1][1] == 49_999, (
+            f"bisection lost coverage: {covered}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_populate_from_logs_returns_none_at_min_chunk(self) -> None:
+        """Bisection stops at the min chunk size; persistent failure at that
+        granularity is a real transport error and must NOT be silently
+        treated as 'empty range'. Returning None preserves the
+        ``_last_scanned_block`` watermark so the next refresh retries.
+        """
+        cache = V4PoolKeyCache()
+        w3 = MagicMock()
+        # Every call fails — bisection eventually reaches min_chunk_blocks
+        # and gives up.
+        w3.eth.get_logs = AsyncMock(side_effect=RuntimeError("upstream-down"))
+        added = await cache.populate_from_logs(
+            chain="base",
+            w3=w3,
+            pool_manager="0x498581fF718922c3f8e6A244956aF099B2652b2b",
+            from_block=0,
+            to_block=500,  # below default min_chunk_blocks=1000, so first failure -> None
+        )
+        assert added is None
+
+    @pytest.mark.asyncio
     async def test_refresh_chain_walks_backward_when_target_missing(self) -> None:
         """VIB-4426 — pools initialized > DEFAULT_BACKFILL_BLOCKS ago must be
         recoverable via the historical-expansion pass. Pre-fix: a pool whose
