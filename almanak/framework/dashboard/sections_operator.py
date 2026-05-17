@@ -24,12 +24,32 @@ each other's previews.
 
 from __future__ import annotations
 
+import grpc
 import streamlit as st
 
 from almanak.framework.dashboard.service_client import (
     DashboardClientError,
     OperatorDashboardServiceClient,
 )
+
+
+def _surface_reconcile_error(action: str, exc: DashboardClientError) -> None:
+    """Render an operator-friendly message for a reconciliation RPC failure.
+
+    Specifically intercepts ``FAILED_PRECONDITION`` (the gateway's signal for
+    "strategy has no live snapshot to derive chain/wallet from") because the
+    raw gRPC error string is unhelpful operator-facing chrome. Everything
+    else falls through to the standard error display.
+    """
+    cause = exc.__cause__
+    if isinstance(cause, grpc.RpcError) and cause.code() == grpc.StatusCode.FAILED_PRECONDITION:
+        st.info(
+            f"{action} unavailable: strategy has no live snapshot. "
+            "Reconciliation requires an active or recently-active strategy."
+        )
+        return
+    st.error(f"{action} failed: {exc}")
+
 
 # Session-state keys — namespaced by strategy_id so different tabs don't collide.
 _PREVIEW_TOKEN_KEY = "phase1_reconcile_preview_token::{strategy_id}"
@@ -107,7 +127,7 @@ def _do_preview(strategy_id: str, client: OperatorDashboardServiceClient) -> Non
     try:
         result = client.preview_reconcile(strategy_id)
     except DashboardClientError as exc:
-        st.error(f"PreviewReconcile failed: {exc}")
+        _surface_reconcile_error("PreviewReconcile", exc)
         return
     st.session_state[_key(_PREVIEW_TOKEN_KEY, strategy_id)] = result.preview_token
     st.session_state[_key(_PREVIEW_RESULT_KEY, strategy_id)] = result
@@ -123,7 +143,7 @@ def _do_apply(strategy_id: str, client: OperatorDashboardServiceClient) -> None:
     try:
         outcome = client.apply_reconcile(strategy_id, token)
     except DashboardClientError as exc:
-        st.error(f"ApplyReconcile failed: {exc}")
+        _surface_reconcile_error("ApplyReconcile", exc)
         return
     st.session_state[_key(_APPLY_OUTCOME_KEY, strategy_id)] = outcome
     # Always invalidate the token after the RPC returns — every terminal
@@ -138,7 +158,7 @@ def _do_refresh(strategy_id: str, client: OperatorDashboardServiceClient) -> Non
     try:
         outcome = client.refresh_registry_from_chain(strategy_id)
     except DashboardClientError as exc:
-        st.error(f"RefreshRegistryFromChain failed: {exc}")
+        _surface_reconcile_error("RefreshRegistryFromChain", exc)
         return
     st.session_state[_key(_REFRESH_OUTCOME_KEY, strategy_id)] = outcome
 

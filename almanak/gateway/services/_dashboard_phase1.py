@@ -280,67 +280,6 @@ def build_position_entry(
     )
 
 
-def build_unverified_entry_from_position_event(
-    *,
-    event: dict[str, Any],
-    cutover: CutoverDerivation,
-) -> gateway_pb2.PositionEntry:
-    """Build a LEGACY-source PositionEntry for a position_events row.
-
-    Used when include_legacy_unverified=true and the registry has not yet
-    backfilled — the renderer paints these under the "Unverified Holdings —
-    Registry Pending" header. Valuation fields are empty (we have no
-    snapshot to derive value from for these rows by definition).
-    """
-    primitive_payload = {
-        "tick_lower": event.get("tick_lower"),
-        "tick_upper": event.get("tick_upper"),
-        "liquidity": event.get("liquidity"),
-        "fees_token0": event.get("fees_token0"),
-        "fees_token1": event.get("fees_token1"),
-        "leverage": event.get("leverage"),
-        "entry_price": event.get("entry_price"),
-        "mark_price": event.get("mark_price"),
-        "is_long": event.get("is_long"),
-    }
-    primitive_payload = {k: v for k, v in primitive_payload.items() if v is not None}
-
-    return gateway_pb2.PositionEntry(
-        handle=_str_or_empty(event.get("position_id")),
-        physical_identity_hash="",
-        deployment_id=_str_or_empty(event.get("deployment_id")),
-        chain=_str_or_empty(event.get("chain")),
-        primitive=_infer_primitive_from_position_type(_str_or_empty(event.get("position_type"))),
-        accounting_category="",
-        status=gateway_pb2.POSITION_STATUS_OPEN,
-        opened_at_block=0,
-        closed_at_block=0,
-        opened_tx=_str_or_empty(event.get("tx_hash")),
-        closed_tx="",
-        value_usd=_str_or_empty(event.get("value_usd")),
-        value_token0="",
-        value_token1="",
-        source=gateway_pb2.POSITION_SOURCE_LEGACY,
-        confidence=gateway_pb2.POSITION_CONFIDENCE_LOW,
-        last_reconciled_at_block=0,
-        cutover_state=cutover.state,
-        primitive_payload_json=_bytes_or_empty(primitive_payload),
-        value_as_of="",
-    )
-
-
-def _infer_primitive_from_position_type(position_type: str) -> str:
-    """Map position_events.position_type TEXT to a primitive label."""
-    upper = position_type.upper()
-    if upper in {"LP"}:
-        return "lp"
-    if upper in {"LENDING", "SUPPLY", "BORROW"}:
-        return "lending"
-    if upper in {"PERP"}:
-        return "perp"
-    return position_type.lower()
-
-
 # accounting_category prefix → primitive. Keep in sync with the v1 cutover
 # key mapping above and with whatever new categories the backfill writer
 # emits when VIB-4202/4209/4501 land.

@@ -250,10 +250,9 @@ class PositionEntry:
 
 @dataclass(frozen=True)
 class GetPositionsResult:
-    """Bundled response from GetPositions — authoritative + unverified lanes."""
+    """Bundled response from GetPositions."""
 
     positions: list[PositionEntry]
-    unverified: list[PositionEntry]
     cutover_states: list[CutoverStateEntry]
 
     def by_accounting_category(self) -> dict[str, list[PositionEntry]]:
@@ -706,9 +705,8 @@ class DashboardServiceClient:
         primitive: str = "",
         accounting_category: str = "",
         status: PositionStatus = PositionStatus.UNSPECIFIED,
-        include_legacy_unverified: bool = False,
     ) -> GetPositionsResult:
-        """Unified positions feed (authoritative + pre-cutover unverified).
+        """Authoritative positions feed sourced from ``position_registry``.
 
         Args:
             strategy_id: Required strategy identifier.
@@ -716,14 +714,10 @@ class DashboardServiceClient:
             primitive: Optional primitive filter ("lp", "lending", "perp").
             accounting_category: Optional category filter ("LP_UNIV3", ...).
             status: Optional status filter; UNSPECIFIED returns all.
-            include_legacy_unverified: When True, populate ``unverified`` with
-                LEGACY-sourced rows (PRE_BACKFILL). Renderer MUST display these
-                under a separate "Unverified Holdings" header — never mixed
-                with the authoritative lane.
 
         Returns:
-            ``GetPositionsResult`` with positions, unverified, and per-category
-            cutover snapshots for header bucketing.
+            ``GetPositionsResult`` with positions and per-category cutover
+            snapshots for header bucketing.
         """
         request = gateway_pb2.GetPositionsRequest(
             strategy_id=strategy_id,
@@ -731,7 +725,6 @@ class DashboardServiceClient:
             primitive=primitive,
             accounting_category=accounting_category,
             status=status.to_proto(),
-            include_legacy_unverified=include_legacy_unverified,
         )
         try:
             response = self._stub().GetPositions(request)
@@ -739,7 +732,6 @@ class DashboardServiceClient:
             raise DashboardClientError(f"GetPositions failed: {exc}") from exc
         return GetPositionsResult(
             positions=[_convert_position_entry(p) for p in response.positions],
-            unverified=[_convert_position_entry(p) for p in response.unverified],
             cutover_states=[_convert_cutover_state_entry(c) for c in response.cutover_states],
         )
 

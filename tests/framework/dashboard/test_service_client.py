@@ -263,7 +263,6 @@ class TestGetPositionsResultGrouping:
                 _make_position_entry(handle="lp2", accounting_category="LP_UNIV3"),
                 _make_position_entry(handle="aave1", accounting_category="AAVE_COLLATERAL"),
             ],
-            unverified=[],
             cutover_states=[],
         )
         grouped = result.by_accounting_category()
@@ -283,11 +282,11 @@ class TestGetPositionsResultGrouping:
             last_reconciled_at_block=5000,
             last_reconciled_unix_seconds=1747440000,
         )
-        result = GetPositionsResult(positions=[], unverified=[], cutover_states=[cutover])
+        result = GetPositionsResult(positions=[], cutover_states=[cutover])
         assert result.cutover_for("LP_UNIV3") is cutover
 
     def test_cutover_for_returns_none_if_missing(self) -> None:
-        result = GetPositionsResult(positions=[], unverified=[], cutover_states=[])
+        result = GetPositionsResult(positions=[], cutover_states=[])
         assert result.cutover_for("LP_UNIV3") is None
 
 
@@ -646,7 +645,6 @@ class TestGetPositions:
             primitive="lp",
             accounting_category="LP_UNIV3",
             status=PositionStatus.OPEN,
-            include_legacy_unverified=True,
         )
 
         assert mock_stub.GetPositions.called
@@ -656,7 +654,6 @@ class TestGetPositions:
         assert request.primitive == "lp"
         assert request.accounting_category == "LP_UNIV3"
         assert request.status == gateway_pb2.POSITION_STATUS_OPEN
-        assert request.include_legacy_unverified is True
 
     def test_request_shape_defaults(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         """Only strategy_id supplied — all filters empty / unspecified."""
@@ -669,7 +666,6 @@ class TestGetPositions:
         assert request.chain == ""
         assert request.primitive == ""
         assert request.status == gateway_pb2.POSITION_STATUS_UNSPECIFIED
-        assert request.include_legacy_unverified is False
 
     def test_parses_full_response(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         response = gateway_pb2.GetPositionsResponse(
@@ -687,15 +683,6 @@ class TestGetPositions:
                     cutover_state=gateway_pb2.CUTOVER_STATE_BACKFILL_COMPLETE,
                 )
             ],
-            unverified=[
-                gateway_pb2.PositionEntry(
-                    handle="legacy-1",
-                    physical_identity_hash="h2",
-                    source=gateway_pb2.POSITION_SOURCE_LEGACY,
-                    confidence=gateway_pb2.POSITION_CONFIDENCE_LOW,
-                    cutover_state=gateway_pb2.CUTOVER_STATE_PRE_BACKFILL,
-                )
-            ],
             cutover_states=[
                 gateway_pb2.CutoverStateEntry(
                     accounting_category="LP_UNIV3",
@@ -706,14 +693,12 @@ class TestGetPositions:
         )
         mock_stub.GetPositions.return_value = response
 
-        result = read_client.get_positions("aave-avax", include_legacy_unverified=True)
+        result = read_client.get_positions("aave-avax")
 
         assert isinstance(result, GetPositionsResult)
         assert len(result.positions) == 1
         assert result.positions[0].handle == "lp-1"
         assert result.positions[0].confidence == PositionConfidence.HIGH
-        assert len(result.unverified) == 1
-        assert result.unverified[0].source == PositionSource.LEGACY
         assert len(result.cutover_states) == 1
 
     def test_grpc_error_wrapped(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:

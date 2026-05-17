@@ -93,7 +93,6 @@ class TestPublicAPI:
         "name",
         [
             "render_positions_section",
-            "render_unverified_holdings_section",
             "render_position_range_history_section",
             "render_reconciliation_report_section",
         ],
@@ -185,7 +184,6 @@ class TestRenderPositionsSection:
     def test_passes_filters_to_client(self, fake_client: MagicMock) -> None:
         fake_client.get_positions.return_value = GetPositionsResult(
             positions=[_make_position()],
-            unverified=[],
             cutover_states=[],
         )
         with (
@@ -196,7 +194,7 @@ class TestRenderPositionsSection:
             sec.render_positions_section("sid", fake_client, chain="avalanche", primitive="lp")
 
         fake_client.get_positions.assert_called_once_with(
-            "sid", chain="avalanche", primitive="lp", include_legacy_unverified=False
+            "sid", chain="avalanche", primitive="lp"
         )
 
     def test_groups_by_accounting_category(self, fake_client: MagicMock) -> None:
@@ -207,7 +205,6 @@ class TestRenderPositionsSection:
         ]
         fake_client.get_positions.return_value = GetPositionsResult(
             positions=positions,
-            unverified=[],
             cutover_states=[
                 CutoverStateEntry(
                     accounting_category="LP_UNIV3",
@@ -241,7 +238,7 @@ class TestRenderPositionsSection:
         assert mock_df.call_count == 2
 
     def test_empty_state(self, fake_client: MagicMock) -> None:
-        fake_client.get_positions.return_value = GetPositionsResult([], [], [])
+        fake_client.get_positions.return_value = GetPositionsResult([], [])
         with (
             patch.object(sec.st, "divider"),
             patch.object(sec.st, "markdown"),
@@ -264,79 +261,6 @@ class TestRenderPositionsSection:
         mock_info.assert_called_once()
         assert "boom" in mock_info.call_args.args[0]
         mock_df.assert_not_called()
-
-
-# =============================================================================
-# render_unverified_holdings_section
-# =============================================================================
-
-
-class TestRenderUnverifiedHoldingsSection:
-    def test_requests_with_include_legacy_unverified_true(self, fake_client: MagicMock) -> None:
-        fake_client.get_positions.return_value = GetPositionsResult([], [], [])
-        with (
-            patch.object(sec.st, "divider"),
-            patch.object(sec.st, "markdown"),
-            patch.object(sec.st, "caption"),
-            patch.object(sec.st, "warning"),
-            patch.object(sec.st, "dataframe"),
-        ):
-            sec.render_unverified_holdings_section("sid", fake_client, chain="ethereum")
-        fake_client.get_positions.assert_called_once_with(
-            "sid", chain="ethereum", primitive="", include_legacy_unverified=True
-        )
-
-    def test_empty_state_uses_caption_not_warning(self, fake_client: MagicMock) -> None:
-        fake_client.get_positions.return_value = GetPositionsResult([], [], [])
-        with (
-            patch.object(sec.st, "divider"),
-            patch.object(sec.st, "markdown"),
-            patch.object(sec.st, "caption") as mock_caption,
-            patch.object(sec.st, "warning") as mock_warning,
-            patch.object(sec.st, "dataframe"),
-        ):
-            sec.render_unverified_holdings_section("sid", fake_client)
-        mock_caption.assert_called_once()
-        mock_warning.assert_not_called()
-
-    def test_populated_renders_warning_with_count_and_table(
-        self, fake_client: MagicMock
-    ) -> None:
-        unverified = [
-            _make_position(
-                handle="legacy1",
-                source=PositionSource.LEGACY,
-                confidence=PositionConfidence.LOW,
-                cutover_state=CutoverState.PRE_BACKFILL,
-            ),
-            _make_position(
-                handle="legacy2",
-                source=PositionSource.LEGACY,
-                confidence=PositionConfidence.LOW,
-                cutover_state=CutoverState.PRE_BACKFILL,
-            ),
-        ]
-        fake_client.get_positions.return_value = GetPositionsResult([], unverified, [])
-        with (
-            patch.object(sec.st, "divider"),
-            patch.object(sec.st, "markdown"),
-            patch.object(sec.st, "warning") as mock_warning,
-            patch.object(sec.st, "dataframe") as mock_df,
-        ):
-            sec.render_unverified_holdings_section("sid", fake_client)
-        mock_warning.assert_called_once()
-        assert "2 unverified holding" in mock_warning.call_args.args[0]
-        mock_df.assert_called_once()
-
-    def test_client_error_degrades(self, fake_client: MagicMock) -> None:
-        fake_client.get_positions.side_effect = DashboardClientError("nope")
-        with (
-            patch.object(sec.st, "divider"),
-            patch.object(sec.st, "markdown"),
-            patch.object(sec.st, "info") as mock_info,
-        ):
-            sec.render_unverified_holdings_section("sid", fake_client)
-        mock_info.assert_called_once()
 
 
 # =============================================================================

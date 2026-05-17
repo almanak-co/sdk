@@ -182,7 +182,6 @@ def render_positions_section(
             strategy_id,
             chain=chain,
             primitive=primitive,
-            include_legacy_unverified=False,
         )
     except DashboardClientError as exc:
         st.info(f"Positions temporarily unavailable: {exc}")
@@ -210,62 +209,6 @@ def _render_position_groups(result: GetPositionsResult) -> None:
             hide_index=True,
             use_container_width=True,
         )
-
-
-def render_unverified_holdings_section(
-    strategy_id: str,
-    client: DashboardServiceClient,
-    *,
-    heading: str = "### Unverified Holdings — Registry Pending",
-    chain: str = "",
-    primitive: str = "",
-) -> None:
-    """Render LEGACY-source pre-cutover rows under a separate header.
-
-    Critical invariant: these rows MUST NOT be commingled with the
-    authoritative lane. They represent strategies that haven't been
-    backfilled into ``position_registry`` yet; their valuations come
-    from snapshot tables and may diverge from on-chain truth. A
-    separate, visually distinct header is the operator's signal that
-    the row's audit confidence is necessarily LOW.
-
-    Args:
-        strategy_id: Strategy identifier.
-        client: Read-only dashboard client.
-        heading: Section heading override.
-        chain: Optional chain filter.
-        primitive: Optional primitive filter.
-    """
-    st.divider()
-    if heading:
-        st.markdown(heading)
-
-    try:
-        result = client.get_positions(
-            strategy_id,
-            chain=chain,
-            primitive=primitive,
-            include_legacy_unverified=True,
-        )
-    except DashboardClientError as exc:
-        st.info(f"Unverified holdings temporarily unavailable: {exc}")
-        return
-
-    if not result.unverified:
-        st.caption("No unverified holdings — all positions are tracked by the registry.")
-        return
-
-    st.warning(
-        f"{len(result.unverified)} unverified holding(s) — these rows pre-date the "
-        "registry cutover and have LOW confidence. Run reconciliation to confirm "
-        "or replay them into the registry.",
-        icon=None,
-    )
-    st.dataframe(
-        [_position_row(p) for p in result.unverified],
-        hide_index=True,
-        use_container_width=True,
-    )
 
 
 def render_position_range_history_section(
@@ -424,5 +367,4 @@ __all__ = [
     "render_position_range_history_section",
     "render_positions_section",
     "render_reconciliation_report_section",
-    "render_unverified_holdings_section",
 ]

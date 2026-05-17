@@ -77,7 +77,6 @@ if TYPE_CHECKING:
         render_position_range_history_section,
         render_positions_section,
         render_reconciliation_report_section,
-        render_unverified_holdings_section,
     )
 
 # Submodules whose import drags in streamlit. Resolved lazily so the
@@ -92,7 +91,6 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "render_position_range_history_section": ".sections_reconciliation",
     "render_positions_section": ".sections_reconciliation",
     "render_reconciliation_report_section": ".sections_reconciliation",
-    "render_unverified_holdings_section": ".sections_reconciliation",
     # Operator-only — Phase 4's CI lint enforces no renderer-side imports
     "render_reconciliation_operator_panel": ".sections_operator",
 }
@@ -127,7 +125,6 @@ __all__ = [
     "render_positions_section",
     "render_reconciliation_operator_panel",
     "render_reconciliation_report_section",
-    "render_unverified_holdings_section",
     # PM integration
     "render_strategy_detail",
     "render_strategy_timeline",

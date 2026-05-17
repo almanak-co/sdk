@@ -16,7 +16,6 @@ Coverage per RPC:
   - empty backend      → empty rows, cutover_states populated with
                          PRE_BACKFILL (no migration_state row)
   - happy path         → registry rows + cutover derivation
-  - include_legacy_unverified → events surface in `unverified` lane
   - cutover state machine derivation (state-table coverage)
 """
 
@@ -294,7 +293,6 @@ class TestGetPositions:
         request = gateway_pb2.GetPositionsRequest(strategy_id="test_strategy")
         response = await dashboard_service.GetPositions(request, mock_context)
         assert len(response.positions) == 0
-        assert len(response.unverified) == 0
         assert len(response.cutover_states) == 0
 
     async def test_empty_backend_returns_empty_rows(
@@ -313,7 +311,6 @@ class TestGetPositions:
         request = gateway_pb2.GetPositionsRequest(strategy_id="test_strategy")
         response = await dashboard_service.GetPositions(request, mock_context)
         assert len(response.positions) == 0
-        assert len(response.unverified) == 0
         sm.get_position_registry_open_rows.assert_awaited_once()
 
     async def test_registry_rows_surface_with_cutover_states(
@@ -357,138 +354,6 @@ class TestGetPositions:
         assert len(response.cutover_states) == 1
         assert response.cutover_states[0].accounting_category == "LP_UNIV3"
         assert response.cutover_states[0].rows_synthesized == 5
-
-    async def test_include_legacy_unverified_surfaces_events(
-        self,
-        dashboard_service: DashboardServiceServicer,
-        mock_context: MagicMock,
-    ) -> None:
-        dashboard_service._initialized = True
-
-        # Registry empty (pre-cutover) but position_events have a row.
-        events = [
-            {
-                "position_id": "evt_pos_1",
-                "deployment_id": "test_strategy",
-                "chain": "base",
-                "position_type": "LP",
-                "event_type": "OPEN",
-                "tx_hash": "0xevt",
-                "timestamp": "2026-05-10T00:00:00+00:00",
-                "tick_lower": -887220,
-                "tick_upper": 887220,
-                "liquidity": "1234567890",
-            },
-        ]
-        sm = MagicMock()
-        sm.get_position_registry_open_rows = AsyncMock(return_value=[])
-        sm.get_latest_snapshot = AsyncMock(return_value=None)
-        sm.get_migration_state = AsyncMock(return_value=_migration_state_row(complete=False, started_at=None))
-        sm.get_position_events_filtered = AsyncMock(return_value=events)
-        dashboard_service._state_manager = sm
-
-        request = gateway_pb2.GetPositionsRequest(
-            strategy_id="test_strategy",
-            include_legacy_unverified=True,
-        )
-        response = await dashboard_service.GetPositions(request, mock_context)
-
-        assert len(response.positions) == 0
-        assert len(response.unverified) == 1
-        assert response.unverified[0].source == gateway_pb2.POSITION_SOURCE_LEGACY
-        assert response.unverified[0].handle == "evt_pos_1"
-
-    # ------------------------------------------------------------------
-    # Codex review fix — unverified lane honors request filters
-    # ------------------------------------------------------------------
-
-    async def test_unverified_lane_drops_events_on_wrong_chain(
-        self,
-        dashboard_service: DashboardServiceServicer,
-        mock_context: MagicMock,
-    ) -> None:
-        """A filtered GetPositions request must NOT surface unverified
-        rows from other chains (Codex review fix)."""
-        dashboard_service._initialized = True
-        events = [
-            {"position_id": "p_base", "chain": "base", "position_type": "LP", "accounting_category": "LP_UNIV3"},
-            {"position_id": "p_eth", "chain": "ethereum", "position_type": "LP", "accounting_category": "LP_UNIV3"},
-        ]
-        sm = MagicMock()
-        sm.get_position_registry_open_rows = AsyncMock(return_value=[])
-        sm.get_latest_snapshot = AsyncMock(return_value=None)
-        sm.get_migration_state = AsyncMock(return_value=None)
-        sm.get_position_events_filtered = AsyncMock(return_value=events)
-        dashboard_service._state_manager = sm
-
-        response = await dashboard_service.GetPositions(
-            gateway_pb2.GetPositionsRequest(
-                strategy_id="test_strategy",
-                chain="base",
-                include_legacy_unverified=True,
-            ),
-            mock_context,
-        )
-        handles = {u.handle for u in response.unverified}
-        assert handles == {"p_base"}, "ethereum event must be dropped by chain filter"
-
-    async def test_unverified_lane_drops_events_on_wrong_accounting_category(
-        self,
-        dashboard_service: DashboardServiceServicer,
-        mock_context: MagicMock,
-    ) -> None:
-        dashboard_service._initialized = True
-        events = [
-            {"position_id": "p_univ3", "chain": "base", "position_type": "LP", "accounting_category": "LP_UNIV3"},
-            {"position_id": "p_aero", "chain": "base", "position_type": "LP", "accounting_category": "LP_AERODROME"},
-        ]
-        sm = MagicMock()
-        sm.get_position_registry_open_rows = AsyncMock(return_value=[])
-        sm.get_latest_snapshot = AsyncMock(return_value=None)
-        sm.get_migration_state = AsyncMock(return_value=None)
-        sm.get_position_events_filtered = AsyncMock(return_value=events)
-        dashboard_service._state_manager = sm
-
-        response = await dashboard_service.GetPositions(
-            gateway_pb2.GetPositionsRequest(
-                strategy_id="test_strategy",
-                accounting_category="LP_UNIV3",
-                include_legacy_unverified=True,
-            ),
-            mock_context,
-        )
-        handles = {u.handle for u in response.unverified}
-        assert handles == {"p_univ3"}
-
-    async def test_unverified_lane_lending_filter_returns_empty(
-        self,
-        dashboard_service: DashboardServiceServicer,
-        mock_context: MagicMock,
-    ) -> None:
-        """Primitive filter for 'lending' yields no rows since the
-        evidence-set today only covers LP + PERP (lending events live in
-        accounting_events — pending VIB-4501)."""
-        dashboard_service._initialized = True
-        sm = MagicMock()
-        sm.get_position_registry_open_rows = AsyncMock(return_value=[])
-        sm.get_latest_snapshot = AsyncMock(return_value=None)
-        sm.get_migration_state = AsyncMock(return_value=None)
-        # No call expected, but mock for safety
-        sm.get_position_events_filtered = AsyncMock(return_value=[])
-        dashboard_service._state_manager = sm
-
-        response = await dashboard_service.GetPositions(
-            gateway_pb2.GetPositionsRequest(
-                strategy_id="test_strategy",
-                primitive="lending",
-                include_legacy_unverified=True,
-            ),
-            mock_context,
-        )
-        assert len(response.unverified) == 0
-        # Skipped — we short-circuit before the events fetch.
-        sm.get_position_events_filtered.assert_not_awaited()
-
 
 # =============================================================================
 # _build_snapshot_position_index — extracted helper (covered via the public

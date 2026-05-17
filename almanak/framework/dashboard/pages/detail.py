@@ -7,7 +7,7 @@ Wires action buttons to real API endpoints.
 import html
 import logging
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import requests
@@ -68,6 +68,20 @@ def _detect_strategy_profile(strategy: Strategy) -> str:
         return "PERPS"
 
     return "TA"
+
+
+def _format_usd_str(raw: object) -> str:
+    """Render a possibly-stringified USD amount as ``$1,234.56`` for table cells.
+
+    Falls back to the raw stringified value on parse failure so we never
+    blank out unexpected data; returns ``""`` for empty / None.
+    """
+    if raw is None or raw == "":
+        return ""
+    try:
+        return format_usd(Decimal(str(raw)))
+    except (InvalidOperation, ValueError):
+        return str(raw)
 
 
 def _coerce_float(value: object) -> float | None:
@@ -701,6 +715,8 @@ def render_position_lifecycle(strategy: Strategy) -> None:
     table_data = []
     for evt in events:
         position_id = str(evt.get("position_id", ""))
+        tx_hash = str(evt.get("tx_hash", "") or "")
+        evt_chain = str(evt.get("chain", "") or "")
         row: dict[str, Any] = {
             "Time": evt.get("timestamp", "")[:19],
             "Type": evt.get("event_type", ""),
@@ -712,13 +728,24 @@ def render_position_lifecycle(strategy: Strategy) -> None:
         row.update(
             {
                 "Protocol": evt.get("protocol", ""),
-                "Value (USD)": evt.get("value_usd", ""),
-                "TX": str(evt.get("tx_hash", ""))[:12] + "..." if evt.get("tx_hash") else "",
+                "Value (USD)": _format_usd_str(evt.get("value_usd")),
+                "TX": get_explorer_url(evt_chain, tx_hash) if tx_hash else "",
             }
         )
         table_data.append(row)
 
-    st.dataframe(table_data, use_container_width=True, hide_index=True)
+    st.dataframe(
+        table_data,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "TX": st.column_config.LinkColumn(
+                "TX",
+                display_text=r".*/tx/(0x[a-fA-F0-9]{8})",
+                help="Open transaction in block explorer",
+            ),
+        },
+    )
 
     # PnL attribution for closed positions
     closed_with_attr = [e for e in events if e.get("event_type") == "CLOSE" and e.get("attribution_json", "{}") != "{}"]
@@ -735,10 +762,13 @@ def render_position_lifecycle(strategy: Strategy) -> None:
                 attr_row.update(
                     {
                         "Type": attr.get("position_type", ""),
-                        "Net PnL": attr.get("net_pnl_usd", "0"),
-                        "Price PnL": attr.get("price_pnl_usd", "0"),
-                        "Fee PnL": attr.get("fee_pnl_usd", "0"),
-                        "Gas": attr.get("gas_usd", "0"),
+                        # Empty != Zero: missing attribution fields render blank
+                        # rather than $0.00 so partial / legacy payloads do not
+                        # display as measured zeroes (AGENTS.md §Accounting).
+                        "Net PnL": _format_usd_str(attr.get("net_pnl_usd")),
+                        "Price PnL": _format_usd_str(attr.get("price_pnl_usd")),
+                        "Fee PnL": _format_usd_str(attr.get("fee_pnl_usd")),
+                        "Gas": _format_usd_str(attr.get("gas_usd")),
                         "Version": f"v{attr.get('version', '?')}",
                     }
                 )
@@ -801,12 +831,28 @@ def render_positions_summary(strategy: Strategy) -> None:
             "Opened": (r["opened_at"] or "")[:19],
             "Closed": (r["closed_at"] or "")[:19],
             "Position ID": r["position_id"][:18],
-            "Open TX": (r["opened_tx"] or "")[:12] + "…" if r["opened_tx"] else "",
-            "Close TX": (r["closed_tx"] or "")[:12] + "…" if r["closed_tx"] else "",
+            "Open TX": get_explorer_url(r["chain"], r["opened_tx"]) if r["opened_tx"] else "",
+            "Close TX": get_explorer_url(r["chain"], r["closed_tx"]) if r["closed_tx"] else "",
         }
         for r in visible
     ]
-    st.dataframe(table_data, use_container_width=True, hide_index=True)
+    st.dataframe(
+        table_data,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Open TX": st.column_config.LinkColumn(
+                "Open TX",
+                display_text=r".*/tx/(0x[a-fA-F0-9]{8})",
+                help="Open transaction in block explorer",
+            ),
+            "Close TX": st.column_config.LinkColumn(
+                "Close TX",
+                display_text=r".*/tx/(0x[a-fA-F0-9]{8})",
+                help="Open transaction in block explorer",
+            ),
+        },
+    )
 
 
 def _fetch_positions_registry(db_path: str, deployment_id: str) -> list[dict[str, Any]]:
@@ -1612,3 +1658,40 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     st.divider()
 
     render_bridge_and_lifecycle(strategy)
+
+    # Reconciliation surface (VIB-4548): net-new audit tab + operator
+    # controls backed by the Phase 1 RPCs. Both surfaces degrade to a
+    # single st.info if the gateway connection fails, so always safe to
+    # invoke. Lazy import keeps the dashboard package streamlit-free at
+    # the gateway sidecar (see VIB-4048 / __init__ docstring).
+    from almanak.framework.dashboard.sections_operator import (
+        render_reconciliation_operator_panel,
+    )
+    from almanak.framework.dashboard.sections_reconciliation import (
+        render_reconciliation_report_section,
+    )
+    from almanak.framework.dashboard.service_client import (
+        DashboardClientError,
+        get_dashboard_service_client,
+        get_operator_dashboard_service_client,
+    )
+
+    # Render the report and the operator panel independently so a failure on
+    # one (read-side gateway down, operator client unreachable, ...) does not
+    # blank both surfaces, and so the second section's connect() does not
+    # block page render after the first has already degraded.
+    _dash_read = get_dashboard_service_client()
+    try:
+        if not _dash_read.is_connected:
+            _dash_read.connect()
+        render_reconciliation_report_section(strategy.id, _dash_read)
+    except DashboardClientError as exc:
+        st.info(f"Reconciliation report temporarily unavailable: {exc}")
+
+    _dash_op = get_operator_dashboard_service_client()
+    try:
+        if not _dash_op.is_connected:
+            _dash_op.connect()
+        render_reconciliation_operator_panel(strategy.id, _dash_op)
+    except DashboardClientError as exc:
+        st.info(f"Reconciliation operator panel temporarily unavailable: {exc}")

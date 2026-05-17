@@ -6887,7 +6887,6 @@ class GetPositionsRequest(_message.Message):
     PRIMITIVE_FIELD_NUMBER: _builtins.int
     ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
     STATUS_FIELD_NUMBER: _builtins.int
-    INCLUDE_LEGACY_UNVERIFIED_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     """required"""
     chain: _builtins.str
@@ -6898,11 +6897,6 @@ class GetPositionsRequest(_message.Message):
     """optional filter ("LP_UNIV3", "AAVE_COLLATERAL", ...)"""
     status: Global___PositionStatus.ValueType
     """optional; UNSPECIFIED = all statuses"""
-    include_legacy_unverified: _builtins.bool
-    """Include pre-cutover evidence-set rows (Unverified Holdings) in the
-    `unverified` field of the response. Renderer must surface these under
-    a separate header — they are NEVER mixed with the authoritative lane.
-    """
     def __init__(
         self,
         *,
@@ -6911,9 +6905,8 @@ class GetPositionsRequest(_message.Message):
         primitive: _builtins.str = ...,
         accounting_category: _builtins.str = ...,
         status: Global___PositionStatus.ValueType = ...,
-        include_legacy_unverified: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "include_legacy_unverified", b"include_legacy_unverified", "primitive", b"primitive", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "primitive", b"primitive", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPositionsRequest: _TypeAlias = GetPositionsRequest  # noqa: Y015
@@ -6923,17 +6916,11 @@ class GetPositionsResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     POSITIONS_FIELD_NUMBER: _builtins.int
-    UNVERIFIED_FIELD_NUMBER: _builtins.int
     CUTOVER_STATES_FIELD_NUMBER: _builtins.int
     @_builtins.property
     def positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionEntry]:
-        """Authoritative / near-authoritative positions (REGISTRY or SNAPSHOT source)."""
-
-    @_builtins.property
-    def unverified(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionEntry]:
-        """LEGACY-sourced rows (PRE_BACKFILL). Only populated when
-        include_legacy_unverified=true. Renderer shows under a separate
-        "Unverified Holdings — Registry Pending" header.
+        """Authoritative positions sourced from position_registry (or near-authoritative
+        snapshot fallback during the mid-cutover window).
         """
 
     @_builtins.property
@@ -6946,10 +6933,9 @@ class GetPositionsResponse(_message.Message):
         self,
         *,
         positions: _abc.Iterable[Global___PositionEntry] | None = ...,
-        unverified: _abc.Iterable[Global___PositionEntry] | None = ...,
         cutover_states: _abc.Iterable[Global___CutoverStateEntry] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cutover_states", b"cutover_states", "positions", b"positions", "unverified", b"unverified"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cutover_states", b"cutover_states", "positions", b"positions"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPositionsResponse: _TypeAlias = GetPositionsResponse  # noqa: Y015

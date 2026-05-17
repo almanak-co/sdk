@@ -2957,96 +2957,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
         return cutover_by_category
 
-    async def _build_unverified_lane(
-        self,
-        *,
-        strategy_id: str,
-        registry_rows: list[dict[str, Any]],
-        cutover_by_category: dict[str, Any],
-        chain_filter: str | None = None,
-        primitive_filter: str | None = None,
-        accounting_category_filter: str | None = None,
-    ) -> list[gateway_pb2.PositionEntry]:
-        """Build LEGACY-source PRE_BACKFILL rows from position_events.
-
-        Returns the rows that exist in ``position_events`` but NOT in
-        ``position_registry`` — pre-cutover evidence that the registry
-        backfill hasn't picked up yet. Lending-events path is deferred to
-        VIB-4501; v1 covers LP + PERP only.
-
-        Codex review note (medium): the request's chain / primitive /
-        accounting_category filters are honored here so a filtered
-        positions request doesn't surface unrelated unverified rows.
-        ``position_types`` we pass to the state-manager fetch is
-        narrowed by ``primitive_filter`` when set; the per-event
-        post-filter then enforces chain + accounting_category since
-        ``get_position_events_filtered`` doesn't support those today.
-        """
-        from almanak.gateway.services._dashboard_phase1 import (
-            CutoverDerivation,
-            build_unverified_entry_from_position_event,
-        )
-
-        assert self._state_manager is not None  # caller (GetPositions) guards
-
-        # Narrow position_types based on the primitive filter so we don't
-        # pull rows we'll just discard. Unknown / empty filter → full LP+PERP set.
-        if primitive_filter == "lp":
-            position_types: frozenset[str] = frozenset({"LP"})
-        elif primitive_filter == "perp":
-            position_types = frozenset({"PERP"})
-        elif primitive_filter in (None, ""):
-            position_types = frozenset({"LP", "PERP"})
-        else:
-            # Filter asks for something we have no evidence-set support for
-            # (e.g., "lending") — return empty, not a wrong-primitive lane.
-            return []
-
-        try:
-            events = await self._state_manager.get_position_events_filtered(
-                deployment_id=strategy_id,
-                position_types=position_types,
-            )
-        except Exception as e:
-            logger.warning("get_position_events_filtered failed in GetPositions: %s", e)
-            return []
-
-        registry_handles_present = {
-            str(row.get("handle") or row.get("physical_identity_hash") or "") for row in registry_rows
-        }
-        unverified: list[gateway_pb2.PositionEntry] = []
-        seen_event_position_ids: set[str] = set()
-        for event in events:
-            pos_id = str(event.get("position_id") or "")
-            if not pos_id or pos_id in seen_event_position_ids:
-                continue
-            if pos_id in registry_handles_present:
-                continue
-            # Apply the request's chain + accounting_category filters per-event.
-            # `get_position_events_filtered` doesn't support these today, so we
-            # enforce them in the post-filter to honor the wire contract.
-            # Strict: events missing the typed field are dropped when the
-            # corresponding filter is set — letting "" through would mix
-            # unrelated unverified rows into a filtered response.
-            evt_chain = str(event.get("chain") or "").strip()
-            evt_category = (event.get("accounting_category") or "").strip()
-            if chain_filter and evt_chain != chain_filter:
-                continue
-            if accounting_category_filter and evt_category != accounting_category_filter:
-                continue
-            seen_event_position_ids.add(pos_id)
-            cutover = cutover_by_category.get(
-                evt_category,
-                CutoverDerivation(
-                    state=gateway_pb2.CUTOVER_STATE_PRE_BACKFILL,
-                    migration_state_row=None,
-                    last_reconciled_at_block=0,
-                    last_reconciled_unix_seconds=0,
-                ),
-            )
-            unverified.append(build_unverified_entry_from_position_event(event=event, cutover=cutover))
-        return unverified
-
     async def GetPositions(
         self,
         request: gateway_pb2.GetPositionsRequest,
@@ -3135,19 +3045,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             snapshot_taken_at_unix=snapshot_taken_at_unix,
         )
 
-        # Optional: LEGACY-source PRE_BACKFILL lane. Honors the request's
-        # chain / primitive / accounting_category filters (Codex review fix).
-        unverified: list[gateway_pb2.PositionEntry] = []
-        if request.include_legacy_unverified:
-            unverified = await self._build_unverified_lane(
-                strategy_id=strategy_id,
-                registry_rows=registry_rows,
-                cutover_by_category=cutover_by_category,
-                chain_filter=chain_filter,
-                primitive_filter=primitive_filter,
-                accounting_category_filter=accounting_category_filter,
-            )
-
         # Build the cutover state entries for the response. Always returned —
         # the renderer uses them to label per-category headers.
         cutover_entries = [
@@ -3155,18 +3052,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             for category, derivation in cutover_by_category.items()
         ]
 
-        # Apply optional PositionStatus filter to both lanes. OPEN only is
-        # supported in v1 anyway (state-manager method constraint); request
-        # status_filter is honored for forward-compat. Apply to `unverified`
-        # too — the legacy lane hardcodes OPEN today, so a request for
-        # CLOSED must NOT return rows from the unverified lane either.
+        # Apply optional PositionStatus filter. OPEN only is supported in v1
+        # anyway (state-manager method constraint); request status_filter is
+        # honored for forward-compat.
         if request.status != gateway_pb2.POSITION_STATUS_UNSPECIFIED:
             positions = [p for p in positions if p.status == request.status]
-            unverified = [p for p in unverified if p.status == request.status]
 
         return gateway_pb2.GetPositionsResponse(
             positions=positions,
-            unverified=unverified,
             cutover_states=cutover_entries,
         )
 
