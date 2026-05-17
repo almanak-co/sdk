@@ -31,7 +31,6 @@ from almanak.framework.connectors.uniswap_v4.receipt_parser import (
     UniswapV4ReceiptParser,
 )
 
-
 # =============================================================================
 # Receipt builders -- shaped after real Anvil mint receipts
 # =============================================================================
@@ -303,9 +302,7 @@ class TestNonAllowlistedSender:
         # silently rejects cross-chain PMs surfaces here.
         parser = UniswapV4ReceiptParser(chain=CHAIN)
         result = parser.extract_lp_open_data(receipt)
-        assert result is not None, (
-            "cross-chain PositionManager (any chain's V4 PM) MUST be accepted by the allowlist"
-        )
+        assert result is not None, "cross-chain PositionManager (any chain's V4 PM) MUST be accepted by the allowlist"
         assert result.position_hash == compute_position_hash(
             owner=eth_pm,
             tick_lower=TICK_LOWER,
@@ -468,9 +465,18 @@ class TestNegativeTickBands:
 
 class TestSingleTokenDeposit:
     """Sometimes only one currency is deposited (e.g. boundary tick, single-
-    sided liquidity). amount1 should be None (unmeasured), not 0."""
+    sided liquidity). VIB-4535: single-sided opens are resolved via the
+    gateway PoolKey lookup -- symmetric with T07's close-side
+    ``extract_lp_close_data``. Without a lookup callable the parser DROPS
+    (mirror of close-side ``missing_pool_key_lookup`` disposition); with a
+    lookup callable the missing leg is stamped as measured zero and both
+    currencies are populated from the canonical PoolKey.
+    """
 
-    def test_single_token_amount1_is_none(self) -> None:
+    def test_single_token_without_lookup_drops(self) -> None:
+        """VIB-4535: without ``pool_key_lookup`` injected the parser cannot
+        resolve the missing currency leg and MUST drop (no warn-and-write).
+        """
         receipt = _canonical_mint_receipt()
         # Drop the WETH (= currency0) transfer; only USDC lands in pool.
         # Receipt order: [0] ModifyLiquidity, [1] ERC-721 mint, [2] USDC, [3] WETH.
@@ -480,24 +486,18 @@ class TestSingleTokenDeposit:
             receipt["logs"][2],  # USDC transfer only (WETH dropped)
         ]
         parser = UniswapV4ReceiptParser(chain=CHAIN)
-        data = parser.extract_lp_open_data(receipt)
-        assert data is not None
-        # When only one token transfer is observed, the helper records the
-        # observed amount under amount0 (lowest sorted address among observed
-        # tokens) and leaves amount1 unmeasured. Documents the limitation that
-        # without seeing both currency0 AND currency1 transfers we cannot
-        # reliably attribute single-sided deposits to currency0 vs currency1
-        # without a PoolKey lookup -- T07 lifts this for the close side.
-        assert data.amount0 == USDC_AMOUNT
-        assert data.amount1 is None
+        assert parser.extract_lp_open_data(receipt) is None
 
     def test_no_token_transfers_amounts_both_none(self) -> None:
         receipt = _canonical_mint_receipt()
         receipt["logs"] = receipt["logs"][:2]  # drop both ERC-20 transfers
         parser = UniswapV4ReceiptParser(chain=CHAIN)
         data = parser.extract_lp_open_data(receipt)
+        # VIB-4535: the PoolKey-lookup branch fires only when
+        # ``amount0 is not None and amount1 is None``. When zero transfers
+        # are observed the helper returns ``(None, None, None, None)`` and
+        # the parser preserves the both-unmeasured shape (Empty != Zero).
         assert data is not None
-        # Empty != Zero (blueprint 27): None when unmeasured
         assert data.amount0 is None
         assert data.amount1 is None
 

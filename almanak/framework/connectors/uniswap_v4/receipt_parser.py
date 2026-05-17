@@ -542,11 +542,17 @@ class UniswapV4ReceiptParser:
         4. ``position_hash = keccak(packed(positionManager, tickLower, tickUpper, salt))``
            per v4-core ``Position.calculatePositionKey``.
 
-        Amount attribution for V0: sum ERC-20 Transfers landing in the
-        PoolManager grouped by token, then assign by sorted-address order
-        (currency0 < currency1 invariant). This mirrors ``extract_lp_close_data``
-        and avoids requiring a gateway PoolKey lookup on the open side --
-        T07 owns the PoolKey-driven attribution for closes.
+        Amount attribution: sum ERC-20 Transfers landing in the PoolManager
+        grouped by token, then assign by sorted-address order
+        (currency0 < currency1 invariant). When only one currency is observed
+        (e.g. a concentrated-liquidity position opened out of range, or a
+        single-sided deposit), the gateway PoolKey lookup is invoked to
+        resolve both currency addresses and stamp a measured zero on the
+        unobserved leg (VIB-4535 — symmetric with T07's close-side
+        ``extract_lp_close_data``). On lookup failure the LPOpenData is
+        dropped (telemetry counters: ``missing_pool_key_lookup`` /
+        ``pool_key_not_found`` / ``pool_key_lookup_error``) rather than
+        emitted with ambiguous attribution.
 
         Non-allowlisted ``sender`` or salt/tokenId mismatch → structured
         WARNING + returns None. The writer must not crash on a parser miss
@@ -616,20 +622,25 @@ class UniswapV4ReceiptParser:
         )
 
         amount0, amount1, currency0, currency1 = self._sum_deposit_transfers_by_currency_order(parsed.transfer_events)
+
+        # VIB-4535: when only one currency landed in PoolManager we cannot
+        # honestly attribute it to currency0 vs currency1 from the observed
+        # transfers alone. Resolve via the gateway PoolKey lookup -- mirror of
+        # close-side T07 (extract_lp_close_data). The helper either returns
+        # a resolved (amount0, amount1, currency0, currency1) tuple, returns
+        # None to signal a drop, OR raises UniswapV4UnsupportedPoolError on
+        # native-ETH currency0 (defense-in-depth; T06 adapter guard already
+        # rejects at compile time).
         if amount0 is not None and amount1 is None:
-            # V0 limitation: single-sided mints cannot be reliably attributed
-            # to currency0 vs currency1 without a gateway PoolKey lookup
-            # (the close side has this via T07; the open side does not yet).
-            # The amount lands on amount0 by sorted-address convention. V1
-            # follow-up: extend extract_lp_open_data to consume the gateway
-            # PoolKey lookup the same way T07 does (VIB-4486 family).
-            logger.warning(
-                "v4_lp_open_data: ambiguous single-sided attribution pool_id=%s tx=%s "
-                "amount0=%s amount1=None (V0 known-limitation; V1 follow-up filed)",
-                mint_event.pool_id,
-                tx_hash,
-                amount0,
+            resolved = self._resolve_single_sided_lp_open(
+                pool_id_hex=mint_event.pool_id.lower(),
+                tx_hash=tx_hash,
+                observed_currency=currency0,  # type: ignore[arg-type]
+                observed_amount=amount0,
             )
+            if resolved is None:
+                return None
+            amount0, amount1, currency0, currency1 = resolved
 
         current_tick: int | None = None
         for swap in parsed.swap_events:
@@ -649,8 +660,10 @@ class UniswapV4ReceiptParser:
             position_hash=position_hash,
             # VIB-4426 P1 #4 — emit canonical sorted currency addresses so
             # build_lp_accounting_event resolves token symbols/decimals by
-            # address (not user-intent index). currency1 may be None on a
-            # single-sided open (V0 known-limitation tracked under VIB-4486).
+            # address (not user-intent index). VIB-4535 closed the V0 hole
+            # where single-sided opens left currency1 unresolved; the
+            # PoolKey-lookup branch above now resolves both currencies (or
+            # drops fail-loud on lookup failure) for those receipts.
             currency0=currency0,
             currency1=currency1,
         )
@@ -668,8 +681,9 @@ class UniswapV4ReceiptParser:
         -- ``None`` is the honest "unmeasured" signal per blueprint 27
         §Empty ≠ Zero (callers must not substitute zero). On a single-sided
         deposit, currency1 is ``None`` (we know one address transferred but
-        cannot infer the unobserved currency without a PoolKey lookup —
-        that V1 follow-up is tracked under VIB-4486).
+        cannot infer the unobserved currency from transfers alone); the
+        caller (``extract_lp_open_data``) resolves the missing leg via the
+        gateway PoolKey lookup -- see VIB-4535.
         """
         deposited_by_token: dict[str, int] = {}
         for transfer in transfer_events:
@@ -686,6 +700,126 @@ class UniswapV4ReceiptParser:
         amount1 = deposited_by_token[sorted_tokens[1]] if len(sorted_tokens) >= 2 else None
         currency1 = sorted_tokens[1] if len(sorted_tokens) >= 2 else None
         return amount0, amount1, currency0, currency1
+
+    def _resolve_single_sided_lp_open(
+        self,
+        *,
+        pool_id_hex: str,
+        tx_hash: str,
+        observed_currency: str,
+        observed_amount: int,
+    ) -> tuple[int, int, str, str] | None:
+        """Resolve a single-sided LP_OPEN via the gateway PoolKey lookup.
+
+        VIB-4535: when only one currency landed in PoolManager,
+        ``extract_lp_open_data`` cannot honestly attribute it to currency0 vs
+        currency1 from the observed transfers alone. This helper mirrors
+        T07's close-side ``extract_lp_close_data`` lookup discipline:
+
+        - Calls ``self._pool_key_lookup(pool_id_hex, chain)`` to get the
+          canonical PoolKey.
+        - On lookup failure (no callable / returns None / raises) emits a
+          structured WARNING + telemetry and returns ``None`` (caller drops).
+        - On native-ETH ``currency0`` raises ``UniswapV4UnsupportedPoolError``
+          (defense-in-depth; adapter T06 already rejects at compile time;
+          gemini-code-assist PR-review medium-priority concern).
+        - On observed-currency-outside-PoolKey returns ``None`` with
+          ``transfer_set_mismatch`` telemetry (caller drops).
+        - On success returns ``(amount0, amount1, currency0, currency1)``
+          where the missing leg is stamped as measured zero (``0``) per
+          blueprint 27 §Empty != Zero — the lookup succeeded AND we observed
+          all transfers from the PoolManager so the unobserved leg truly
+          received zero.
+
+        Returns:
+            ``None`` to signal the caller should drop ``LPOpenData``, OR
+            a resolved ``(amount0, amount1, currency0, currency1)`` tuple.
+
+        Raises:
+            ``UniswapV4UnsupportedPoolError``: on native-ETH currency0.
+        """
+        if self._pool_key_lookup is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.MISSING_POOL_KEY_LOOKUP,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        try:
+            pool_key = self._pool_key_lookup(pool_id_hex, self.chain)
+        except Exception as exc:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_LOOKUP_ERROR,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"error={type(exc).__name__}",
+            )
+            return None
+
+        if pool_key is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_NOT_FOUND,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        pk_currency0 = pool_key.currency0.lower()
+        pk_currency1 = pool_key.currency1.lower()
+
+        # Native-ETH currency0 is out of V0 scope (VIB-4483 / P-V1-B). The
+        # adapter compile-time guard (T06 / VIB-4471) already rejects native
+        # ETH at compile time, so in normal flow no native-ETH receipt should
+        # reach this branch. Defense-in-depth: if one ever does (e.g. a
+        # non-PositionManager hook bypass), raise rather than silently
+        # attribute measured-zero to the native-ETH leg (the native leg
+        # emits no ERC-20 Transfer so the single observed transfer is always
+        # the ERC-20 side; stamping `amount=0` on the ETH leg would be a
+        # misattribution). Mirror of ``extract_lp_close_data``.
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
+        from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
+
+        if pk_currency0 == NATIVE_CURRENCY:
+            self._emit_drop_telemetry(
+                outcome="raise",
+                reason=V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"currency0={pool_key.currency0}",
+            )
+            raise UniswapV4UnsupportedPoolError(
+                f"Uniswap V4 LP open has currency0={pool_key.currency0} (native ETH) but "
+                f"native-ETH legs are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 "
+                f"pools. Native-ETH currency support is tracked by VIB-4483 (P-V1-B). "
+                f"pool_id={pool_id_hex} chain={self.chain}"
+            )
+
+        # The single observed currency MUST be one of the two PoolKey
+        # currencies; otherwise attribution is impossible (mirror of the
+        # close-side ``transfer_set_mismatch`` drop). Catches parser
+        # mis-extraction or a stale cache returning the wrong PoolKey.
+        if observed_currency not in (pk_currency0, pk_currency1):
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.TRANSFER_SET_MISMATCH,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"expected={sorted([pk_currency0, pk_currency1])} observed=[{observed_currency}]",
+            )
+            return None
+
+        # Map observed amount onto its correct leg; missing leg is measured
+        # zero (Decimal("0") semantics; int field = 0). Empty != Zero only
+        # applies when we don't know -- here the lookup succeeded AND we
+        # observed all transfers so the unobserved currency truly received
+        # zero in this open.
+        if observed_currency == pk_currency0:
+            return observed_amount, 0, pk_currency0, pk_currency1
+        return 0, observed_amount, pk_currency0, pk_currency1
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from a V4 burn receipt.
