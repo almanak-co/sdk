@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -125,6 +125,103 @@ class TestGatewayBalanceProvider:
         assert result.balance == Decimal("10.5")
         assert result.decimals == 18
         assert result.stale is False
+        request = mock_client.market.GetBalance.call_args.args[0]
+        assert request.force_refresh is False
+
+    def test_get_balance_threads_force_refresh(self, mock_client):
+        """force_refresh is sent to the gateway for read-after-write checks."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+
+        mock_client.market.GetBalance.return_value = gateway_pb2.BalanceResponse(
+            balance="10.5",
+            decimals=18,
+            raw_balance="10500000000000000000",
+            timestamp=int(datetime.now(UTC).timestamp()),
+        )
+        provider = GatewayBalanceProvider(
+            client=mock_client,
+            wallet_address="0x1234",
+            chain="arbitrum",
+        )
+
+        import asyncio
+
+        asyncio.run(provider.get_balance("WETH", force_refresh=True))
+
+        request = mock_client.market.GetBalance.call_args.args[0]
+        assert request.force_refresh is True
+
+    def test_get_balance_retries_then_returns_stale_cache(self, mock_client):
+        """All retries exhausted on retryable errors falls back to stale cache."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+
+        # Seed cache with a prior successful read.
+        mock_client.market.GetBalance.return_value = gateway_pb2.BalanceResponse(
+            balance="42.0",
+            decimals=18,
+            raw_balance="42000000000000000000",
+            timestamp=int(datetime.now(UTC).timestamp()),
+        )
+        provider = GatewayBalanceProvider(
+            client=mock_client,
+            wallet_address="0x1234",
+            chain="arbitrum",
+        )
+        import asyncio
+        from unittest.mock import patch
+
+        seeded = asyncio.run(provider.get_balance("WETH"))
+        assert seeded.balance == Decimal("42.0")
+        assert seeded.stale is False
+
+        # Now make every call raise a retryable error and skip real backoff.
+        mock_client.market.GetBalance.side_effect = RuntimeError("UNAVAILABLE: peer reset")
+        with patch("almanak.framework.data.balance.gateway_provider.asyncio.sleep", new=AsyncMock(return_value=None)):
+            result = asyncio.run(provider.get_balance("WETH"))
+
+        assert result.balance == Decimal("42.0")
+        assert result.stale is True
+        # 1 seeding call + 3 retry attempts on the failure path.
+        assert mock_client.market.GetBalance.call_count == 4
+
+    def test_get_balance_non_retryable_no_cache_raises_underlying(self, mock_client):
+        """Non-retryable error with no cache propagates the original exception."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+
+        class BadRequest(Exception):
+            pass
+
+        mock_client.market.GetBalance.side_effect = BadRequest("INVALID_ARGUMENT: bad symbol")
+        provider = GatewayBalanceProvider(
+            client=mock_client,
+            wallet_address="0x1234",
+            chain="arbitrum",
+        )
+        import asyncio
+
+        with pytest.raises(BadRequest, match="INVALID_ARGUMENT"):
+            asyncio.run(provider.get_balance("BOGUS"))
+        # Non-retryable: should NOT have retried.
+        assert mock_client.market.GetBalance.call_count == 1
+
+    def test_get_balance_retryable_no_cache_raises_data_source_unavailable(self, mock_client):
+        """Retries exhausted with no cache surfaces DataSourceUnavailable."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        mock_client.market.GetBalance.side_effect = RuntimeError("DEADLINE_EXCEEDED")
+        provider = GatewayBalanceProvider(
+            client=mock_client,
+            wallet_address="0x1234",
+            chain="arbitrum",
+        )
+        import asyncio
+        from unittest.mock import patch
+
+        with patch("almanak.framework.data.balance.gateway_provider.asyncio.sleep", new=AsyncMock(return_value=None)):
+            with pytest.raises(DataSourceUnavailable):
+                asyncio.run(provider.get_balance("WETH"))
+        assert mock_client.market.GetBalance.call_count == 3
 
     def test_cache_invalidation(self, mock_client):
         """invalidate_cache clears cached balances."""

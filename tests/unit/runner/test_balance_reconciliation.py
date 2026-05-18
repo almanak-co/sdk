@@ -15,12 +15,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
+from almanak.framework.runner.reconciliation import BalanceSnapshot
 from almanak.framework.runner.strategy_runner import (
     IterationStatus,
     RunnerConfig,
     StrategyRunner,
 )
-
 
 # =============================================================================
 # Helpers
@@ -264,6 +264,102 @@ class TestReconcileBalances:
         assert recon is not None
         assert "USDC" in recon["tokens_checked"]
         assert "ETH" not in recon["tokens_checked"]
+
+    @pytest.mark.asyncio
+    async def test_real_delta_post_reads_force_fresh_balances(self):
+        """Post-execution reconciliation must bypass gateway-side balance cache."""
+        bp = MagicMock()
+        usdc_bal = MagicMock()
+        usdc_bal.balance = Decimal("96")
+        eth_bal = MagicMock()
+        eth_bal.balance = Decimal("4")
+        bp.get_balance = AsyncMock(side_effect=lambda t, *, force_refresh=False: usdc_bal if t == "USDC" else eth_bal)
+
+        runner = _make_runner(balance_provider=bp)
+        strategy = MagicMock()
+        strategy.strategy_id = "test"
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
+        pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
+
+        recon = await runner._reconcile_post_execution_balances(strategy, intent, None, pre_snapshot=pre_snapshot)
+
+        assert recon is not None
+        assert bp.get_balance.await_args_list[0].kwargs["force_refresh"] is True
+        assert bp.get_balance.await_args_list[1].kwargs["force_refresh"] is True
+
+    @pytest.mark.asyncio
+    async def test_real_delta_post_falls_back_when_provider_rejects_force_refresh(self):
+        """Legacy provider that doesn't accept force_refresh still reconciles cleanly."""
+        usdc_bal = MagicMock()
+        usdc_bal.balance = Decimal("96")
+        eth_bal = MagicMock()
+        eth_bal.balance = Decimal("4")
+
+        async def legacy_get_balance(token):  # no force_refresh kwarg supported
+            return usdc_bal if token == "USDC" else eth_bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=legacy_get_balance)
+
+        runner = _make_runner(balance_provider=bp)
+        strategy = MagicMock()
+        strategy.strategy_id = "test"
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
+        pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
+
+        recon = await runner._reconcile_post_execution_balances(strategy, intent, None, pre_snapshot=pre_snapshot)
+
+        assert recon is not None
+        # Each token is read twice: first attempt with kwarg fails -> fall back without kwarg.
+        kwargs_seen = [c.kwargs for c in bp.get_balance.await_args_list]
+        assert any("force_refresh" in k for k in kwargs_seen), "should have tried kwarg first"
+        assert any(k == {} for k in kwargs_seen), "should have fallen back without kwarg"
+
+    @pytest.mark.asyncio
+    async def test_real_delta_post_no_kwarg_when_no_pre_snapshot(self):
+        """Without pre_snapshot, force_refresh stays off and kwarg is never sent."""
+        bp = MagicMock()
+        usdc_bal = MagicMock()
+        usdc_bal.balance = Decimal("96")
+        bp.get_balance = AsyncMock(return_value=usdc_bal)
+
+        runner = _make_runner(balance_provider=bp)
+        strategy = MagicMock()
+        strategy.strategy_id = "test"
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
+
+        recon = await runner._reconcile_post_execution_balances(strategy, intent, None, pre_snapshot=None)
+
+        # Legacy/post-only path should still reconcile and never pass force_refresh.
+        assert recon is not None
+        assert bp.get_balance.await_count == 2
+        for call in bp.get_balance.await_args_list:
+            assert "force_refresh" not in call.kwargs
+
+    @pytest.mark.asyncio
+    async def test_real_delta_post_reraises_unrelated_type_error(self):
+        """A TypeError unrelated to force_refresh must NOT be swallowed."""
+
+        async def buggy_provider(token, *, force_refresh=False):
+            raise TypeError("bad return type from underlying client")
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=buggy_provider)
+
+        runner = _make_runner(balance_provider=bp)
+        strategy = MagicMock()
+        strategy.strategy_id = "test"
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
+        pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
+
+        # The reconciliation loop swallows per-token exceptions and logs them;
+        # the assertion is that no second call was issued for the same token
+        # (i.e., the fallback path did NOT fire on an unrelated TypeError).
+        await runner._reconcile_post_execution_balances(strategy, intent, None, pre_snapshot=pre_snapshot)
+        per_token_calls = [c for c in bp.get_balance.await_args_list if c.args == ("USDC",)]
+        # One kwarg attempt; no follow-up no-kwarg fallback.
+        assert len(per_token_calls) == 1
+        assert per_token_calls[0].kwargs.get("force_refresh") is True
 
 
 # =============================================================================

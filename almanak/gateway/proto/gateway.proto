@@ -104,6 +104,10 @@ message BalanceRequest {
   string token = 1;
   string chain = 2;
   string wallet_address = 3;
+  // Bypass the gateway-side balance cache for read-after-write paths such
+  // as post-execution reconciliation. Normal strategy reads should leave
+  // this false so the gateway can absorb repeated UI/decide-cycle queries.
+  bool force_refresh = 4;
 }
 
 message BalanceResponse {

@@ -143,6 +143,7 @@ class TestMarketServiceGetBalance:
         # Mock balance provider
         mock_provider = MagicMock()
         mock_provider.get_balance = AsyncMock(return_value=mock_result)
+        mock_provider.invalidate_cache = MagicMock()
 
         with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
             market_service._initialized = True
@@ -160,6 +161,11 @@ class TestMarketServiceGetBalance:
 
                 assert response.balance == "10.5"
                 assert response.decimals == 18
+                mock_provider.invalidate_cache.assert_not_called()
+
+                request.force_refresh = True
+                await market_service.GetBalance(request, mock_context)
+                mock_provider.invalidate_cache.assert_called_once_with("WETH")
 
     @pytest.mark.asyncio
     async def test_get_balance_unknown_address_dynamic_resolution(
@@ -564,6 +570,7 @@ class TestGetPriceManualOverrideFallback:
         retry with backoff instead of treating the response as fatal.
         """
         import grpc as grpc_mod
+
         from almanak.framework.data.interfaces import AllDataSourcesFailed, DataSourceUnavailable
 
         settings = GatewaySettings(chains=["zerog"], enable_manual_price_overrides=True)
@@ -597,6 +604,7 @@ class TestGetPriceManualOverrideFallback:
         failure goes straight to the typed-error path (UNAVAILABLE for
         AllDataSourcesFailed) — override is never consulted."""
         import grpc as grpc_mod
+
         from almanak.framework.data.interfaces import AllDataSourcesFailed
 
         settings = GatewaySettings(chains=["zerog"])  # default: override off

@@ -1156,6 +1156,31 @@ async def snapshot_balances_for_intent(
     return BalanceSnapshot(timestamp=datetime.now(UTC), balances=balances)
 
 
+async def _read_balance_for_reconciliation(
+    balance_provider: Any,
+    token_symbol: str,
+    *,
+    force_refresh: bool,
+) -> Any:
+    """Read a token balance, forcing freshness when the provider supports it.
+
+    Default path (``force_refresh=False``) never touches the kwarg, so legacy
+    providers see the same call shape they always have. The ``force_refresh=True``
+    branch attempts the kwarg call and falls back narrowly when the provider
+    raises ``TypeError("...unexpected keyword argument 'force_refresh'...")``
+    so unrelated ``TypeError``s inside ``get_balance`` still surface.
+    """
+    if not force_refresh:
+        return await balance_provider.get_balance(token_symbol)
+    try:
+        return await balance_provider.get_balance(token_symbol, force_refresh=True)
+    except TypeError as exc:
+        msg = str(exc)
+        if "force_refresh" not in msg or "keyword argument" not in msg:
+            raise
+        return await balance_provider.get_balance(token_symbol)
+
+
 async def reconcile_post_execution_balances(
     runner: Any,
     strategy: StrategyProtocol,
@@ -1182,7 +1207,11 @@ async def reconcile_post_execution_balances(
         post_balances: dict[str, Decimal] = {}
         for token_symbol in tokens:
             try:
-                bal = await runner.balance_provider.get_balance(token_symbol)
+                bal = await _read_balance_for_reconciliation(
+                    runner.balance_provider,
+                    token_symbol,
+                    force_refresh=pre_snapshot is not None,
+                )
                 post_balances[token_symbol] = bal.balance
             except Exception as exc:  # noqa: BLE001
                 logger.debug(

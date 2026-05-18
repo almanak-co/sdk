@@ -106,7 +106,7 @@ class GatewayBalanceProvider(BalanceProvider):
         """Get the chain name."""
         return self._chain
 
-    async def get_balance(self, token: str) -> BalanceResult:
+    async def get_balance(self, token: str, *, force_refresh: bool = False) -> BalanceResult:
         """Get token balance from gateway with retry and cached fallback.
 
         On transient RPC errors (rate-limit 429, timeouts, connection errors)
@@ -115,6 +115,8 @@ class GatewayBalanceProvider(BalanceProvider):
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC")
+            force_refresh: Ask the gateway to bypass its server-side balance
+                cache. Use for read-after-write checks such as reconciliation.
 
         Returns:
             BalanceResult with balance in human-readable units.
@@ -133,6 +135,7 @@ class GatewayBalanceProvider(BalanceProvider):
                     token=token,
                     chain=self._chain,
                     wallet_address=self._wallet_address,
+                    force_refresh=force_refresh,
                 )
                 response = self._client.market.GetBalance(request, timeout=self._timeout)
 

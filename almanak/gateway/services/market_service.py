@@ -749,6 +749,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
+            if request.force_refresh and hasattr(provider, "invalidate_cache"):
+                provider.invalidate_cache(token)
 
             # Chain-scoped native check: only route to get_native_balance when
             # the symbol is actually native to THIS chain. Prevents POL on

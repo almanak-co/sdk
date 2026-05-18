@@ -403,17 +403,24 @@ class BalanceRequest(_message.Message):
     TOKEN_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    FORCE_REFRESH_FIELD_NUMBER: _builtins.int
     token: _builtins.str
     chain: _builtins.str
     wallet_address: _builtins.str
+    force_refresh: _builtins.bool
+    """Bypass the gateway-side balance cache for read-after-write paths such
+    as post-execution reconciliation. Normal strategy reads should leave
+    this false so the gateway can absorb repeated UI/decide-cycle queries.
+    """
     def __init__(
         self,
         *,
         token: _builtins.str = ...,
         chain: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
+        force_refresh: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token", b"token", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "force_refresh", b"force_refresh", "token", b"token", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BalanceRequest: _TypeAlias = BalanceRequest  # noqa: Y015
