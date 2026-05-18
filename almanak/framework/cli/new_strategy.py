@@ -4357,30 +4357,52 @@ ALMANAK_PRIVATE_KEY=
 """
 
 
-def generate_dashboard_ui(name: str) -> str:
+def _docstring_safe(s: str) -> str:
+    """Neutralise characters that break a triple-quoted docstring block.
+
+    ``json.dumps`` can't escape inside a docstring (the surrounding
+    triple quotes are part of the file), so backslashes (escape-sequence
+    warnings) and embedded ``"`` are rewritten.
+    """
+    return s.replace("\\", "/").replace('"', "'")
+
+
+def generate_dashboard_ui(
+    name: str,
+    template: StrategyTemplate = StrategyTemplate.BLANK,
+) -> str:
     """Generate a starter ``dashboard/ui.py``.
 
-    The stub follows the standard 3-section layout (VIB-3969):
-      1. Title + strategy info
-      2. ``render_pnl_section`` — 5-second eyeball at the top
-      3. Author's primitive-specific content (TODO placeholder)
-      4. ``render_cost_stack_section`` + ``render_trade_tape_section``
-         at the bottom for audit / detail
+    For templates that have a matching framework dashboard renderer
+    (``DYNAMIC_LP``, ``LENDING_LOOP``, ``PERPS``, ``TA_SWAP``), emit a
+    scaffold wired to the renderer — the renderer owns the title, the
+    strategy header, and the three audit sections (PnL / Cost Stack /
+    Trade Tape), so the scaffold is short by design.
+
+    For every other template (``BLANK``, ``MULTI_STEP``, ``STAKING``,
+    ``VAULT_YIELD``, ``COPY_TRADER``, ``BASIS_TRADE``), fall back to the
+    generic direct-sections starter — title + ``render_pnl_section`` →
+    author's primitive-specific UI → ``render_cost_stack_section`` +
+    ``render_trade_tape_section``.
     """
+    if template == StrategyTemplate.DYNAMIC_LP:
+        return _generate_dashboard_ui_lp(name)
+    if template == StrategyTemplate.LENDING_LOOP:
+        return _generate_dashboard_ui_lending(name)
+    if template == StrategyTemplate.PERPS:
+        return _generate_dashboard_ui_perp(name)
+    if template == StrategyTemplate.TA_SWAP:
+        return _generate_dashboard_ui_ta(name)
+    return _generate_dashboard_ui_generic(name)
+
+
+def _generate_dashboard_ui_generic(name: str) -> str:
+    """Direct-sections starter used for blank / multi-step / etc. templates."""
     snake = to_snake_case(name)
     display_name = snake.replace("_", " ").title()
     # Embed strings via ``json.dumps`` so quotes / backslashes / unicode
     # in the strategy name can never break the generated Python file.
     title_literal = json.dumps(display_name)
-
-    # Docstrings can't go through json.dumps (the surrounding triple
-    # quotes are part of the file), so neutralise the two characters
-    # that can break a triple-quoted block: backslashes (escape
-    # sequence warnings) and embedded ``"``. Apply to both the human
-    # display name and the snake_case form, since ``to_snake_case`` does
-    # not strip non-alphanumeric characters.
-    def _docstring_safe(s: str) -> str:
-        return s.replace("\\", "/").replace('"', "'")
 
     display_doc = _docstring_safe(display_name)
     snake_doc = _docstring_safe(snake)
@@ -4438,6 +4460,250 @@ def render_custom_dashboard(
     st.markdown("## Audit")
     render_cost_stack_section(strategy_id, heading="")
     render_trade_tape_section(strategy_id)
+'''
+
+
+def _generate_dashboard_ui_lp(name: str) -> str:
+    """LP scaffold — wired to ``render_lp_dashboard`` via
+    ``LPDashboardConfig`` + ``prepare_lp_session_state``.
+
+    The renderer owns the title, the strategy header, and the three
+    audit sections. Strategy-specific content (custom panels, etc.) goes
+    BELOW the renderer call — wrapping it with ``st.title(...)`` or any
+    of the section helpers double-renders.
+    """
+    snake = to_snake_case(name)
+    display_doc = _docstring_safe(snake.replace("_", " ").title())
+    snake_doc = _docstring_safe(snake)
+    return f'''"""{display_doc} Dashboard.
+
+Custom Streamlit dashboard for the {snake_doc} strategy. Loaded by the
+hosted platform's dashboard image and by ``almanak dashboard``
+locally — both call ``render_custom_dashboard()`` with the same
+arguments.
+
+Wired to the framework LP template renderer
+(``render_lp_dashboard``), which owns the title, the strategy header,
+and the three audit sections (PnL / Cost Stack / Trade Tape). Do NOT
+wrap it with ``st.title(...)`` or extra ``render_pnl_section`` /
+``render_cost_stack_section`` / ``render_trade_tape_section`` calls —
+that double-renders.
+"""
+
+from typing import Any
+
+from almanak.framework.dashboard.templates import (
+    LPDashboardConfig,
+    prepare_lp_session_state,
+    render_lp_dashboard,
+)
+
+_FEE_BPS_TO_PCT = {{
+    "100": "0.01%",
+    "500": "0.05%",
+    "3000": "0.30%",
+    "10000": "1.00%",
+}}
+
+
+def _parse_pool(pool: str, default_fee_tier: str) -> tuple[str, str, str]:
+    """Parse ``TOKEN0/TOKEN1[/FEE_BPS]`` from ``config.json``.
+
+    ``fee_tier`` can be either embedded in the pool string
+    (``WETH/USDC/3000``) or a separate config field. Both layouts are
+    seen across strategies.
+    """
+    parts = [p.strip() for p in pool.split("/") if p.strip()]
+    if len(parts) >= 3:
+        return parts[0], parts[1], _format_fee_tier(parts[2])
+    if len(parts) == 2:
+        return parts[0], parts[1], default_fee_tier
+    return "WETH", "USDC", default_fee_tier
+
+
+def _format_fee_tier(value: Any) -> str:
+    """Normalise a ``fee_tier`` config value to a display string."""
+    if isinstance(value, str) and value.endswith("%"):
+        return value
+    try:
+        return _FEE_BPS_TO_PCT.get(str(int(value)), f"{{int(value) / 10000:.2f}}%")
+    except (TypeError, ValueError):
+        return "0.30%"
+
+
+def render_custom_dashboard(
+    strategy_id: str,
+    strategy_config: dict[str, Any],
+    api_client: Any,
+    session_state: dict[str, Any],
+) -> None:
+    default_fee_tier = _format_fee_tier(strategy_config.get("fee_tier", 3000))
+    token0, token1, fee_tier = _parse_pool(
+        str(strategy_config.get("pool", "WETH/USDC")),
+        default_fee_tier=default_fee_tier,
+    )
+
+    config = LPDashboardConfig(
+        protocol=str(strategy_config.get("protocol", "uniswap_v3")),
+        token0=token0,
+        token1=token1,
+        fee_tier=fee_tier,
+        chain=str(strategy_config.get("chain", "arbitrum")),
+    )
+
+    session_state = prepare_lp_session_state(
+        api_client,
+        session_state=session_state,
+        config=config,
+    )
+
+    render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+'''
+
+
+def _generate_dashboard_ui_lending(name: str) -> str:
+    """Lending scaffold — wired to ``render_lending_dashboard``.
+
+    Defaults to Aave V3; swap ``get_aave_v3_config`` for
+    ``get_morpho_blue_config`` / ``get_compound_v3_config`` /
+    ``get_spark_config`` to point the dashboard at a different protocol
+    (or build a ``LendingDashboardConfig`` directly).
+    """
+    snake = to_snake_case(name)
+    display_doc = _docstring_safe(snake.replace("_", " ").title())
+    snake_doc = _docstring_safe(snake)
+    return f'''"""{display_doc} Dashboard.
+
+Custom Streamlit dashboard for the {snake_doc} strategy. Loaded by the
+hosted platform's dashboard image and by ``almanak dashboard``
+locally — both call ``render_custom_dashboard()`` with the same
+arguments.
+
+Wired to the framework lending template renderer
+(``render_lending_dashboard``), which owns the title, the strategy
+header, and the three audit sections (PnL / Cost Stack / Trade Tape).
+Do NOT wrap it with ``st.title(...)`` or extra section helpers — that
+double-renders.
+"""
+
+from typing import Any
+
+from almanak.framework.dashboard.templates import (
+    get_aave_v3_config,
+    render_lending_dashboard,
+)
+
+
+def render_custom_dashboard(
+    strategy_id: str,
+    strategy_config: dict[str, Any],
+    api_client: Any,
+    session_state: dict[str, Any],
+) -> None:
+    config = get_aave_v3_config(
+        collateral_token=str(strategy_config.get("collateral_token", "WETH")),
+        borrow_token=str(strategy_config.get("borrow_token", "USDC")),
+        chain=str(strategy_config.get("chain", "arbitrum")),
+    )
+
+    render_lending_dashboard(strategy_id, strategy_config, session_state, config)
+'''
+
+
+def _generate_dashboard_ui_perp(name: str) -> str:
+    """Perp scaffold — wired to ``render_perp_dashboard``.
+
+    Defaults to GMX V2; swap ``get_gmx_v2_config`` for
+    ``get_hyperliquid_config`` (or build a ``PerpDashboardConfig``
+    directly) to point the dashboard at a different venue.
+    """
+    snake = to_snake_case(name)
+    display_doc = _docstring_safe(snake.replace("_", " ").title())
+    snake_doc = _docstring_safe(snake)
+    return f'''"""{display_doc} Dashboard.
+
+Custom Streamlit dashboard for the {snake_doc} strategy. Loaded by the
+hosted platform's dashboard image and by ``almanak dashboard``
+locally — both call ``render_custom_dashboard()`` with the same
+arguments.
+
+Wired to the framework perp template renderer
+(``render_perp_dashboard``), which owns the title, the strategy
+header, and the three audit sections (PnL / Cost Stack / Trade Tape).
+Do NOT wrap it with ``st.title(...)`` or extra section helpers — that
+double-renders.
+"""
+
+from typing import Any
+
+from almanak.framework.dashboard.templates import (
+    get_gmx_v2_config,
+    render_perp_dashboard,
+)
+
+
+def render_custom_dashboard(
+    strategy_id: str,
+    strategy_config: dict[str, Any],
+    api_client: Any,
+    session_state: dict[str, Any],
+) -> None:
+    config = get_gmx_v2_config(
+        market=str(strategy_config.get("perp_market", strategy_config.get("market", "ETH/USD"))),
+        collateral_token=str(strategy_config.get("collateral_token", "USDC")),
+        chain=str(strategy_config.get("chain", "arbitrum")),
+    )
+
+    render_perp_dashboard(strategy_id, strategy_config, session_state, config)
+'''
+
+
+def _generate_dashboard_ui_ta(name: str) -> str:
+    """TA scaffold — wired to ``render_ta_dashboard``.
+
+    Defaults to RSI; swap ``get_rsi_config`` for ``get_macd_config`` /
+    ``get_bollinger_config`` / ``get_cci_config`` / ``get_stochastic_config``
+    / ``get_atr_config`` / ``get_adx_config`` (or build a
+    ``TADashboardConfig`` directly) to point the dashboard at a different
+    indicator.
+    """
+    snake = to_snake_case(name)
+    display_doc = _docstring_safe(snake.replace("_", " ").title())
+    snake_doc = _docstring_safe(snake)
+    return f'''"""{display_doc} Dashboard.
+
+Custom Streamlit dashboard for the {snake_doc} strategy. Loaded by the
+hosted platform's dashboard image and by ``almanak dashboard``
+locally — both call ``render_custom_dashboard()`` with the same
+arguments.
+
+Wired to the framework TA template renderer (``render_ta_dashboard``),
+which owns the title, the strategy header, and the three audit
+sections (PnL / Cost Stack / Trade Tape). Do NOT wrap it with
+``st.title(...)`` or extra section helpers — that double-renders.
+"""
+
+from typing import Any
+
+from almanak.framework.dashboard.templates import (
+    get_rsi_config,
+    render_ta_dashboard,
+)
+
+
+def render_custom_dashboard(
+    strategy_id: str,
+    strategy_config: dict[str, Any],
+    api_client: Any,
+    session_state: dict[str, Any],
+) -> None:
+    config = get_rsi_config(
+        period=int(strategy_config.get("rsi_period", 14)),
+        overbought=float(strategy_config.get("rsi_overbought", 70)),
+        oversold=float(strategy_config.get("rsi_oversold", 30)),
+    )
+
+    render_ta_dashboard(strategy_id, strategy_config, session_state, config)
 '''
 
 
@@ -4806,7 +5072,7 @@ def new_strategy(
         dashboard_dir = strategy_dir / "dashboard"
         dashboard_dir.mkdir(exist_ok=True)
         dashboard_ui_file = dashboard_dir / "ui.py"
-        dashboard_ui_file.write_text(generate_dashboard_ui(name), encoding="utf-8")
+        dashboard_ui_file.write_text(generate_dashboard_ui(name, template_enum), encoding="utf-8")
         files_created.append("dashboard/ui.py")
 
         dashboard_metadata_file = dashboard_dir / "metadata.json"

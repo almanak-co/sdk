@@ -159,6 +159,123 @@ def test_generate_dashboard_ui_is_valid_python_for_names_with_backslash() -> Non
 
 
 # ---------------------------------------------------------------------------
+# Template-renderer scaffolds — DYNAMIC_LP / LENDING_LOOP / PERPS / TA_SWAP
+# scaffold a ``render_*_dashboard()`` wrapper instead of the direct-sections
+# starter. The framework renderer owns the title, the strategy header, and
+# the three audit sections, so the scaffold must NOT call ``st.title(...)``
+# or the section helpers itself — that double-renders.
+# ---------------------------------------------------------------------------
+
+
+def _ast_call_names(code: str) -> set[str]:
+    """Return ``{'st.title', 'render_pnl_section', ...}`` — actual call
+    targets in the AST, ignoring strings inside docstrings/comments."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(code)):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name):
+            names.add(f.id)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+            names.add(f"{f.value.id}.{f.attr}")
+    return names
+
+
+_TEMPLATE_DASHBOARDS: tuple[tuple[StrategyTemplate, str, tuple[str, ...]], ...] = (
+    (
+        StrategyTemplate.DYNAMIC_LP,
+        "render_lp_dashboard",
+        ("LPDashboardConfig", "prepare_lp_session_state"),
+    ),
+    (
+        StrategyTemplate.LENDING_LOOP,
+        "render_lending_dashboard",
+        ("get_aave_v3_config",),
+    ),
+    (
+        StrategyTemplate.PERPS,
+        "render_perp_dashboard",
+        ("get_gmx_v2_config",),
+    ),
+    (
+        StrategyTemplate.TA_SWAP,
+        "render_ta_dashboard",
+        ("get_rsi_config",),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "template,renderer,additional",
+    _TEMPLATE_DASHBOARDS,
+    ids=lambda v: v.value if hasattr(v, "value") else str(v),
+)
+def test_template_dashboard_scaffold_calls_renderer(
+    template: StrategyTemplate,
+    renderer: str,
+    additional: tuple[str, ...],
+) -> None:
+    """The 4 primitive-specific templates must scaffold the matching
+    framework renderer (``render_lp_dashboard`` / ``render_lending_dashboard``
+    / ``render_perp_dashboard`` / ``render_ta_dashboard``)."""
+    calls = _ast_call_names(generate_dashboard_ui("Mean Reversion", template))
+    assert renderer in calls
+    for symbol in additional:
+        assert symbol in calls, f"{template} scaffold missing {symbol!r} call"
+
+
+@pytest.mark.parametrize(
+    "template,renderer,additional",
+    _TEMPLATE_DASHBOARDS,
+    ids=lambda v: v.value if hasattr(v, "value") else str(v),
+)
+def test_template_dashboard_scaffold_does_not_double_render(
+    template: StrategyTemplate,
+    renderer: str,
+    additional: tuple[str, ...],
+) -> None:
+    """The framework renderer owns the title and the three audit
+    sections. Scaffolds wired to a renderer must NOT call them again."""
+    calls = _ast_call_names(generate_dashboard_ui("Mean Reversion", template))
+    leaks = calls & {
+        "st.title",
+        "render_pnl_section",
+        "render_cost_stack_section",
+        "render_trade_tape_section",
+    }
+    assert not leaks, f"{template} scaffold leaks {leaks!r} alongside {renderer}"
+
+
+@pytest.mark.parametrize(
+    "template,_renderer,_additional",
+    _TEMPLATE_DASHBOARDS,
+    ids=lambda v: v.value if hasattr(v, "value") else str(v),
+)
+def test_template_dashboard_scaffold_passes_ruff(
+    template: StrategyTemplate,
+    _renderer: str,
+    _additional: tuple[str, ...],
+) -> None:
+    """Generated template-renderer scaffolds must be ruff-clean (E/W/F/I)
+    so authors get a starter file they can run unchanged."""
+    code = generate_dashboard_ui("Mean Reversion", template)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ui_path = Path(tmpdir) / "ui.py"
+        ui_path.write_text(code)
+
+        result = subprocess.run(
+            ["uv", "run", "ruff", "check", str(ui_path), "--select", "E,W,F,I"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"ruff failed for {template.value} scaffold:\n{result.stdout}\n{result.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Smoke tests: every template generates valid, parseable, lintable Python
 # ---------------------------------------------------------------------------
 
