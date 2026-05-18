@@ -33,15 +33,27 @@ Example:
             ...
 """
 
+from almanak.framework.connectors.base.compiler import (
+    BaseCompilerContext,
+    BaseConcentratedLiquidityCompiler,
+    BaseProtocolCompiler,
+    CLCompilerContext,
+    CompilerServices,
+)
 from almanak.framework.connectors.base.event import BaseEvent
 from almanak.framework.connectors.base.hex_utils import HexDecoder
 from almanak.framework.connectors.base.receipt_parser import BaseReceiptParser, ParseResult
 from almanak.framework.connectors.base.registry import EventRegistry
 
 __all__ = [
+    "BaseCompilerContext",
+    "BaseConcentratedLiquidityCompiler",
     "BaseEvent",
+    "BaseProtocolCompiler",
+    "CLCompilerContext",
+    "CompilerServices",
+    "BaseReceiptParser",
     "EventRegistry",
     "HexDecoder",
-    "BaseReceiptParser",
     "ParseResult",
 ]

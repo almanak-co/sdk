@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.connectors.uniswap_v3.compiler import UniswapV3Compiler
 from almanak.framework.intents import LpOpenZeroLiquidityError
 from almanak.framework.intents.compiler import (
     CompilationStatus,
@@ -37,7 +38,7 @@ from almanak.framework.intents.compiler import (
 )
 from almanak.framework.intents.vocabulary import Intent
 
-LP_ADAPTER_CLS = "almanak.framework.intents.compiler.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_POOL = "almanak.framework.intents.pool_validation.validate_v3_pool"
 FETCH_SQRT = "almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96"
 
@@ -84,6 +85,11 @@ def _ok_pool_check(pool_address: str | None = None) -> MagicMock:
 @pytest.fixture
 def lp_compiler():
     return _make_compiler()
+
+
+@pytest.fixture
+def v3_compiler() -> UniswapV3Compiler:
+    return UniswapV3Compiler()
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +182,8 @@ class TestPreflightSlot0Aware:
         mock_validate.return_value = _ok_pool_check(pool_address="0xpoolpoolpoolpool")
         # Pool is far above the requested range AND the user supplied only
         # token0. recompute_lp_amounts will return (0, 0) — the slot0
-        # branch in _maybe_recompute_lp_amounts_from_slot0 fails with the
-        # typed prefix.
+        # connector compiler's slot0 recompute branch fails with the typed
+        # prefix.
         mock_slot0.return_value = (tick_to_sqrt_ratio_x96(5000), 5000)
 
         intent = Intent.lp_open(
@@ -232,11 +238,10 @@ class TestPreflightSlot0Aware:
 class TestPreflightDirectInvocation:
     """Drive ``_preflight_lp_liquidity`` directly to pin its return shape."""
 
-    def test_zero_amounts_returns_none(self, lp_compiler: IntentCompiler) -> None:
+    def test_zero_amounts_returns_none(self, v3_compiler: UniswapV3Compiler) -> None:
         # Both inputs zero → caller is responsible for that error surface;
         # pre-flight stays out of the way.
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address=None),
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=-1000,
             tick_upper=1000,
             amount0_desired=0,
@@ -245,9 +250,8 @@ class TestPreflightDirectInvocation:
         )
         assert out is None
 
-    def test_positive_in_range_returns_none(self, lp_compiler: IntentCompiler) -> None:
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address=None),
+    def test_positive_in_range_returns_none(self, v3_compiler: UniswapV3Compiler) -> None:
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=-1000,
             tick_upper=1000,
             amount0_desired=10**18,
@@ -257,14 +261,13 @@ class TestPreflightDirectInvocation:
         assert out is None
 
     def test_one_leg_no_slot0_returns_none(
-        self, lp_compiler: IntentCompiler
+        self, v3_compiler: UniswapV3Compiler
     ) -> None:
         # Single-sided mints WITHOUT slot0 must pass preflight (return
         # None). The midpoint is always in-range and would falsely
         # block legitimate single-token out-of-range mints. Reviewed
         # by CodeRabbit + Codex P2 + Claude pr-auditor (3/3 auditors).
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address=None),
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=-10,
             tick_upper=10,
             amount0_desired=1_000_000,
@@ -274,14 +277,13 @@ class TestPreflightDirectInvocation:
         assert out is None
 
     def test_two_leg_full_range_minuscule_amounts_returns_failed(
-        self, lp_compiler: IntentCompiler
+        self, v3_compiler: UniswapV3Compiler
     ) -> None:
         # Full-range LP at 1-wei amounts: liquidity per unit price
         # range is so small it truncates to 0 in both legs — the
         # canonical "amounts too small for the chosen range" zero-
         # liquidity revert the preflight protects against.
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address=None),
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=-887200,
             tick_upper=887200,
             amount0_desired=1,
@@ -295,7 +297,7 @@ class TestPreflightDirectInvocation:
         assert out.error.startswith(LpOpenZeroLiquidityError.ERROR_PREFIX)
 
     def test_one_leg_with_slot0_below_range_returns_none(
-        self, lp_compiler: IntentCompiler
+        self, v3_compiler: UniswapV3Compiler
     ) -> None:
         # Slot0-aware single-sided success: live price below the range
         # AND only amount0 supplied. UniswapV3 mints valid liquidity
@@ -304,8 +306,7 @@ class TestPreflightDirectInvocation:
         from almanak.framework.intents.lp_math import tick_to_sqrt_ratio_x96
 
         sqrt_below = tick_to_sqrt_ratio_x96(-1000)  # below [-10, 10]
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address="0xpool"),
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=-10,
             tick_upper=10,
             amount0_desired=1_000_000_000,
@@ -315,12 +316,11 @@ class TestPreflightDirectInvocation:
         )
         assert out is None
 
-    def test_degenerate_range_returns_none(self, lp_compiler: IntentCompiler) -> None:
+    def test_degenerate_range_returns_none(self, v3_compiler: UniswapV3Compiler) -> None:
         # Same lower/upper -> midpoint helper returns 0 -> pre-flight no-ops
         # (the real degenerate-range error is raised earlier in
         # _compute_lp_ticks; pre-flight must not double-report).
-        out = lp_compiler._preflight_lp_liquidity(
-            pool_check=_ok_pool_check(pool_address=None),
+        out = v3_compiler._preflight_lp_liquidity(
             tick_lower=100,
             tick_upper=100,
             amount0_desired=10**18,

@@ -59,7 +59,6 @@ from .compiler import (
     PriceInfo,
     TokenInfo,
     TransactionData,
-    UniswapV3LPAdapter,
 )
 from .compiler_lending import (
     AssetNotCollateralEligibleError,
@@ -217,7 +216,6 @@ __all__ = [
     "TokenInfo",
     "PriceInfo",
     "DefaultSwapAdapter",
-    "UniswapV3LPAdapter",
     "AaveV3Adapter",
     "DEFAULT_GAS_ESTIMATES",
     "PROTOCOL_ROUTERS",

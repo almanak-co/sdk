@@ -59,7 +59,6 @@ from almanak.framework.intents import (
     LPOpenIntent,
     RepayIntent,
     SwapIntent,
-    UniswapV3LPAdapter,
     WithdrawIntent,
 )
 from almanak.framework.intents.vocabulary import IntentType

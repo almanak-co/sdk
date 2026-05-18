@@ -538,22 +538,14 @@ class UniswapV4Adapter:
                     sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
                     logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
 
-            liquidity = self._sdk.compute_liquidity_from_amounts(
-                sqrt_price_x96, tick_lower, tick_upper, amount0_wei, amount1_wei
-            )
-
-            if liquidity <= 0:
-                return ActionBundle(
-                    intent_type=IntentType.LP_OPEN.value,
-                    transactions=[],
-                    metadata={"error": "Computed liquidity is zero — check amounts and price range"},
-                )
-
-            # Compute max amounts with slippage buffer.
+            # Preserve the intent's requested amount as the hard spend cap.
+            # When price estimates are uncertain, reduce liquidity instead of
+            # raising amount*_max above what the user asked to spend.
+            #
             # On-chain sqrtPrice is accurate so 5% covers normal price movement.
             # Estimated sqrtPrice (oracle-based) can diverge significantly from
             # actual V4 pool state, so use 30% to avoid MaximumAmountExceeded
-            # reverts from the PoolManager.
+            # reverts from the PoolManager without exceeding the request.
             if used_onchain_price:
                 lp_default_slippage = Decimal("0.05")  # 5% for on-chain price
             else:
@@ -570,8 +562,21 @@ class UniswapV4Adapter:
                 )
             slippage_bps = int(effective_slippage * 10000)
             slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
-            amount0_max = int(Decimal(amount0_wei) * slippage_mult)
-            amount1_max = int(Decimal(amount1_wei) * slippage_mult)
+            liquidity_amount0 = int(Decimal(amount0_wei) / slippage_mult)
+            liquidity_amount1 = int(Decimal(amount1_wei) / slippage_mult)
+            amount0_max = amount0_wei
+            amount1_max = amount1_wei
+
+            liquidity = self._sdk.compute_liquidity_from_amounts(
+                sqrt_price_x96, tick_lower, tick_upper, liquidity_amount0, liquidity_amount1
+            )
+
+            if liquidity <= 0:
+                return ActionBundle(
+                    intent_type=IntentType.LP_OPEN.value,
+                    transactions=[],
+                    metadata={"error": "Computed liquidity is zero — check amounts and price range"},
+                )
 
             mint_params = LPMintParams(
                 pool_key=pool_key,
@@ -609,6 +614,8 @@ class UniswapV4Adapter:
                 "token1": token1_dict,
                 "amount0_desired": str(amount0_wei),
                 "amount1_desired": str(amount1_wei),
+                "amount0_liquidity_budget": str(liquidity_amount0),
+                "amount1_liquidity_budget": str(liquidity_amount1),
                 "tick_lower": tick_lower,
                 "tick_upper": tick_upper,
                 "liquidity": str(liquidity),

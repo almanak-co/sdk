@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 """Uniswap V3 Connector (concentrated liquidity AMM).
 
 This module provides the Uniswap V3 adapter for executing token swaps
@@ -47,19 +48,7 @@ from .adapter import (
     TransactionData,
     UniswapV3Adapter,
     UniswapV3Config,
-)
-from .receipt_parser import (
-    EVENT_NAME_TO_TYPE,
-    EVENT_TOPICS,
-    SWAP_EVENT_TOPIC,
-    TOPIC_TO_EVENT,
-    ParsedSwapResult,
-    ParseResult,
-    SwapEventData,
-    TransferEventData,
-    UniswapV3Event,
-    UniswapV3EventType,
-    UniswapV3ReceiptParser,
+    UniswapV3LPAdapter,
 )
 from .sdk import (
     FACTORY_ADDRESSES,
@@ -101,11 +90,25 @@ from .sdk import (
 # - SDKSwapQuote (from sdk): Low-level quote with protocol-specific details like tick info
 # This pattern is intentional and consistent across connectors (uniswap_v3, traderjoe_v2, aerodrome).
 from .sdk import SwapQuote as SDKSwapQuote
+from .receipt_parser import (
+    EVENT_NAME_TO_TYPE,
+    EVENT_TOPICS,
+    SWAP_EVENT_TOPIC,
+    TOPIC_TO_EVENT,
+    ParsedSwapResult,
+    ParseResult,
+    SwapEventData,
+    TransferEventData,
+    UniswapV3Event,
+    UniswapV3EventType,
+    UniswapV3ReceiptParser,
+)
 
 __all__ = [
     # Adapter exports
     "UniswapV3Adapter",
     "UniswapV3Config",
+    "UniswapV3LPAdapter",
     "SwapQuote",
     "SwapResult",
     "SwapType",

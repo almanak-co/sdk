@@ -23,6 +23,7 @@ Example:
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -30,6 +31,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
+
+from ..connectors.base.compiler import CLCompilerContext
+from ..connectors.compiler_registry import get_compiler as get_connector_compiler
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: PolymarketAdapter import is done lazily in __init__ to avoid circular import and allow optional usage
@@ -94,6 +98,53 @@ logger = logging.getLogger(__name__)
 _PCS_PERPS_KEY_WARNED = False
 
 
+@dataclass(frozen=True)
+class _ConnectorCompilerServices:
+    """Bound framework services exposed to connector-owned compilers."""
+
+    compiler: "IntentCompiler"
+
+    def resolve_token(self, token: str) -> "TokenInfo | None":
+        return self.compiler._resolve_token(token)
+
+    def usd_to_token_amount(self, usd_amount: Decimal, token: "TokenInfo") -> int:
+        return self.compiler._usd_to_token_amount(usd_amount, token)
+
+    def calculate_expected_output(self, amount_in: int, from_token: "TokenInfo", to_token: "TokenInfo") -> int:
+        return self.compiler._calculate_expected_output(amount_in, from_token, to_token)
+
+    def build_approve_tx(self, token_address: str, spender: str, amount: int) -> list["TransactionData"]:
+        return self.compiler._build_approve_tx(token_address, spender, amount)
+
+    def validate_pool(self, result: "PoolValidationResult", intent_id: str) -> "CompilationResult | None":
+        return self.compiler._validate_pool(result, intent_id)
+
+    def format_amount(self, amount: int, decimals: int) -> str:
+        return self.compiler._format_amount(amount, decimals)
+
+    def parse_pool_info(self, pool: str) -> tuple["TokenInfo", "TokenInfo", int, bool] | None:
+        return self.compiler._parse_pool_info(pool)
+
+    def price_to_tick(self, price: Decimal, *, token0_decimals: int, token1_decimals: int) -> int:
+        return self.compiler._price_to_tick(
+            price,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+
+    def get_tick_spacing(self, fee_tier: int) -> int:
+        return self.compiler._get_tick_spacing(fee_tier)
+
+    def get_wrapped_native_address(self) -> str | None:
+        return self.compiler._get_wrapped_native_address()
+
+    def query_position_liquidity(self, position_manager: str, token_id: int) -> int | None:
+        return self.compiler._query_position_liquidity(position_manager, token_id)
+
+    def query_position_tokens_owed(self, position_manager: str, token_id: int) -> tuple[int | None, int | None]:
+        return self.compiler._query_position_tokens_owed(position_manager, token_id)
+
+
 def _warn_pcs_perps_protocol_key_once() -> None:
     global _PCS_PERPS_KEY_WARNED
     if _PCS_PERPS_KEY_WARNED:
@@ -129,9 +180,7 @@ from .compiler_adapters import (  # noqa: F401
     BalancerAdapter,
     DefaultSwapAdapter,
     LendingProtocolAdapter,
-    LPProtocolAdapter,
     SwapProtocolAdapter,
-    UniswapV3LPAdapter,
 )
 from .compiler_constants import (  # noqa: F401
     AAVE_BORROW_SELECTOR,
@@ -522,6 +571,49 @@ class IntentCompiler:
         from ..connectors.protocol_aliases import normalize_protocol
 
         return normalize_protocol(self.chain, intent_protocol)
+
+    def _build_cl_compiler_context(self, protocol: str) -> CLCompilerContext:
+        """Build the connector compiler context for concentrated-liquidity protocols."""
+        config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
+
+        def default_swap_adapter_factory(adapter_protocol: str) -> DefaultSwapAdapter:
+            return DefaultSwapAdapter(
+                self.chain,
+                adapter_protocol,
+                pool_selection_mode=config.swap_pool_selection_mode,
+                fixed_fee_tier=config.fixed_swap_fee_tier,
+                rpc_url=self._get_chain_rpc_url(),
+                rpc_timeout=getattr(self, "rpc_timeout", 10.0),
+                gateway_client=getattr(self, "_gateway_client", None),
+            )
+
+        def lp_adapter_factory(adapter_protocol: str) -> Any:
+            from ..connectors.uniswap_v3.adapter import UniswapV3LPAdapter
+
+            return UniswapV3LPAdapter(self.chain, adapter_protocol)
+
+        return CLCompilerContext(
+            chain=self.chain,
+            wallet_address=self.wallet_address,
+            rpc_url=self._get_chain_rpc_url(),
+            rpc_timeout=getattr(self, "rpc_timeout", 10.0),
+            permission_discovery=getattr(config, "permission_discovery", False),
+            allow_placeholder_prices=config.allow_placeholder_prices,
+            token_resolver=getattr(self, "_token_resolver", None),
+            gateway_client=getattr(self, "_gateway_client", None),
+            price_oracle=getattr(self, "price_oracle", None),
+            cache=getattr(self, "_allowance_cache", {}),
+            services=_ConnectorCompilerServices(self),
+            protocol=protocol,
+            default_swap_adapter_factory=default_swap_adapter_factory,
+            lp_adapter_factory=lp_adapter_factory,
+            swap_pool_selection_mode=config.swap_pool_selection_mode,
+            fixed_swap_fee_tier=config.fixed_swap_fee_tier,
+            default_deadline_seconds=self.default_deadline_seconds,
+            default_lp_slippage=self.default_lp_slippage,
+            max_price_impact_pct=config.max_price_impact_pct,
+            using_placeholders=getattr(self, "_using_placeholders", False),
+        )
 
     def _ensure_polymarket_adapter(self) -> None:
         """Retry adapter init if gateway has connected since construction."""
@@ -1491,21 +1583,31 @@ class IntentCompiler:
         Returns:
             CompilationResult with swap ActionBundle
         """
-        # Phase 6B.3: route to dedicated protocol helpers when applicable.
-        # Falls through to the Uniswap-V3-style body when ``None`` is returned.
         routed = self._dispatch_swap_protocol_route(intent)
         if routed is not None:
             return routed
 
         protocol = self._resolve_protocol(intent.protocol)
-        return self._compile_swap_v3_body(intent, protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile_swap(self._build_cl_compiler_context(protocol), intent)
+
+        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
+
+        if protocol in UNISWAP_V3_FORKS:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=f"Connector compiler for protocol '{protocol}' is not registered.",
+            )
+        return self._compile_default_router_swap_body(intent, protocol)
 
     def _dispatch_swap_protocol_route(self, intent: SwapIntent) -> CompilationResult | None:
         """Route a SWAP intent to the correct protocol-specific compiler.
 
         Returns the routed ``CompilationResult`` when a dedicated helper owns
-        the protocol, or ``None`` when the generic Uniswap-V3-style body in
-        ``_compile_swap_v3_body`` should handle it.
+        the protocol, or ``None`` when connector/default-router dispatch should
+        handle it.
 
         Extracted in Phase 6B.3 so ``_compile_swap`` itself stays small.
         """
@@ -1573,12 +1675,13 @@ class IntentCompiler:
         from_upper = (intent.from_token or "").upper()
         return to_upper.startswith(("PT-", "YT-")) or from_upper.startswith(("PT-", "YT-"))
 
-    def _compile_swap_v3_body(self, intent: SwapIntent, protocol: str) -> CompilationResult:
-        """Uniswap-V3-style swap body shared across uniswap_v3, v2, sushiswap, pancakeswap_v3, etc.
+    def _compile_default_router_swap_body(self, intent: SwapIntent, protocol: str) -> CompilationResult:
+        """Compile non-folded default-router swaps such as uniswap_v2/sushiswap/camelot.
 
-        Phase 6B.3: extracted from ``_compile_swap`` onto the shared helpers in
-        ``_compiler_helpers.py``. Behaviour — error messages, approval-chain
-        ordering, metadata shape — is preserved byte-for-byte.
+        Uniswap-V3-family protocols are connector-owned and must not reach this
+        fallback. This path exists only for older router-backed swap protocols
+        that still use ``DefaultSwapAdapter`` and do not have connector
+        compilers yet.
         """
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -2755,22 +2858,34 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP mint ActionBundle
         """
-        # Phase 6B.4: route to dedicated protocol helpers when applicable.
-        # Returns the routed CompilationResult, or None if the generic
-        # Uniswap-V3-style body should handle this intent.
         routed = self._dispatch_lp_open_protocol_route(intent)
         if routed is not None:
             return routed
 
         protocol = self._resolve_protocol(intent.protocol)
-        return self._compile_lp_open_v3_body(intent, protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile_lp_open(self._build_cl_compiler_context(protocol), intent)
+
+        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
+
+        if protocol in UNISWAP_V3_FORKS:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=f"Connector compiler for protocol '{protocol}' is not registered.",
+            )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{protocol}' is not supported for LP_OPEN on {self.chain}.",
+        )
 
     def _dispatch_lp_open_protocol_route(self, intent: LPOpenIntent) -> CompilationResult | None:
         """Route an LP_OPEN intent to the correct protocol-specific compiler.
 
         Returns the routed ``CompilationResult`` when a dedicated helper owns
-        the protocol, or ``None`` when the Uniswap-V3-style body in
-        ``_compile_lp_open_v3_body`` should handle it.
+        the protocol, or ``None`` when connector dispatch should handle it.
 
         Extracted in Phase 6B.4 so ``_compile_lp_open`` itself stays small.
         Dispatch order is preserved from the pre-refactor method.
@@ -2852,313 +2967,17 @@ class IntentCompiler:
             error=f"Protocol '{intent.protocol}' is not supported for LP_OPEN on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
         )
 
-    def _compile_lp_open_v3_body(self, intent: LPOpenIntent, protocol: str) -> CompilationResult:
-        """Uniswap-V3-style LP_OPEN body shared across uniswap_v3, pancakeswap_v3, sushiswap_v3, etc.
-
-        Phase 6B.4: extracted from ``_compile_lp_open`` onto the shared helpers
-        in ``_compiler_helpers.py``. Behaviour - error messages, approval-chain
-        ordering, metadata shape - is preserved byte-for-byte.
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
-        try:
-            # Step 1: Get LP adapter (resolve alias e.g. "agni" -> "uniswap_v3")
-            adapter = UniswapV3LPAdapter(self.chain, protocol)
-            position_manager = adapter.get_position_manager_address()
-
-            if position_manager == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 2: Parse pool info, normalize token order, invert ranges if needed
-            resolved_pool = self._resolve_lp_pool_and_amounts(intent)
-            if isinstance(resolved_pool, CompilationResult):
-                return resolved_pool
-            token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1 = resolved_pool
-
-            # Validate pool existence (best-effort)
-            from .pool_validation import validate_v3_pool
-
-            pool_check = validate_v3_pool(
-                self.chain,
-                protocol,
-                token0_info.address,
-                token1_info.address,
-                fee_tier,
-                self._get_chain_rpc_url(),
-                gateway_client=self._gateway_client,
-            )
-            failed = self._validate_pool(pool_check, intent.intent_id)
-            if failed is not None:
-                return failed
-
-            # Step 3: Convert amounts to wei
-            amount0_desired = int(amount0 * Decimal(10**token0_info.decimals))
-            amount1_desired = int(amount1 * Decimal(10**token1_info.decimals))
-
-            # Step 4: Price range -> ticks (aligned to tick spacing)
-            ticks_or_fail = self._compute_lp_ticks(
-                range_lower=range_lower,
-                range_upper=range_upper,
-                fee_tier=fee_tier,
-                token0_info=token0_info,
-                token1_info=token1_info,
-                intent_id=intent.intent_id,
-            )
-            if isinstance(ticks_or_fail, CompilationResult):
-                return ticks_or_fail
-            tick_lower, tick_upper, tick_spacing = ticks_or_fail
-
-            logger.debug(
-                f"LP tick calculation: price_range=[{range_lower:.8f}, {range_upper:.8f}], "
-                f"decimals=({token0_info.decimals}, {token1_info.decimals}), "
-                f"ticks=[{tick_lower}, {tick_upper}], spacing={tick_spacing}"
-            )
-
-            # Step 4a: One-shot slot0 fetch shared by 4b (recompute) and 4c (pre-flight).
-            # Both checks need the live sqrt-price; doing it twice burns an
-            # extra RPC for no reason.
-            slot0 = self._fetch_lp_pool_slot0(pool_check)
-
-            # Step 4b: Align amounts to pool's current price when slot0 is available,
-            # preventing "Price slippage check" reverts when oracle price diverges.
-            recomputed_or_fail = self._maybe_recompute_lp_amounts_from_slot0(
-                pool_check=pool_check,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-                intent_id=intent.intent_id,
-                slot0=slot0,
-            )
-            if isinstance(recomputed_or_fail, CompilationResult):
-                return recomputed_or_fail
-            amount0_desired, amount1_desired = recomputed_or_fail
-
-            # Step 4c: VIB-3823 — getLiquidityForAmounts pre-flight.
-            # Fails fast when the chosen tick range + amounts would mint zero
-            # liquidity on-chain (M0 revert). Fires for the no-slot0 fallback
-            # path (where step 4b returned the inputs unchanged) AND as a
-            # belt-and-braces check after the slot0 recompute. Mirrors the
-            # VIB-3744 / VIB-3749 "fail before on-chain" pattern.
-            preflight = self._preflight_lp_liquidity(
-                pool_check=pool_check,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-                intent_id=intent.intent_id,
-                slot0=slot0,
-            )
-            if preflight is not None:
-                return preflight
-
-            # Step 5: LP slippage-based minimums
-            amount0_min, amount1_min = self._compute_lp_slippage_mins(
-                intent=intent,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-            )
-
-            # Step 6: Build approve TXs for both tokens (in token0 -> token1 order)
-            self._extend_lp_approvals(
-                transactions=transactions,
-                token0_info=token0_info,
-                token1_info=token1_info,
-                position_manager=position_manager,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-            )
-
-            # Step 7: Build mint TX. Use direct arithmetic (see swap path
-            # comment) to preserve byte-for-byte behaviour for non-positive
-            # ``default_deadline_seconds`` configurations.
-            deadline = int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds
-            mint_calldata = adapter.get_mint_calldata(
-                token0=token0_info.address,
-                token1=token1_info.address,
-                fee=fee_tier,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-                amount0_min=amount0_min,
-                amount1_min=amount1_min,
-                recipient=self.wallet_address,
-                deadline=deadline,
-            )
-
-            # Handle native token (ETH) - send value with transaction
-            value, native_warning = self._resolve_lp_native_value(
-                token0_info=token0_info,
-                token1_info=token1_info,
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-            )
-            if native_warning:
-                warnings.append(native_warning)
-
-            mint_tx = TransactionData(
-                to=position_manager,
-                value=value,
-                data="0x" + mint_calldata.hex(),
-                gas_estimate=adapter.estimate_mint_gas(),
-                description=(
-                    f"Mint LP position: "
-                    f"{self._format_amount(amount0_desired, token0_info.decimals)} "
-                    f"{token0_info.symbol} + "
-                    f"{self._format_amount(amount1_desired, token1_info.decimals)} "
-                    f"{token1_info.symbol} "
-                    f"[{intent.range_lower:.2f} - {intent.range_upper:.2f}]"
-                ),
-                tx_type="lp_mint",
-            )
-            transactions.append(mint_tx)
-
-            # Step 8: Assemble ActionBundle
-            total_gas = sum_transaction_gas(transactions)
-            action_bundle = assemble_action_bundle(
-                intent_type=IntentType.LP_OPEN.value,
-                transactions=transactions,
-                metadata={
-                    "pool": intent.pool,
-                    "token0": token0_info.to_dict(),
-                    "token1": token1_info.to_dict(),
-                    "fee_tier": fee_tier,
-                    "tick_lower": tick_lower,
-                    "tick_upper": tick_upper,
-                    "range_lower": str(intent.range_lower),
-                    "range_upper": str(intent.range_upper),
-                    "amount0_desired": str(amount0_desired),
-                    "amount1_desired": str(amount1_desired),
-                    "amount0_min": str(amount0_min),
-                    "amount1_min": str(amount1_min),
-                    "protocol": protocol,
-                    "position_manager": position_manager,
-                    "deadline": deadline,
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
-            logger.info(
-                f"Compiled LP_OPEN intent: {token0_info.symbol}/{token1_info.symbol}, range [{intent.range_lower:.2f}-{intent.range_upper:.2f}], {len(transactions)} txs{tx_summary}, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile LP_OPEN intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _resolve_lp_pool_and_amounts(
-        self, intent: LPOpenIntent
-    ) -> tuple[TokenInfo, TokenInfo, int, Decimal, Decimal, Decimal, Decimal] | CompilationResult:
-        """Parse the pool spec and normalize token order for LP_OPEN.
-
-        Returns ``(token0, token1, fee_tier, range_lower, range_upper, amount0, amount1)``
-        with the token0-addr < token1-addr invariant enforced (ranges and
-        amounts inverted as needed), or a FAILED CompilationResult.
-        """
-        # Pool format expected: "0xPoolAddress" or "TOKEN0/TOKEN1/FEE"
-        pool_info = self._parse_pool_info(intent.pool)
-        if pool_info is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Could not parse pool info: {intent.pool}",
-                intent_id=intent.intent_id,
-            )
-
-        token0_info, token1_info, fee_tier, tokens_swapped = pool_info
-
-        # When tokens were reordered to match on-chain convention (token0 addr < token1 addr),
-        # we must invert the price range and swap the amounts to stay consistent.
-        # The user specified prices as "token1-per-token0" in their original ordering.
-        # After swapping, that relationship is inverted: new price = 1 / old price.
-        range_lower = intent.range_lower
-        range_upper = intent.range_upper
-        amount0 = intent.amount0
-        amount1 = intent.amount1
-
-        if tokens_swapped:
-            # Invert price range: if user said 550-670 (WBNB in USDT), after swap
-            # token0=USDT, token1=WBNB, so price is now WBNB-per-USDT = 1/550 to 1/670.
-            # new_lower = 1/old_upper, new_upper = 1/old_lower (preserves lower < upper).
-            range_lower = Decimal(1) / intent.range_upper
-            range_upper = Decimal(1) / intent.range_lower
-            # Swap amounts to match new token order
-            amount0, amount1 = amount1, amount0
-            logger.debug(
-                f"Tokens swapped: inverted price range [{intent.range_lower}, {intent.range_upper}] "
-                f"-> [{range_lower:.10f}, {range_upper:.10f}], swapped amounts"
-            )
-
-        return token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1
-
-    def _compute_lp_ticks(
-        self,
-        *,
-        range_lower: Decimal,
-        range_upper: Decimal,
-        fee_tier: int,
-        token0_info: TokenInfo,
-        token1_info: TokenInfo,
-        intent_id: str,
-    ) -> tuple[int, int, int] | CompilationResult:
-        """Convert a price range to spacing-aligned ticks. Returns FAILED on collapse."""
-        tick_lower = self._price_to_tick(
-            range_lower,
-            token0_decimals=token0_info.decimals,
-            token1_decimals=token1_info.decimals,
-        )
-        tick_upper = self._price_to_tick(
-            range_upper,
-            token0_decimals=token0_info.decimals,
-            token1_decimals=token1_info.decimals,
-        )
-
-        # Align ticks to tick spacing (60 for 0.3% fee tier)
-        tick_spacing = self._get_tick_spacing(fee_tier)
-        tick_lower = (tick_lower // tick_spacing) * tick_spacing
-        tick_upper = (tick_upper // tick_spacing) * tick_spacing
-
-        if tick_lower >= tick_upper:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    "LP_OPEN tick range collapsed after applying pool tick spacing. "
-                    "Widen the price range so lower and upper ticks differ."
-                ),
-                intent_id=intent_id,
-            )
-        return tick_lower, tick_upper, tick_spacing
-
     def _fetch_lp_pool_slot0(
         self,
         pool_check: "PoolValidationResult",
     ) -> tuple[int, int] | None:
-        """Single slot0 fetch shared by the recompute + zero-liquidity pre-flight.
+        """Fetch slot0 for CL pool-alignment helpers.
 
         Returns ``(sqrt_price_x96, current_tick)`` or ``None`` when the
-        pool address / transport is unavailable or the call fails. Both
-        ``_maybe_recompute_lp_amounts_from_slot0`` (Step 4b) and
-        ``_preflight_lp_liquidity`` (Step 4c, VIB-3823) consume this so
-        we don't burn two RPC round-trips per LP_OPEN compile.
+        pool address / transport is unavailable or the call fails. This stays
+        framework-side because Aerodrome Slipstream still uses the legacy
+        standalone compiler path and needs gateway/RPC transport from the
+        running ``IntentCompiler``.
         """
         if not pool_check.pool_address:
             return None
@@ -3197,250 +3016,6 @@ class IntentCompiler:
         if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
             return None
         return sqrt_price_x96, current_tick
-
-    def _maybe_recompute_lp_amounts_from_slot0(
-        self,
-        *,
-        pool_check: "PoolValidationResult",
-        tick_lower: int,
-        tick_upper: int,
-        amount0_desired: int,
-        amount1_desired: int,
-        intent_id: str,
-        slot0: tuple[int, int] | None | Any = _SLOT0_NOT_FETCHED,
-    ) -> tuple[int, int] | CompilationResult:
-        """Align desired amounts to the pool's current price using ``slot0``.
-
-        Returns the (possibly recomputed) ``(amount0, amount1)`` pair, or a
-        FAILED result if recomputation yields ``(0, 0)`` from non-zero input.
-        When the pool address or RPC is unavailable, returns the inputs unchanged.
-
-        Prevents "Price slippage check" reverts when the oracle-derived ratio
-        diverges from the pool's live ratio.
-
-        Args:
-            slot0: Pre-fetched ``(sqrt_price_x96, current_tick)`` from the
-                caller's one-shot ``_fetch_lp_pool_slot0`` — pass it through
-                explicitly. ``None`` means "caller fetched and missed";
-                the default sentinel ``_SLOT0_NOT_FETCHED`` preserves the
-                legacy contract for tests / callers that have not migrated
-                yet, in which case the helper fetches slot0 itself. The
-                sentinel matters: ``None`` must NOT trigger a re-fetch on
-                an already-failed slot0 lookup (Codex P3 dedup).
-        """
-        from .lp_math import recompute_lp_amounts
-
-        if slot0 is _SLOT0_NOT_FETCHED:
-            slot0 = self._fetch_lp_pool_slot0(pool_check)
-        if slot0 is None:
-            return amount0_desired, amount1_desired
-
-        sqrt_price_x96, current_tick = slot0
-
-        a0_corrected, a1_corrected = recompute_lp_amounts(
-            sqrt_price_x96,
-            tick_lower,
-            tick_upper,
-            amount0_desired,
-            amount1_desired,
-            current_tick=current_tick,
-        )
-        if a0_corrected == 0 and a1_corrected == 0 and (amount0_desired > 0 or amount1_desired > 0):
-            from .intent_errors import LpOpenZeroLiquidityError
-
-            err = LpOpenZeroLiquidityError(
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                reason=(
-                    "Live pool sqrt-price + supplied amounts produced zero "
-                    "liquidity. Widen the tick range or increase amounts."
-                ),
-            )
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=str(err),
-                intent_id=intent_id,
-            )
-        if a0_corrected > 0 or a1_corrected > 0:
-            logger.debug(
-                f"LP amounts recomputed from on-chain price: "
-                f"({amount0_desired}, {amount1_desired}) -> ({a0_corrected}, {a1_corrected})"
-            )
-            return a0_corrected, a1_corrected
-        return amount0_desired, amount1_desired
-
-    def _preflight_lp_liquidity(
-        self,
-        *,
-        pool_check: "PoolValidationResult",
-        tick_lower: int,
-        tick_upper: int,
-        amount0_desired: int,
-        amount1_desired: int,
-        intent_id: str,
-        slot0: tuple[int, int] | None = None,
-    ) -> CompilationResult | None:
-        """VIB-3823 LP_OPEN pre-flight: simulate getLiquidityForAmounts.
-
-        Returns a FAILED ``CompilationResult`` carrying an
-        ``LpOpenZeroLiquidityError``-style error message when the
-        chosen tick range + amounts would mint zero liquidity on-chain
-        (the ``M0`` revert in ``UniswapV3Pool.mint()``). Returns
-        ``None`` when liquidity is positive, letting compile continue.
-
-        Uses the supplied live pool ``sqrtPriceX96`` when present;
-        otherwise falls back to the geometric range midpoint. The
-        midpoint is the most permissive in-range classification (both
-        legs participate) so a zero result there is conclusive — no
-        choice of in-range sqrt-price would mint liquidity for these
-        amounts.
-
-        Skips when both inputs are zero — that's a different error
-        surface caught upstream by ``_resolve_lp_pool_and_amounts``.
-
-        Args:
-            slot0: Optional pre-fetched ``(sqrt_price_x96, current_tick)``
-                — usually shared with ``_maybe_recompute_lp_amounts_from_slot0``
-                so a single LP_OPEN compile makes one slot0 RPC at most.
-        """
-        if amount0_desired == 0 and amount1_desired == 0:
-            return None
-
-        from .intent_errors import LpOpenZeroLiquidityError
-        from .lp_math import (
-            liquidity_for_amounts_at_sqrt_price,
-            range_midpoint_sqrt_price_x96,
-        )
-
-        sqrt_price_x96: int | None = None
-        used_live = False
-        if slot0 is not None:
-            candidate, _current_tick = slot0
-            if candidate and candidate > 0:
-                sqrt_price_x96 = candidate
-                used_live = True
-
-        if sqrt_price_x96 is None:
-            # Without live sqrt-price, single-sided mints (one amount = 0) can
-            # still be valid on-chain when the live price sits outside the
-            # range — UniswapV3 mints positive liquidity for that case. The
-            # geometric midpoint always classifies as in-range, where the
-            # in-range branch needs both legs and returns 0. Skipping the
-            # check here trades a possible M0 revert for not falsely blocking
-            # a legitimate single-sided LP_OPEN. Two-sided mints still get
-            # the conservative midpoint check.
-            if amount0_desired == 0 or amount1_desired == 0:
-                return None
-            sqrt_price_x96 = range_midpoint_sqrt_price_x96(tick_lower, tick_upper)
-            if sqrt_price_x96 == 0:
-                # Degenerate range — caught earlier by _compute_lp_ticks; no-op
-                return None
-
-        liquidity = liquidity_for_amounts_at_sqrt_price(
-            sqrt_price_x96,
-            tick_lower,
-            tick_upper,
-            amount0_desired,
-            amount1_desired,
-        )
-
-        if liquidity <= 0:
-            reason_suffix = (
-                "(checked against live pool sqrtPriceX96)"
-                if used_live
-                else "(checked against range geometric midpoint; no live sqrt-price available)"
-            )
-            err = LpOpenZeroLiquidityError(
-                amount0_desired=amount0_desired,
-                amount1_desired=amount1_desired,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                reason=(
-                    f"getLiquidityForAmounts returned 0 {reason_suffix}. "
-                    f"Either widen the tick range, choose a wider fee tier, or "
-                    f"increase the deposit amounts."
-                ),
-            )
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=str(err),
-                intent_id=intent_id,
-            )
-        return None
-
-    def _compute_lp_slippage_mins(
-        self,
-        *,
-        intent: LPOpenIntent,
-        amount0_desired: int,
-        amount1_desired: int,
-    ) -> tuple[int, int]:
-        """Compute ``(amount0_min, amount1_min)`` from the effective LP slippage.
-
-        LP slippage differs from swap slippage: in swaps slippage represents a
-        real loss, while in LP it just means a different deposit ratio (no
-        loss). Default 20% slippage (80% minimum), configurable to 100% (zero
-        minimum) for volatile pairs. ``protocol_params.lp_slippage`` overrides
-        the default.
-
-        Uses ``compute_min_amount_out`` from the shared helper module for both
-        legs so truncation behaviour matches the swap path exactly.
-        """
-        protocol_lp_slippage = (intent.protocol_params or {}).get("lp_slippage")
-        lp_slippage = (
-            min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
-            if protocol_lp_slippage is not None
-            else (getattr(intent, "max_slippage", None) or self.default_lp_slippage)
-        )
-        amount0_min = compute_min_amount_out(amount0_desired, lp_slippage)
-        amount1_min = compute_min_amount_out(amount1_desired, lp_slippage)
-        logger.debug(
-            f"LP mint: slippage={float(lp_slippage) * 100:.1f}%, "
-            f"amount0={amount0_desired} (min={amount0_min}), "
-            f"amount1={amount1_desired} (min={amount1_min})"
-        )
-        return amount0_min, amount1_min
-
-    def _extend_lp_approvals(
-        self,
-        *,
-        transactions: list[TransactionData],
-        token0_info: TokenInfo,
-        token1_info: TokenInfo,
-        position_manager: str,
-        amount0_desired: int,
-        amount1_desired: int,
-    ) -> None:
-        """Append approve txs for each non-native token with positive amount.
-
-        Ordering (token0 before token1) is preserved from the pre-refactor
-        method because approval-chain ordering is consensus-critical.
-        """
-        if amount0_desired > 0 and not token0_info.is_native:
-            transactions.extend(self._build_approve_tx(token0_info.address, position_manager, amount0_desired))
-        if amount1_desired > 0 and not token1_info.is_native:
-            transactions.extend(self._build_approve_tx(token1_info.address, position_manager, amount1_desired))
-
-    @staticmethod
-    def _resolve_lp_native_value(
-        *,
-        token0_info: TokenInfo,
-        token1_info: TokenInfo,
-        amount0_desired: int,
-        amount1_desired: int,
-    ) -> tuple[int, str | None]:
-        """Return ``(value, warning)`` for the LP mint tx.
-
-        ``value`` is the native-ETH amount to attach. ``warning`` is the
-        human-facing warning string (or ``None`` when neither token is native).
-        """
-        if token0_info.is_native:
-            return amount0_desired, "Token0 is native - sending ETH with transaction"
-        if token1_info.is_native:
-            return amount1_desired, "Token1 is native - sending ETH with transaction"
-        return 0, None
 
     def _compile_lp_open_fluid(self, intent: "LPOpenIntent") -> "CompilationResult":
         """Compile LP_OPEN intent for Fluid DEX T1 (Arbitrum only).
@@ -4046,21 +3621,34 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP close ActionBundle
         """
-        # Phase 6B backlog: route to dedicated protocol helpers when applicable.
-        # Falls through to the Uniswap-V3-style body when ``None`` is returned.
         routed = self._dispatch_lp_close_protocol_route(intent)
         if routed is not None:
             return routed
 
         protocol = self._resolve_protocol(intent.protocol)
-        return self._compile_lp_close_v3_body(intent, protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile_lp_close(self._build_cl_compiler_context(protocol), intent)
+
+        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
+
+        if protocol in UNISWAP_V3_FORKS:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=f"Connector compiler for protocol '{protocol}' is not registered.",
+            )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{protocol}' is not supported for LP_CLOSE on {self.chain}.",
+        )
 
     def _dispatch_lp_close_protocol_route(self, intent: LPCloseIntent) -> CompilationResult | None:
         """Route an LP_CLOSE intent to the correct protocol-specific compiler.
 
         Returns the routed ``CompilationResult`` when a dedicated helper owns
-        the protocol, or ``None`` when the generic Uniswap-V3-style body in
-        ``_compile_lp_close_v3_body`` should handle it.
+        the protocol, or ``None`` when connector dispatch should handle it.
 
         Extracted in Phase 6B backlog so ``_compile_lp_close`` itself stays small.
         Dispatch order is preserved from the pre-refactor method.
@@ -4140,250 +3728,6 @@ class IntentCompiler:
             intent_id=intent.intent_id,
             error=f"Protocol '{intent.protocol}' is not supported for LP_CLOSE on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
         )
-
-    def _compile_lp_close_v3_body(self, intent: LPCloseIntent, protocol: str) -> CompilationResult:
-        """Uniswap-V3-style LP_CLOSE body shared across uniswap_v3, pancakeswap_v3, sushiswap_v3, etc.
-
-        Phase 6B backlog: extracted from ``_compile_lp_close`` onto local
-        per-step helpers. Behaviour - error messages, approval-chain ordering,
-        metadata shape - is preserved byte-for-byte.
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
-        try:
-            # Step 1: Get LP adapter (resolve alias e.g. "agni" -> "uniswap_v3")
-            adapter = UniswapV3LPAdapter(self.chain, protocol)
-            position_manager = adapter.get_position_manager_address()
-
-            if position_manager == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 2: Parse position ID to token ID
-            try:
-                token_id = int(intent.position_id)
-            except ValueError:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid position ID (must be integer): {intent.position_id}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Use direct arithmetic (see swap path comment) to preserve
-            # byte-for-byte behaviour for non-positive
-            # ``default_deadline_seconds`` configurations.
-            deadline = int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds
-
-            # Step 3: Query position's on-chain state (liquidity + tokens owed)
-            state_or_fail = self._query_lp_close_position_state(
-                position_manager=position_manager,
-                token_id=token_id,
-                intent_id=intent.intent_id,
-                warnings=warnings,
-            )
-            if isinstance(state_or_fail, CompilationResult):
-                return state_or_fail
-            liquidity, position_has_activity = state_or_fail
-
-            # Step 4: Build decrease / collect / burn transactions (ordering preserved)
-            self._extend_lp_close_transactions(
-                transactions=transactions,
-                warnings=warnings,
-                adapter=adapter,
-                position_manager=position_manager,
-                token_id=token_id,
-                liquidity=liquidity,
-                position_has_activity=position_has_activity,
-                collect_fees=intent.collect_fees,
-                deadline=deadline,
-            )
-
-            # Step 5: Assemble ActionBundle
-            total_gas = sum_transaction_gas(transactions)
-            no_op = not transactions
-            metadata: dict[str, Any] = {
-                "position_id": intent.position_id,
-                "token_id": token_id,
-                "pool": intent.pool,
-                "collect_fees": intent.collect_fees,
-                "protocol": protocol,
-                "position_manager": position_manager,
-                "deadline": deadline,
-                "chain": self.chain,
-            }
-            if no_op:
-                metadata["no_op"] = True
-                metadata["reason"] = f"Position #{token_id} already closed (0 liquidity, 0 tokens owed); LP_CLOSE no-op"
-
-            action_bundle = assemble_action_bundle(
-                intent_type=IntentType.LP_CLOSE.value,
-                transactions=transactions,
-                metadata=metadata,
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
-            logger.info(
-                f"Compiled LP_CLOSE intent: position #{token_id}, collect_fees={intent.collect_fees}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile LP_CLOSE intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _query_lp_close_position_state(
-        self,
-        *,
-        position_manager: str,
-        token_id: int,
-        intent_id: str,
-        warnings: list[str],
-    ) -> tuple[int, bool] | CompilationResult:
-        """Fetch position liquidity + tokens-owed and classify activity.
-
-        Returns ``(liquidity, position_has_activity)`` on success, or a
-        FAILED ``CompilationResult`` when liquidity cannot be queried. Appends
-        context warnings to ``warnings`` in place to match the pre-refactor
-        message ordering.
-
-        ``position_has_activity`` is True when any of:
-            - liquidity > 0, OR
-            - tokens_owed is unknown (fail-open: collect anyway), OR
-            - either tokens_owed leg is > 0.
-        """
-        liquidity = self._query_position_liquidity(position_manager, token_id)
-        if liquidity is None:
-            # In offline permission-discovery mode there is no RPC to query,
-            # but the manifest still needs to see the full decrease + collect
-            # + burn selector surface. Synthesize a non-zero liquidity so the
-            # downstream builder emits all three TXs. Mirrors the same
-            # permission-discovery short-circuit in compile_lp_close_aerodrome.
-            if getattr(self._config, "permission_discovery", False):
-                logger.debug(
-                    "Permission discovery mode: using synthetic liquidity for position #%d",
-                    token_id,
-                )
-                return 10**18, True
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Could not query liquidity for position #{token_id}. Ensure rpc_url is provided to IntentCompiler.",
-                intent_id=intent_id,
-            )
-
-        tokens_owed0, tokens_owed1 = self._query_position_tokens_owed(position_manager, token_id)
-        tokens_owed_unknown = tokens_owed0 is None or tokens_owed1 is None
-        if tokens_owed_unknown:
-            warnings.append(f"Could not query tokens owed for position #{token_id} - collecting anyway")
-        elif tokens_owed0 == 0 and tokens_owed1 == 0:
-            warnings.append(f"Position #{token_id} has no tokens owed pre-decrease - will still collect after close")
-
-        # Treat unknown owed as potential activity (collect anyway to avoid
-        # leaving fees uncollected).
-        position_has_activity = (
-            liquidity > 0
-            or tokens_owed_unknown
-            or (tokens_owed0 is not None and tokens_owed1 is not None and (tokens_owed0 > 0 or tokens_owed1 > 0))
-        )
-        return liquidity, position_has_activity
-
-    def _extend_lp_close_transactions(
-        self,
-        *,
-        transactions: list[TransactionData],
-        warnings: list[str],
-        adapter: UniswapV3LPAdapter,
-        position_manager: str,
-        token_id: int,
-        liquidity: int,
-        position_has_activity: bool,
-        collect_fees: bool,
-        deadline: int,
-    ) -> None:
-        """Append decrease / collect / burn TXs (consensus-critical ordering).
-
-        Extends ``transactions`` and ``warnings`` in-place so the caller keeps
-        ownership of the final assembly. Ordering is pinned by the
-        characterization tests — do not re-order, add, or drop branches
-        without updating the tests in lockstep.
-        """
-        # Decrease: skip on 0 liquidity, warn; else build decreaseLiquidity TX.
-        if liquidity == 0:
-            warnings.append(f"Position #{token_id} has 0 liquidity - skipping decreaseLiquidity step")
-        else:
-            # Use 0 for min amounts to ensure position can be closed.
-            decrease_calldata = adapter.get_decrease_liquidity_calldata(
-                token_id=token_id,
-                liquidity=liquidity,
-                amount0_min=0,
-                amount1_min=0,
-                deadline=deadline,
-            )
-            transactions.append(
-                TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + decrease_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_decrease_liquidity"),
-                    description=f"Decrease liquidity: position #{token_id} (remove all)",
-                    tx_type="lp_decrease_liquidity",
-                )
-            )
-
-        # Collect: requested AND position has activity; else emit skip-warning.
-        if collect_fees and position_has_activity:
-            collect_calldata = adapter.get_collect_calldata(
-                token_id=token_id,
-                recipient=self.wallet_address,
-                amount0_max=MAX_UINT128,
-                amount1_max=MAX_UINT128,
-            )
-            transactions.append(
-                TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + collect_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_collect"),
-                    description=f"Collect tokens and fees: position #{token_id}",
-                    tx_type="lp_collect",
-                )
-            )
-        elif collect_fees:
-            warnings.append(f"Skipping collect for position #{token_id} - position appears already closed")
-        else:
-            warnings.append("Skipping fee collection as collect_fees=False")
-
-        # Burn: only when position had activity - avoid reverting on
-        # already-burned NFTs.
-        if position_has_activity:
-            burn_calldata = adapter.get_burn_calldata(token_id=token_id)
-            transactions.append(
-                TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + burn_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_burn"),
-                    description=f"Burn position NFT: #{token_id}",
-                    tx_type="lp_burn",
-                )
-            )
-        else:
-            warnings.append(f"Position #{token_id} appears already closed (0 liquidity, 0 tokens owed) - skipping burn")
 
     # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     def _compile_lp_close_traderjoe_v2(self, intent: LPCloseIntent) -> CompilationResult:
@@ -4721,8 +4065,16 @@ class IntentCompiler:
 
         from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
 
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile_collect_fees(self._build_cl_compiler_context(protocol), intent)
+
         if protocol in UNISWAP_V3_FORKS:
-            return self._compile_collect_fees_v3_fork(intent, protocol)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Connector compiler for protocol '{protocol}' is not registered.",
+                intent_id=intent.intent_id,
+            )
 
         # Aerodrome Classic (Solidly fork) uses fungible LP tokens with auto-
         # compounding fees: trading fees accrue into pool reserves and are
@@ -4746,7 +4098,7 @@ class IntentCompiler:
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=(
-                f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. "
+                f"Protocol '{protocol}' does not support LP_COLLECT_FEES. "
                 f"Supported: traderjoe_v2, uniswap_v4, aerodrome_slipstream, "
                 f"and Uniswap-V3 forks ({', '.join(sorted(UNISWAP_V3_FORKS))})"
             ),
@@ -5024,98 +4376,6 @@ class IntentCompiler:
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
-        return result
-
-    # crap-allowlist: VIB-4314 — coverage seeded only by integration tests on
-    # the per-chain Anvil intent suites (covered live), which CRAP's diff-cover
-    # path does not see. Dedicated unit tests + fee-accrual fixture land with
-    # VIB-4314 (V3-fork LP_COLLECT_FEES fee-accrual fixture); flip threshold-
-    # crossing back on once that PR merges. Function is cc=7 — low complexity;
-    # the score is dominated by 4% coverage, not by branch fan-out.
-    def _compile_collect_fees_v3_fork(self, intent: "CollectFeesIntent", protocol: str) -> CompilationResult:
-        """Compile LP_COLLECT_FEES for Uniswap-V3 fork families.
-
-        Covers ``uniswap_v3`` plus every V3 fork in
-        ``protocol_aliases.UNISWAP_V3_FORKS`` (``sushiswap_v3``,
-        ``pancakeswap_v3``, ``agni_finance``). V3 fees are tracked
-        independently of liquidity and can be claimed at any time, so the
-        bundle is a single ``NonfungiblePositionManager.collect`` call
-        with ``MAX_UINT128`` caps. The position itself is left intact.
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        try:
-            protocol_params = getattr(intent, "protocol_params", None) or {}
-            position_id = protocol_params.get("position_id") or getattr(intent, "position_id", None)
-            if not position_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"{protocol} LP_COLLECT_FEES requires 'position_id' in "
-                        f"protocol_params (NFT tokenId of the position)."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-            try:
-                token_id = int(position_id)
-            except (TypeError, ValueError):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid position_id (must be integer): {position_id}",
-                    intent_id=intent.intent_id,
-                )
-
-            adapter = UniswapV3LPAdapter(self.chain, protocol)
-            position_manager = adapter.get_position_manager_address()
-            if position_manager == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
-                    intent_id=intent.intent_id,
-                )
-
-            collect_calldata = adapter.get_collect_calldata(
-                token_id=token_id,
-                recipient=self.wallet_address,
-                amount0_max=MAX_UINT128,
-                amount1_max=MAX_UINT128,
-            )
-            tx = TransactionData(
-                to=position_manager,
-                value=0,
-                data="0x" + collect_calldata.hex(),
-                gas_estimate=get_gas_estimate(self.chain, "lp_collect"),
-                description=f"Collect fees: position #{token_id} ({protocol})",
-                tx_type="lp_collect_fees",
-            )
-            transactions = [tx]
-
-            action_bundle = assemble_action_bundle(
-                intent_type=IntentType.LP_COLLECT_FEES.value,
-                transactions=transactions,
-                metadata={
-                    "position_id": position_id,
-                    "token_id": token_id,
-                    "protocol": protocol,
-                    "position_manager": position_manager,
-                    "chain": self.chain,
-                    "pool": intent.pool,
-                },
-            )
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = tx.gas_estimate
-            logger.info(
-                "Compiled V3-fork LP_COLLECT_FEES intent: position #%d, protocol=%s",
-                token_id,
-                protocol,
-            )
-        except Exception as e:
-            logger.exception("Failed to compile V3-fork LP_COLLECT_FEES intent: %s", e)
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
         return result
 
     def _compile_lp_open_aerodrome(self, intent: LPOpenIntent) -> CompilationResult:
@@ -8951,8 +8211,6 @@ __all__ = [
     "PriceInfo",
     "DefaultSwapAdapter",
     "SwapProtocolAdapter",
-    "UniswapV3LPAdapter",
-    "LPProtocolAdapter",
     "AaveV3Adapter",
     "LendingProtocolAdapter",
     "DEFAULT_GAS_ESTIMATES",

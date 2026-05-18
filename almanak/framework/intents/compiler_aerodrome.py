@@ -11,6 +11,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from ..connectors.base.cl_math import compute_lp_slippage_mins, maybe_recompute_lp_amounts_from_slot0
 from ..models.reproduction_bundle import ActionBundle
 from . import compiler_constants
 from .compiler_models import CompilationResult, CompilationStatus
@@ -809,7 +810,8 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         # directly. Without this, oracle/pool price divergence causes the
         # NonfungiblePositionManager to revert with "Price slippage check"
         # because the actual amounts taken by the pool fall below the mins.
-        recomputed_or_fail = compiler._maybe_recompute_lp_amounts_from_slot0(
+        recomputed_or_fail = maybe_recompute_lp_amounts_from_slot0(
+            fetch_slot0=compiler._fetch_lp_pool_slot0,
             pool_check=pool_check,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
@@ -822,11 +824,12 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         amount0_desired, amount1_desired = recomputed_or_fail
 
         # LP slippage-based minimums computed from POOL-ALIGNED amounts, not
-        # oracle inputs. Matches the V3 path (compiler.py:_compile_lp_open_v3_body).
-        amount0_min, amount1_min = compiler._compute_lp_slippage_mins(
+        # oracle inputs. Matches the V3-family connector compiler path.
+        amount0_min, amount1_min = compute_lp_slippage_mins(
             intent=intent,
             amount0_desired=amount0_desired,
             amount1_desired=amount1_desired,
+            default_lp_slippage=compiler.default_lp_slippage,
         )
 
         # Create Aerodrome adapter

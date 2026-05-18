@@ -31,7 +31,8 @@ import time
 
 from web3 import Web3
 
-from almanak.framework.intents import LPCloseIntent, UniswapV3LPAdapter
+from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3LPAdapter
+from almanak.framework.intents import LPCloseIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 # Sentinel passed to ``collect`` for unbounded amount0/amount1 maxes.

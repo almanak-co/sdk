@@ -33,8 +33,14 @@ if TYPE_CHECKING:
     pass
 
 from ...intents.compiler_constants import (
+    LP_POSITION_MANAGERS,
+    NFT_POSITION_BURN_SELECTOR,
+    NFT_POSITION_COLLECT_SELECTOR,
+    NFT_POSITION_DECREASE_SELECTOR,
+    NFT_POSITION_MINT_SELECTOR,
     SWAP_ROUTER_V1_CHAIN_OVERRIDES,
     SWAP_ROUTER_V1_PROTOCOLS,
+    get_gas_estimate,
 )
 from ...intents.vocabulary import IntentType, SwapIntent
 from ...models.reproduction_bundle import ActionBundle
@@ -1107,6 +1113,121 @@ class UniswapV3Adapter:
         self._allowance_cache.clear()
 
 
+class UniswapV3LPAdapter:
+    """LP calldata adapter for Uniswap V3 and compatible forks."""
+
+    def __init__(self, chain: str, protocol: str = "uniswap_v3") -> None:
+        self.chain = chain
+        self.protocol = protocol
+        chain_managers = LP_POSITION_MANAGERS.get(chain, {})
+        self.position_manager_address = chain_managers.get(protocol, "0x0000000000000000000000000000000000000000")
+
+    def get_position_manager_address(self) -> str:
+        """Get the NFT position manager address."""
+        return self.position_manager_address
+
+    def get_mint_calldata(
+        self,
+        token0: str,
+        token1: str,
+        fee: int,
+        tick_lower: int,
+        tick_upper: int,
+        amount0_desired: int,
+        amount1_desired: int,
+        amount0_min: int,
+        amount1_min: int,
+        recipient: str,
+        deadline: int,
+    ) -> bytes:
+        """Generate calldata for NonfungiblePositionManager.mint."""
+        params = (
+            self._pad_address(token0)
+            + self._pad_address(token1)
+            + self._pad_uint24(fee)
+            + self._pad_int24(tick_lower)
+            + self._pad_int24(tick_upper)
+            + self._pad_uint256(amount0_desired)
+            + self._pad_uint256(amount1_desired)
+            + self._pad_uint256(amount0_min)
+            + self._pad_uint256(amount1_min)
+            + self._pad_address(recipient)
+            + self._pad_uint256(deadline)
+        )
+        return bytes.fromhex(NFT_POSITION_MINT_SELECTOR[2:] + params)
+
+    def get_decrease_liquidity_calldata(
+        self,
+        token_id: int,
+        liquidity: int,
+        amount0_min: int,
+        amount1_min: int,
+        deadline: int,
+    ) -> bytes:
+        """Generate calldata for NonfungiblePositionManager.decreaseLiquidity."""
+        params = (
+            self._pad_uint256(token_id)
+            + self._pad_uint128(liquidity)
+            + self._pad_uint256(amount0_min)
+            + self._pad_uint256(amount1_min)
+            + self._pad_uint256(deadline)
+        )
+        return bytes.fromhex(NFT_POSITION_DECREASE_SELECTOR[2:] + params)
+
+    def get_collect_calldata(
+        self,
+        token_id: int,
+        recipient: str,
+        amount0_max: int,
+        amount1_max: int,
+    ) -> bytes:
+        """Generate calldata for NonfungiblePositionManager.collect."""
+        params = (
+            self._pad_uint256(token_id)
+            + self._pad_address(recipient)
+            + self._pad_uint128(amount0_max)
+            + self._pad_uint128(amount1_max)
+        )
+        return bytes.fromhex(NFT_POSITION_COLLECT_SELECTOR[2:] + params)
+
+    def get_burn_calldata(self, token_id: int) -> bytes:
+        """Generate calldata for NonfungiblePositionManager.burn."""
+        return bytes.fromhex(NFT_POSITION_BURN_SELECTOR[2:] + self._pad_uint256(token_id))
+
+    def estimate_mint_gas(self) -> int:
+        """Estimate gas for minting a new position."""
+        return get_gas_estimate(self.chain, "lp_mint")
+
+    def estimate_close_gas(self, collect_fees: bool) -> int:
+        """Estimate gas for closing a position."""
+        gas = get_gas_estimate(self.chain, "lp_decrease_liquidity")
+        gas += get_gas_estimate(self.chain, "lp_collect")
+        gas += get_gas_estimate(self.chain, "lp_burn")
+        return gas
+
+    @staticmethod
+    def _pad_address(addr: str) -> str:
+        return addr.lower().replace("0x", "").zfill(64)
+
+    @staticmethod
+    def _pad_uint256(value: int) -> str:
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pad_uint128(value: int) -> str:
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pad_uint24(value: int) -> str:
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pad_int24(value: int) -> str:
+        if value < 0:
+            value = (1 << 256) + value
+        return hex(value)[2:].zfill(64)
+
+
 # =============================================================================
 # Exports
 # =============================================================================
@@ -1114,6 +1235,7 @@ class UniswapV3Adapter:
 __all__ = [
     "UniswapV3Adapter",
     "UniswapV3Config",
+    "UniswapV3LPAdapter",
     "SwapQuote",
     "SwapResult",
     "SwapType",

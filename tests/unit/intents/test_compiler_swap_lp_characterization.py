@@ -1,14 +1,9 @@
 """Characterization tests for IntentCompiler._compile_swap and ._compile_lp_open.
 
-Phase 6B.1 gate: unit-level characterization tests for the two highest-CC
-methods in ``almanak/framework/intents/compiler.py`` before the shared-helper
-extraction (Phase 6B.2+). These tests pin current observable behaviour with
-mocked SDK/adapter/oracle seams so a regression during refactor is caught in
-seconds instead of ~30 minutes of Anvil-fork intent tests.
-
-Scope:
-    - ``_compile_swap`` (compiler.py line 1278, CC 51, 378 LOC)
-    - ``_compile_lp_open`` (compiler.py line 2396, CC 51, 368 LOC)
+Unit-level characterization tests for ``_compile_swap`` and ``_compile_lp_open``.
+These tests pin current observable behaviour with mocked SDK/adapter/oracle seams
+so a regression during refactor is caught in seconds instead of ~30 minutes of
+Anvil-fork intent tests.
 
 Non-scope (by construction):
     - No production code changes.
@@ -28,15 +23,15 @@ import pytest
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.intents import LPOpenIntent
 from almanak.framework.intents.compiler import CompilationStatus
+from almanak.framework.intents.vocabulary import Intent
 
 # ---------------------------------------------------------------------------
-# Module-level patch targets. All swap/LP paths in ``_compile_swap`` and
-# ``_compile_lp_open`` reach for these symbols via ``compiler.py``'s own
-# namespace, so patching *here* is what intercepts the real call.
+# Module-level patch targets for framework swap compilation and connector-owned
+# Uniswap V3-family LP compilation.
 # ---------------------------------------------------------------------------
 
 SWAP_ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
-LP_ADAPTER_CLS = "almanak.framework.intents.compiler.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_V3_POOL = "almanak.framework.intents.pool_validation.validate_v3_pool"
 FETCH_SLOT0 = "almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96"
 
@@ -203,12 +198,10 @@ def _make_lp_intent(
 
 
 class TestCompileSwapHappyPaths:
-    """Per-protocol happy paths through the main UniV3-style swap body.
+    """Per-protocol happy paths through the default router swap body.
 
-    All protocols below dispatch into the same shared body from line ~1364
-    onward (after the aggregator / aerodrome / curve / v4 / fluid / traderjoe
-    early returns), so this table verifies the dispatch boundary AND the
-    shared body's output at the same time.
+    Non-folded router protocols still compile in ``IntentCompiler``; Uniswap
+    V3-family protocols must dispatch to connector compilers instead.
     """
 
     @pytest.mark.parametrize(
@@ -383,7 +376,7 @@ class TestCompileSwapErrorPaths:
 
 
 class TestCompileSwapDispatch:
-    """Dispatch decisions that routed away from the UniV3-style body."""
+    """Dispatch decisions that route away from the default router swap body."""
 
     def test_lifi_protocol_dispatches_to_lifi_helper(self) -> None:
         """protocol='lifi' routes to ``_compile_lifi_swap``."""
@@ -703,7 +696,7 @@ _USDT = _make_token_info("USDT", "0x55d398326f99059fF775485246999027B3197955", 1
 
 
 class TestCompileLPOpenHappyPaths:
-    """Per-protocol LP_OPEN happy paths through the UniV3-style body."""
+    """Per-protocol LP_OPEN happy paths through the connector compiler."""
 
     @patch(FETCH_SLOT0)
     @patch(VALIDATE_V3_POOL)
@@ -1267,3 +1260,48 @@ class TestCompileLPOpenTickSpacing:
         spacing = IntentCompiler._get_tick_spacing(3000)  # => 60
         assert result.action_bundle.metadata["tick_lower"] % spacing == 0
         assert result.action_bundle.metadata["tick_upper"] % spacing == 0
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed when a connector-owned compiler is missing (post-fold cutover)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorMissingFailsClosed:
+    """A V3-fork with no registered connector compiler must fail closed.
+
+    UNISWAP_V3_FORKS mirrors the registry exactly, so reaching the
+    fall-through with a fork means the registry/import is broken. That must
+    surface as a clear "not registered" error (mirroring ``_compile_swap``),
+    not a misleading "unsupported protocol" using the raw intent.protocol
+    (which can be ``None`` on default-protocol flows).
+    """
+
+    GET_CONNECTOR = "almanak.framework.intents.compiler.get_connector_compiler"
+    _EXPECTED = "Connector compiler for protocol 'uniswap_v3' is not registered."
+
+    def _assert_fail_closed(self, result) -> None:
+        assert result.status == CompilationStatus.FAILED
+        assert result.error == self._EXPECTED
+        assert "None" not in result.error
+        assert "is not supported" not in result.error
+
+    def test_lp_open_fork_missing_connector_fails_closed(self) -> None:
+        compiler = _make_compiler()
+        with patch(self.GET_CONNECTOR, return_value=None):
+            result = compiler.compile(_make_lp_intent(protocol="uniswap_v3"))
+        self._assert_fail_closed(result)
+
+    def test_lp_close_fork_missing_connector_fails_closed(self) -> None:
+        compiler = _make_compiler()
+        intent = Intent.lp_close(position_id="123", pool="USDC/WETH/3000", protocol="uniswap_v3")
+        with patch(self.GET_CONNECTOR, return_value=None):
+            result = compiler.compile(intent)
+        self._assert_fail_closed(result)
+
+    def test_collect_fees_fork_missing_connector_fails_closed(self) -> None:
+        compiler = _make_compiler()
+        intent = Intent.collect_fees("USDC/WETH/3000", protocol="uniswap_v3")
+        with patch(self.GET_CONNECTOR, return_value=None):
+            result = compiler.compile(intent)
+        self._assert_fail_closed(result)

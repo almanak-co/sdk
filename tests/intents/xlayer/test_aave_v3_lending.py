@@ -430,8 +430,10 @@ class TestAaveV3BorrowIntent:
         3. Execute via ExecutionOrchestrator
         4. Verify USDG balance increased and debt was created
 
-        USDT0 LTV=70%, so 1000 USDT0 collateral can borrow up to 700 USDG.
-        We borrow 300 USDG (~30% LTV) for safety margin.
+        USDT0 LTV=70%, so 1000 USDT0 collateral can borrow up to 700 USDG
+        when oracle pricing is near par. X-Layer fork liquidity and risk
+        params can drift, so this test borrows a conservative 50 USDG while
+        still proving the BORROW path end-to-end.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdt0 = tokens["USDT0"]
@@ -442,9 +444,10 @@ class TestAaveV3BorrowIntent:
         usdg_address = "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8"
         usdg_decimals = 6  # USDG is 6 decimals
 
-        # Supply 1000 USDT0 as collateral, borrow 300 USDG (~30% LTV)
+        # Supply 1000 USDT0 as collateral, borrow 50 USDG to stay well below
+        # fork-block-specific liquidity / risk caps.
         collateral_amount = Decimal("1000")
-        borrow_amount = Decimal("300")
+        borrow_amount = Decimal("50")
 
         print(f"\n{'='*80}")
         print(f"Test: Borrow {borrow_amount} USDG with {collateral_amount} USDT0 collateral (X-Layer)")
@@ -598,7 +601,7 @@ class TestAaveV3BorrowIntent:
             collateral_token="USDT0",
             collateral_amount=Decimal("1000"),
             borrow_token="USDG",
-            borrow_amount=Decimal("300"),
+            borrow_amount=Decimal("50"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
@@ -610,7 +613,7 @@ class TestAaveV3BorrowIntent:
         assert borrow_exec.success, f"Setup borrow failed: {borrow_exec.error}"
 
         # Now repay partial debt
-        repay_amount = Decimal("100")
+        repay_amount = Decimal("25")
 
         print(f"\n{'='*80}")
         print(f"Test: Repay {repay_amount} USDG debt using RepayIntent (X-Layer)")

@@ -1,15 +1,14 @@
 """Characterization tests for ``IntentCompiler._compile_lp_close``.
 
-Phase 6B backlog gate: unit-level characterization tests for
-``_compile_lp_close`` (compiler.py ~line 3653, CC 39, 245 LOC) BEFORE the
-shared-helper extraction. These tests pin current observable behaviour with
-mocked SDK / adapter / on-chain seams so a regression during refactor is
-caught in seconds instead of ~30 minutes of Anvil-fork intent tests.
+Unit-level characterization tests for ``IntentCompiler._compile_lp_close``.
+These tests pin current observable behaviour with mocked SDK / adapter /
+on-chain seams so a regression during refactor is caught in seconds instead
+of ~30 minutes of Anvil-fork intent tests.
 
 Scope:
     - Protocol dispatch (Uniswap V4, TraderJoe V2, Aerodrome, Aerodrome
       Slipstream, Pendle, Curve, Fluid, Solana variants).
-    - Generic Uniswap V3-style body (uniswap_v3, pancakeswap_v3, etc.).
+    - Connector-owned Uniswap V3-family compiler path.
     - Position state edge cases (zero liquidity, no tokens owed, unknown
       tokens owed, closed position, unknown liquidity).
     - Error paths (invalid position id, unknown position manager,
@@ -37,12 +36,10 @@ from almanak.framework.intents.compiler import (
 from almanak.framework.intents.vocabulary import Intent, LPCloseIntent
 
 # ---------------------------------------------------------------------------
-# Module-level patch targets. ``_compile_lp_close`` reaches for these
-# symbols via compiler.py's own namespace, so patching *here* is what
-# intercepts the real call.
+# Module-level patch target for connector-owned Uniswap V3-family LP close.
 # ---------------------------------------------------------------------------
 
-LP_ADAPTER_CLS = "almanak.framework.intents.compiler.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +111,12 @@ def _make_lp_close_intent(
 
 
 # ---------------------------------------------------------------------------
-# Per-protocol happy paths (generic V3 body)
+# Per-protocol happy paths (connector compiler)
 # ---------------------------------------------------------------------------
 
 
 class TestCompileLPCloseV3HappyPaths:
-    """Per-protocol happy paths through the generic Uniswap-V3-style body."""
+    """Per-protocol happy paths through the Uniswap V3-family connector compiler."""
 
     @pytest.mark.parametrize(
         "protocol",
@@ -151,10 +148,16 @@ class TestCompileLPCloseV3HappyPaths:
         assert result.action_bundle.metadata["collect_fees"] is True
 
     @patch(LP_ADAPTER_CLS)
-    def test_collect_fees_false_skips_collect(
+    def test_collect_fees_false_still_collects_on_close(
         self, mock_adapter_cls: MagicMock
     ) -> None:
-        """collect_fees=False drops the lp_collect tx and surfaces a warning."""
+        """collect_fees=False cannot suppress collect on a close.
+
+        decreaseLiquidity moves principal into tokensOwed and burn() reverts
+        unless tokensOwed is zero, so collect is mandatory on an active-position
+        close. The flag is honoured as informational: collect still fires and a
+        warning records that collect_fees=False was overridden.
+        """
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         compiler = _make_compiler()
 
@@ -167,9 +170,10 @@ class TestCompileLPCloseV3HappyPaths:
 
         assert result.status == CompilationStatus.SUCCESS, result.error
         tx_types = [tx.tx_type for tx in result.transactions]
-        # Pin exact ordering: decrease -> burn (no collect when collect_fees=False).
-        assert tx_types == ["lp_decrease_liquidity", "lp_burn"]
-        assert any("collect_fees=False" in w for w in result.warnings)
+        # Pin exact ordering: decrease -> collect -> burn (collect is required
+        # to satisfy the burn precondition; collect_fees=False is overridden).
+        assert tx_types == ["lp_decrease_liquidity", "lp_collect", "lp_burn"]
+        assert any("collect_fees=False ignored" in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------
