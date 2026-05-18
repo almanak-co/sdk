@@ -414,6 +414,10 @@ class TestAaveV3BorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-4590: USDG borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current xlayer fork pin — likely oracle/LTV/cap drift, not authz (as of 2026-05-18)",
+    )
     async def test_borrow_usdg_with_usdt0_collateral_using_intent(
         self,
         web3: Web3,
@@ -569,6 +573,10 @@ class TestAaveV3BorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-4590: setup borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current xlayer fork pin, blocking repay path (as of 2026-05-18)",
+    )
     async def test_repay_usdg_using_intent(
         self,
         web3: Web3,

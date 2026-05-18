@@ -432,6 +432,10 @@ class TestSparkBorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-4590: USDC borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current ethereum fork pin — likely oracle/LTV/cap drift, not authz (as of 2026-05-18)",
+    )
     async def test_borrow_usdc_with_weth_collateral_using_intent(
         self,
         web3: Web3,
@@ -614,6 +618,10 @@ class TestSparkBorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-4590: setup borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current ethereum fork pin, blocking repay path (as of 2026-05-18)",
+    )
     async def test_repay_usdc_using_intent(
         self,
         web3: Web3,

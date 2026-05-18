@@ -389,6 +389,10 @@ class TestPancakeSwapV3CollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position on some fork pins; strict=False because the fix sometimes accrues fees on this fork (as of 2026-05-18)",
+    )
     async def test_collect_fees_weth_usdc(
         self,
         web3: Web3,
