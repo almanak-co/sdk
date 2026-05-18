@@ -297,13 +297,12 @@ class PortfolioValuer:
             )
 
             # Step 5: Determine confidence level
-            has_any_value = bool(wallet_balances or positions)
-            if not has_any_value and (positions_unavailable or wallet_data_incomplete):
-                confidence = ValueConfidence.UNAVAILABLE
-            elif positions_unavailable or wallet_data_incomplete:
-                confidence = ValueConfidence.ESTIMATED
-            else:
-                confidence = ValueConfidence.HIGH
+            confidence = self._determine_value_confidence(
+                positions=positions,
+                wallet_balances=wallet_balances,
+                positions_unavailable=positions_unavailable,
+                wallet_data_incomplete=wallet_data_incomplete,
+            )
 
             # Step 6: Build audit-safe token price map (chain:address keyed)
             token_price_records = self._build_token_price_records(chain, prices, tracked_tokens)
@@ -355,6 +354,36 @@ class PortfolioValuer:
             # Always drop the per-snapshot cache so the next value() call
             # does a fresh prefetch and never serves stale events.
             self._snapshot_event_cache = None
+
+    @staticmethod
+    def _determine_value_confidence(
+        *,
+        positions: list[PositionValue],
+        wallet_balances: list,
+        positions_unavailable: bool,
+        wallet_data_incomplete: bool,
+    ) -> ValueConfidence:
+        """Compute the snapshot-level confidence from per-position + wallet signals.
+
+        VIB-4584 / F3.1 — if any position couldn't be valued through a
+        registered protocol path (e.g. Aerodrome CL, Uniswap V4 LP),
+        the snapshot is UNAVAILABLE — a reader cannot distinguish
+        "measured zero" from "we have no idea" without this signal. Take
+        precedence over ESTIMATED because one unvalued LP can hide
+        arbitrary value behind a $0 row.
+
+        Extracted from ``value()`` (Phase 5 of the snapshot pipeline) so
+        the confidence policy lives in one place and ``value()`` stays
+        under the CC threshold.
+        """
+        if any(p.details.get("valuation_status") == "no_path" for p in positions):
+            return ValueConfidence.UNAVAILABLE
+        has_any_value = bool(wallet_balances or positions)
+        if not has_any_value and (positions_unavailable or wallet_data_incomplete):
+            return ValueConfidence.UNAVAILABLE
+        if positions_unavailable or wallet_data_incomplete:
+            return ValueConfidence.ESTIMATED
+        return ValueConfidence.HIGH
 
     def _prefetch_accounting_events(self, deployment_id: str) -> None:
         """Fetch all accounting events for the deployment once per snapshot.
@@ -554,6 +583,19 @@ class PortfolioValuer:
         gross_position_total = sum((p.value_usd for p in merged_positions), Decimal("0"))
         available_cash_usd = max(Decimal("0"), external_total - gross_position_total)
 
+        # VIB-4584 / F3.1: preserve UNAVAILABLE when the framework couldn't
+        # value at least one position through a registered path. External
+        # portfolio totals are advisory — they cannot retroactively certify
+        # a value the framework never verified. Without this guard, an
+        # external Zerion read would silently downgrade UNAVAILABLE →
+        # ESTIMATED and hide the data-quality signal F3.1 was added to
+        # surface.
+        reconciled_confidence = (
+            ValueConfidence.UNAVAILABLE
+            if framework_snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+            else ValueConfidence.ESTIMATED
+        )
+
         return PortfolioSnapshot(
             timestamp=framework_snapshot.timestamp,
             strategy_id=framework_snapshot.strategy_id,
@@ -561,7 +603,7 @@ class PortfolioValuer:
             available_cash_usd=available_cash_usd,
             deployed_capital_usd=framework_snapshot.deployed_capital_usd,
             wallet_total_value_usd=external_total,
-            value_confidence=ValueConfidence.ESTIMATED,
+            value_confidence=reconciled_confidence,
             error=framework_snapshot.error,
             positions=merged_positions,
             wallet_balances=framework_snapshot.wallet_balances,
@@ -900,8 +942,24 @@ class PortfolioValuer:
 
         # Re-price all positions and enrich details with valuer breakdown
         positions: list[PositionValue] = []
+        any_unrepriced = False
         for p in all_position_infos.values():
-            value_usd, enriched_details = self._reprice_position_enriched(p, strategy.chain, market)
+            value_usd, enriched_details, repriced = self._reprice_position_enriched(p, strategy.chain, market)
+            if not repriced:
+                any_unrepriced = True
+                # VIB-4584 / F3.1 — surface the per-position signal on the
+                # serialized details so dashboards / downstream auditors can
+                # filter "we couldn't value this position" without re-running
+                # the valuer. The snapshot-level confidence is set below in
+                # ``value()`` step 5.
+                enriched_details = {**enriched_details, "valuation_status": "no_path"}
+                logger.warning(
+                    "No registered valuation path for %s position on protocol=%s "
+                    "(position_id=%s); snapshot value_confidence will be UNAVAILABLE",
+                    p.position_type.value,
+                    p.protocol,
+                    p.position_id,
+                )
 
             # Merge enriched valuer details into position details
             merged_details = {**p.details, **enriched_details}
@@ -920,9 +978,9 @@ class PortfolioValuer:
             positions.append(pos)
 
         position_value = sum((p.value_usd for p in positions), Decimal("0"))
-        # Signal incomplete if strategy failed OR discovery had errors.
-        # Even if some positions were found, we may be missing others.
-        return positions, position_value, positions_incomplete
+        # Signal incomplete if strategy failed, discovery had errors, OR any
+        # position couldn't be valued through a registered protocol path.
+        return positions, position_value, positions_incomplete or any_unrepriced
 
     def _get_strategy_positions(self, strategy: StrategyLike) -> tuple[list["PositionInfo"], bool]:
         """Get positions from strategy.get_open_positions(), gracefully.
@@ -1050,42 +1108,75 @@ class PortfolioValuer:
         position: "PositionInfo",
         chain: str,
         market: MarketDataSource,
-    ) -> tuple[Decimal, dict[str, Any]]:
+    ) -> tuple[Decimal, dict[str, Any], bool]:
         """Re-price a position and return enriched details for persistence.
 
         Returns:
-            (value_usd, enriched_details) where enriched_details contains
-            the full valuer breakdown (amounts, ticks, health factor, etc.)
+            (value_usd, enriched_details, repriced) where ``repriced`` is
+            ``True`` when a protocol-specific on-chain path successfully
+            valued the position (or when a strategy-authoritative fallback
+            applies, e.g. PERPs/VAULTs the strategy reports directly).
+            ``False`` signals that no registered valuation path matched
+            the protocol — VIB-4584 / F3.1: the snapshot's
+            ``value_confidence`` must drop to ``UNAVAILABLE`` so a reader
+            doesn't confuse "we have no idea" with "measured zero".
         """
         from almanak.framework.teardown.models import PositionType
 
         if position.position_type == PositionType.LP:
             result = self._reprice_lp_on_chain_enriched(position, chain, market)
             if result is not None:
-                return result
-            return position.value_usd, {}
+                return result[0], result[1], True
+            # No LP path matched (e.g. Aerodrome CL, Uniswap V4) or on-chain
+            # read failed. VIB-4584 / F3.1 scope: only flag as "no path"
+            # when no value source exists anywhere — strategies that report
+            # value_usd > 0 are asserting a value we trust (the overnight
+            # matrix specifically hit value_usd == 0 with no on-chain path).
+            if position.value_usd > 0:
+                return position.value_usd, {}, True
+            return position.value_usd, {}, False
 
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
             result = self._reprice_lending_on_chain_enriched(position, chain, market)
             if result is not None:
-                return result
-            if position.position_type == PositionType.BORROW and position.value_usd > 0:
-                return -position.value_usd, {}
-            return position.value_usd, {}
+                return result[0], result[1], True
+            # No on-chain path matched — fall back to the strategy-reported
+            # value when it carries signal.
+            #
+            # BORROW debt is semantically negative; strategies may report
+            # either the *gross* debt as positive (framework negates) or an
+            # already-normalised negative value. Either is a real value;
+            # only ``value_usd == 0`` means "no measurement".
+            if position.position_type == PositionType.BORROW:
+                if position.value_usd > 0:
+                    return -position.value_usd, {}, True
+                if position.value_usd < 0:
+                    return position.value_usd, {}, True
+                # value_usd == 0 — no signal → flag as no_path so confidence
+                # drops to UNAVAILABLE rather than masquerade as measured zero.
+                return position.value_usd, {}, False
+            # SUPPLY — long-only; a positive value is the strategy's fallback
+            # assertion, zero means we have nothing to say.
+            if position.value_usd > 0:
+                return position.value_usd, {}, True
+            return position.value_usd, {}, False
 
         if position.position_type == PositionType.PERP:
             result = self._reprice_perps_on_chain_enriched(position, chain, market)
             if result is not None:
-                return result
-            return position.value_usd, {}
+                return result[0], result[1], True
+            # PERPs: trust the strategy fallback — strategies (e.g. GMX V2,
+            # Drift) report the position with a meaningful value_usd from
+            # their own on-chain reads inside ``get_open_positions``.
+            return position.value_usd, {}, True
 
         if position.position_type == PositionType.VAULT:
             result = self._reprice_vault_on_chain_enriched(position, chain, market)
             if result is not None:
-                return result
-            return position.value_usd, {}
+                return result[0], result[1], True
+            return position.value_usd, {}, True
 
-        return position.value_usd, {}
+        return position.value_usd, {}, True
 
     def _reprice_lp_on_chain_enriched(
         self,

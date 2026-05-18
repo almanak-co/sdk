@@ -2185,6 +2185,28 @@ class ExecutionOrchestrator:
             return result
 
         if isinstance(exc, TransactionRevertedError):
+            # VIB-4581 / F1.A — record the reverted tx_hash on the result so
+            # the downstream ledger writer (``build_ledger_entry`` reads
+            # ``result.transaction_results[0].tx_hash``) persists the mined
+            # tx hash even when the tx reverted. Pre-fix, the exception path
+            # left ``transaction_results`` empty and the ledger row carried
+            # ``tx_hash=""`` despite gas being burned on chain — invisible to
+            # post-mortem auditors. ``_phase_enrich`` already populates the
+            # list from receipts on the non-exception revert path; the
+            # ``SubmissionError`` branch below uses the same pattern for
+            # partially-submitted txs.
+            if exc.tx_hash and not any(tr.tx_hash == exc.tx_hash for tr in result.transaction_results):
+                result.transaction_results.append(
+                    TransactionResult(
+                        tx_hash=exc.tx_hash,
+                        success=False,
+                        gas_used=exc.gas_used or 0,
+                        error=exc.revert_reason or str(exc),
+                    )
+                )
+                if exc.gas_used:
+                    result.total_gas_used += exc.gas_used
+
             # Build verbose revert report, record on result, and close the session.
             verbose_report = self._build_and_record_revert_report(
                 state,

@@ -517,7 +517,15 @@ class TestPortfolioValuerDiscoveryIntegration:
 
         assert len(positions) == 1
         assert positions[0].position_type == PositionType.SUPPLY
-        assert unavailable is False
+        # VIB-4584 / F3.1: the discovered SUPPLY has ``value_usd=0`` and the
+        # lending repricer can't run without an RPC in unit tests, so no
+        # source provided a value — the position is flagged
+        # ``valuation_status='no_path'`` and ``unavailable=True``. Strategy-
+        # reported positions with ``value_usd>0`` (see
+        # ``test_discovery_failure_still_returns_strategy_positions``) take
+        # the trust-the-strategy path and remain ``unavailable=False``.
+        assert unavailable is True
+        assert positions[0].details.get("valuation_status") == "no_path"
 
     def test_strategy_only_no_discovery(self):
         """Strategy provides positions, discovery finds nothing new."""
@@ -698,6 +706,67 @@ class TestPortfolioValuerDiscoveryIntegration:
 
 class TestPortfolioValuerFullIntegration:
     """End-to-end test: strategy + discovery -> PortfolioSnapshot."""
+
+    def test_value_unknown_protocol_lp_marks_snapshot_unavailable(self):
+        """VIB-4584 / F3.1 — an LP position whose protocol has no registered
+        valuation path (e.g. Aerodrome CL, Uniswap V4) must yield a snapshot
+        stamped ``value_confidence='UNAVAILABLE'`` and a per-position
+        ``details['valuation_status'] = 'no_path'`` marker. A reader cannot
+        distinguish "measured zero" from "we have no idea" without this.
+        """
+        from almanak.framework.teardown.models import TeardownPositionSummary
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+        from almanak.framework.portfolio.models import ValueConfidence
+        from datetime import datetime, UTC
+
+        valuer = PortfolioValuer(gateway_client=None)
+
+        # Strategy reports one LP on a fictional protocol. _lp_reader will
+        # return None because no protocol-specific reader matches.
+        lp_pos = PositionInfo(
+            position_type=PositionType.LP,
+            position_id="future-dex-token-1",
+            chain="arbitrum",
+            protocol="future_dex_v9",
+            value_usd=Decimal("0"),
+            details={"token_id": "1"},
+        )
+        strategy = MagicMock()
+        strategy.strategy_id = "test-unknown-proto"
+        strategy.chain = "arbitrum"
+        strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+        # Empty tracked-tokens → no wallet balance → the snapshot has no
+        # alternative data source. Combined with the unvalued LP, the
+        # confidence MUST drop to UNAVAILABLE.
+        strategy._get_tracked_tokens.return_value = []
+        metadata = MagicMock()
+        metadata.supported_protocols = ["future_dex_v9"]
+        strategy.STRATEGY_METADATA = metadata
+        summary = TeardownPositionSummary(
+            strategy_id="test-unknown-proto",
+            timestamp=datetime.now(UTC),
+            positions=[lp_pos],
+        )
+        strategy.get_open_positions.return_value = summary
+
+        market = MagicMock()
+        eth_stub = MagicMock()
+        eth_stub.balance = Decimal("0")
+        market.balance.side_effect = lambda sym: eth_stub
+        market.price.side_effect = lambda sym, *a, **kw: Decimal("0")
+
+        # Force the LP reader's read_position to return None for the unknown
+        # protocol — this is the production failure mode for V4 / Aerodrome CL.
+        with (
+            patch.object(valuer._lp_reader, "read_position", return_value=None),
+            patch.object(valuer._discovery, "discover", return_value=DiscoveryResult()),
+        ):
+            snapshot = valuer.value(strategy, market)
+
+        assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+        assert len(snapshot.positions) == 1
+        assert snapshot.positions[0].details.get("valuation_status") == "no_path"
+        assert snapshot.positions[0].value_usd == Decimal("0")
 
     def test_value_includes_discovered_lending(self):
         """Full pipeline: discovery finds lending, valuer produces snapshot."""

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.vocabulary import Intent
+from ..teardown.sweep_warning import warn_if_sweep_non_strategy_balance
 
 if TYPE_CHECKING:
     from ..teardown import TeardownMode
@@ -43,6 +44,18 @@ _VALID_APPROVAL_ACTIONS = {"approve", "continue", "wait_and_escalate", "cancel"}
 # start blocking on approvals no one will give. Tests import this constant
 # directly so the taxonomy cannot drift between runtime and test expectations.
 _MANUAL_TEARDOWN_REQUESTERS: frozenset[str] = frozenset({"cli", "dashboard", "dashboard_api"})
+
+
+# -------------------------------------------------------------------------
+# VIB-4587 / F5 — teardown sweep DX warning
+# -------------------------------------------------------------------------
+#
+# Logic lives in ``almanak/framework/teardown/sweep_warning.py`` so the
+# manager-driven teardown path (``teardown_manager.py``) and the inline
+# fallback (this module) can both invoke it. We re-export the public
+# name under the historical private name so existing unit tests keep
+# importing from this module unchanged.
+_warn_if_sweep_non_strategy_balance = warn_if_sweep_non_strategy_balance
 
 
 def derive_teardown_auto_mode(request: Any) -> bool:
@@ -935,6 +948,20 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 if balance_value <= 0:
                     logger.info(f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)")
                     continue
+                # VIB-4587 / F5 — emit DX warning before sweeping when the
+                # from-token wasn't seen in this strategy's accounting history.
+                # NOTE: ``state_manager`` in this body is the teardown lifecycle
+                # SM (``TeardownStateManager``) — it tracks teardown requests,
+                # not accounting events. Hand the helper the runner's accounting
+                # ``StateManager`` instead, which exposes
+                # ``get_accounting_events_sync``.
+                warn_if_sweep_non_strategy_balance(
+                    state_manager=getattr(runner, "state_manager", None),
+                    deployment_id=deployment_id,
+                    intent=intent,
+                    balance_token=balance_token,
+                    balance_value=balance_value,
+                )
                 intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
                 logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
             elif balance_token and teardown_market is None:

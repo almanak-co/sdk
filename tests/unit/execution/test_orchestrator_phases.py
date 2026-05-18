@@ -351,6 +351,69 @@ class TestHandleExecutionException:
         assert out.error == "verbose report text"
         assert any(t == ExecutionEventType.TX_REVERTED for t, _ in events)
 
+    def test_transaction_reverted_records_tx_hash_for_ledger(self, orchestrator):
+        """VIB-4581 / F1.A regression — exception-path revert must populate
+        ``transaction_results`` so the ledger writer persists the mined-tx hash.
+        """
+        state = _make_state(orchestrator)
+
+        exc = TransactionRevertedError(
+            tx_hash="0xdeadbeef",
+            revert_reason="TRANSFER_FROM_FAILED",
+            gas_used=120_000,
+            block_number=42,
+        )
+        with patch(
+            "almanak.framework.execution.orchestrator.build_verbose_revert_report"
+        ) as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "verbose report text"
+            mock_report.to_dict.return_value = {"report": "ok"}
+            mock_build.return_value = mock_report
+
+            out = orchestrator._handle_execution_exception(state, exc)
+
+        assert len(out.transaction_results) == 1
+        tr = out.transaction_results[0]
+        assert tr.tx_hash == "0xdeadbeef"
+        assert tr.success is False
+        assert tr.gas_used == 120_000
+        assert tr.error == "TRANSFER_FROM_FAILED"
+        assert out.total_gas_used == 120_000
+
+    def test_transaction_reverted_does_not_duplicate_existing_tx_hash(self, orchestrator):
+        """Idempotency — if ``_phase_enrich`` already appended the receipt
+        before the exception path runs (defensive: belt-and-braces against
+        future call-order changes), we must not record the same hash twice.
+        """
+        state = _make_state(orchestrator)
+        # Simulate a TransactionResult already on the result from _phase_enrich.
+        from almanak.framework.execution.orchestrator import TransactionResult
+
+        state.result.transaction_results.append(
+            TransactionResult(tx_hash="0xdeadbeef", success=False, gas_used=80_000)
+        )
+        state.result.total_gas_used = 80_000
+
+        exc = TransactionRevertedError(
+            tx_hash="0xdeadbeef",
+            revert_reason="reverted",
+            gas_used=80_000,
+        )
+        with patch(
+            "almanak.framework.execution.orchestrator.build_verbose_revert_report"
+        ) as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "verbose report text"
+            mock_report.to_dict.return_value = {"report": "ok"}
+            mock_build.return_value = mock_report
+
+            out = orchestrator._handle_execution_exception(state, exc)
+
+        # Exactly one entry, no double-counted gas.
+        assert len(out.transaction_results) == 1
+        assert out.total_gas_used == 80_000
+
     def test_submission_error_preserves_partial_tx_hashes_from_session(self, orchestrator):
         state = _make_state(orchestrator)
         # Session with a partially-submitted tx_hash

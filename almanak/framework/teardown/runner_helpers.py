@@ -67,6 +67,14 @@ capture at ``_init_single_chain_state``. Threaded into the commit pipeline
 so ``transaction_ledger.pre_state_json`` carries lending fields lane-
 symmetric with iteration (VIB-3934)."""
 
+WarnSweepNonStrategyBalance = Callable[..., None]
+"""Sync ``(strategy, intent, balance_token, balance_value) -> None``. Logs a
+WARNING when teardown's ``amount='all'`` SWAP would sweep a wallet balance
+the strategy never emitted any accounting events for. Bound via
+:func:`build_runner_helpers` against the runner's **accounting** StateManager
+(``runner.state_manager``) — the teardown lifecycle state manager does not
+expose ``get_accounting_events_sync`` (VIB-4587 / F5)."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
@@ -88,6 +96,7 @@ class TeardownRunnerHelpers:
     snapshot_intent_balances: SnapshotIntentBalances | None = None
     reconcile_post_balances: ReconcilePostBalances | None = None
     snapshot_intent_lending_state: SnapshotIntentLendingState | None = None
+    warn_sweep_non_strategy_balance: WarnSweepNonStrategyBalance | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -110,6 +119,11 @@ class TeardownRunnerHelpers:
         """True iff the lending pre-state capture helper is wired (VIB-3934)."""
         return self.snapshot_intent_lending_state is not None
 
+    @property
+    def has_sweep_warning(self) -> bool:
+        """True iff the teardown-sweep DX warning helper is wired (VIB-4587 / F5)."""
+        return self.warn_sweep_non_strategy_balance is not None
+
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
     """Bind the runner instance into a :class:`TeardownRunnerHelpers` bag.
@@ -126,6 +140,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         snapshot_balances_for_intent,
     )
     from ..runner.teardown_commit import commit_teardown_intent
+    from .sweep_warning import warn_if_sweep_non_strategy_balance
 
     async def _snapshot_intent_balances(strategy: Any, intent: Any) -> Any | None:
         # ``snapshot_balances_for_intent`` only needs the runner + intent
@@ -133,6 +148,21 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         # symmetry with reconcile and future protocol-aware variants.
         del strategy
         return await snapshot_balances_for_intent(runner, intent)
+
+    def _warn_sweep_non_strategy_balance(strategy: Any, intent: Any, balance_token: str, balance_value: Any) -> None:
+        # VIB-4587 / F5 — wallet-scope teardown sweep DX warning. We compute
+        # ``deployment_id`` here (using the same fallback the runner uses
+        # for accounting writes) so the call site doesn't have to recompute
+        # it, and pass the runner's **accounting** StateManager — the
+        # teardown lifecycle SM does not expose ``get_accounting_events_sync``.
+        deployment_id = getattr(strategy, "deployment_id", "") or getattr(strategy, "strategy_id", "") or ""
+        warn_if_sweep_non_strategy_balance(
+            state_manager=getattr(runner, "state_manager", None),
+            deployment_id=deployment_id,
+            intent=intent,
+            balance_token=balance_token,
+            balance_value=balance_value,
+        )
 
     async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:
         # VIB-3934 — capture lending pre-state via the runner's safe wrapper
@@ -156,6 +186,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         snapshot_intent_balances=_snapshot_intent_balances,
         reconcile_post_balances=partial(reconcile_post_execution_balances, runner),
         snapshot_intent_lending_state=_snapshot_intent_lending_state,
+        warn_sweep_non_strategy_balance=_warn_sweep_non_strategy_balance,
     )
 
 
@@ -166,5 +197,6 @@ __all__ = [
     "SnapshotIntentBalances",
     "SnapshotIntentLendingState",
     "TeardownRunnerHelpers",
+    "WarnSweepNonStrategyBalance",
     "build_runner_helpers",
 ]

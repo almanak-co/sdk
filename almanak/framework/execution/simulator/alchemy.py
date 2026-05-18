@@ -310,15 +310,27 @@ class AlchemySimulator(Simulator):
         Returns:
             SimulationResult with parsed data
         """
-        # Check for RPC-level error
+        # Check for RPC-level error.
+        # VIB-4588 / F6 — distinguish an RPC layer error (the simulation NEVER
+        # ran; the upstream service errored on the call itself) from an EVM
+        # revert reported by the simulation. Pre-fix this branch returned
+        # ``simulated=True, success=False`` which FallbackSimulator interprets
+        # as an authoritative revert (``fallback.py:185``) and refuses to
+        # cascade. Real Alchemy bugs (e.g. ``bigInt is not defined``) would
+        # then permanently break ``ax swap`` on Base — there was no way to
+        # try a different simulator.
+        #
+        # Raise ``SimulationError(recoverable=True)`` so the FallbackSimulator
+        # cascade engages. Authoritative EVM reverts are reported via
+        # ``results[0]["error"]`` below — those keep the ``simulated=True,
+        # success=False`` return shape and halt the cascade as before.
         if "error" in response:
             error = response["error"]
             error_msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-            logger.error(f"Alchemy RPC error: {error_msg}")
-            return SimulationResult(
-                success=False,
-                simulated=True,
-                revert_reason=error_msg,
+            logger.error(f"Alchemy RPC error (recoverable, cascading): {error_msg}")
+            raise SimulationError(
+                reason=f"Alchemy RPC error: {error_msg}",
+                recoverable=True,
             )
 
         # Get result array

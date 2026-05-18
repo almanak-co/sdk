@@ -817,3 +817,91 @@ class TestMantleFallbackGasEstimates:
         assert gas >= 146_000_000, (
             f"Mantle unwrap fallback ({gas}) too low for WMNT withdraw (~146M)."
         )
+
+class TestAlchemyRpcErrorClassificationVib4588:
+    """VIB-4588 / F6 — Alchemy RPC layer errors must be classified as
+    transient (recoverable=True), not as authoritative EVM reverts.
+
+    Pre-fix ``_parse_response`` returned ``simulated=True, success=False``
+    when the upstream RPC returned an ``error`` object (e.g. internal
+    Alchemy bug ``bigInt is not defined``). FallbackSimulator
+    (``fallback.py:185``) treats that as an authoritative revert and refuses
+    to cascade — ``ax swap`` on Base would permanently break with no path
+    to the next simulator. The fix raises ``SimulationError(recoverable=True)``
+    so the cascade engages.
+
+    EVM reverts continue to halt the cascade via ``results[0]["error"]``.
+    """
+
+    def test_rpc_error_raises_recoverable_simulation_error(self):
+        """RPC layer error → SimulationError(recoverable=True), not a revert."""
+        from almanak.framework.execution.interfaces import SimulationError
+
+        sim = AlchemySimulator(api_key="fake-key")
+        response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "bigInt is not defined"},
+        }
+        with pytest.raises(SimulationError) as exc_info:
+            sim._parse_response(response, chain="base", expected_count=1)
+        assert exc_info.value.recoverable is True
+        assert "bigInt is not defined" in str(exc_info.value)
+
+    def test_evm_revert_in_results_still_halts_cascade(self):
+        """EVM revert reported via results[0]['error'] → simulated=True, no raise."""
+        sim = AlchemySimulator(api_key="fake-key")
+        response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [{"error": "execution reverted: SafeMath sub"}],
+        }
+        result = sim._parse_response(response, chain="arbitrum", expected_count=1)
+        # Pre-fix behaviour PRESERVED for genuine EVM reverts:
+        # simulated=True + success=False (authoritative, halts cascade).
+        assert result.simulated is True
+        assert result.success is False
+        assert "SafeMath sub" in (result.revert_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_fallback_cascades_past_alchemy_rpc_error(self):
+        """End-to-end: alchemy RPC error → FallbackSimulator tries next sim."""
+        from almanak.framework.execution.interfaces import SimulationError as _SE
+        from almanak.framework.execution.simulator.fallback import FallbackSimulator
+
+        tenderly = MagicMock()
+        tenderly.name = "tenderly"
+        tenderly.supports_chain = MagicMock(return_value=True)
+        tenderly.simulate = AsyncMock(
+            side_effect=_SE("tenderly auth missing", recoverable=True)
+        )
+
+        alchemy = MagicMock()
+        alchemy.name = "alchemy"
+        alchemy.supports_chain = MagicMock(return_value=True)
+        # Alchemy now RAISES on RPC error — used to return a "revert" shape.
+        alchemy.simulate = AsyncMock(
+            side_effect=_SE("Alchemy RPC error: bigInt is not defined", recoverable=True)
+        )
+
+        local = MagicMock()
+        local.name = "local"
+        local.supports_chain = MagicMock(return_value=True)
+        local.simulate = AsyncMock(
+            return_value=SimulationResult(success=True, simulated=True)
+        )
+
+        fallback = FallbackSimulator(primary=tenderly, fallbacks=[alchemy, local])
+        mock_tx = MagicMock()
+        result = await fallback.simulate([mock_tx], chain="base")
+        assert result.success is True
+        # All three simulators must have been called in order: tenderly (raised
+        # recoverable → cascade), alchemy (raised recoverable per the F6 fix
+        # in alchemy._parse_response — pre-fix it would have returned a
+        # success=False "revert" shape that authoritatively halted the
+        # cascade), local (succeeded). Asserting each explicitly pins the
+        # alchemy hop so a regression that re-introduces the halt-on-RPC-error
+        # behaviour can't silently pass by skipping straight to local.
+        tenderly.simulate.assert_called_once()
+        alchemy.simulate.assert_called_once()
+        local.simulate.assert_called_once()

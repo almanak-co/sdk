@@ -8,7 +8,7 @@ Covers:
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -581,7 +581,15 @@ class TestPortfolioValuer:
         snapshot = valuer.value(strategy, market)
 
         assert snapshot.total_value_usd == Decimal("4.70")
-        assert snapshot.value_confidence == ValueConfidence.ESTIMATED
+        # VIB-4584 / F3.1: the framework couldn't value this LP through any
+        # registered protocol path (TraderJoe V2 LB has no on-chain repricer
+        # yet), so the framework snapshot was stamped UNAVAILABLE. External
+        # portfolio data (Zerion) supplied a value — it surfaces in
+        # ``positions[0].value_usd`` and ``total_value_usd`` for operator
+        # visibility — but UNAVAILABLE is sticky: an advisory external
+        # reading cannot retroactively certify a value the framework never
+        # verified.
+        assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
         assert snapshot.snapshot_metadata["valuation_source"] == "reconciled_external"
         assert snapshot.snapshot_metadata["reconciliation_status"] == "external_won_zero_framework"
         assert len(snapshot.positions) == 1
@@ -1045,6 +1053,141 @@ class TestDeployedCapitalUsd:
         # Full external total is in wallet_total_value_usd
         assert reconciled.total_value_usd == Decimal("0")
         assert reconciled.wallet_total_value_usd == Decimal("1050")
+
+    def test_unavailable_confidence_preserved_through_external_reconciliation(self):
+        """VIB-4584 / F3.1 — UNAVAILABLE must survive external reconciliation.
+
+        When the framework can't value a position through a registered path
+        (e.g. Aerodrome CL, Uniswap V4 LP), the snapshot is stamped
+        UNAVAILABLE so a reader can distinguish "we have no idea" from
+        "measured zero". External portfolio totals (Zerion / DeBank) are
+        advisory metadata — they cannot retroactively certify a value the
+        framework never verified. Reconciliation MUST keep the UNAVAILABLE
+        verdict; otherwise the data-quality signal F3.1 was built to
+        surface is silently downgraded to ESTIMATED.
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer()
+
+        framework_snapshot = PortfolioSnapshot(
+            timestamp=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+            strategy_id="future-dex-strat",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            deployed_capital_usd=Decimal("0"),
+            value_confidence=ValueConfidence.UNAVAILABLE,
+        )
+
+        external = {
+            "total_value_usd": Decimal("12345"),
+            "provider": "zerion",
+            "cache_hit": False,
+            "timestamp": datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+            "positions": [],
+        }
+
+        reconciled = valuer._build_external_reconciled_snapshot(
+            framework_snapshot, external, {"reconciliation_status": "external_won_zero_framework"}
+        )
+
+        assert reconciled.value_confidence == ValueConfidence.UNAVAILABLE, (
+            "external reconciliation must not downgrade UNAVAILABLE → ESTIMATED — "
+            "external data is advisory metadata, not a value certification"
+        )
+
+    def test_borrow_with_negative_strategy_value_is_trusted_not_no_path(self):
+        """VIB-4584 / F3.1 — strategies may report BORROW debt either as a
+        positive gross amount (framework negates) or as an already-normalised
+        negative value. The pre-fix `value_usd > 0` gate rejected the latter
+        and flagged it as no_path, marking the snapshot UNAVAILABLE despite a
+        perfectly fine fallback value being present. This test pins both:
+
+        * BORROW with positive ``value_usd`` → framework returns the negated
+          debt and marks it ``repriced=True`` (legacy behaviour).
+        * BORROW with negative ``value_usd`` → already normalised; framework
+          returns it unchanged with ``repriced=True``.
+        * BORROW with zero ``value_usd`` → no signal anywhere → marked
+          ``repriced=False`` so the snapshot drops to UNAVAILABLE.
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer()
+        market = MagicMock()
+
+        # Patch the on-chain repricer to None so the strategy-fallback branch
+        # is the path under test.
+        with patch.object(valuer, "_reprice_lending_on_chain_enriched", return_value=None):
+            positive = PositionInfo(
+                position_type=PositionType.BORROW,
+                position_id="bor-pos",
+                chain="ethereum",
+                protocol="aave_v3",
+                value_usd=Decimal("1000"),
+            )
+            value, _details, repriced = valuer._reprice_position_enriched(positive, "ethereum", market)
+            assert (value, repriced) == (Decimal("-1000"), True), (
+                "positive value_usd must be negated and trusted"
+            )
+
+            negative = PositionInfo(
+                position_type=PositionType.BORROW,
+                position_id="bor-neg",
+                chain="ethereum",
+                protocol="aave_v3",
+                value_usd=Decimal("-2500"),
+            )
+            value, _details, repriced = valuer._reprice_position_enriched(negative, "ethereum", market)
+            assert (value, repriced) == (Decimal("-2500"), True), (
+                "negative value_usd is already normalised — must be trusted, not flagged no_path"
+            )
+
+            zero = PositionInfo(
+                position_type=PositionType.BORROW,
+                position_id="bor-zero",
+                chain="ethereum",
+                protocol="aave_v3",
+                value_usd=Decimal("0"),
+            )
+            value, _details, repriced = valuer._reprice_position_enriched(zero, "ethereum", market)
+            assert (value, repriced) == (Decimal("0"), False), (
+                "zero value_usd with no on-chain path means we have no signal — repriced=False"
+            )
+
+    def test_non_unavailable_confidence_falls_through_to_estimated(self):
+        """Companion to the no_path test above: when the framework snapshot
+        has HIGH or ESTIMATED confidence going in, the reconciled snapshot
+        falls back to ESTIMATED (the legacy behaviour) because the external
+        provider's number "won" against framework_total <= 0. Only
+        UNAVAILABLE is sticky — other confidence levels still pay the
+        agreement-with-external cost.
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer()
+
+        for input_confidence in (ValueConfidence.HIGH, ValueConfidence.ESTIMATED):
+            framework_snapshot = PortfolioSnapshot(
+                timestamp=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+                strategy_id="strat",
+                total_value_usd=Decimal("0"),
+                available_cash_usd=Decimal("0"),
+                deployed_capital_usd=Decimal("0"),
+                value_confidence=input_confidence,
+            )
+            external = {
+                "total_value_usd": Decimal("100"),
+                "provider": "zerion",
+                "cache_hit": False,
+                "timestamp": datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+                "positions": [],
+            }
+            reconciled = valuer._build_external_reconciled_snapshot(
+                framework_snapshot, external, {"reconciliation_status": "external_won_zero_framework"}
+            )
+            assert reconciled.value_confidence == ValueConfidence.ESTIMATED, (
+                f"input={input_confidence} expected ESTIMATED but got {reconciled.value_confidence}"
+            )
 
 
 # ---------------------------------------------------------------------------

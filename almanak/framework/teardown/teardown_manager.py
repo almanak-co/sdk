@@ -898,6 +898,19 @@ class TeardownManager:
 
                             intent_with_slippage = Intent.set_resolved_amount(intent_with_slippage, bal.balance)
                         logger.info(f"Resolved amount='all' for {from_token}: {bal.balance}")
+                        # VIB-4587 / F5 — DX warning when sweeping a from-token
+                        # the strategy never emitted accounting events for.
+                        # Best-effort: never blocks the unwind.
+                        if self.runner_helpers.has_sweep_warning:
+                            try:
+                                self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
+                                    strategy,
+                                    intent_with_slippage,
+                                    from_token,
+                                    bal.balance,
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.debug("sweep-warning helper raised; ignored", exc_info=True)
 
                     # Apply real prices to compiler if available
                     original_oracle = getattr(self.compiler, "price_oracle", None)
