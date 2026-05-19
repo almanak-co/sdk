@@ -1106,6 +1106,17 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Port to run the dashboard on (default: 8501)",
 )
 @click.option(
+    "--dashboard-mode",
+    type=click.Choice(["hosted-parity", "command-center"], case_sensitive=False),
+    default="hosted-parity",
+    help=(
+        "Dashboard layout. 'hosted-parity' (default) mirrors the hosted "
+        "platform: one strategy, one gateway, no multi-strategy navigation. "
+        "'command-center' opens the repo-wide browser. Standalone mode "
+        "(--dashboard with no working dir) always uses Command Center."
+    ),
+)
+@click.option(
     "--simulate-tx/--no-simulate-tx",
     "simulate_tx",
     default=None,
@@ -1214,6 +1225,7 @@ def run(  # noqa: C901
     debug: bool,
     dashboard: bool,
     dashboard_port: int,
+    dashboard_mode: str,
     simulate_tx: bool | None,
     network: str | None,
     gateway_host: str,
@@ -1338,16 +1350,9 @@ def run(  # noqa: C901
         gateway_host=effective_host,
         gateway_port=gateway_port,
         auth_token=session_auth_token,
+        dashboard_mode=dashboard_mode,
     ):
         return
-
-    dashboard_process = _maybe_start_dashboard_process(
-        dashboard=dashboard,
-        dashboard_port=dashboard_port,
-        gateway_host=effective_host,
-        gateway_port=gateway_port,
-        auth_token=session_auth_token,
-    )
 
     strategy_bootstrap = _load_strategy_bootstrap(
         working_dir=working_dir,
@@ -1368,6 +1373,29 @@ def run(  # noqa: C901
         network=network,
         gateway_network=gateway_network,
         fresh=fresh,
+    )
+
+    # Launch the dashboard sidecar AFTER ``strategy_id`` is resolved so
+    # hosted-parity mode can scope to it from the first render rather than
+    # racing the strategy boot. The dashboard subprocess uses the same
+    # ``render_custom_dashboard_safe(...)`` shape the hosted platform uses,
+    # closing the local↔hosted divergence operators have been hitting on
+    # round-trips through staging.
+    dashboard_process = _maybe_start_dashboard_process(
+        dashboard=dashboard,
+        dashboard_port=dashboard_port,
+        gateway_host=effective_host,
+        gateway_port=gateway_port,
+        auth_token=session_auth_token,
+        mode=dashboard_mode.lower(),
+        strategy_id=runtime_bootstrap.strategy_id,
+        strategy_working_dir=working_dir,
+        # Forward the RESOLVED + MUTATED runtime config (post-bootstrap)
+        # so the dashboard renders the same values the strategy sees —
+        # closes the divergence when --config points outside working_dir
+        # or when runtime overrides (copy-trading flags etc.) have been
+        # applied (Codex P2 on PR #2372).
+        strategy_config=strategy_bootstrap.strategy_config,
     )
 
     is_resume, existing_state_info = _load_resume_state(

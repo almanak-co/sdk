@@ -3003,19 +3003,91 @@ def _build_components(
 # ---------------------------------------------------------------------------
 
 
+def _build_dashboard_subprocess_env(
+    *,
+    gateway_host: str,
+    gateway_port: int,
+    auth_token: str | None,
+    mode: str,
+    strategy_id: str | None,
+    strategy_working_dir: str | None,
+    strategy_config: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Build the env mapping handed to the dashboard subprocess.
+
+    Encapsulates gateway-connection forwarding (host/port/auth-token,
+    plus the stale-``GATEWAY_AUTH_TOKEN`` strip from VIB-520) AND the
+    hosted-parity scoping channel (strategy_id, working_dir, and the
+    optional pre-resolved runtime config). Extracted out of
+    ``_start_dashboard_background`` so that function stays under the
+    CRAP complexity cap as additional env channels are added.
+    """
+    import json as _json
+
+    from almanak.config.cli_runtime import subprocess_env_with_overrides
+
+    overrides: dict[str, str] = {
+        "GATEWAY_HOST": gateway_host,
+        "GATEWAY_PORT": str(gateway_port),
+    }
+    if auth_token:
+        overrides["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
+
+    if mode == "hosted-parity" and strategy_id and strategy_working_dir:
+        # Tell app_single.py which strategy to scope to and where to find
+        # its ``dashboard/ui.py`` and ``config.json``. The dashboard reads
+        # these from os.environ; do NOT rely on cwd because Streamlit's
+        # child cwd is not the strategy's working dir.
+        overrides["ALMANAK_DASHBOARD_STRATEGY_ID"] = strategy_id
+        overrides["ALMANAK_DASHBOARD_WORKING_DIR"] = str(Path(strategy_working_dir).resolve())
+        # Forward the RESOLVED + MUTATED runtime config (post-bootstrap)
+        # so the dashboard sees the same values the running strategy sees
+        # — covers ``--config`` pointing outside working_dir AND copy-
+        # trading / chain runtime overrides AND the resolved strategy_id
+        # field. Without this, app_single re-reads working_dir/config.json
+        # and renders stale values (Codex P2 on PR #2372).
+        if strategy_config is not None:
+            try:
+                # ``default=str`` so Decimal / datetime / Path / etc. in the
+                # strategy_config serialise to a string rather than crashing
+                # the subprocess at boot (strategy configs frequently carry
+                # Decimal for range bounds, fee tiers, target_ltv, …).
+                # Lossy: the dashboard receives strings, not the typed
+                # objects — but the alternative (TypeError → fall back to
+                # stale on-disk config) is worse.
+                overrides["ALMANAK_DASHBOARD_STRATEGY_CONFIG"] = _json.dumps(strategy_config, default=str)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Failed to serialise strategy_config for dashboard subprocess; "
+                    "app_single will fall back to working_dir/config.json (may be stale)."
+                )
+
+    env = subprocess_env_with_overrides(overrides)
+    if auth_token:
+        # Drop the legacy unprefixed shape so a stale .env value can't shadow
+        # the session token in the spawned child (VIB-520).
+        env.pop("GATEWAY_AUTH_TOKEN", None)
+    return env
+
+
 def _start_dashboard_background(
     *,
     port: int,
     gateway_host: str = "127.0.0.1",
     gateway_port: int = 50051,
     auth_token: str | None = None,
+    mode: str = "command-center",
+    strategy_id: str | None = None,
+    strategy_working_dir: str | None = None,
+    strategy_config: dict[str, Any] | None = None,
 ) -> Any:
     """Launch the Streamlit dashboard as a background subprocess.
 
     Mirrors the nested ``start_dashboard_background`` previously defined
-    inside ``run()``. Behavior-preserving: probes the requested port with
-    a transient socket bind, falls back to 8502-8509 if busy, and returns
-    ``None`` on any launch failure (no streamlit, spawn error, no free port).
+    inside ``run()``. Behavior-preserving for ``mode == "command-center"``:
+    probes the requested port with a transient socket bind, falls back to
+    8502-8509 if busy, and returns ``None`` on any launch failure (no
+    streamlit, spawn error, no free port).
 
     Args:
         port: The requested dashboard port.
@@ -3031,6 +3103,25 @@ def _start_dashboard_background(
             mainnet the managed gateway always rolls a fresh
             ``uuid.uuid4().hex`` (VIB-520), so the inherited value never
             matches and every dashboard gRPC call returns UNAUTHENTICATED.
+        mode: ``"hosted-parity"`` (single-strategy, mirrors hosted image —
+            ``app_single.py``) or ``"command-center"`` (multi-strategy
+            navigation — ``app.py``). Hosted-parity requires
+            ``strategy_id`` and ``strategy_working_dir``.
+        strategy_id: Resolved deployment_id the dashboard scopes to. Required
+            for ``mode == "hosted-parity"``; ignored otherwise.
+        strategy_working_dir: Strategy folder containing ``config.json`` and
+            (optionally) ``dashboard/ui.py``. Required for
+            ``mode == "hosted-parity"``; ignored otherwise.
+        strategy_config: Resolved + mutated runtime strategy config dict
+            (post ``_load_strategy_bootstrap`` / ``_prepare_runtime_bootstrap``,
+            so it reflects ``--config`` overrides AND copy-trading flags AND
+            the resolved ``strategy_id``). Serialized to JSON and exported
+            as ``ALMANAK_DASHBOARD_STRATEGY_CONFIG``. The dashboard prefers
+            this over re-reading ``working_dir/config.json`` so custom
+            dashboards see the same config the running strategy sees
+            (Codex P2 on PR #2372 — fixes the case where ``--config`` points
+            outside ``working_dir`` or runtime overrides have mutated the
+            config since startup).
 
     Returns:
         A ``subprocess.Popen`` handle, or ``None`` if launch failed.
@@ -3068,28 +3159,36 @@ def _start_dashboard_background(
             return None
 
     project_root = Path(__file__).parent.parent.parent.parent
-    dashboard_path = project_root / "almanak" / "framework" / "dashboard" / "app.py"
+    dashboard_dir = project_root / "almanak" / "framework" / "dashboard"
+    if mode == "hosted-parity":
+        if not strategy_id or not strategy_working_dir:
+            click.echo(
+                "Error: hosted-parity dashboard requires strategy_id and "
+                "strategy_working_dir; falling back to Command Center.",
+                err=True,
+            )
+            dashboard_path = dashboard_dir / "app.py"
+            mode = "command-center"
+        else:
+            dashboard_path = dashboard_dir / "app_single.py"
+    elif mode == "command-center":
+        dashboard_path = dashboard_dir / "app.py"
+    else:
+        click.echo(f"Error: unknown dashboard mode {mode!r}", err=True)
+        return None
 
-    # Pass gateway connection info to the dashboard subprocess via the typed
-    # subprocess-env helper. The managed gateway rolls a fresh session token
-    # on mainnet (run_helpers session_auth_token = uuid.uuid4().hex, VIB-520) —
-    # we MUST forward it so the dashboard's GatewayClient picks up the same
-    # token rather than whatever a stale .env entry happens to hold (an
-    # inherited GATEWAY_AUTH_TOKEN can otherwise shadow the session token
-    # and every gRPC call returns UNAUTHENTICATED).
-    from almanak.config.cli_runtime import subprocess_env_with_overrides
-
-    overrides: dict[str, str] = {
-        "GATEWAY_HOST": gateway_host,
-        "GATEWAY_PORT": str(gateway_port),
-    }
-    if auth_token:
-        overrides["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
-    env = subprocess_env_with_overrides(overrides)
-    if auth_token:
-        # Drop the legacy unprefixed shape so a stale .env value can't shadow
-        # the session token in the spawned child.
-        env.pop("GATEWAY_AUTH_TOKEN", None)
+    # Build the subprocess env (gateway connection + hosted-parity scoping
+    # if applicable). Extracted to a helper to keep this function under
+    # the CRAP complexity cap as new env channels are added.
+    env = _build_dashboard_subprocess_env(
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        auth_token=auth_token,
+        mode=mode,
+        strategy_id=strategy_id,
+        strategy_working_dir=strategy_working_dir,
+        strategy_config=strategy_config,
+    )
 
     try:
         process = subprocess.Popen(
@@ -3146,6 +3245,7 @@ def _handle_standalone_dashboard(
     gateway_host: str,
     gateway_port: int,
     auth_token: str | None = None,
+    dashboard_mode: str = "command-center",
 ) -> bool:
     """Handle the standalone dashboard early-exit branch.
 
@@ -3176,6 +3276,19 @@ def _handle_standalone_dashboard(
     """
     if not (dashboard and working_dir == "."):
         return False
+
+    # Standalone dashboard (no strategy directory) always opens Command
+    # Center — hosted-parity scoping requires a strategy id/dir context
+    # that doesn't exist here. If the operator explicitly passed
+    # ``--dashboard-mode=hosted-parity``, surface a one-line warning so
+    # they know their flag was overridden rather than silently ignored
+    # (Claude pr-auditor Important #3 on PR #2372).
+    if dashboard_mode.lower() == "hosted-parity":
+        click.echo(
+            "Warning: --dashboard-mode=hosted-parity ignored in standalone mode "
+            "(no strategy context). Opening Command Center.",
+            err=True,
+        )
 
     click.echo()
     click.echo("=" * 60)
@@ -3213,6 +3326,7 @@ def _maybe_handle_run_early_exit(
     gateway_host: str,
     gateway_port: int,
     auth_token: str | None,
+    dashboard_mode: str = "command-center",
 ) -> bool:
     """Handle early-return `run()` branches before strategy bootstrap."""
     if _handle_list_all(list_all, gateway_client):
@@ -3225,6 +3339,7 @@ def _maybe_handle_run_early_exit(
         gateway_host=gateway_host,
         gateway_port=gateway_port,
         auth_token=auth_token,
+        dashboard_mode=dashboard_mode,
     )
 
 
@@ -3235,8 +3350,18 @@ def _maybe_start_dashboard_process(
     gateway_host: str,
     gateway_port: int,
     auth_token: str | None,
+    mode: str = "command-center",
+    strategy_id: str | None = None,
+    strategy_working_dir: str | None = None,
+    strategy_config: dict[str, Any] | None = None,
 ) -> Any:
-    """Start the dashboard sidecar when requested, registering cleanup."""
+    """Start the dashboard sidecar when requested, registering cleanup.
+
+    See ``_start_dashboard_background`` for the meaning of ``mode``,
+    ``strategy_id``, ``strategy_working_dir``, and ``strategy_config``
+    — they're forwarded verbatim and only consulted when
+    ``mode == "hosted-parity"``.
+    """
     import atexit
 
     if not dashboard:
@@ -3247,6 +3372,10 @@ def _maybe_start_dashboard_process(
         gateway_host=gateway_host,
         gateway_port=gateway_port,
         auth_token=auth_token,
+        mode=mode,
+        strategy_id=strategy_id,
+        strategy_working_dir=strategy_working_dir,
+        strategy_config=strategy_config,
     )
     if dashboard_process is not None:
         atexit.register(_stop_dashboard, dashboard_process)
