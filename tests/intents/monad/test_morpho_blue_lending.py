@@ -20,6 +20,15 @@ Each test still exercises the full Intent → Compile → Execute → Verify pip
 for shape correctness. When wstETH or WBTC funding is added to the Monad
 conftest, the xfail markers should be removed and the tests should pass.
 
+Layer 5 (epic VIB-4591 / ticket VIB-4604): only the loan-side ``SUPPLY``
+test executes on Monad today (BORROW/REPAY/WITHDRAW are ``xfail(strict=True)``
+on the wstETH-funding gap and never run), so Layer 5 is wired only into the
+SUPPLY test. Morpho Blue's pre/post-state reader has full parity with Aave V3
+(both legs resolved from ``intent.market_id``), so the Anvil ``eth_call``
+adapter populates before/after collateral / debt / health-factor at
+``confidence=HIGH``. Loan-side supply emits a ``Supply`` event so
+``amount_token`` is populated (not the VIB-4635 collateral path).
+
 NO MOCKING. The intents are real; the executions are real; the xfail markers
 document the funding gap explicitly rather than papering over it.
 
@@ -29,11 +38,18 @@ To run:
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from web3 import Web3
 
+from almanak.framework.accounting.lending_accounting import (
+    capture_lending_post_state,
+    capture_lending_pre_state,
+    lending_state_to_dict,
+)
 from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
 from almanak.framework.connectors.morpho_blue.receipt_parser import (
     MorphoBlueEvent,
@@ -44,7 +60,9 @@ from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
+    ExecutionResult,
 )
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import (
     BorrowIntent,
     RepayIntent,
@@ -55,12 +73,14 @@ from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
 )
 
 CHAIN_NAME = "monad"
+PROTOCOL = "morpho_blue"
 MORPHO_MARKET_NAME_LOAN = "wstETH/WETH"  # loan token = WETH → supply test uses this
 MORPHO_MARKET_NAME_BORROW = "wstETH/WETH"  # collateral = wstETH
 
@@ -106,6 +126,129 @@ def _assets_wei(event: MorphoBlueEvent) -> int:
     return int(Decimal(str(assets)))
 
 
+# =============================================================================
+# Layer 5 helpers (shared) — epic VIB-4591 / ticket VIB-4604
+# =============================================================================
+#
+# Identical shape to the merged Aave V3 golden
+# (``tests/intents/arbitrum/test_aave_v3_lending.py``) and the Arbitrum Morpho
+# Blue Layer-5 rollout. Only the loan-side SUPPLY test runs on Monad (the
+# borrow/repay/withdraw funding-gap tests are xfail(strict=True) and never
+# execute), so these helpers are exercised by the SUPPLY path only.
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-morpho-blue-lending",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol=PROTOCOL,
+        simulation_enabled=True,
+    )
+
+
+def _enrich_for_accounting(
+    execution_result: ExecutionResult,
+    intent: Any,
+    wallet: str,
+    bundle_metadata: dict | None = None,
+) -> ExecutionResult:
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _capture_lending_state(
+    intent: Any,
+    wallet: str,
+    reader: Any,
+    price_oracle: dict[str, Decimal],
+    *,
+    post: bool,
+) -> dict | None:
+    """Capture and serialize Morpho Blue pre/post state via the Anvil eth_call adapter.
+
+    Returns the runner-shaped state dict (``lending_state_to_dict`` output) or
+    ``None`` when the read genuinely yields nothing — never a fabricated zero.
+    """
+    capture = capture_lending_post_state if post else capture_lending_pre_state
+    state = capture(
+        intent=intent,
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        gateway_client=reader,
+        price_oracle=price_oracle,
+    )
+    return lending_state_to_dict(state, protocol=PROTOCOL)
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    """Identity sextuple per epic VIB-4591 decision #5 (no agent_id)."""
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+    # Epic decision #5: the identity is a sextuple — there is NO agent_id.
+    # Enforce the contract, don't just document it: a persisted lending row
+    # must never carry a populated agent_id (absent, or present-but-empty).
+    assert not row.get("agent_id"), (
+        f"Layer-5 lending row must not carry an agent_id (epic decision #5); "
+        f"got {row.get('agent_id')!r}"
+    )
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    """Epic decision #6: no lot_id on the persisted lending event."""
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_high_confidence_state(payload: dict) -> None:
+    """Morpho Blue has a full pre/post-state reader → confidence=HIGH.
+
+    Morpho Blue's ``_capture_morpho_blue_pre_state`` resolves both market legs
+    from ``intent.market_id`` via ``MORPHO_MARKETS`` for every lending intent
+    type (it does NOT require ``intent.collateral_token`` the way Compound V3's
+    REPAY arm does — VIB-4633), so the Anvil eth_call adapter yields a live
+    before+after read at ``confidence=HIGH`` with collateral/debt/HF populated.
+    """
+    assert payload["confidence"] == "HIGH", (
+        f"Morpho Blue lending must persist confidence=HIGH (full reader + Anvil "
+        f"eth_call adapter), got {payload['confidence']!r} "
+        f"(unavailable_reason={payload.get('unavailable_reason')!r})"
+    )
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
+
+
+def _assert_asset(payload: dict, expected: str) -> None:
+    """Asset-symbol assertion (case-insensitive).
+
+    The lending category handler upper-cases the asset symbol
+    (lending_handler.py: ``asset = (...).upper()``), so compare
+    case-insensitively — the symbol identity, not its casing, is the contract.
+    """
+    assert payload["asset"].upper() == expected.upper(), (
+        f"persisted asset {payload['asset']!r} must match {expected!r} (case-insensitive)"
+    )
+
+
 @pytest.fixture
 def execution_context(funded_wallet: str) -> ExecutionContext:
     return ExecutionContext(
@@ -142,8 +285,16 @@ class TestMorphoBlueSupplyIntent:
         orchestrator: ExecutionOrchestrator,
         execution_context: ExecutionContext,
         price_oracle_monad_local: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ) -> None:
-        """Supply WETH as loan token (not collateral) into wstETH/WETH market."""
+        """Supply WETH as loan token (not collateral) into wstETH/WETH market.
+
+        Layer 5: loan-side supply emits a Morpho ``Supply`` event, so the
+        lending handler resolves the amount via the primary ``supply_amount``
+        key → ``amount_token`` populated and ``confidence=HIGH`` (this is the
+        loan-side path, NOT the collateral path that hits VIB-4635).
+        """
         price_oracle = price_oracle_monad_local
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         weth_address = tokens["WETH"]
@@ -191,6 +342,10 @@ class TestMorphoBlueSupplyIntent:
         )
         assert compilation_result.action_bundle is not None
 
+        pre_state = _capture_lending_state(
+            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
+        )
+
         # Layer 2: Execute
         execution_result = await orchestrator.execute(
             compilation_result.action_bundle, execution_context
@@ -225,6 +380,44 @@ class TestMorphoBlueSupplyIntent:
         assert position.supply_shares > 0, (
             f"Expected supply_shares > 0 after loan-token supply, got {position.supply_shares}"
         )
+
+        # ── Layer 5: loan-side SUPPLY accounting ─────────────────────────────
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(
+            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
+        )
+
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="SUPPLY",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="SUPPLY", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_high_confidence_state(payload)
+        _assert_asset(payload, "WETH")
+        # Loan-side Supply event → handler resolves the amount via the primary
+        # supply_amount key (NOT the collateral path), so amount_token is
+        # populated. SUPPLY drains wallet inventory: principal measured,
+        # interest not applicable (must be None, not 0).
+        assert payload["amount_token"] is not None, (
+            "loan-side SUPPLY must populate amount_token (Supply event → "
+            "supply_amount key; not the VIB-4635 collateral path)"
+        )
+        assert Decimal(payload["amount_token"]) == supply_amount
+        assert payload["principal_delta_usd"] is not None, "SUPPLY must measure principal_delta_usd"
+        assert Decimal(payload["principal_delta_usd"]) > 0
+        assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
 
         print(f"\nWETH spent: {format_token_amount(weth_spent, weth_decimals)}")
         print(f"Supply shares: {position.supply_shares}")
