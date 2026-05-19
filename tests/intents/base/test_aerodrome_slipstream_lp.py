@@ -23,6 +23,7 @@ To run:
     uv run pytest tests/intents/base/test_aerodrome_slipstream_lp.py -v -s
 """
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -32,7 +33,11 @@ from almanak.core.contracts import AERODROME
 from almanak.framework.connectors.aerodrome.receipt_parser import (
     AerodromeSlipstreamReceiptParser,
 )
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import (
     IntentCompiler,
     LPCloseIntent,
@@ -47,6 +52,7 @@ from tests.intents._lp_setup_helpers import (
 )
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -84,6 +90,150 @@ RANGE_UPPER = Decimal("200000")
 
 
 # =============================================================================
+# Layer-5 accounting helpers (mirrors tests/intents/base/test_pancakeswap_v3_lp.py)
+# =============================================================================
+#
+# Aerodrome Slipstream is concentrated-liquidity (Uniswap-V3-shaped): same
+# ``lp:{protocol}:{chain}:{wallet}:{pool}`` position key, same ``LPCloseData``,
+# same ``lp_handler.py`` path, and ``AerodromeSlipstreamReceiptParser`` extracts
+# the V3-style ``lp_open_data`` (with ticks). The Layer-5 contract is therefore
+# the V3 directional null-contract — identical to PancakeSwap V3 / SushiSwap V3.
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-aerodrome-slipstream-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol=PROTOCOL,
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_parser_event_equality(payload: dict, lp_close_data, *, dec0: int, dec1: int) -> None:
+    """Parser ↔ event exact equality, honoring the Empty≠Zero≠None contract.
+
+    ``LPCloseData.fees{0,1}`` default to ``None`` when the parser did not
+    measure fees separately (Empty). Aerodrome Slipstream's clean-close path
+    takes that branch, and the LP handler correctly persists an *unmeasured*
+    ``None`` (it does NOT fabricate a measured-zero — verified on a real
+    Anvil-fork run: ``lp_close_data.fees0/1 is None`` →
+    ``payload["fees{0,1}_collected"] is None``). This is the merged
+    **SushiSwap V3** directional fee-contract (the better precedent per
+    VIB-4597), NOT the PancakeSwap-style ``Decimal(payload[...]) == "0"``
+    reconciliation which crashes on the legitimately-``None`` payload.
+
+    Directional contract per epic VIB-4591 decision #5 / blueprints/27:
+
+    * parser reading concrete  → payload MUST equal it exactly.
+    * parser reading ``None`` (Empty) → payload may be ``None`` (unmeasured)
+      or measured-zero ``Decimal('0')``; it must NEVER fabricate a non-zero
+      fee.
+    """
+    assert Decimal(payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
+    assert Decimal(payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
+    for field, raw in (
+        ("fees0_collected", lp_close_data.fees0),
+        ("fees1_collected", lp_close_data.fees1),
+    ):
+        dec = dec0 if field == "fees0_collected" else dec1
+        parser_human = _to_human(raw, dec)
+        payload_raw = payload[field]
+        payload_fee = None if payload_raw is None or payload_raw == "" else Decimal(payload_raw)
+        if parser_human is not None:
+            assert payload_fee == parser_human, (
+                f"{field}: payload {payload_fee!r} must equal parser reading {parser_human!r}"
+            )
+        else:
+            assert payload_fee is None or payload_fee == Decimal("0"), (
+                f"{field}: parser did not measure fees (Empty); payload must be "
+                f"unmeasured (None) or measured-zero (0), never a fabricated {payload_fee!r}"
+            )
+
+
+async def _open_position_for_accounting(
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+):
+    """Open a Slipstream LP position; return (position_id, intent, enriched_result)."""
+    intent = LPOpenIntent(
+        pool=POOL,
+        amount0=LP_AMOUNT_WETH,
+        amount1=LP_AMOUNT_USDC,
+        range_lower=RANGE_LOWER,
+        range_upper=RANGE_UPPER,
+        protocol="aerodrome_slipstream",
+        chain=CHAIN_NAME,
+    )
+
+    compiler = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        rpc_url=anvil_rpc_url,
+    )
+    compilation_result = compiler.compile(intent)
+    assert compilation_result.status.value == "SUCCESS", f"LP Open compilation failed: {compilation_result.error}"
+    assert compilation_result.action_bundle is not None
+
+    execution_result = await orchestrator.execute(compilation_result.action_bundle)
+    assert execution_result.success, f"LP Open execution failed: {execution_result.error}"
+    enriched = _enrich_for_accounting(
+        execution_result,
+        intent,
+        funded_wallet,
+        compilation_result.action_bundle.metadata,
+    )
+
+    parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
+    position_id: int | None = None
+    for tx_result in enriched.transaction_results:
+        if tx_result.receipt:
+            pos_id = parser.extract_position_id(tx_result.receipt.to_dict())
+            if pos_id is not None:
+                position_id = int(pos_id)
+    assert position_id is not None, "Failed to extract Slipstream position ID from LP Open receipt"
+    return position_id, intent, enriched
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 #
@@ -103,39 +253,13 @@ async def _open_position_via_intent(
     anvil_rpc_url: str,
 ) -> int:
     """Open a Slipstream LP position via LPOpenIntent and return the NFT tokenId."""
-    intent = LPOpenIntent(
-        pool=POOL,
-        amount0=LP_AMOUNT_WETH,
-        amount1=LP_AMOUNT_USDC,
-        range_lower=RANGE_LOWER,
-        range_upper=RANGE_UPPER,
-        protocol="aerodrome_slipstream",
-        chain=CHAIN_NAME,
+    position_id, _, _ = await _open_position_for_accounting(
+        funded_wallet,
+        orchestrator,
+        price_oracle,
+        anvil_rpc_url,
     )
-
-    compiler = IntentCompiler(
-        chain=CHAIN_NAME,
-        wallet_address=funded_wallet,
-        price_oracle=price_oracle,
-        rpc_url=anvil_rpc_url,
-    )
-    compilation_result = compiler.compile(intent)
-    assert compilation_result.status.value == "SUCCESS", (
-        f"LP Open compilation failed: {compilation_result.error}"
-    )
-    assert compilation_result.action_bundle is not None
-
-    execution_result = await orchestrator.execute(compilation_result.action_bundle)
-    assert execution_result.success, f"LP Open execution failed: {execution_result.error}"
-
-    parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
-    for tx_result in execution_result.transaction_results:
-        if tx_result.receipt:
-            pos_id = parser.extract_position_id(tx_result.receipt.to_dict())
-            if pos_id is not None:
-                return int(pos_id)
-
-    raise AssertionError("Failed to extract Slipstream position ID from LP Open receipt")
+    return position_id
 
 
 # =============================================================================
@@ -157,6 +281,8 @@ class TestAerodromeSlipstreamLPOpenIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Open a WETH/USDC Slipstream LP position via LPOpenIntent.
 
@@ -218,6 +344,12 @@ class TestAerodromeSlipstreamLPOpenIntent:
         # Layer 2 — Execute
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
 
         # Layer 3 — Parse: extract position ID from the Mint/Transfer receipt
         parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
@@ -256,6 +388,38 @@ class TestAerodromeSlipstreamLPOpenIntent:
             f"WETH spent ({weth_spent}) exceeds desired ({expected_weth_max})"
         )
 
+        # Layer 5 — assert the real accounting pipeline persisted LP_OPEN.
+        # Slipstream is V3-concentrated: ticks/liquidity ship via the
+        # structured ``lp_open_data`` struct, so the V3 OPEN bracket must be
+        # populated and the V4 ``position_hash`` must NOT be fabricated.
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        payload = _payload(accounting_row)
+        assert payload["event_type"] == "LP_OPEN"
+        assert payload["position_key"] == accounting_row["position_key"]
+        assert payload["pool_address"].startswith("0x"), (
+            "Slipstream LP_OPEN must persist the canonical on-chain pool address"
+        )
+        assert Decimal(payload["amount0"]) >= 0
+        assert Decimal(payload["amount1"]) >= 0
+        assert payload["position_hash"] is None, (
+            "Aerodrome Slipstream LP_OPEN must not fabricate a V4 position_hash"
+        )
+        assert payload["tick_lower"] is not None
+        assert payload["tick_upper"] is not None
+        assert payload["liquidity"] is not None
+        assert payload["current_tick"] is not None
+        assert payload["in_range"] is True
+
         print("\nALL CHECKS PASSED")
 
 
@@ -283,6 +447,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Case #1: Close a position that has liquidity (normal close).
 
@@ -298,8 +464,20 @@ class TestAerodromeSlipstreamLPCloseIntent:
         usdc_decimals = get_token_decimals(web3, usdc_addr)
         weth_decimals = get_token_decimals(web3, weth_addr)
 
-        position_id = await _open_position_via_intent(
+        # Open via the accounting helper so Layer 5 has the prior LP_OPEN row
+        # for linkage + cost basis.
+        position_id, open_intent, open_result = await _open_position_for_accounting(
             funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
         )
         liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity > 0, f"Position must have liquidity before close, got {liquidity}"
@@ -334,6 +512,12 @@ class TestAerodromeSlipstreamLPCloseIntent:
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"LP Close execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            close_intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
 
         # Layer 3 strict: parse_receipt success on every receipt + extract
         # lp_close_data on at least one. Mirrors the PancakeSwap V3 LP_CLOSE
@@ -392,6 +576,35 @@ class TestAerodromeSlipstreamLPCloseIntent:
             f"wallet={usdc_returned}, parsed={parsed_usdc}"
         )
 
+        # Layer 5 — assert the real accounting pipeline persisted LP_CLOSE.
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        open_payload = _payload(open_accounting_row)
+        # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
+        assert close_payload["position_key"] == open_payload["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        # #2 directional null-contract on LP_CLOSE (V3-shaped: no fabricated V4 hash).
+        assert close_payload["position_hash"] is None, (
+            "Aerodrome Slipstream LP_CLOSE must not fabricate a V4 position_hash"
+        )
+        assert close_payload["realized_pnl_usd"] is not None, (
+            "open-then-close must compute realized PnL"
+        )
+        # #3 parser ↔ event exact scaled-int equality.
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        _assert_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
+
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_no_fees(
@@ -401,6 +614,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Case #2: Close a position with no liquidity and no owed tokens.
 
@@ -412,8 +627,20 @@ class TestAerodromeSlipstreamLPCloseIntent:
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
 
-        position_id = await _open_position_via_intent(
+        # Open via the accounting helper so Layer 5 persists the OPEN — the
+        # no-op close assertion is then not vacuous against a fresh harness.
+        position_id, open_intent, open_result = await _open_position_for_accounting(
             funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
         )
 
         # The Slipstream NPM exposes the same ``decreaseLiquidity`` /
@@ -458,6 +685,14 @@ class TestAerodromeSlipstreamLPCloseIntent:
         )
         assert compilation_result.action_bundle is not None
 
+        # Layer 5 — snapshot the LP_CLOSE row set BEFORE the no-op close so the
+        # post-check is scoped to this run, not worker-shared store history.
+        close_rows_before = await layer5_accounting_harness.store.get_accounting_events(
+            "layer5-intent-test",
+            event_type="LP_CLOSE",
+            limit=20,
+        )
+
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, (
             "LP Close on empty Slipstream position must succeed as a no-op"
@@ -483,6 +718,19 @@ class TestAerodromeSlipstreamLPCloseIntent:
             f"delta={weth_after_close - weth_before_close}"
         )
 
+        # Layer 5 — a no-op empty LP_CLOSE must NOT fabricate an accounting
+        # event (epic VIB-4591 decision #7: failure/no-op → zero rows). The
+        # LP_CLOSE row set must be unchanged from the pre-close snapshot.
+        close_rows_after = await layer5_accounting_harness.store.get_accounting_events(
+            "layer5-intent-test",
+            event_type="LP_CLOSE",
+            limit=20,
+        )
+        assert close_rows_after == close_rows_before, (
+            "No-op empty Slipstream LP_CLOSE must not fabricate an accounting event "
+            f"(before={len(close_rows_before)} rows, after={len(close_rows_after)} rows)"
+        )
+
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
@@ -492,6 +740,8 @@ class TestAerodromeSlipstreamLPCloseIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Case #3: Close a position with no liquidity but uncollected owed tokens.
 
@@ -506,8 +756,19 @@ class TestAerodromeSlipstreamLPCloseIntent:
         usdc_decimals = get_token_decimals(web3, usdc_addr)
         weth_decimals = get_token_decimals(web3, weth_addr)
 
-        position_id = await _open_position_via_intent(
+        # Open via the accounting helper for the prior LP_OPEN (linkage + basis).
+        position_id, open_intent, open_result = await _open_position_for_accounting(
             funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
         )
 
         compiler = IntentCompiler(
@@ -550,6 +811,12 @@ class TestAerodromeSlipstreamLPCloseIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, (
             f"LP Close on owed-tokens position must succeed. Error: {execution_result.error}"
+        )
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            close_intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
         )
 
         # Layer 3 strict: parse_receipt success + extract_lp_close_data,
@@ -601,6 +868,31 @@ class TestAerodromeSlipstreamLPCloseIntent:
             f"wallet={usdc_collected}, parsed={parsed_usdc}"
         )
 
+        # Layer 5 — assert the real accounting pipeline persisted LP_CLOSE.
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
+        assert close_payload["position_key"] == _payload(open_accounting_row)["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        # #2 directional null-contract on LP_CLOSE (V3-shaped: no fabricated V4 hash).
+        assert close_payload["position_hash"] is None, (
+            "Aerodrome Slipstream LP_CLOSE must not fabricate a V4 position_hash"
+        )
+        # #3 parser ↔ event exact scaled-int equality.
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        _assert_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
+
 
 # =============================================================================
 # CollectFeesIntent Tests (LP_COLLECT_FEES)
@@ -641,6 +933,8 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """LP_COLLECT_FEES on a Slipstream position with no accrued fees is a
         clean no-op that preserves balance conservation.
@@ -675,8 +969,24 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
 
-        position_id = await _open_position_via_intent(
+        # Open via the accounting helper so Layer 5 covers the LP_OPEN even
+        # though the downstream fee-accrual swap is the xfail-prone step.
+        position_id, open_intent, open_result = await _open_position_for_accounting(
             funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(open_accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        assert _payload(open_accounting_row)["position_hash"] is None, (
+            "Aerodrome Slipstream LP_OPEN must not fabricate a V4 position_hash"
         )
         liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"

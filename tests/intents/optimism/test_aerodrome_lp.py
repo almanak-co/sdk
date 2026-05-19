@@ -31,6 +31,7 @@ To run:
 
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal
 
@@ -39,11 +40,16 @@ from web3 import Web3
 
 from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -79,6 +85,141 @@ RANGE_UPPER = Decimal("1000000")
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Layer-5 accounting helpers (epic VIB-4591)
+# -----------------------------------------------------------------------------
+#
+# Aerodrome / Velodrome V2 on Optimism is a Solidly fork: fungible LP, no NFT,
+# no concentrated-liquidity tick model. The result enricher's
+# ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL["aerodrome"]`` removes ``lp_open_data``
+# and the flat ``tick_*`` fields on LP_OPEN; LP_CLOSE amounts ship inside
+# ``lp_close_data``. So the directional null-contract is the INVERSE of the
+# V3-style precedents:
+#
+#   * ``position_hash`` / ``tick_lower`` / ``tick_upper`` / ``liquidity`` /
+#     ``current_tick`` / ``in_range`` MUST be ``None`` — Solidly has no tick
+#     bracket; fabricating one would be a correctness regression
+#     (Empty≠Zero≠None, blueprints/27).
+#   * ``pool_address`` is the canonical Solidly descriptor the position key
+#     carries (``token0/token1/volatile|stable``), NOT a ``0x`` address.
+#   * ``amount0`` / ``amount1`` are measured (>= 0); fee legs follow the
+#     directional Empty≠Zero≠None contract from the SushiSwap V3 precedent.
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-aerodrome-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="aerodrome",
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_solidly_null_contract(payload: dict, *, event_type: str) -> None:
+    """Assert the classic-Aerodrome (Solidly) directional null-contract.
+
+    Solidly fungible LP has no NFT / tick model. The handler must persist
+    ``None`` for every concentrated-liquidity field rather than fabricate a
+    zero or a synthetic bracket (Empty≠Zero≠None, epic VIB-4591 decision #5).
+    ``pool_address`` is the canonical Solidly descriptor (slash-separated
+    ``token0/token1/volatile|stable``), never a fabricated 0x address.
+    """
+    assert payload["event_type"] == event_type
+    assert payload["position_hash"] is None, (
+        "Aerodrome Classic (Solidly) must not fabricate a V4 position_hash"
+    )
+    # The Solidly contract holds for BOTH LP_OPEN and LP_CLOSE: classic
+    # Aerodrome must never fabricate a tick bracket. LP_CLOSE's payload schema
+    # doesn't carry these keys at all (fees/pnl/il instead), so ``.get``
+    # absent → None still satisfies "not fabricated" and future-proofs
+    # against a regression that starts injecting them on close rows
+    # (CodeRabbit PR #2364).
+    for field in ("tick_lower", "tick_upper", "liquidity", "current_tick", "in_range"):
+        assert payload.get(field) is None, (
+            f"Aerodrome Classic {event_type} must not fabricate concentrated-"
+            f"liquidity field {field!r}; Solidly has no tick model (got "
+            f"{payload.get(field)!r})"
+        )
+    pool_address = payload["pool_address"]
+    assert isinstance(pool_address, str) and pool_address, (
+        "Aerodrome Classic must persist a non-empty pool identifier"
+    )
+    assert not pool_address.startswith("0x"), (
+        "classic Aerodrome surfaces the Solidly descriptor as pool_address "
+        f"(token0/token1/volatile|stable), not a 0x address; got {pool_address!r}"
+    )
+    assert "/" in pool_address, (
+        "classic Aerodrome pool_address must be the Solidly descriptor "
+        f"(slash-separated); got {pool_address!r}"
+    )
+
+
+def _assert_close_parser_event_equality(payload: dict, lp_close_data, *, dec0: int, dec1: int) -> None:
+    """Parser ↔ event exact equality for an Aerodrome Classic LP_CLOSE.
+
+    Mirrors the merged SushiSwap V3 directional fee-contract: a concrete
+    parser fee reading must equal the payload exactly; a ``None`` parser
+    reading (Empty — Solidly's close path does not separately measure fees)
+    reconciles against an unmeasured ``None`` or a measured-zero payload, and
+    must NEVER match a fabricated non-zero fee.
+    """
+    assert Decimal(payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
+    assert Decimal(payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
+    for field, raw in (
+        ("fees0_collected", lp_close_data.fees0),
+        ("fees1_collected", lp_close_data.fees1),
+    ):
+        dec = dec0 if field == "fees0_collected" else dec1
+        parser_human = _to_human(raw, dec)
+        payload_raw = payload[field]
+        payload_fee = None if payload_raw is None or payload_raw == "" else Decimal(payload_raw)
+        if parser_human is not None:
+            assert payload_fee == parser_human, (
+                f"{field}: payload {payload_fee!r} must equal parser reading {parser_human!r}"
+            )
+        else:
+            assert payload_fee is None or payload_fee == Decimal("0"), (
+                f"{field}: parser did not measure fees (Empty); payload must be "
+                f"unmeasured (None) or measured-zero (0), never a fabricated {payload_fee!r}"
+            )
 
 
 _pool_address_cache: str | None = None
@@ -117,14 +258,20 @@ def _get_lp_token_balance(web3: Web3, pool_address: str, wallet: str) -> int:
     return get_token_balance(web3, pool_address, wallet)
 
 
-async def _open_lp_position(
+async def _open_lp_position_for_accounting(
     web3: Web3,
     funded_wallet: str,
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     anvil_rpc_url: str,
-) -> tuple[str, int]:
-    """Open the USDC/WETH volatile LP position. Returns (pool_address, lp_balance_after)."""
+):
+    """Open the USDC/WETH volatile LP position.
+
+    Returns ``(pool_address, lp_balance_after, intent, enriched_result)`` so
+    Layer-5 callers can persist the LP_OPEN through the real accounting
+    pipeline. Enrichment runs with ``live_mode=False`` (paper), exactly as the
+    runner would in non-live mode.
+    """
     pool_address = _resolve_pool_address(web3, anvil_rpc_url)
 
     intent = LPOpenIntent(
@@ -151,8 +298,28 @@ async def _open_lp_position(
 
     execution_result = await orchestrator.execute(compilation_result.action_bundle)
     assert execution_result.success, f"Aerodrome LP_OPEN execution failed: {execution_result.error}"
+    enriched = _enrich_for_accounting(
+        execution_result,
+        intent,
+        funded_wallet,
+        compilation_result.action_bundle.metadata,
+    )
 
-    return pool_address, _get_lp_token_balance(web3, pool_address, funded_wallet)
+    return pool_address, _get_lp_token_balance(web3, pool_address, funded_wallet), intent, enriched
+
+
+async def _open_lp_position(
+    web3: Web3,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+) -> tuple[str, int]:
+    """Open the USDC/WETH volatile LP position. Returns (pool_address, lp_balance_after)."""
+    pool_address, lp_balance, _, _ = await _open_lp_position_for_accounting(
+        web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url
+    )
+    return pool_address, lp_balance
 
 
 # =============================================================================
@@ -182,6 +349,8 @@ class TestAerodromeLPOpen:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Open a USDC + WETH volatile-pool LP position via LPOpenIntent."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -227,6 +396,12 @@ class TestAerodromeLPOpen:
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Aerodrome LP_OPEN execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
 
         # --- Layer 3: Receipt Parsing ---
         # Aerodrome's parser doesn't yet emit dedicated LP open events for the
@@ -289,6 +464,26 @@ class TestAerodromeLPOpen:
             f"LP received={lp_received}"
         )
 
+        # --- Layer 5: real accounting pipeline persisted LP_OPEN ---
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        payload = _payload(accounting_row)
+        assert payload["position_key"] == accounting_row["position_key"]
+        # Solidly directional null-contract: no fabricated NFT/tick fields,
+        # pool_address is the Solidly descriptor (not a 0x address).
+        _assert_solidly_null_contract(payload, event_type="LP_OPEN")
+        assert Decimal(payload["amount0"]) >= 0
+        assert Decimal(payload["amount1"]) >= 0
+
 
 # =============================================================================
 # LP Close Tests
@@ -315,6 +510,8 @@ class TestAerodromeLPClose:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Open then close a USDC + WETH volatile LP position; verify roundtrip."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -328,10 +525,22 @@ class TestAerodromeLPClose:
         weth_decimals = get_token_decimals(web3, weth_addr)
 
         # --- Setup: open a position so we have LP tokens to burn ---
-        pool_address, lp_after_open = await _open_lp_position(
+        # Open via the accounting helper so Layer 5 has the prior LP_OPEN row
+        # for position-key linkage + cost basis.
+        pool_address, lp_after_open, open_intent, open_result = await _open_lp_position_for_accounting(
             web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url
         )
         assert lp_after_open > 0, "Setup invariant: LP_OPEN must mint at least 1 LP wei"
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
 
         # --- Layer 4 BEFORE close ---
         usdc_before_close = get_token_balance(web3, usdc_addr, funded_wallet)
@@ -368,6 +577,12 @@ class TestAerodromeLPClose:
         # --- Layer 2: Execute ---
         close_execution = await orchestrator.execute(close_result.action_bundle)
         assert close_execution.success, f"Aerodrome LP_CLOSE execution failed: {close_execution.error}"
+        close_execution = _enrich_for_accounting(
+            close_execution,
+            close_intent,
+            funded_wallet,
+            close_result.action_bundle.metadata,
+        )
 
         # --- Layer 3: Receipt Parsing ---
         # Velodrome V2 volatile pools may not always emit a standard ``Burn``
@@ -378,6 +593,7 @@ class TestAerodromeLPClose:
         parser = AerodromeReceiptParser(chain=CHAIN_NAME)
         any_parse_succeeded = False
         saw_close_data = False
+        lp_close_data = None
         for tx_result in close_execution.transaction_results:
             if not tx_result.receipt:
                 continue
@@ -390,6 +606,7 @@ class TestAerodromeLPClose:
             close_data = parser.extract_lp_close_data(receipt_dict)
             if close_data is not None and (close_data.amount0_collected > 0 or close_data.amount1_collected > 0):
                 saw_close_data = True
+                lp_close_data = close_data
         assert any_parse_succeeded, "At least one LP_CLOSE tx receipt must be parsed"
         assert saw_close_data, (
             "LP_CLOSE must yield non-zero LPCloseData from the parser "
@@ -426,3 +643,31 @@ class TestAerodromeLPClose:
             f"WETH returned={format_token_amount(weth_returned, weth_decimals)}, "
             f"LP burned={lp_burned}, LP residual={lp_after_close}"
         )
+
+        # --- Layer 5: real accounting pipeline persisted LP_CLOSE ---
+        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=close_execution,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        open_payload = _payload(open_accounting_row)
+        # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
+        assert close_payload["position_key"] == open_payload["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        # #2 Solidly directional null-contract on LP_CLOSE.
+        _assert_solidly_null_contract(close_payload, event_type="LP_CLOSE")
+        assert close_payload["realized_pnl_usd"] is not None, (
+            "open-then-close must compute realized PnL"
+        )
+        # #3 parser ↔ event exact scaled-int equality.
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        _assert_close_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
