@@ -80,11 +80,19 @@ def _make_intent(intent_type_value: str) -> SimpleNamespace:
     )
 
 
-def _make_execution_result(tx_hash: str = "0xabc", success: bool = True) -> SimpleNamespace:
-    """Minimal ExecutionResult-ish object: success + transaction_results[0].tx_hash."""
+def _make_execution_result(
+    tx_hash: str = "0xabc", success: bool = True, block_number: int | None = None
+) -> SimpleNamespace:
+    """Minimal ExecutionResult-ish object: success + transaction_results[0].tx_hash.
+
+    When ``block_number`` is provided, also stamps a ``receipt`` on the
+    transaction so :func:`strategy_runner._last_receipt_block` can extract
+    it for VIB-4589 post-state-read pinning.
+    """
+    receipt = SimpleNamespace(block_number=block_number) if block_number is not None else None
     return SimpleNamespace(
         success=success,
-        transaction_results=[SimpleNamespace(tx_hash=tx_hash)],
+        transaction_results=[SimpleNamespace(tx_hash=tx_hash, success=success, receipt=receipt)],
         total_gas_used=120_000,
         gas_cost_usd="0.50",
         extracted_data={},
@@ -624,13 +632,18 @@ async def test_vib3934_lending_post_state_captured_inside_commit(
         liquidation_threshold_bps=8500,
     )
 
-    def _capture_lending(*, intent, chain, wallet_address, gateway_client, price_oracle, phase):
+    def _capture_lending(*, intent, chain, wallet_address, gateway_client, price_oracle, phase, block=None):
+        # VIB-4589 / F7 — ``block`` is the new receipt-anchored read param.
+        # Capture it alongside the phase so the regression test below pins
+        # that the teardown commit pipeline passes ``receipt.block_number``
+        # (extracted from ``execution_result``) for the post-state read.
         capture_calls.append(
             {
                 "phase": phase,
                 "chain": chain,
                 "wallet_address": wallet_address,
                 "gateway_client": gateway_client,
+                "block": block,
             }
         )
         return fake_post_state if phase == "post" else None
@@ -646,7 +659,12 @@ async def test_vib3934_lending_post_state_captured_inside_commit(
 
     intent = _make_intent("WITHDRAW")
     intent.protocol = "aave_v3"
-    result = _make_execution_result(tx_hash="0xwithdraw-post")
+    # VIB-4589 / F7 — stamp a specific receipt block so we can assert below
+    # that the teardown commit pipeline forwards EXACTLY that block to the
+    # post-state read. Anything else (None, "latest", a different int) would
+    # reintroduce the indexer-race this test is the regression guard for.
+    receipt_block = 19_876_543
+    result = _make_execution_result(tx_hash="0xwithdraw-post", block_number=receipt_block)
     context = SimpleNamespace(protocol="aave_v3", chain="arbitrum")
 
     outcome = await commit_teardown_intent(
@@ -672,6 +690,10 @@ async def test_vib3934_lending_post_state_captured_inside_commit(
     assert Decimal(str(post["debt_usd"])) == Decimal("0.00")
     # Reads happened with the teardown's stash oracle (Accounting-AttemptNo17 §A4).
     assert capture_calls[0]["gateway_client"] == "fake-gateway"
+    # VIB-4589 / F7 regression guard — the forwarded ``block`` MUST equal
+    # the receipt's block_number. A None / "latest" / mismatched int here
+    # would re-open the stale-collateral race that this PR closed.
+    assert capture_calls[0]["block"] == receipt_block
 
 
 @pytest.mark.asyncio

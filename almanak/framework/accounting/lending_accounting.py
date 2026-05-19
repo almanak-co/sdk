@@ -107,10 +107,41 @@ def _decode_word(hex_data: str, word_index: int) -> int:
     return int(hex_data[start : start + 64], 16)
 
 
-def _gateway_eth_call(gateway_client: Any, chain: str, to: str, data: str) -> str | None:
-    """Make an eth_call via the gateway's public eth_call API."""
+def _gateway_eth_call(
+    gateway_client: Any, chain: str, to: str, data: str, block: int | str | None = None
+) -> str | None:
+    """Make an eth_call via the gateway's public eth_call API.
+
+    ``block`` (VIB-4589 / F7) — passed through to ``GatewayClient.eth_call``.
+    Callers reading **post-execution** state MUST pin to the receipt's block
+    (``receipt.block_number``) to avoid racing the upstream RPC's receipt
+    indexer; reads with ``block=None`` fall back to ``"latest"`` and are
+    only safe for **pre-execution** captures where the read precedes the
+    submitted tx by definition.
+    """
     try:
-        return gateway_client.eth_call(chain, to, data)
+        return gateway_client.eth_call(chain, to, data, block=block)
+    except TypeError:
+        # Backwards-compat with mocks / older gateway clients that don't accept
+        # the ``block`` kwarg yet. We only fall back to the legacy 3-arg form
+        # when the caller wasn't pinning the read in the first place — i.e.
+        # ``block is None`` or ``block == "latest"``. Pinned reads (an int
+        # block_number, or any other tag) MUST fail closed here: silently
+        # downgrading to ``"latest"`` would reintroduce the exact stale
+        # post-state race VIB-4589 / F7 is closing.
+        if block is None or (isinstance(block, str) and block == "latest"):
+            try:
+                return gateway_client.eth_call(chain, to, data)
+            except Exception:
+                logger.debug("gateway eth_call failed (legacy path)", exc_info=True)
+                return None
+        logger.warning(
+            "gateway eth_call: block=%r requested but client signature rejects "
+            "the kwarg; refusing to fall back to 'latest' to preserve pinning "
+            "(VIB-4589). Caller will get None and skip the post-state read.",
+            block,
+        )
+        return None
     except Exception:
         logger.debug("gateway eth_call failed", exc_info=True)
         return None
@@ -121,6 +152,7 @@ def read_aave_user_emode(
     chain: str,
     wallet_address: str,
     pool_address: str,
+    block: int | str | None = None,
 ) -> int | None:
     """Read Aave V3 ``Pool.getUserEMode(user)`` and return the category (uint8 range).
 
@@ -137,7 +169,7 @@ def read_aave_user_emode(
           stored as uint8). Empty ≠ Zero (AGENTS.md §Accounting).
     """
     calldata = _AAVE_GET_USER_EMODE_SELECTOR + _pad_address(wallet_address)
-    hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata)
+    hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata, block=block)
     if not hex_data:
         return None
     # gemini review: lowercase before stripping the `0x` prefix so an uppercase
@@ -168,8 +200,15 @@ def read_aave_account_state(
     gateway_client: Any,
     chain: str,
     wallet_address: str,
+    block: int | str | None = None,
 ) -> AaveAccountState | None:
     """Read Aave V3 Pool.getUserAccountData (+ getUserEMode, VIB-4213) for *wallet_address*.
+
+    ``block`` (VIB-4589 / F7) — when provided, both eth_calls
+    (``getUserAccountData`` and ``getUserEMode``) pin to the same block so
+    the snapshot is internally consistent and POST-execution captures
+    cannot race the upstream RPC's receipt indexer. Default ``None`` falls
+    back to ``"latest"`` for pre-execution captures.
 
     Returns normalised USD values and a 1e18-normalised health factor, or None
     if the primary ``getUserAccountData`` call fails. The secondary e-mode read
@@ -196,7 +235,7 @@ def read_aave_account_state(
             return None
 
         calldata = _AAVE_GET_ACCOUNT_DATA_SELECTOR + _pad_address(wallet_address)
-        hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata)
+        hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata, block=block)
         if not hex_data:
             return None
 
@@ -213,8 +252,9 @@ def read_aave_account_state(
         # Cap unrealistically large HF (empty position → max sentinel)
         health_factor = min(Decimal(hf_raw) / _AAVE_HF_SCALE, Decimal("999999"))
 
-        # VIB-4213: best-effort e-mode read. None on failure; never fabricated 0.
-        e_mode_category = read_aave_user_emode(gateway_client, chain, wallet_address, pool_address)
+        # VIB-4213: best-effort e-mode read. Pin to the same block so the
+        # (collateral, debt, HF, e-mode) tuple is internally consistent.
+        e_mode_category = read_aave_user_emode(gateway_client, chain, wallet_address, pool_address, block=block)
 
         return AaveAccountState(
             collateral_usd=collateral_usd,
@@ -255,6 +295,7 @@ def read_morpho_blue_account_state(
     loan_decimals: int,
     lltv_raw: int,
     price_oracle: dict | None,
+    block: int | str | None = None,
 ) -> MorphoBlueAccountState | None:
     """Read Morpho Blue position and market state for *wallet_address* via gateway.
 
@@ -282,6 +323,11 @@ def read_morpho_blue_account_state(
         loan_decimals: Decimals for loan token.
         lltv_raw: Raw LLTV from market params (1e18-scaled int, e.g. 860000000000000000 = 86%).
         price_oracle: Dict mapping token symbol → USD price (Decimal or float).
+        block: Optional block reference for both eth_calls (VIB-4589 / F7).
+            ``None`` (default) → ``"latest"``, safe for pre-execution captures.
+            Post-execution captures MUST pass ``receipt.block_number`` so the
+            (position, market) pair is read at the same block as the confirmed
+            receipt and cannot race the upstream RPC's receipt indexer.
 
     Returns:
         MorphoBlueAccountState or None on failure.
@@ -298,8 +344,12 @@ def read_morpho_blue_account_state(
         user_hex = _pad_address(wallet_address)
 
         # ── Call 1: position(bytes32 id, address user) ──────────────────────
+        # VIB-4589 / F7: pin BOTH eth_calls to the same block so position +
+        # market come from one consistent snapshot. Without this, a post-tx
+        # read where market() lands one block after position() would compute
+        # ``borrow_assets`` against the wrong shares total.
         position_calldata = _MORPHO_POSITION_SELECTOR + market_hex + user_hex
-        position_raw = _gateway_eth_call(gateway_client, chain, morpho_address, position_calldata)
+        position_raw = _gateway_eth_call(gateway_client, chain, morpho_address, position_calldata, block=block)
         if not position_raw:
             logger.debug("read_morpho_blue_account_state: position() call failed for market=%s", market_id[:18])
             return None
@@ -325,7 +375,7 @@ def read_morpho_blue_account_state(
         #   Word 4 (hex [256:320]): lastUpdate
         #   Word 5 (hex [320:384]): fee
         market_calldata = _MORPHO_MARKET_SELECTOR + market_hex
-        market_raw = _gateway_eth_call(gateway_client, chain, morpho_address, market_calldata)
+        market_raw = _gateway_eth_call(gateway_client, chain, morpho_address, market_calldata, block=block)
         if not market_raw:
             logger.debug("read_morpho_blue_account_state: market() call failed for market=%s", market_id[:18])
             return None
@@ -404,6 +454,11 @@ class CompoundV3AccountState:
     health_factor: Decimal | None
 
 
+# crap-allowlist: VIB-4638 — read_compound_v3_account_state is cc=27 / CRAP=35
+# pre-existing (already noqa: C901). VIB-4589 / F7 only added passthrough
+# plumbing (block= kwarg + docstring + 4 forwarded kwargs) — zero cc delta.
+# A proper 3-helper refactor is filed as VIB-4638 and follows the CRAP
+# refactor protocol separately from this accounting correctness fix.
 def read_compound_v3_account_state(  # noqa: C901
     gateway_client: Any,
     chain: str,
@@ -412,6 +467,7 @@ def read_compound_v3_account_state(  # noqa: C901
     borrow_token: str,
     price_oracle: dict | None,
     market_id: str | None = None,
+    block: int | str | None = None,
 ) -> CompoundV3AccountState | None:
     """Read Compound V3 account state via gateway eth_call.
 
@@ -436,6 +492,13 @@ def read_compound_v3_account_state(  # noqa: C901
     SUPPLY/WITHDRAW callers (which pass the collateral as borrow_token) still read
     the correct market's debt balance.  When omitted, borrow_token is used as the
     market key (original BORROW/REPAY behaviour).
+
+    ``block`` (VIB-4589 / F7) — optional block reference threaded into every
+    underlying eth_call so the read pins to a single block. ``None`` (default)
+    falls back to ``"latest"`` (safe for pre-execution captures, where the
+    read precedes the submitted tx by definition). Post-execution captures
+    MUST pass ``receipt.block_number`` to avoid racing the upstream RPC's
+    receipt indexer — see the rationale in :func:`capture_lending_post_state`.
 
     Returns None on any failure (missing prices, gateway unavailable, etc.).
     """
@@ -530,7 +593,7 @@ def read_compound_v3_account_state(  # noqa: C901
             # Returns the supplied base-asset balance.  Expressed in base-token
             # decimals (same as borrow_decimals since base==collateral here).
             balance_of_calldata = _COMPOUND_V3_BALANCE_OF_SELECTOR + account_hex
-            balance_of_raw = _gateway_eth_call(gateway_client, chain, comet_address, balance_of_calldata)
+            balance_of_raw = _gateway_eth_call(gateway_client, chain, comet_address, balance_of_calldata, block=block)
             if not balance_of_raw:
                 logger.debug("read_compound_v3_account_state: balanceOf() call failed for base asset")
                 return None
@@ -544,7 +607,7 @@ def read_compound_v3_account_state(  # noqa: C901
             # Compound V3 — a non-zero borrow would net against the supply.
             # We still call borrowBalanceOf() for correctness (net position).
             borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
-            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata)
+            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata, block=block)
             if not borrow_raw:
                 logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
                 return None
@@ -566,7 +629,7 @@ def read_compound_v3_account_state(  # noqa: C901
             # ── Call 1: userCollateral(wallet, collateralTokenAddress) ──────
             collateral_hex = _pad_address(collateral_address)
             collateral_calldata = _COMPOUND_V3_USER_COLLATERAL_SELECTOR + account_hex + collateral_hex
-            collateral_raw = _gateway_eth_call(gateway_client, chain, comet_address, collateral_calldata)
+            collateral_raw = _gateway_eth_call(gateway_client, chain, comet_address, collateral_calldata, block=block)
             if not collateral_raw:
                 logger.debug("read_compound_v3_account_state: userCollateral() call failed")
                 return None
@@ -581,7 +644,7 @@ def read_compound_v3_account_state(  # noqa: C901
 
             # ── Call 2: borrowBalanceOf(wallet) ─────────────────────────────
             borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
-            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata)
+            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata, block=block)
             if not borrow_raw:
                 logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
                 return None
@@ -641,6 +704,7 @@ def _capture_aave_v3_pre_state(
     wallet_address: str,
     gateway_client: Any,
     price_oracle: dict | None,  # noqa: ARG001 — registry-uniform signature
+    block: int | str | None = None,
 ) -> AaveAccountState | None:
     """Aave V3 pre-state arm of capture_lending_pre_state.
 
@@ -648,8 +712,11 @@ def _capture_aave_v3_pre_state(
     onto the returned ``AaveAccountState`` so it lands in pre_state_json /
     post_state_json. SUPPLY/WITHDRAW intents have no rate mode at the Aave
     collateral side — the field stays ``None``.
+
+    VIB-4589 / F7: ``block`` pins the read; ``None`` → ``"latest"`` for
+    pre-state captures, ``receipt.block_number`` for post-state.
     """
-    aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
+    aave_state = read_aave_account_state(gateway_client, chain, wallet_address, block=block)
     if aave_state is None:
         logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
         return None
@@ -799,6 +866,7 @@ def _capture_morpho_blue_pre_state(
     wallet_address: str,
     gateway_client: Any,
     price_oracle: dict | None,
+    block: int | str | None = None,
 ) -> MorphoBlueAccountState | None:
     """Morpho Blue pre-state arm — applies for all lending intent types (parity with Aave V3)."""
     market_id = _intent_market_id(intent)
@@ -849,6 +917,7 @@ def _capture_morpho_blue_pre_state(
         loan_decimals=loan_decimals,
         lltv_raw=lltv_raw,
         price_oracle=price_oracle,
+        block=block,
     )
     if morpho_state is None:
         logger.debug(
@@ -871,6 +940,7 @@ def _capture_compound_v3_pre_state(
     wallet_address: str,
     gateway_client: Any,
     price_oracle: dict | None,
+    block: int | str | None = None,
 ) -> CompoundV3AccountState | None:
     """Compound V3 pre-state arm — SUPPLY/WITHDRAW require ``intent.market_id``."""
     intent_type_str = _intent_type_value(intent)
@@ -906,6 +976,7 @@ def _capture_compound_v3_pre_state(
         borrow_token=borrow_token_sym or "",
         price_oracle=price_oracle,
         market_id=intent_market_id,
+        block=block,
     )
     if compound_pre_state is None:
         logger.debug("capture_lending_pre_state: Compound V3 read returned None for chain=%s", chain)
@@ -931,6 +1002,7 @@ def capture_lending_pre_state(
     wallet_address: str,
     gateway_client: Any | None,
     price_oracle: dict | None,
+    block: int | str | None = None,
 ) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
     """Read on-chain lending state BEFORE the transaction is submitted (VIB-3489).
 
@@ -945,6 +1017,13 @@ def capture_lending_pre_state(
     - Any gateway eth_call fails.
 
     Never raises; never substitutes stale data on failure.
+
+    VIB-4589 / F7: ``block`` pins every underlying eth_call to a single
+    block reference. Pre-state captures pass ``None`` (→ ``"latest"`` — safe
+    because the read precedes submission). Post-state captures pass
+    ``receipt.block_number`` (via :func:`capture_lending_post_state`) so the
+    snapshot reflects exactly the state produced by the confirmed receipt
+    and cannot race the upstream RPC's receipt indexer.
     """
     if gateway_client is None:
         return None
@@ -963,6 +1042,7 @@ def capture_lending_pre_state(
         wallet_address=wallet_address,
         gateway_client=gateway_client,
         price_oracle=price_oracle,
+        block=block,
     )
 
 
@@ -973,6 +1053,7 @@ def capture_lending_post_state(
     wallet_address: str,
     gateway_client: Any | None,
     price_oracle: dict | None,
+    block: int | str | None = None,
 ) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
     """Read on-chain lending state AFTER the transaction confirms (VIB-3474).
 
@@ -983,11 +1064,14 @@ def capture_lending_post_state(
     *before* it is serialised to the ledger row, which the new
     ``category_handlers/lending_handler.py`` then reads back.
 
-    The implementation is identical to ``capture_lending_pre_state`` — the
-    difference is purely temporal (called by the runner after TX confirmation).
-    Block-anchored reads are not yet wired (gateway prerequisite); the read
-    targets the latest block, which on a confirmed TX is the post-confirmation
-    state.
+    The implementation delegates to ``capture_lending_pre_state`` — the
+    only difference is temporal (called by the runner after TX confirmation).
+    VIB-4589 / F7: callers SHOULD pass ``block=receipt.block_number`` so the
+    read pins to the exact block of the confirmed receipt. The pre-fix
+    behaviour (``block=None`` → ``"latest"``) caused stale post-state on
+    mainnet when the upstream RPC's receipt indexer trailed the call site
+    — a confirmed WITHDRAW receipt was not yet visible to the next
+    ``"latest"`` view, so the read returned a near-full collateral balance.
 
     Returns ``None`` (silently, with a debug log) when the intent isn't a
     supported lending protocol or any gateway call fails. Never raises; never
@@ -999,6 +1083,7 @@ def capture_lending_post_state(
         wallet_address=wallet_address,
         gateway_client=gateway_client,
         price_oracle=price_oracle,
+        block=block,
     )
 
 

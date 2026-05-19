@@ -741,6 +741,7 @@ class GatewayClient:
         chain: str,
         to: str,
         data: str,
+        block: int | str | None = None,
     ) -> str | None:
         """Perform a raw eth_call via the gateway's RPC proxy.
 
@@ -748,6 +749,21 @@ class GatewayClient:
             chain: Chain identifier (e.g., "base", "arbitrum")
             to: Contract address to call
             data: Hex-encoded calldata (with 0x prefix)
+            block: Optional block reference. ``None`` (default) uses the
+                ``"latest"`` block tag — backwards-compatible behaviour.
+                An ``int`` is encoded as the standard JSON-RPC hex string
+                (``hex(N)``). A ``str`` is passed through unchanged (so
+                callers can supply ``"latest"``, ``"pending"``, ``"safe"``,
+                or a pre-encoded ``"0x..."``).
+
+                VIB-4589 / F7 — receipt-time post-state reads (Aave V3
+                ``getUserAccountData`` etc.) MUST pin to ``receipt.block_number``
+                to avoid racing the upstream RPC's receipt indexer. Reading
+                at ``"latest"`` on mainnet has surfaced as a stale-collateral
+                bug where a confirmed WITHDRAW receipt is not yet reflected
+                in the next ``"latest"`` view, so the post-state read returns
+                a near-full collateral balance instead of the expected
+                near-zero. Block-anchoring eliminates the race by construction.
 
         Returns:
             Hex-encoded result string, or None on failure
@@ -760,8 +776,32 @@ class GatewayClient:
             logger.warning("Gateway client not connected")
             return None
 
+        # Encode the block reference per JSON-RPC eth_call semantics.
+        # Integers → 0x-prefixed hex (no zero-pad — Geth / Erigon / Alchemy
+        # all accept the minimal form). Strings pass through (covers
+        # "latest" / "pending" / "safe" / "finalized" / pre-encoded hex).
+        # Reject bool (subclass of int) and negative ints locally — failing
+        # here surfaces a caller bug instead of (a) silently degrading to
+        # ``"latest"`` (which would re-open the VIB-4589 race) or
+        # (b) producing a confusing downstream RPC error. The ValueError
+        # propagates past the inner try/except (which only catches
+        # ``grpc.RpcError``) and is converted to ``None`` at the next layer
+        # up by ``lending_accounting._gateway_eth_call``'s outer
+        # ``except Exception`` clause, so production paths still fail
+        # gracefully while the caller's traceback identifies the bad value.
+        if block is None:
+            block_param: str = "latest"
+        elif isinstance(block, bool):
+            raise ValueError(f"eth_call block must not be bool, got {block!r}")
+        elif isinstance(block, int):
+            if block < 0:
+                raise ValueError(f"eth_call block must be non-negative, got {block}")
+            block_param = hex(block)
+        else:
+            block_param = block
+
         try:
-            params = json.dumps([{"to": to, "data": data}, "latest"])
+            params = json.dumps([{"to": to, "data": data}, block_param])
             response = self._rpc_stub.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,

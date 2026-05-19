@@ -287,6 +287,13 @@ async def commit_teardown_intent(
             try:
                 gateway_client = runner._get_gateway_client()
                 teardown_price_oracle_for_state = getattr(runner, "_teardown_price_oracle", None)
+                # VIB-4589 / F7 — pin post-state read to receipt block.
+                # ``strategy_runner._last_receipt_block`` is the single
+                # source of truth; we import lazily to keep the
+                # teardown-commit module free of strategy_runner import-time
+                # coupling.
+                from .strategy_runner import _last_receipt_block
+
                 lending_post_state = runner._capture_lending_state_safe(
                     intent=intent,
                     chain=getattr(strategy, "chain", "") or "",
@@ -294,6 +301,7 @@ async def commit_teardown_intent(
                     gateway_client=gateway_client,
                     price_oracle=teardown_price_oracle_for_state,
                     phase="post",
+                    block=_last_receipt_block(execution_result),
                 )
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.debug(

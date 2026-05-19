@@ -161,6 +161,84 @@ def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
     return ExecutionMode.LIVE
 
 
+def _last_receipt_block(execution_result: Any | None) -> int | None:
+    """Return the block number of the last successful receipt in ``execution_result``.
+
+    VIB-4589 / F7 — used to pin post-execution state reads (Aave V3
+    ``getUserAccountData``, Morpho Blue ``position``/``market``, Compound V3
+    ``balanceOf``/``userCollateral``) to the exact block of the confirmed
+    receipt. Reading at ``"latest"`` from the gateway races the upstream
+    RPC's receipt indexer; the stale-collateral bug surfaced when a
+    confirmed WITHDRAW receipt was not yet visible to the next ``"latest"``
+    view, so the read returned a near-full collateral balance.
+
+    For multi-tx bundles the LAST successful receipt's block is the
+    correct anchor (state after the whole bundle landed). Returns ``None``
+    when no receipt is available — callers fall back to ``"latest"`` which
+    preserves the legacy behaviour.
+
+    Robust to the shape variability ``_collect_candidate_receipts`` already
+    handles: ``execution_result`` and each ``transaction_results`` entry may
+    be either an object (``ExecutionResult`` / ``GatewayExecutionResult``)
+    or a dict; the receipt may use ``block_number`` (snake) or
+    ``blockNumber`` (JSON-RPC camel); a numeric block may arrive as an int,
+    decimal string, or 0x-prefixed hex string.
+    """
+    if execution_result is None:
+        return None
+    tx_results = getattr(execution_result, "transaction_results", None)
+    if tx_results is None and isinstance(execution_result, dict):
+        tx_results = execution_result.get("transaction_results")
+    if not isinstance(tx_results, list):
+        return None
+    for tx in reversed(tx_results):
+        if isinstance(tx, dict):
+            if not tx.get("success", False):
+                continue
+            receipt = tx.get("receipt")
+        else:
+            if not getattr(tx, "success", False):
+                continue
+            receipt = getattr(tx, "receipt", None)
+        if receipt is None:
+            continue
+        if isinstance(receipt, dict):
+            raw = receipt.get("block_number")
+            if raw is None:
+                raw = receipt.get("blockNumber")
+        else:
+            raw = getattr(receipt, "block_number", None)
+            if raw is None:
+                raw = getattr(receipt, "blockNumber", None)
+        block_number = _coerce_block_number(raw)
+        if block_number is not None and block_number > 0:
+            return block_number
+    return None
+
+
+def _coerce_block_number(raw: Any) -> int | None:
+    """Best-effort coercion of a raw block reference to ``int``.
+
+    Accepts ``int`` (rejects ``bool`` since ``bool`` is an ``int`` subclass),
+    decimal strings (``"19876543"``), and 0x-prefixed hex strings
+    (``"0x12d4abc"``). Returns ``None`` for anything else — the caller
+    treats ``None`` as "no anchoring available, fall back to 'latest'".
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return int(s, 16) if s.lower().startswith("0x") else int(s)
+        except ValueError:
+            return None
+    return None
+
+
 def _merge_lending_state(target: dict[str, Any] | None, lending_dict: dict[str, Any] | None) -> dict[str, Any] | None:
     """Overlay lending protocol state fields onto an existing pre/post-state dict.
 
@@ -3848,6 +3926,7 @@ class StrategyRunner:
         gateway_client: Any | None,
         price_oracle: dict | None,
         phase: str,
+        block: int | str | None = None,
     ) -> Any | None:
         """Best-effort lending pre/post state capture (VIB-3474).
 
@@ -3897,6 +3976,7 @@ class StrategyRunner:
                 wallet_address=wallet_address,
                 gateway_client=gateway_client,
                 price_oracle=price_oracle,
+                block=block,
             )
         except (ConnectionError, TimeoutError, OSError):
             logger.debug("lending %s-state capture failed (transient/non-fatal)", phase, exc_info=True)
@@ -4567,6 +4647,13 @@ class StrategyRunner:
         # before they are serialized to the ledger row.  ``state.lending_pre_state``
         # was captured by ``_init_single_chain_state`` *before* submission.
         intent_protocol = (getattr(intent, "protocol", "") or "").lower()
+        # VIB-4589 / F7 — pin the post-state read to the confirmed receipt's
+        # block. Reading at ``"latest"`` (the pre-fix default) raced the
+        # upstream RPC's receipt indexer on mainnet and produced stale
+        # collateral balances. Use the LAST successful receipt's
+        # block_number — for multi-tx bundles that is the state after the
+        # whole bundle landed.
+        post_block = _last_receipt_block(state.last_execution_result)
         lending_post_state = self._capture_lending_state_safe(
             intent=intent,
             chain=strategy.chain,
@@ -4574,6 +4661,7 @@ class StrategyRunner:
             gateway_client=state.gateway_client,
             price_oracle=state.price_oracle,
             phase="post",
+            block=post_block,
         )
         pre_state = _build_pre_state_for_ledger(
             state.pre_snapshot,
@@ -4862,6 +4950,9 @@ class StrategyRunner:
                 # Reconciliation-incident path: the on-chain TX still landed
                 # so post-state is meaningful. Re-read here to keep the
                 # ledger row's lending fields aligned with reality.
+                # VIB-4589 / F7 — pin the read to the receipt's block to
+                # avoid racing the upstream RPC's receipt indexer; same
+                # rationale as the clean-success path above.
                 self._capture_lending_state_safe(
                     intent=intent,
                     chain=strategy.chain,
@@ -4869,6 +4960,7 @@ class StrategyRunner:
                     gateway_client=state.gateway_client,
                     price_oracle=state.price_oracle,
                     phase="post",
+                    block=_last_receipt_block(last_execution_result),
                 ),
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
