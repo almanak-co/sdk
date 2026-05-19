@@ -255,12 +255,21 @@ async def _persist_and_drain_for_intent_test(
     error: str = "",
     price_oracle: dict[str, Decimal] | None = None,
     eth_call_reader: Any | None = None,
+    pre_state: dict[str, Any] | None = None,
+    post_state: dict[str, Any] | None = None,
 ) -> Layer5Persisted:
     """Persist one real intent result through the production outbox path.
 
     This stays test-scoped on purpose: Layer-5 intent tests need to assert
     what the existing accounting processor writes without adding a new
     production helper or changing runner behavior.
+
+    ``pre_state`` / ``post_state`` mirror the runner's lending-state capture
+    (``capture_lending_pre_state`` / ``capture_lending_post_state`` serialized
+    via ``lending_state_to_dict``). When supplied they flow into
+    ``build_ledger_entry`` so the lending category handler reads real
+    collateral/debt/health-factor and emits ``confidence=HIGH`` rows — the
+    LP slot0 lane has no equivalent (it enriches ``extracted_data`` instead).
     """
     _maybe_enrich_with_slot0(result, chain=chain, eth_call_reader=eth_call_reader)
 
@@ -273,6 +282,8 @@ async def _persist_and_drain_for_intent_test(
         success=success,
         error=error,
         price_oracle=price_oracle,
+        pre_state=pre_state,
+        post_state=post_state,
     )
     entry.deployment_id = deployment_id
     entry.execution_mode = execution_mode
@@ -316,8 +327,14 @@ async def assert_accounting_persisted(
     cycle_id: str = "layer5-cycle",
     execution_mode: str = "paper",
     eth_call_reader: Any | None = None,
+    pre_state: dict[str, Any] | None = None,
+    post_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist a real execution result through Layer 5 and return the event row."""
+    """Persist a real execution result through Layer 5 and return the event row.
+
+    ``pre_state`` / ``post_state`` are the runner-shaped lending-state dicts
+    (see ``_persist_and_drain_for_intent_test``); LP callers omit them.
+    """
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
         accounting_processor=harness.processor,
@@ -332,6 +349,8 @@ async def assert_accounting_persisted(
         success=bool(getattr(result, "success", False)),
         price_oracle=price_oracle,
         eth_call_reader=eth_call_reader,
+        pre_state=pre_state,
+        post_state=post_state,
     )
     assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
     assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"
