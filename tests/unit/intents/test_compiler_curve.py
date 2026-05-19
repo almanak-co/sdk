@@ -140,7 +140,7 @@ def compiler():
 
 
 class TestCurveSwap:
-    """Tests for _compile_swap_curve routing."""
+    """Tests for connector-owned Curve swap compilation."""
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
@@ -330,7 +330,7 @@ class TestCurveSwap:
 
 
 class TestCurveLPOpen:
-    """Tests for _compile_lp_open_curve routing."""
+    """Tests for connector-owned Curve LP open compilation."""
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
@@ -435,7 +435,7 @@ class TestCurveLPOpen:
 
 
 class TestCurveLPClose:
-    """Tests for _compile_lp_close_curve routing."""
+    """Tests for connector-owned Curve LP close compilation."""
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
@@ -548,3 +548,160 @@ class TestCurveLPClose:
         assert result.action_bundle.intent_type == IntentType.LP_CLOSE.value
         assert result.action_bundle.transactions == []
         assert result.action_bundle.metadata.get("no_op") is True
+
+    def test_lp_close_unsupported_chain_returns_failed(self):
+        """LP close fails when the chain is not supported by Curve."""
+        config = IntentCompilerConfig(allow_placeholder_prices=True)
+        compiler = IntentCompiler(chain="avalanche", wallet_address=TEST_WALLET, config=config)
+
+        intent = LPCloseIntent(position_id="100.0", pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Curve is not supported on avalanche" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_unknown_pool_returns_failed(self, compiler):
+        """LP close fails when the pool is neither a known name nor a known address."""
+        intent = LPCloseIntent(
+            position_id="100.0",
+            pool="0xDEADBEEF00000000000000000000000000000000",
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Unknown Curve pool" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_by_pool_address_success(self, mock_config_cls, mock_adapter_cls, compiler):
+        """LP close resolves the pool by address (not name) and succeeds."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(success=True, op="remove_liquidity")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPCloseIntent(position_id="50", pool=USDC_USDT_POOL, protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["pool_name"] == "usdc_usdt"
+        mock_adapter.remove_liquidity.assert_called_once_with(
+            pool_address=USDC_USDT_POOL,
+            lp_amount=Decimal("50"),
+            slippage_bps=50,
+        )
+
+    @patch(
+        CURVE_POOLS_PATH,
+        {
+            "ethereum": {
+                "nolp_pool": {
+                    "address": USDC_USDT_POOL,
+                    "coins": ["USDC", "USDT"],
+                    "pool_type": "stableswap",
+                    "n_coins": 2,
+                }
+            }
+        },
+    )
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_pool_missing_lp_token_returns_failed(self, compiler):
+        """LP close fails closed when the pool config has no lp_token field."""
+        intent = LPCloseIntent(position_id="100.0", pool="nolp_pool", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "missing 'lp_token'" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_position_id_lp_token_mismatch_returns_failed(self, compiler):
+        """LP close refuses when an address-form position_id != the pool's LP token."""
+        wrong_lp_token = "0x" + "1" * 40
+
+        intent = LPCloseIntent(position_id=wrong_lp_token, pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "does not match" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_balance_query_failure_returns_failed(self, compiler):
+        """Address-form position_id with an unqueryable balance fails closed."""
+        lp_token = "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC"
+        compiler._query_erc20_balance = MagicMock(return_value=None)
+
+        intent = LPCloseIntent(position_id=lp_token, pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Failed to query LP token balance" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_unresolvable_lp_token_decimals_returns_failed(self, compiler):
+        """Address-form position_id whose LP token decimals can't be resolved fails closed."""
+        lp_token = "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC"
+        compiler._query_erc20_balance = MagicMock(return_value=100 * 10**18)
+        compiler._resolve_token = MagicMock(return_value=None)
+
+        intent = LPCloseIntent(position_id=lp_token, pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Could not resolve decimals" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_by_lp_token_address_success(self, mock_config_cls, mock_adapter_cls, compiler):
+        """Address-form position_id with a nonzero on-chain balance computes lp_amount and succeeds."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(success=True, op="remove_liquidity")
+        mock_adapter_cls.return_value = mock_adapter
+
+        lp_token = "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC"
+        compiler._query_erc20_balance = MagicMock(return_value=100 * 10**18)
+        compiler._resolve_token = MagicMock(return_value=MagicMock(decimals=18))
+
+        intent = LPCloseIntent(position_id=lp_token, pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["lp_amount"] == "100"
+        mock_adapter.remove_liquidity.assert_called_once_with(
+            pool_address=USDC_USDT_POOL,
+            lp_amount=Decimal("100"),
+            slippage_bps=50,
+        )
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_unexpected_exception_returns_failed(self, mock_config_cls, mock_adapter_cls, compiler):
+        """An unexpected adapter exception is caught and surfaced as FAILED."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity.side_effect = RuntimeError("boom")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPCloseIntent(position_id="100.0", pool="usdc_usdt", protocol="curve")
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "boom" in result.error

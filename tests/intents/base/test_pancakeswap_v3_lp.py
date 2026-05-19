@@ -745,7 +745,7 @@ class TestPancakeSwapV3CollectFeesIntent:
         # 5. Parse receipts — Layer 3 strict: COLLECT event amounts > 0.
         # The V3-fork collect compiler routes `recipient=wallet` directly (no
         # unwrap), so the Collect event amount0/amount1 must equal the wallet
-        # deltas exactly (see compiler._compile_collect_fees_v3_fork).
+        # deltas exactly (see the connector collect-fees compiler).
         parser = PancakeSwapV3ReceiptParser(chain=CHAIN_NAME)
         parsed_amount0_collected = 0
         parsed_amount1_collected = 0

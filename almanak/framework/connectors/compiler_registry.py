@@ -28,6 +28,10 @@ class CompilerRegistry:
             "almanak.framework.connectors.uniswap_v3.compiler",
             "UniswapV3Compiler",
         ),
+        "curve": (
+            "almanak.framework.connectors.curve.compiler",
+            "CurveCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

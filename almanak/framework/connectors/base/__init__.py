@@ -44,6 +44,7 @@ from almanak.framework.connectors.base.event import BaseEvent
 from almanak.framework.connectors.base.hex_utils import HexDecoder
 from almanak.framework.connectors.base.receipt_parser import BaseReceiptParser, ParseResult
 from almanak.framework.connectors.base.registry import EventRegistry
+from almanak.framework.connectors.base.swap_adapter import DefaultSwapAdapter
 
 __all__ = [
     "BaseCompilerContext",
@@ -53,6 +54,7 @@ __all__ = [
     "CLCompilerContext",
     "CompilerServices",
     "BaseReceiptParser",
+    "DefaultSwapAdapter",
     "EventRegistry",
     "HexDecoder",
     "ParseResult",

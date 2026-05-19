@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.vocabulary import IntentType
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,6 +196,7 @@ class TestCompileLPOpenInversion:
         intent.amount0 = Decimal(str(amount0))
         intent.amount1 = Decimal(str(amount1))
         intent.intent_id = "test-intent-001"
+        intent.intent_type = IntentType.LP_OPEN
         intent.max_slippage = None
         intent.protocol_params = None
         return intent

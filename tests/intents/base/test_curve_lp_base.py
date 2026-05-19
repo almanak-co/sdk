@@ -29,9 +29,9 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
+    _wrap_native_token,
     fund_erc20_token,
     get_token_balance,
-    _wrap_native_token,
 )
 
 pytestmark = pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
@@ -306,7 +306,7 @@ class TestCurveWethCbethLPClose:
 
         # --- Layer 1: Compile LP_CLOSE ---
         # Curve LP_CLOSE expects position_id as a DECIMAL token amount (e.g., "9.84"),
-        # not raw wei. The compiler multiplies by 1e18 internally (see _compile_lp_close_curve).
+        # not raw wei. The Curve connector compiler multiplies by 1e18 internally.
         # Convert raw wei balance -> decimal token units, consistent with Ethereum Curve test.
         lp_amount_decimal_str = str(Decimal(lp_balance) / Decimal(10**18))
         close_intent = LPCloseIntent(

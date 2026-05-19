@@ -512,7 +512,7 @@ class TestSmallAmountSixDecimalTokens:
 
     def test_swap_curve_uses_human_decimal(self) -> None:
         """Curve SWAP compiler ships ``str(amount_decimal)`` (human),
-        not wei (see ``compiler_curve.py:213``). Description must NOT
+        not wei. Description must NOT
         scale by ``10**decimals`` for the curve path or a $100 USDC swap
         would render as ``Swap 0.0001 USDC → DAI`` (Codex P2 catch).
         """

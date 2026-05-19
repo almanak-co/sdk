@@ -32,7 +32,8 @@ import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
 
-from ..connectors.base.compiler import CLCompilerContext
+from ..connectors.base.compiler import BaseCompilerContext, BaseProtocolCompiler, CLCompilerContext
+from ..connectors.base.swap_adapter import DefaultSwapAdapter
 from ..connectors.compiler_registry import get_compiler as get_connector_compiler
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
@@ -107,6 +108,9 @@ class _ConnectorCompilerServices:
     def resolve_token(self, token: str) -> "TokenInfo | None":
         return self.compiler._resolve_token(token)
 
+    def require_token_price(self, symbol: str) -> Decimal:
+        return self.compiler._require_token_price(symbol)
+
     def usd_to_token_amount(self, usd_amount: Decimal, token: "TokenInfo") -> int:
         return self.compiler._usd_to_token_amount(usd_amount, token)
 
@@ -144,6 +148,9 @@ class _ConnectorCompilerServices:
     def query_position_tokens_owed(self, position_manager: str, token_id: int) -> tuple[int | None, int | None]:
         return self.compiler._query_position_tokens_owed(position_manager, token_id)
 
+    def query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
+        return self.compiler._query_erc20_balance(token_address, wallet_address)
+
 
 def _warn_pcs_perps_protocol_key_once() -> None:
     global _PCS_PERPS_KEY_WARNED
@@ -178,7 +185,6 @@ from ._compiler_helpers import (
 from .compiler_adapters import (  # noqa: F401
     AaveV3Adapter,
     BalancerAdapter,
-    DefaultSwapAdapter,
     LendingProtocolAdapter,
     SwapProtocolAdapter,
 )
@@ -572,6 +578,33 @@ class IntentCompiler:
 
         return normalize_protocol(self.chain, intent_protocol)
 
+    def _base_compiler_context_kwargs(self) -> dict[str, Any]:
+        """Build common connector compiler context fields."""
+        config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
+
+        return {
+            "chain": self.chain,
+            "wallet_address": self.wallet_address,
+            "rpc_url": self._get_chain_rpc_url(),
+            "rpc_timeout": getattr(self, "rpc_timeout", 10.0),
+            "permission_discovery": getattr(config, "permission_discovery", False),
+            "allow_placeholder_prices": config.allow_placeholder_prices,
+            "token_resolver": getattr(self, "_token_resolver", None),
+            "gateway_client": getattr(self, "_gateway_client", None),
+            "price_oracle": getattr(self, "price_oracle", None),
+            "cache": getattr(self, "_allowance_cache", {}),
+            "services": _ConnectorCompilerServices(self),
+        }
+
+    def _build_compiler_context(self, protocol: str, connector_compiler: BaseProtocolCompiler) -> BaseCompilerContext:
+        """Build the context type requested by a connector compiler."""
+        context_type = getattr(connector_compiler, "context_type", BaseCompilerContext)
+        if issubclass(context_type, CLCompilerContext):
+            return self._build_cl_compiler_context(protocol)
+        if context_type is not BaseCompilerContext:
+            return context_type(**self._base_compiler_context_kwargs())
+        return BaseCompilerContext(**self._base_compiler_context_kwargs())
+
     def _build_cl_compiler_context(self, protocol: str) -> CLCompilerContext:
         """Build the connector compiler context for concentrated-liquidity protocols."""
         config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
@@ -593,17 +626,7 @@ class IntentCompiler:
             return UniswapV3LPAdapter(self.chain, adapter_protocol)
 
         return CLCompilerContext(
-            chain=self.chain,
-            wallet_address=self.wallet_address,
-            rpc_url=self._get_chain_rpc_url(),
-            rpc_timeout=getattr(self, "rpc_timeout", 10.0),
-            permission_discovery=getattr(config, "permission_discovery", False),
-            allow_placeholder_prices=config.allow_placeholder_prices,
-            token_resolver=getattr(self, "_token_resolver", None),
-            gateway_client=getattr(self, "_gateway_client", None),
-            price_oracle=getattr(self, "price_oracle", None),
-            cache=getattr(self, "_allowance_cache", {}),
-            services=_ConnectorCompilerServices(self),
+            **self._base_compiler_context_kwargs(),
             protocol=protocol,
             default_swap_adapter_factory=default_swap_adapter_factory,
             lp_adapter_factory=lp_adapter_factory,
@@ -1590,7 +1613,7 @@ class IntentCompiler:
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
-            return connector_compiler.compile_swap(self._build_cl_compiler_context(protocol), intent)
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
         from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
 
@@ -1652,8 +1675,6 @@ class IntentCompiler:
             # Aerodrome/Velodrome - Solidly-fork with different swap interface.
             # protocol is already resolved (velodrome -> aerodrome on Optimism).
             "aerodrome": self._compile_swap_aerodrome,
-            # Curve - pool-based AMM with direct pool addressing.
-            "curve": self._compile_swap_curve,
             # Uniswap V4 - PoolManager-based singleton with different interface.
             "uniswap_v4": self._compile_swap_uniswap_v4,
             # Fluid DEX - direct pool swapIn call.
@@ -2865,7 +2886,7 @@ class IntentCompiler:
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
-            return connector_compiler.compile_lp_open(self._build_cl_compiler_context(protocol), intent)
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
         from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
 
@@ -2917,9 +2938,6 @@ class IntentCompiler:
         # Pendle LP (single-token liquidity provision)
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_open(intent)
-        # Curve LP (pool-based AMM with proportional liquidity)
-        if intent.protocol == "curve":
-            return self._compile_lp_open_curve(intent)
         # Fluid DEX LP (Arbitrum only, unencumbered positions)
         if intent.protocol == "fluid":
             return self._compile_lp_open_fluid(intent)
@@ -3628,7 +3646,7 @@ class IntentCompiler:
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
-            return connector_compiler.compile_lp_close(self._build_cl_compiler_context(protocol), intent)
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
         from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
 
@@ -3679,9 +3697,6 @@ class IntentCompiler:
         # Pendle LP close
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_close(intent)
-        # Curve LP close (pool-based AMM, proportional removal)
-        if intent.protocol == "curve":
-            return self._compile_lp_close_curve(intent)
         # Fluid DEX LP close (with encumbrance guard)
         if intent.protocol == "fluid":
             return self._compile_lp_close_fluid(intent)
@@ -4067,7 +4082,7 @@ class IntentCompiler:
 
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
-            return connector_compiler.compile_collect_fees(self._build_cl_compiler_context(protocol), intent)
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
         if protocol in UNISWAP_V3_FORKS:
             return CompilationResult(
@@ -4980,24 +4995,6 @@ class IntentCompiler:
                 error=str(e),
                 intent_id=intent.intent_id,
             )
-
-    def _compile_swap_curve(self, intent: SwapIntent) -> CompilationResult:
-        """Compile SWAP intent for Curve Finance."""
-        from .compiler_curve import compile_swap_curve
-
-        return compile_swap_curve(self, intent)
-
-    def _compile_lp_open_curve(self, intent: LPOpenIntent) -> CompilationResult:
-        """Compile LP_OPEN intent for Curve Finance."""
-        from .compiler_curve import compile_lp_open_curve
-
-        return compile_lp_open_curve(self, intent)
-
-    def _compile_lp_close_curve(self, intent: LPCloseIntent) -> CompilationResult:
-        """Compile LP_CLOSE intent for Curve Finance."""
-        from .compiler_curve import compile_lp_close_curve
-
-        return compile_lp_close_curve(self, intent)
 
     def _compile_pendle_swap(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Pendle Protocol (yield tokenization)."""

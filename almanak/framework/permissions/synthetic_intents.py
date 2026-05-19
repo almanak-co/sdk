@@ -295,13 +295,13 @@ def _build_curve_swap_intents(chain: str) -> list[AnyIntent]:
     """Emit one synthetic ``SwapIntent`` per curated curve pool on ``chain``.
 
     Curve pools are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a
-    single token pair only resolves to one pool. The compiler's
-    ``compile_swap_curve`` walks ``CURVE_POOLS[chain]`` to match pool by
+    single token pair only resolves to one pool. ``CurveCompiler`` walks
+    ``CURVE_POOLS[chain]`` to match pool by
     coin pair; emitting one intent per registered pool — using the first
     two coin addresses of each — guarantees every pool's address lands on
     the manifest.
 
-    The price-oracle gate in ``compile_swap_curve`` (price_ratio for
+    The price-oracle gate in ``CurveCompiler`` (price_ratio for
     CryptoSwap/Tricrypto pools) does NOT fire during permission discovery
     because ``IntentCompiler`` is created with ``allow_placeholder_prices=True``
     and ``_require_token_price`` returns the placeholder map (USDT=$1,

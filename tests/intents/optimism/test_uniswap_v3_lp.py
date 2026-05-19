@@ -696,7 +696,7 @@ class TestUniswapV3CollectFeesIntent:
         # 5. Parse receipts — Layer 3 strict: COLLECT event amounts > 0.
         # The V3-fork collect compiler routes `recipient=wallet` directly (no
         # unwrap), so Collect event amount0/amount1 must equal wallet deltas
-        # exactly (see compiler._compile_collect_fees_v3_fork).
+        # exactly (see the connector collect-fees compiler).
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
         parsed_amount0_collected = 0
         parsed_amount1_collected = 0

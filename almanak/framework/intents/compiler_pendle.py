@@ -256,7 +256,7 @@ def _build_pre_swap_tx(
     if not from_token.is_native:
         approvals.extend(compiler._build_approve_tx(from_token.address, v3_router, amount_in))
 
-    from .compiler_adapters import DefaultSwapAdapter
+    from almanak.framework.connectors.base.swap_adapter import DefaultSwapAdapter
 
     pre_swap_adapter = DefaultSwapAdapter(
         chain=compiler.chain,
