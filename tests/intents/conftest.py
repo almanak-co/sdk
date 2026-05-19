@@ -371,6 +371,98 @@ async def assert_accounting_persisted(
     return matching_after[0]
 
 
+async def assert_accounting_persisted_or_gap(
+    harness: Layer5AccountingHarness,
+    *,
+    intent: Any,
+    result: Any,
+    chain: str,
+    wallet_address: str,
+    expected_event_type: str,
+    gap_xfail_reason: str,
+    price_oracle: dict[str, Decimal] | None = None,
+    deployment_id: str = "layer5-intent-test",
+    strategy_id: str = "layer5-intent-test",
+    cycle_id: str = "layer5-cycle",
+    execution_mode: str = "paper",
+    eth_call_reader: Any | None = None,
+    pre_state: dict[str, Any] | None = None,
+    post_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Like :func:`assert_accounting_persisted`, but encodes a known
+    *event-dropped* production gap as a runtime ``pytest.xfail``.
+
+    Drives the SAME shared ``_persist_and_drain_for_intent_test`` path (no
+    hand-rolled ledger / outbox / ``drain_one``) exactly **once**. When the
+    typed ``accounting_events`` row is genuinely written, it applies the
+    identical hard contract as :func:`assert_accounting_persisted`
+    (exactly-one + idempotent re-drain + return the row) against that same
+    single persisted entry — so a future production fix reactivates every
+    downstream assertion automatically. Only when the persist path produced
+    **zero** rows for this ledger entry — the exact drop signature
+    documented in ``gap_xfail_reason`` — does it ``pytest.xfail`` instead
+    of failing hard.
+
+    This is the full-event-drop analogue of the in-test ``pytest.xfail``
+    used by the merged VIB-4633/4634/4635 field-level gap encodings; a
+    dropped row cannot be probed after ``assert_accounting_persisted``'s
+    own ``len(...) == 1`` hard assert, so the gap check must wrap the
+    persist. Used ONLY with a Linear-ticket-referencing reason.
+    """
+    persisted = await _persist_and_drain_for_intent_test(
+        state_manager=harness.store,
+        accounting_processor=harness.processor,
+        strategy_id=strategy_id,
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        execution_mode=execution_mode,
+        chain=chain,
+        wallet_address=wallet_address,
+        intent=intent,
+        result=result,
+        success=bool(getattr(result, "success", False)),
+        price_oracle=price_oracle,
+        eth_call_reader=eth_call_reader,
+        pre_state=pre_state,
+        post_state=post_state,
+    )
+    assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
+    assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"
+
+    rows = await harness.store.get_accounting_events(deployment_id, limit=50)
+    ledger_rows = [row for row in rows if row.get("ledger_entry_id") == persisted.ledger_entry_id]
+    matching = [row for row in ledger_rows if row.get("event_type") == expected_event_type]
+    if not matching:
+        # Only the TRUE zero-row drop is the documented production gap. If a
+        # row exists for this ledger under a DIFFERENT event_type, that is a
+        # real regression (mis-typed event) and must NOT be masked as the
+        # known gap — fail loudly instead of xfail-ing (CodeRabbit PR #2369).
+        assert ledger_rows == [], (
+            f"expected zero accounting_events rows for the documented drop gap, "
+            f"but ledger {persisted.ledger_entry_id} has rows under "
+            f"{[row.get('event_type') for row in ledger_rows]!r}"
+        )
+        # Documented production gap: the on-chain action succeeded but the
+        # typed event was dropped. Reactivates the moment the gap is fixed
+        # (then ``matching`` is non-empty and the full hard asserts below
+        # run against this same single persisted entry).
+        pytest.xfail(gap_xfail_reason)
+
+    # Same hard contract as ``assert_accounting_persisted`` — applied to
+    # the SAME single persisted entry (no second persist): exactly one
+    # row, idempotent re-drain, return the row.
+    assert len(matching) == 1, (
+        f"expected exactly one {expected_event_type} accounting_event for ledger "
+        f"{persisted.ledger_entry_id}, got {len(matching)}"
+    )
+    redrained = await harness.processor.drain_one(persisted.ledger_entry_id)
+    assert redrained is True
+    rows_after = await harness.store.get_accounting_events(deployment_id, event_type=expected_event_type, limit=20)
+    matching_after = [row for row in rows_after if row.get("ledger_entry_id") == persisted.ledger_entry_id]
+    assert len(matching_after) == 1, "drain_one must be idempotent for Layer-5 rows"
+    return matching_after[0]
+
+
 async def assert_no_accounting_on_failure(
     harness: Layer5AccountingHarness,
     *,

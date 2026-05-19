@@ -14,17 +14,26 @@ To run:
     uv run pytest tests/intents/polygon/test_uniswap_v4_lp_open.py -v -s
 """
 
+import json
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionPhase,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
+    assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -59,6 +68,90 @@ LP_RANGE_UPPER = Decimal("10000")  # 10000 USDC per WETH
 
 
 # =============================================================================
+# Layer-5 accounting helpers (mirrors tests/intents/ethereum/test_uniswap_v3_lp.py;
+# V4-specific position_hash directional contract per epic VIB-4591 / VIB-4594)
+# =============================================================================
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-uniswap-v4-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="uniswap_v4",
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+    # Identity sextuple has no agent_id (Morpho precedent VIB-4604).
+    assert "agent_id" not in row
+
+
+def _assert_v4_open_position_hash(payload: dict) -> None:
+    """V4 LP_OPEN should populate the lot-matching anchor (VIB-4473).
+
+    Unlike V3 (where ``position_hash`` is always ``None``), the Uniswap V4
+    receipt parser computes ``keccak(positionManager, tickLower, tickUpper,
+    salt)`` (VIB-4474 T05) and ``lp_accounting.py:476`` forwards it onto
+    the LP_OPEN payload — so the persisted ``accounting_events`` row MUST
+    carry a real 0x-prefixed 32-byte hash, NOT ``None``.
+
+    VIB-4636 (genuine production gap, surfaced by this Layer-5 rollout):
+    the result-enrichment path invokes the V4 parser on per-tx receipts
+    that don't carry the ``ModifyLiquidity`` mint (``total_logs=1``);
+    ``_AGGREGATE_FIELDS`` aggregates ``lp_close_data`` but not
+    ``lp_open_data``, so ``position_hash`` never reaches the payload. The
+    on-chain LP_OPEN is correct (Layers 1–4 + amounts/pool/ticks/confidence
+    all hard-assert green); only the books anchor is dropped. Encode the
+    TRUE current behavior via a runtime xfail that fires ONLY on the exact
+    ``position_hash is None`` signature and auto-reactivates (the hard
+    asserts below run) the moment VIB-4636 lands. Pattern mirrors the
+    merged VIB-4633/4634/4635 Compound/Morpho gap encodings.
+    """
+    ph = payload["position_hash"]
+    if ph is None:
+        pytest.xfail(
+            "VIB-4636: V4 LP_OPEN position_hash anchor (VIB-4473) is not "
+            "persisted onto the accounting_events payload — enrichment path "
+            "drops the mint-sourced lp_open_data. On-chain LP_OPEN verified "
+            "correct above (amounts/pool/ticks/confidence hard-asserted)."
+        )
+    # Reactivates automatically once VIB-4636 wires position_hash through.
+    assert isinstance(ph, str) and ph.startswith("0x"), (
+        f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
+    )
+    assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
+
+
+# =============================================================================
 # LPOpenIntent Tests -- Uniswap V4 on Polygon
 # =============================================================================
 
@@ -84,6 +177,8 @@ class TestUniswapV4LPOpenIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test opening a WETH/USDC LP position via Uniswap V4.
 
@@ -170,6 +265,12 @@ class TestUniswapV4LPOpenIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
+        # Enrich for accounting (populates result.lp_open_data — Layer 5 needs
+        # it; mirrors the V3 golden / SushiSwap precedent ordering).
+        execution_result = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, bundle.metadata
+        )
+
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
         position_id = None
@@ -253,7 +354,45 @@ class TestUniswapV4LPOpenIntent:
 
         print(f"\nPosition ID: {position_id}")
         print(f"Liquidity:   {liquidity}")
-        print("\nALL 4 LAYERS PASSED")
+
+        # Layer 5: assert the real accounting pipeline persisted LP_OPEN.
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        payload = _payload(accounting_row)
+        assert payload["event_type"] == "LP_OPEN"
+        assert payload["position_key"] == accounting_row["position_key"]
+        assert payload["pool_address"].startswith("0x"), "LP_OPEN must persist canonical pool address"
+        # V4 difference vs V3: position_hash IS populated (VIB-4473 anchor).
+        # Gap-aware FIRST: on the VIB-4636 enrich-path drop the persisted
+        # lp_open_data (amounts + anchor + confidence) is missing/garbage,
+        # so xfail here before the exact-amount asserts rather than
+        # hard-failing on corrupted books (CodeRabbit PR #2369 / VIB-4636).
+        _assert_v4_open_position_hash(payload)
+        # Tie the persisted amounts to the exact Layer-4 spend and pin
+        # confidence — `>= 0` would pass on a zero/mis-scaled row and an
+        # un-pinned confidence hides a degraded read (CodeRabbit PR #2369).
+        assert Decimal(payload["amount0"]) == (Decimal(weth_spent) / Decimal(10**weth_decimals))
+        assert Decimal(payload["amount1"]) == (Decimal(usdc_spent) / Decimal(10**usdc_decimals))
+        assert payload["confidence"] == "HIGH", (
+            f"V4 LP_OPEN with the Anvil eth_call reader must persist "
+            f"confidence=HIGH, got {payload['confidence']!r}"
+        )
+        assert payload["tick_lower"] is not None
+        assert payload["tick_upper"] is not None
+        assert payload["liquidity"] is not None
+        assert payload["current_tick"] is not None
+        assert payload["in_range"] is True
+
+        print("\nALL 5 LAYERS PASSED")
 
     @pytest.mark.intent(IntentType.LP_OPEN)  # noqa: layers
     @pytest.mark.asyncio
@@ -262,10 +401,14 @@ class TestUniswapV4LPOpenIntent:
         web3: Web3,
         funded_wallet: str,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test that LP_OPEN with an invalid pool fails at compilation.
 
-        Verifies compilation produces a clear error for invalid pool specs.
+        Verifies compilation produces a clear error for invalid pool specs,
+        and (Layer 5) that a failed LP_OPEN writes ZERO accounting_events
+        rows (epic VIB-4591 decision #7).
         """
         print(f"\n{'='*80}")
         print("Test: LP_OPEN with invalid pool (should fail)")
@@ -297,6 +440,23 @@ class TestUniswapV4LPOpenIntent:
             "Compiler must not return an ActionBundle on FAILED compilation"
         )
         print(f"Compilation failed as expected: {compilation_result.error}")
+
+        # Layer 5: a failed LP_OPEN must write zero accounting_events rows.
+        failed_result = ExecutionResult(
+            success=False,
+            phase=ExecutionPhase.VALIDATION,
+            error=compilation_result.error or "LP_OPEN compilation failed",
+        )
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=intent,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+
         print("\nALL CHECKS PASSED")
 
 

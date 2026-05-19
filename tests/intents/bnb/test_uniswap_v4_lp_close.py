@@ -51,17 +51,26 @@ To run:
     uv run pytest tests/intents/bnb/test_uniswap_v4_lp_close.py -v -s
 """
 
+import json
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionPhase,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
+    assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -242,6 +251,223 @@ async def _open_v4_position(
 
 
 # =============================================================================
+# Layer-5 accounting helpers (mirrors tests/intents/ethereum/test_uniswap_v3_lp.py;
+# V4-specific position_hash directional contract per epic VIB-4591 / VIB-4594)
+# =============================================================================
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-uniswap-v4-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="uniswap_v4",
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+    # Identity sextuple has no agent_id (Morpho precedent VIB-4604).
+    assert "agent_id" not in row
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_v4_close_position_hash(payload: dict) -> None:
+    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
+
+    The close leg matches against the prior OPEN payload by ``position_key``
+    (not by re-reading the hash off the burn receipt), so the handler
+    forwards ``position_hash=None`` for the close-like events even on V4.
+    See ``lp_accounting.py`` VIB-4473 comment.
+    """
+    assert payload["position_hash"] is None, (
+        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
+        "must stay None (not re-read off the burn receipt)"
+    )
+
+
+def _assert_v4_open_position_hash(payload: dict) -> None:
+    """The reused close-basis LP_OPEN row must carry the V4 anchor (VIB-4473).
+
+    This close path reuses the setup ``LP_OPEN`` accounting row as the
+    lot-matching basis, so it must verify that row actually persisted the
+    V4 ``position_hash`` anchor — otherwise the close test could pass
+    without ever covering the LP_OPEN-side accounting regression once the
+    native-BNB xfail is lifted.
+
+    Mirrors ``_assert_v4_open_position_hash`` in
+    ``tests/intents/bnb/test_uniswap_v4_lp_open.py``: gap-aware, encodes
+    the TRUE current behavior via a runtime xfail that fires ONLY on the
+    exact ``position_hash is None`` signature and auto-reactivates the hard
+    asserts the moment VIB-4636 lands (same pattern as the merged
+    VIB-4633/4634/4635 gap encodings).
+    """
+    ph = payload["position_hash"]
+    if ph is None:
+        pytest.xfail(
+            "VIB-4636: V4 LP_OPEN position_hash anchor (VIB-4473) is not "
+            "persisted onto the accounting_events payload — enrichment path "
+            "drops the mint-sourced lp_open_data. On-chain LP_OPEN verified "
+            "correct above (amounts/pool/ticks/confidence hard-asserted)."
+        )
+    # Reactivates automatically once VIB-4636 wires position_hash through.
+    assert isinstance(ph, str) and ph.startswith("0x"), (
+        f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
+    )
+    assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
+
+
+def _payload_fee(raw) -> Decimal | None:
+    """Decode a persisted ``fees*_collected`` cell honoring Empty≠Zero≠None.
+
+    ``None`` = unmeasured (the parser did not separately measure fees).
+    ``""`` = the parser did not emit the field. Both stay ``None`` here so
+    the caller can apply the directional null-contract; any concrete value
+    (``"0"`` measured-zero or a positive amount) becomes a ``Decimal``.
+    """
+    if raw is None or raw == "":
+        return None
+    return Decimal(raw)
+
+
+def _assert_fee_contract(payload_raw, parser_human: Decimal | None, *, field: str) -> None:
+    """Directional null-contract for a single ``fees*_collected`` leg.
+
+    Per epic VIB-4591 decision #5 / blueprints/27 Empty≠Zero≠None. The V4
+    receipt parser sets ``LPCloseData.fees0/fees1 = None`` (Empty): V4
+    bundles fees into the withdrawal Transfer, fee separation is V1 work
+    (VIB-4482). The LP handler correctly persists an unmeasured ``None``
+    (it does NOT fabricate a measured-zero):
+
+    * parser reading is concrete  -> payload MUST equal it exactly.
+    * parser reading is ``None`` (Empty) -> payload may be ``None``
+      (unmeasured) or measured-zero ``Decimal('0')``; it must NEVER
+      fabricate a non-zero fee.
+    """
+    payload_fee = _payload_fee(payload_raw)
+    if parser_human is not None:
+        assert payload_fee == parser_human, (
+            f"{field}: payload {payload_fee!r} must equal parser reading {parser_human!r}"
+        )
+        return
+    assert payload_fee is None or payload_fee == Decimal("0"), (
+        f"{field}: parser did not measure fees (Empty); payload must be unmeasured "
+        f"(None) or measured-zero (0), never a fabricated {payload_fee!r}"
+    )
+
+
+async def _open_v4_position_with_accounting(
+    web3: Web3,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    *,
+    harness,
+    eth_call_reader,
+) -> tuple[int, int, str, str, dict]:
+    """Open a V4 LP position AND persist the LP_OPEN through Layer 5.
+
+    Returns ``(position_id, liquidity, currency0, currency1,
+    open_accounting_row)``. The persisted OPEN seeds the cost basis the
+    subsequent LP_CLOSE links against (epic VIB-4591 decisions #4/#5).
+    """
+    intent = LPOpenIntent(
+        pool=LP_POOL,
+        amount0=LP_AMOUNT_BNB,
+        amount1=LP_AMOUNT_USDT,
+        range_lower=LP_RANGE_LOWER,
+        range_upper=LP_RANGE_UPPER,
+        protocol="uniswap_v4",
+        chain=CHAIN_NAME,
+    )
+
+    compiler = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+    )
+    compilation_result = compiler.compile(intent)
+    assert compilation_result.status.value == "SUCCESS", (
+        f"Setup LP_OPEN compilation failed: {compilation_result.error}"
+    )
+    bundle = compilation_result.action_bundle
+    assert bundle is not None
+
+    execution_result = await orchestrator.execute(bundle)
+    assert execution_result.success, f"Setup LP_OPEN execution failed: {execution_result.error}"
+
+    parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
+    position_id: int | None = None
+    liquidity: int | None = None
+    for tx_result in execution_result.transaction_results:
+        if tx_result.receipt:
+            receipt_dict = tx_result.receipt.to_dict()
+            if position_id is None:
+                position_id = parser.extract_position_id(receipt_dict)
+            if liquidity is None:
+                liquidity = parser.extract_liquidity(receipt_dict)
+        if position_id is not None and liquidity is not None:
+            break
+
+    assert position_id is not None, "Setup LP_OPEN must yield a position_id"
+    assert liquidity is not None and liquidity > 0, "Setup LP_OPEN must yield positive liquidity"
+
+    token0 = bundle.metadata.get("token0", {})
+    token1 = bundle.metadata.get("token1", {})
+    currency0 = token0.get("address", "")
+    currency1 = token1.get("address", "")
+    assert currency0 and currency1, "Must extract currency addresses from bundle metadata"
+
+    open_accounting_row = await assert_accounting_persisted(
+        harness,
+        intent=intent,
+        result=execution_result,
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        expected_event_type="LP_OPEN",
+        price_oracle=price_oracle,
+        eth_call_reader=eth_call_reader,
+    )
+    _assert_identity(open_accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+    # Verify the reused close-basis row carries the V4 lot-matching anchor
+    # (gap-aware: xfails on the VIB-4636 signature, auto-reactivates on fix).
+    _assert_v4_open_position_hash(_payload(open_accounting_row))
+
+    return position_id, liquidity, currency0, currency1, open_accounting_row
+
+
+# =============================================================================
 # LPCloseIntent Tests -- Uniswap V4 on BNB Chain
 # =============================================================================
 
@@ -273,6 +499,8 @@ class TestUniswapV4LPCloseIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test full LP_OPEN -> LP_CLOSE lifecycle for BNB/USDT via V4 on BNB Chain.
 
@@ -356,10 +584,22 @@ class TestUniswapV4LPCloseIntent:
                     f"0x{existing_code.hex().removeprefix('0x')} -> 0x"
                 )
 
-        # Setup: Open a position first
+        # Setup: Open a position first (and persist its LP_OPEN through
+        # Layer 5 so the LP_CLOSE below has a prior OPEN to link basis to).
         print("\n--- Setup: Opening LP position ---")
-        position_id, liquidity, currency0, currency1 = await _open_v4_position(
-            web3, funded_wallet, orchestrator, augmented_oracle,
+        (
+            position_id,
+            liquidity,
+            currency0,
+            currency1,
+            open_accounting_row,
+        ) = await _open_v4_position_with_accounting(
+            web3,
+            funded_wallet,
+            orchestrator,
+            augmented_oracle,
+            harness=layer5_accounting_harness,
+            eth_call_reader=anvil_eth_call_adapter,
         )
         print(f"Opened position: id={position_id}, liquidity={liquidity}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
@@ -518,8 +758,82 @@ class TestUniswapV4LPCloseIntent:
             f"usdt_received={usdt_received}"
         )
 
+        # Layer 5: assert the real accounting pipeline persisted LP_CLOSE.
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=augmented_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        open_payload = _payload(open_accounting_row)
+        # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
+        assert close_payload["position_key"] == open_payload["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        # #2 directional null-contract: V4 close matches by position_key, so
+        # position_hash stays None on LP_CLOSE (the anchor lives on LP_OPEN).
+        _assert_v4_close_position_hash(close_payload)
+        assert close_payload["realized_pnl_usd"] is not None, (
+            "open-then-close must compute realized PnL"
+        )
+
+        # #3 parser ↔ event exact equality, matched by token IDENTITY
+        # (Empty≠Zero≠None on the fee legs: V4 LPCloseData.fees0/fees1 are
+        # None — fee separation is V1 VIB-4482).
+        #
+        # Native-key V4 pool: native BNB (currency0=0x0) flows out of the
+        # PoolManager WITHOUT a Transfer event, so the parser observes only
+        # the USDT leg. ``extract_lp_close_data`` keys collected amounts by
+        # PoolKey currency (``collected_by_token.get(currency0/1, 0)``), so
+        # the native leg is a measured-zero and the USDT value lands on
+        # whichever of amount0/1_collected corresponds to the USDT currency.
+        # A positional ``payload.amount0 == parser.amount0_collected`` would
+        # validate the wrong leg with the wrong decimals once the V4
+        # LP_CLOSE xfail lifts (CodeRabbit, PR #2369). Resolve BOTH sides by
+        # the USDT currency address and assert that single ERC-20 leg; the
+        # native BNB leg is already validated by the Layer-4 balance delta.
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdt_decimals_p = get_token_decimals(web3, usdt_addr)
+
+        # Parser side: pick the (amount, fee) for the USDT currency.
+        p_cur0 = (lp_close_data.currency0 or "").lower()
+        p_cur1 = (lp_close_data.currency1 or "").lower()
+        if p_cur0 == usdt_addr.lower():
+            parser_erc20_amount = lp_close_data.amount0_collected
+            parser_erc20_fee = lp_close_data.fees0
+        else:
+            assert p_cur1 == usdt_addr.lower(), (
+                f"expected USDT on a parser currency leg, got {p_cur0}/{p_cur1}"
+            )
+            parser_erc20_amount = lp_close_data.amount1_collected
+            parser_erc20_fee = lp_close_data.fees1
+
+        # Payload side: pick the leg whose token symbol resolves to USDT.
+        if close_payload["token0"] in tokens and tokens[close_payload["token0"]].lower() == usdt_addr.lower():
+            erc20_payload_amount = Decimal(close_payload["amount0"])
+            erc20_fee_raw = close_payload["fees0_collected"]
+        else:
+            assert (
+                close_payload["token1"] in tokens
+                and tokens[close_payload["token1"]].lower() == usdt_addr.lower()
+            ), f"expected USDT on one payload leg, got {close_payload['token0']}/{close_payload['token1']}"
+            erc20_payload_amount = Decimal(close_payload["amount1"])
+            erc20_fee_raw = close_payload["fees1_collected"]
+
+        assert erc20_payload_amount == _to_human(parser_erc20_amount, usdt_decimals_p)
+        # Fee legs: V4 LPCloseData.fees{0,1} are None (Empty) — directional
+        # null-contract on the ERC-20 leg the parser actually measured.
+        _assert_fee_contract(
+            erc20_fee_raw, _to_human(parser_erc20_fee, usdt_decimals_p), field="fees(erc20-leg)"
+        )
+
         print(f"\nPosition {position_id} successfully closed")
-        print("\nALL 4 LAYERS PASSED")
+        print("\nALL 5 LAYERS PASSED")
 
     @pytest.mark.intent(IntentType.LP_CLOSE)  # noqa: layers
     @pytest.mark.asyncio
@@ -528,6 +842,8 @@ class TestUniswapV4LPCloseIntent:
         web3: Web3,
         funded_wallet: str,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test that LP_CLOSE without liquidity in protocol_params fails at compilation.
 
@@ -537,7 +853,9 @@ class TestUniswapV4LPCloseIntent:
         Layer 1 by design. The failure-path contract from
         ``.claude/rules/intent-tests.md`` is still honoured by snapshotting
         native BNB and USDT around ``compiler.compile(...)`` and asserting
-        both balances are unchanged after the failed compilation.
+        both balances are unchanged after the failed compilation. Layer 5
+        adds the books-side mirror: a failed LP_CLOSE writes ZERO
+        accounting_events rows (epic VIB-4591 decision #7).
         """
         print(f"\n{'=' * 80}")
         print("Test: LP_CLOSE without liquidity (should fail compilation)")
@@ -602,6 +920,23 @@ class TestUniswapV4LPCloseIntent:
         )
 
         print(f"Compilation failed as expected: {compilation_result.error}")
+
+        # Layer 5: a failed LP_CLOSE must write zero accounting_events rows.
+        failed_result = ExecutionResult(
+            success=False,
+            phase=ExecutionPhase.VALIDATION,
+            error=compilation_result.error or "LP_CLOSE compilation failed",
+        )
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=_augment_oracle_with_bnb(price_oracle),
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+
         print("\nALL CHECKS PASSED")
 
 

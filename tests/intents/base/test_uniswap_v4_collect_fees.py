@@ -25,6 +25,7 @@ To run:
     uv run pytest tests/intents/base/test_uniswap_v4_collect_fees.py -v -s
 """
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -32,12 +33,20 @@ from web3 import Web3
 
 from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionPhase,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted_or_gap,
+    assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -84,6 +93,112 @@ LP_RANGE_UPPER = Decimal("10000")
 COUNTER_SWAP_USDC = Decimal("100")
 COUNTER_SWAP_ETH = Decimal("0.05")
 SWAP_MAX_SLIPPAGE = Decimal("0.05")
+
+
+# =============================================================================
+# Layer-5 accounting helpers (mirrors tests/intents/ethereum/test_uniswap_v3_lp.py;
+# V4-specific position_hash directional contract per epic VIB-4591 / VIB-4594)
+# =============================================================================
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-uniswap-v4-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="uniswap_v4",
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+    # Identity sextuple has no agent_id (Morpho precedent VIB-4604).
+    assert "agent_id" not in row
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_v4_close_position_hash(payload: dict) -> None:
+    """V4 LP_CLOSE / LP_COLLECT_FEES leave ``position_hash`` ``None``.
+
+    The close leg matches against the prior OPEN payload by ``position_key``
+    (not by re-reading the hash off the burn receipt), so the handler
+    forwards ``position_hash=None`` for the close-like events even on V4.
+    See ``lp_accounting.py`` VIB-4473 comment.
+    """
+    assert payload["position_hash"] is None, (
+        "V4 LP_CLOSE/LP_COLLECT_FEES match by position_key; position_hash "
+        "must stay None (not re-read off the burn receipt)"
+    )
+
+
+def _payload_fee(raw) -> Decimal | None:
+    """Decode a persisted ``fees*_collected`` cell honoring Empty≠Zero≠None.
+
+    ``None`` = unmeasured (the parser did not separately measure fees).
+    ``""`` = the parser did not emit the field. Both stay ``None`` here so
+    the caller can apply the directional null-contract; any concrete value
+    (``"0"`` measured-zero or a positive amount) becomes a ``Decimal``.
+    """
+    if raw is None or raw == "":
+        return None
+    return Decimal(raw)
+
+
+def _assert_fee_contract(payload_raw, parser_human: Decimal | None, *, field: str) -> None:
+    """Directional null-contract for a single ``fees*_collected`` leg.
+
+    Per epic VIB-4591 decision #5 / blueprints/27 Empty≠Zero≠None. The V4
+    receipt parser sets ``LPCloseData.fees0/fees1 = None`` (Empty): V4
+    bundles fees into the withdrawal Transfer, fee separation is V1 work
+    (VIB-4482). The LP handler correctly persists an unmeasured ``None``
+    (it does NOT fabricate a measured-zero):
+
+    * parser reading is concrete  -> payload MUST equal it exactly.
+    * parser reading is ``None`` (Empty) -> payload may be ``None``
+      (unmeasured) or measured-zero ``Decimal('0')``; it must NEVER
+      fabricate a non-zero fee.
+    """
+    payload_fee = _payload_fee(payload_raw)
+    if parser_human is not None:
+        assert payload_fee == parser_human, (
+            f"{field}: payload {payload_fee!r} must equal parser reading {parser_human!r}"
+        )
+        return
+    assert payload_fee is None or payload_fee == Decimal("0"), (
+        f"{field}: parser did not measure fees (Empty); payload must be unmeasured "
+        f"(None) or measured-zero (0), never a fabricated {payload_fee!r}"
+    )
 
 
 # =============================================================================
@@ -252,6 +367,8 @@ class TestUniswapV4CollectFeesIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Collect fees from an ETH/USDC LP position via V4 on Base.
 
@@ -397,6 +514,12 @@ class TestUniswapV4CollectFeesIntent:
             f"{len(execution_result.transaction_results)} transactions confirmed"
         )
 
+        # Enrich for accounting (populates result.lp_close_data — Layer 5
+        # needs it; mirrors the V3 golden / SushiSwap precedent ordering).
+        execution_result = _enrich_for_accounting(
+            execution_result, collect_intent, funded_wallet, bundle.metadata
+        )
+
         # Layer 3: Receipt Parsing -- fees0 / fees1 separate from principal.
         #
         # V4 COLLECT_FEES is implemented as DECREASE_LIQUIDITY(0) + TAKE_PAIR,
@@ -414,6 +537,7 @@ class TestUniswapV4CollectFeesIntent:
         pool_manager_addr = parser.pool_manager  # lowercased in parser ctor
         wallet_lower = funded_wallet.lower()
         gas_spent_wei = 0
+        lp_close_data = None
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i + 1}:")
@@ -458,6 +582,10 @@ class TestUniswapV4CollectFeesIntent:
                     )
                     if transfer.token.lower() == usdc_addr.lower():
                         usdc_fees_from_transfers += transfer.amount
+
+            close_data = parser.extract_lp_close_data(receipt_dict)
+            if close_data is not None:
+                lp_close_data = close_data
 
         assert saw_zero_delta_modify_liquidity, (
             "V4 LP_COLLECT_FEES must emit a ModifyLiquidity event with "
@@ -524,7 +652,55 @@ class TestUniswapV4CollectFeesIntent:
             f"Position liquidity invariant: {liquidity_before} == "
             f"{liquidity_after} (unchanged)"
         )
-        print("\nALL 4 LAYERS PASSED")
+
+        # Layer 5: assert the real accounting pipeline persisted
+        # LP_COLLECT_FEES. VIB-4637 (genuine production gap, surfaced by
+        # this rollout): a V4 fees-only collect emits ModifyLiquidity
+        # delta=0, so extract_lp_close_data yields no typed pool_address
+        # and _resolve_pool_address rejects the V3-style V4 position_key
+        # (`weth/usdc/3000`) — the LP_COLLECT_FEES event is dropped
+        # entirely (zero rows). On-chain collect is verified correct above
+        # (Layers 1–4 hard-asserted). Encode the TRUE behavior via a
+        # runtime xfail that fires ONLY on the exact zero-rows drop and
+        # auto-reactivates (full hard asserts below run) when VIB-4637
+        # lands. Pattern mirrors merged VIB-4633/4634/4635.
+        collect_accounting_row = await assert_accounting_persisted_or_gap(
+            layer5_accounting_harness,
+            intent=collect_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_COLLECT_FEES",
+            gap_xfail_reason=(
+                "VIB-4637: V4 LP_COLLECT_FEES accounting event dropped — "
+                "fees-only collect (ModifyLiquidity delta=0) yields no typed "
+                "pool_address and _resolve_pool_address rejects the V3-style "
+                "V4 position_key. On-chain collect verified correct above."
+            ),
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(collect_accounting_row, event_type="LP_COLLECT_FEES", wallet=funded_wallet)
+        collect_payload = _payload(collect_accounting_row)
+        assert collect_payload["position_key"] == collect_accounting_row["position_key"]
+        _assert_no_lot_id(collect_accounting_row, collect_payload)
+        _assert_v4_close_position_hash(collect_payload)
+        if lp_close_data is not None:
+            dec0 = get_token_decimals(web3, tokens[collect_payload["token0"]])
+            dec1 = get_token_decimals(web3, tokens[collect_payload["token1"]])
+            assert Decimal(collect_payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
+            assert Decimal(collect_payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
+            _assert_fee_contract(
+                collect_payload["fees0_collected"], _to_human(lp_close_data.fees0, dec0), field="fees0_collected"
+            )
+            _assert_fee_contract(
+                collect_payload["fees1_collected"], _to_human(lp_close_data.fees1, dec1), field="fees1_collected"
+            )
+        else:
+            _assert_fee_contract(collect_payload["fees0_collected"], None, field="fees0_collected")
+            _assert_fee_contract(collect_payload["fees1_collected"], None, field="fees1_collected")
+
+        print("\nALL 5 LAYERS PASSED")
 
     @pytest.mark.intent(IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
@@ -533,12 +709,16 @@ class TestUniswapV4CollectFeesIntent:
         web3: Web3,
         funded_wallet: str,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """V4 LP_COLLECT_FEES requires ``position_id`` in protocol_params.
 
         Compilation must fail with a clear error mentioning the missing
         ``position_id`` -- this is a hard precondition of
-        ``_compile_collect_fees_uniswap_v4``.
+        ``_compile_collect_fees_uniswap_v4``. Layer 5: a failed
+        LP_COLLECT_FEES writes ZERO accounting_events rows (epic VIB-4591
+        decision #7).
         """
         print(f"\n{'=' * 80}")
         print("Test: COLLECT_FEES without position_id (should fail)")
@@ -567,6 +747,23 @@ class TestUniswapV4CollectFeesIntent:
             f"Error should mention position_id, got: {compilation_result.error}"
         )
         print(f"Compilation failed as expected: {compilation_result.error}")
+
+        # Layer 5: a failed LP_COLLECT_FEES must write zero accounting_events rows.
+        failed_result = ExecutionResult(
+            success=False,
+            phase=ExecutionPhase.VALIDATION,
+            error=compilation_result.error or "LP_COLLECT_FEES compilation failed",
+        )
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=collect_intent,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+
         print("\nALL CHECKS PASSED")
 
 
