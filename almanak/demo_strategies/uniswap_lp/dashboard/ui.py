@@ -78,4 +78,6 @@ def render_custom_dashboard(
         config=config,
     )
 
-    render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+    # Pass api_client through so the LP template renders the gateway-backed
+    # Positions registry + Position Lifecycle sections (PR #2373 / Problem A2).
+    render_lp_dashboard(strategy_id, strategy_config, session_state, config, api_client=api_client)

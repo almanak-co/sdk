@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from almanak.framework.dashboard.sections import (
         render_cost_stack_section,
         render_pnl_section,
+        render_position_lifecycle_section,
         render_trade_tape_section,
     )
     from almanak.framework.dashboard.sections_operator import (
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 _LAZY_IMPORTS: dict[str, LazySpec] = {
     "render_cost_stack_section": ".sections",
     "render_pnl_section": ".sections",
+    "render_position_lifecycle_section": ".sections",
     "render_trade_tape_section": ".sections",
     # Phase 3 (VIB-4495) — Phase 1 RPC-backed section helpers
     "render_position_range_history_section": ".sections_reconciliation",
@@ -121,6 +123,7 @@ __all__ = [
     "render_cost_stack_section",
     "render_pnl_section",
     # Phase 3 / VIB-4495 — Phase 1 RPC-backed sections (lazy)
+    "render_position_lifecycle_section",
     "render_position_range_history_section",
     "render_positions_section",
     "render_reconciliation_operator_panel",

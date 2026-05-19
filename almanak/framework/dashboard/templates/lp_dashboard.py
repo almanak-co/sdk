@@ -391,6 +391,7 @@ def render_lp_dashboard(
     strategy_config: dict[str, Any],
     session_state: dict[str, Any],
     config: LPDashboardConfig,
+    api_client: Any | None = None,
 ) -> None:
     """Render an LP strategy dashboard using the provided configuration.
 
@@ -407,6 +408,14 @@ def render_lp_dashboard(
             Use :func:`prepare_lp_session_state` to populate this from the
             gateway before calling this function.
         config: LPDashboardConfig for this dashboard
+        api_client: Optional ``DashboardAPIClient`` (the same one passed
+            into ``render_custom_dashboard``). When supplied, the template
+            renders the gateway-backed Positions registry and Position
+            Lifecycle sections so AlmanakCode-generated LP dashboards
+            inherit the same tables the local detail page shows (PR 2 /
+            Problem A2). When ``None`` (legacy callers), those sections
+            are skipped silently — backward-compatible with every existing
+            ``render_lp_dashboard(...)`` call site.
     """
     # Warn about missing critical keys so silent N/A failures are visible
     missing = [k for k in LP_CRITICAL_KEYS if k not in session_state]
@@ -540,9 +549,92 @@ def render_lp_dashboard(
     st.subheader("Performance Summary")
     _render_performance_summary(session_state)
 
+    # Position registry + lifecycle sections (PR 2 / Problem A2). Reuses the
+    # existing gateway-backed ``render_positions_section`` and the new
+    # gateway-backed ``render_position_lifecycle_section`` so AlmanakCode-
+    # generated LP dashboards (and lp_dual / lp_triple multi-position
+    # fixtures, once they ship custom UIs) show the same registry +
+    # lifecycle tables that the local detail page renders today. Skipped
+    # silently for legacy callers that don't thread ``api_client`` through.
+    if api_client is not None:
+        _render_lp_position_panels(strategy_id, api_client)
+
     # Audit — life-to-date costs + per-intent trade tape
     render_cost_stack_section(strategy_id)
     render_trade_tape_section(strategy_id)
+
+
+def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
+    """Render the gateway-backed Positions + Position Lifecycle sections.
+
+    Split out so a missing api_client falls through cleanly without
+    leaking the import / RPC fanout into the main template body.
+
+    Known gateway-side limitations operators should be aware of:
+
+    - ``DashboardService.GetPositions`` returns OPEN positions only (see
+      ``almanak/gateway/services/dashboard_service.py`` — closed/
+      reorg_invalidated rows are deferred to a future RPC). On hosted, this
+      means that after a multi-leg position is closed its alias
+      (``leg_narrow`` / ``leg_wide``) no longer resolves and the lifecycle
+      table's CLOSE row renders without the Alias column. Locally, the
+      detail-page SQLite reader returns both open and closed rows, so the
+      same multi-leg fixture renders WITH the alias. This is a hosted-vs-
+      local alias-parity gap that has to be closed via a gateway extension.
+    """
+    from almanak.framework.dashboard.sections import (
+        render_position_lifecycle_section,
+    )
+    from almanak.framework.dashboard.sections_reconciliation import (
+        render_positions_section,
+    )
+    from almanak.framework.dashboard.service_client import (
+        DashboardClientError,
+        get_dashboard_service_client,
+    )
+
+    # Authoritative registry feed (handles + cutover-state pills). The
+    # service client is a lazy singleton — connect before the first call
+    # so the section does not surface a "Not connected to gateway" info
+    # banner on first paint (the lifecycle section happens to connect the
+    # same singleton later, which only helps on a SUBSEQUENT rerun —
+    # operators were seeing the registry panel appear broken on first
+    # render then work after one Streamlit reload). Mirrors the connect
+    # pattern at ``pages/detail.py`` (the local Command Center path).
+    service_client = get_dashboard_service_client()
+    try:
+        if not service_client.is_connected:
+            service_client.connect()
+        render_positions_section(strategy_id, service_client, heading="### Positions")
+    except DashboardClientError as exc:
+        st.info(f"Positions temporarily unavailable: {exc}")
+    except Exception:
+        # Belt-and-braces for unexpected programmer errors (AttributeError
+        # from a future edit, Streamlit upgrade incompatibility, …). LOG
+        # AT EXCEPTION LEVEL — a DEBUG-only log would make this catch
+        # observationally indistinguishable from a successful render with
+        # no positions, which the UAT card §A explicitly forbids. The
+        # visible warning gives the operator something to correlate with
+        # the logs.
+        logger.exception("render_positions_section unexpected failure for %s", strategy_id)
+        st.warning("Positions panel failed to render — check logs.")
+
+    # Lifecycle table (OPEN / CLOSE rows + PnL attribution). Filters on
+    # LP/PERP position types — covers every primitive that emits
+    # position_events today.
+    try:
+        render_position_lifecycle_section(
+            strategy_id,
+            api_client,
+            position_types=["LP", "PERP"],
+        )
+    except Exception:
+        # Same belt-and-braces semantics as the registry section above —
+        # log at EXCEPTION level + visible warning so unexpected failures
+        # are not laundered as "section rendered successfully with no
+        # data" (UAT card §A).
+        logger.exception("render_position_lifecycle_section unexpected failure for %s", strategy_id)
+        st.warning("Position lifecycle panel failed to render — check logs.")
 
 
 def _render_position_status_panel(
