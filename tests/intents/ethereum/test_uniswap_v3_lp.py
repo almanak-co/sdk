@@ -15,13 +15,22 @@ To run:
     uv run pytest tests/intents/ethereum/test_uniswap_v3_lp.py -v -s
 """
 
+import json
 from decimal import Decimal
 
 import pytest
 from web3 import Web3
 
+from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
 from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.extracted_data import LPCloseData
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionPhase,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import (
     IntentCompiler,
     LPCloseIntent,
@@ -29,6 +38,7 @@ from almanak.framework.intents import (
     SwapIntent,
 )
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -36,6 +46,8 @@ from tests.intents._lp_setup_helpers import (
 )
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
+    assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -74,13 +86,57 @@ RANGE_UPPER = Decimal("20000")
 # ``execTransactionWithRole``-wrapped under ``ZodiacOrchestrator``.
 
 
-async def _open_position_via_intent(
+def _execution_context(wallet: str) -> ExecutionContext:
+    return ExecutionContext(
+        strategy_id="layer5-uniswap-v3-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="uniswap_v3",
+    )
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human(raw: int | None, decimals: int) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / Decimal(10**decimals)
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["strategy_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+async def _open_position_for_accounting(
     funded_wallet: str,
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     anvil_rpc_url: str,
-) -> int:
-    """Open an LP position via LPOpenIntent and return the position token ID."""
+):
     intent = LPOpenIntent(
         pool=POOL,
         amount0=LP_AMOUNT_WETH,
@@ -103,16 +159,113 @@ async def _open_position_via_intent(
 
     execution_result = await orchestrator.execute(compilation_result.action_bundle)
     assert execution_result.success, f"LP Open execution failed: {execution_result.error}"
+    enriched = _enrich_for_accounting(
+        execution_result,
+        intent,
+        funded_wallet,
+        compilation_result.action_bundle.metadata,
+    )
 
-    # Extract position ID from mint receipt
     parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
-    for tx_result in execution_result.transaction_results:
+    position_id = None
+    for tx_result in enriched.transaction_results:
         if tx_result.receipt:
             pos_id = parser.extract_position_id(tx_result.receipt.to_dict())
             if pos_id is not None:
-                return pos_id
+                position_id = pos_id
+    assert position_id is not None, "Failed to extract position ID from LP Open receipt"
+    return position_id, intent, enriched
 
-    raise AssertionError("Failed to extract position ID from LP Open receipt")
+
+async def _open_position_via_intent(
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+) -> int:
+    """Open an LP position via LPOpenIntent and return the position token ID."""
+    position_id, _, _ = await _open_position_for_accounting(
+        funded_wallet,
+        orchestrator,
+        price_oracle,
+        anvil_rpc_url,
+    )
+    return position_id
+
+
+async def _execute_same_pool_fee_accrual_swap(
+    *,
+    web3: Web3,
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+) -> None:
+    """Execute a test-scoped exactInputSingle swap through WETH/USDC/3000.
+
+    The production compiler correctly refuses fixed-tier swaps when the quoter
+    cannot prove price impact. This fixture only needs to accrue fees on the
+    local Anvil fork, so it sends the router call directly with
+    amountOutMinimum=0 after compiling a normal swap intent to keep Zodiac
+    permission-manifest binding in sync with the executed targets.
+    """
+    tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+    usdc_addr = tokens["USDC"]
+    weth_addr = tokens["WETH"]
+    usdc_decimals = get_token_decimals(web3, usdc_addr)
+    amount_in = int(Decimal("1000") * Decimal(10**usdc_decimals))
+
+    manifest_intent = SwapIntent(
+        from_token="USDC",
+        to_token="WETH",
+        amount=Decimal("1000"),
+        max_slippage=Decimal("0.05"),
+        protocol="uniswap_v3",
+        chain=CHAIN_NAME,
+    )
+    manifest_compiler = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        rpc_url=anvil_rpc_url,
+    )
+    manifest_result = manifest_compiler.compile(manifest_intent)
+    assert manifest_result.status.value == "SUCCESS", (
+        f"Fee-accrual manifest seed must compile. Error: {manifest_result.error}"
+    )
+
+    adapter = UniswapV3Adapter(
+        UniswapV3Config(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_provider=price_oracle,
+        )
+    )
+    router = adapter.addresses["swap_router"]
+    approve_tx = adapter._build_approve_tx(usdc_addr, router, amount_in)
+    swap_tx = adapter._build_exact_input_single_tx(
+        token_in=usdc_addr,
+        token_out=weth_addr,
+        fee=3000,
+        recipient=funded_wallet,
+        amount_in=amount_in,
+        amount_out_minimum=0,
+    )
+    transactions = [tx.to_dict() for tx in (approve_tx, swap_tx) if tx is not None]
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SWAP.value,
+        transactions=transactions,
+        metadata={
+            "protocol": "uniswap_v3",
+            "chain": CHAIN_NAME,
+            "selected_fee_tier": 3000,
+            "router": router,
+            "amount_in": str(amount_in),
+            "min_amount_out": "0",
+        },
+    )
+    swap_result = await orchestrator.execute(action_bundle)
+    assert swap_result.success, f"Direct same-pool fee-accrual swap failed: {swap_result.error}"
 
 
 # =============================================================================
@@ -147,6 +300,8 @@ class TestUniswapV3LPOpenIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test opening a WETH/USDC LP position using LPOpenIntent.
 
@@ -213,6 +368,12 @@ class TestUniswapV3LPOpenIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
         # 5. Parse receipts - extract position ID
@@ -259,6 +420,30 @@ class TestUniswapV3LPOpenIntent:
         assert usdc_spent <= expected_usdc_max, f"USDC spent ({usdc_spent}) exceeds desired ({expected_usdc_max})"
         assert weth_spent <= expected_weth_max, f"WETH spent ({weth_spent}) exceeds desired ({expected_weth_max})"
 
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        payload = _payload(accounting_row)
+        assert payload["event_type"] == "LP_OPEN"
+        assert payload["position_key"] == accounting_row["position_key"]
+        assert payload["pool_address"].startswith("0x"), "LP_OPEN must persist canonical pool address"
+        assert Decimal(payload["amount0"]) >= 0
+        assert Decimal(payload["amount1"]) >= 0
+        assert payload["position_hash"] is None, "Uniswap V3 LP_OPEN must not fabricate a V4 position_hash"
+        assert payload["tick_lower"] is not None
+        assert payload["tick_upper"] is not None
+        assert payload["liquidity"] is not None
+        assert payload["current_tick"] is not None
+        assert payload["in_range"] is True
+
         print("\nALL CHECKS PASSED")
 
 
@@ -278,6 +463,60 @@ class TestUniswapV3LPCloseIntent:
     #3: Position has no liquidity but has owed tokens (decreased but not collected)
     """
 
+    @pytest.mark.intent(IntentType.LP_CLOSE)
+    @pytest.mark.asyncio
+    async def test_lp_close_invalid_position_writes_no_accounting(
+        self,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+    ):
+        """Failure-path guard: rejected/reverted LP_CLOSE writes no typed rows."""
+        invalid_close = LPCloseIntent(
+            position_id="999999999999",
+            pool=POOL,
+            collect_fees=True,
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        compilation_result = compiler.compile(invalid_close)
+        if compilation_result.status.value == "SUCCESS" and compilation_result.action_bundle is not None:
+            execution_result = await orchestrator.execute(compilation_result.action_bundle)
+            assert not execution_result.success, "invalid LP_CLOSE setup must not land successfully"
+            failed_result = _enrich_for_accounting(
+                execution_result,
+                invalid_close,
+                funded_wallet,
+                compilation_result.action_bundle.metadata,
+            )
+        else:
+            assert compilation_result.status.value == "FAILED"
+            failed_result = ExecutionResult(
+                success=False,
+                phase=ExecutionPhase.VALIDATION,
+                error=compilation_result.error or "LP_CLOSE compilation failed",
+            )
+
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=invalid_close,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
@@ -287,6 +526,8 @@ class TestUniswapV3LPCloseIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test #1: Close position that has liquidity.
 
@@ -309,7 +550,22 @@ class TestUniswapV3LPCloseIntent:
         print(f"{'=' * 80}")
 
         # 1. Open position
-        position_id = await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
+        position_id, open_intent, open_result = await _open_position_for_accounting(
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
         print(f"Opened position #{position_id}")
 
         # 2. Verify it has liquidity
@@ -349,6 +605,12 @@ class TestUniswapV3LPCloseIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
         assert execution_result.success, f"LP Close execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            close_intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions")
 
         # 5. Parse receipts
@@ -378,6 +640,33 @@ class TestUniswapV3LPCloseIntent:
             f"USDC returned: {usdc_returned}, WETH returned: {weth_returned}"
         )
 
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        open_payload = _payload(open_accounting_row)
+        assert close_payload["position_key"] == open_payload["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        assert close_payload["position_hash"] is None, "Uniswap V3 LP_CLOSE must not fabricate a V4 position_hash"
+        assert close_payload["realized_pnl_usd"] is not None
+
+        lp_close_data = execution_result.lp_close_data
+        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        assert Decimal(close_payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
+        assert Decimal(close_payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
+        assert Decimal(close_payload["fees0_collected"]) == _to_human(lp_close_data.fees0, dec0)
+        assert Decimal(close_payload["fees1_collected"]) == _to_human(lp_close_data.fees1, dec1)
+
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
@@ -390,6 +679,8 @@ class TestUniswapV3LPCloseIntent:
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         test_private_key: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test #2: Close position with no liquidity and no owed tokens.
 
@@ -415,7 +706,22 @@ class TestUniswapV3LPCloseIntent:
         print(f"{'=' * 80}")
 
         # 1. Open position
-        position_id = await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
+        position_id, open_intent, open_result = await _open_position_for_accounting(
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+        )
+        await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
         print(f"Opened position #{position_id}")
 
         # 2. Decrease all liquidity directly
@@ -483,6 +789,12 @@ class TestUniswapV3LPCloseIntent:
 
         assert usdc_delta == 0, f"USDC balance should be unchanged for empty position, got delta: {usdc_delta}"
         assert weth_delta == 0, f"WETH balance should be unchanged for empty position, got delta: {weth_delta}"
+        close_rows = await layer5_accounting_harness.store.get_accounting_events(
+            "layer5-intent-test",
+            event_type="LP_CLOSE",
+            limit=20,
+        )
+        assert close_rows == [], "No-op empty LP_CLOSE must not fabricate an accounting event"
 
         print(f"USDC delta: {usdc_delta}")
         print(f"WETH delta: {weth_delta}")
@@ -498,6 +810,8 @@ class TestUniswapV3LPCloseIntent:
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
         test_private_key: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test #3: Close position with no liquidity but uncollected owed tokens.
 
@@ -526,7 +840,22 @@ class TestUniswapV3LPCloseIntent:
         print(f"{'=' * 80}")
 
         # 1. Open position
-        position_id = await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
+        position_id, open_intent, open_result = await _open_position_for_accounting(
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
         print(f"Opened position #{position_id}")
 
         # 2. Execute a swap through the pool to generate fees
@@ -592,6 +921,12 @@ class TestUniswapV3LPCloseIntent:
         assert execution_result.success, (
             f"LP Close should succeed for position with owed tokens. Error: {execution_result.error}"
         )
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            close_intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
 
         # Parse receipts
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
@@ -620,6 +955,31 @@ class TestUniswapV3LPCloseIntent:
             f"USDC collected: {usdc_collected}, WETH collected: {weth_collected}"
         )
 
+        close_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        assert close_payload["position_key"] == _payload(open_accounting_row)["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        assert close_payload["position_hash"] is None
+
+        lp_close_data = execution_result.lp_close_data
+        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        assert Decimal(close_payload["amount0"]) == _to_human(lp_close_data.amount0_collected, dec0)
+        assert Decimal(close_payload["amount1"]) == _to_human(lp_close_data.amount1_collected, dec1)
+        assert Decimal(close_payload["fees0_collected"]) == _to_human(lp_close_data.fees0, dec0)
+        assert Decimal(close_payload["fees1_collected"]) == _to_human(lp_close_data.fees1, dec1)
+
         print("\nALL CHECKS PASSED")
 
 
@@ -642,10 +1002,6 @@ class TestUniswapV3CollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12)",
-    )
     async def test_collect_fees_weth_usdc(
         self,
         web3: Web3,
@@ -653,6 +1009,8 @@ class TestUniswapV3CollectFeesIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Collect fees from an in-range WETH/USDC position after a same-pool swap.
 
@@ -673,8 +1031,21 @@ class TestUniswapV3CollectFeesIntent:
         print(f"{'=' * 80}")
 
         # 1. Open an in-range position to accrue fees against.
-        position_id = await _open_position_via_intent(
-            funded_wallet, orchestrator, price_oracle, anvil_rpc_url,
+        position_id, open_intent, open_result = await _open_position_for_accounting(
+            funded_wallet,
+            orchestrator,
+            price_oracle,
+            anvil_rpc_url,
+        )
+        open_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
         )
         print(f"Opened position #{position_id}")
 
@@ -682,30 +1053,12 @@ class TestUniswapV3CollectFeesIntent:
         assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"
 
         # 2. Execute a same-pool swap to generate trading fees.
-        swap_intent = SwapIntent(
-            from_token="USDC",
-            to_token="WETH",
-            amount=Decimal("1000"),
-            max_slippage=Decimal("0.05"),
-            protocol="uniswap_v3",
-            chain=CHAIN_NAME,
-        )
-        compiler = IntentCompiler(
-            chain=CHAIN_NAME,
-            wallet_address=funded_wallet,
+        await _execute_same_pool_fee_accrual_swap(
+            web3=web3,
+            funded_wallet=funded_wallet,
+            orchestrator=orchestrator,
             price_oracle=price_oracle,
-            rpc_url=anvil_rpc_url,
-        )
-        swap_compilation = compiler.compile(swap_intent)
-        assert swap_compilation.status.value == "SUCCESS", (
-            f"Fee-accrual swap must compile to seed LP_COLLECT_FEES coverage. "
-            f"Error: {swap_compilation.error}"
-        )
-        assert swap_compilation.action_bundle is not None
-        swap_result = await orchestrator.execute(swap_compilation.action_bundle)
-        assert swap_result.success, (
-            f"Fee-accrual swap must execute so LP_COLLECT_FEES runs on a fee-accrued "
-            f"position. Error: {swap_result.error}"
+            anvil_rpc_url=anvil_rpc_url,
         )
         print("Executed swap to generate LP fees")
 
@@ -722,6 +1075,12 @@ class TestUniswapV3CollectFeesIntent:
             chain=CHAIN_NAME,
             protocol_params={"position_id": position_id},
         )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
 
         print("\nCompiling CollectFeesIntent...")
         compilation_result = compiler.compile(collect_intent)
@@ -735,6 +1094,12 @@ class TestUniswapV3CollectFeesIntent:
         print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"CollectFees execution failed: {execution_result.error}"
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            collect_intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
 
         # 5. Parse receipts — Layer 3 strict: COLLECT event amounts > 0.
         # The V3-fork collect compiler routes `recipient=wallet` directly (no
@@ -743,6 +1108,8 @@ class TestUniswapV3CollectFeesIntent:
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
         parsed_amount0_collected = 0
         parsed_amount1_collected = 0
+        parsed_fees0_collected = 0
+        parsed_fees1_collected = 0
         saw_collect = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
@@ -756,6 +1123,8 @@ class TestUniswapV3CollectFeesIntent:
                 if lp_close_data:
                     parsed_amount0_collected += lp_close_data.amount0_collected
                     parsed_amount1_collected += lp_close_data.amount1_collected
+                    parsed_fees0_collected += lp_close_data.fees0 or 0
+                    parsed_fees1_collected += lp_close_data.fees1 or 0
                     saw_collect = True
 
         assert saw_collect, (
@@ -765,6 +1134,15 @@ class TestUniswapV3CollectFeesIntent:
             f"Parser must report positive collected amounts. "
             f"amount0={parsed_amount0_collected}, amount1={parsed_amount1_collected}"
         )
+        execution_result.lp_close_data = LPCloseData(
+            amount0_collected=0,
+            amount1_collected=0,
+            fees0=parsed_amount0_collected,
+            fees1=parsed_amount1_collected,
+            liquidity_removed=0,
+            source="collect",
+        )
+        execution_result.extracted_data["lp_close_data"] = execution_result.lp_close_data
 
         # 6. Verify principal liquidity is unchanged (fees-only, not LP_CLOSE).
         liquidity_after = query_position_liquidity(web3, POSITION_MANAGER, position_id)
@@ -801,6 +1179,29 @@ class TestUniswapV3CollectFeesIntent:
             f"USDC wallet delta must exactly equal parsed Collect amount. "
             f"wallet={usdc_received}, parsed={parsed_usdc_collected}"
         )
+
+        collect_accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=collect_intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_COLLECT_FEES",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(collect_accounting_row, event_type="LP_COLLECT_FEES", wallet=funded_wallet)
+        collect_payload = _payload(collect_accounting_row)
+        assert collect_payload["position_key"] == _payload(open_accounting_row)["position_key"]
+        _assert_no_lot_id(collect_accounting_row, collect_payload)
+        assert collect_payload["position_hash"] is None
+
+        dec0 = get_token_decimals(web3, tokens[collect_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[collect_payload["token1"]])
+        assert Decimal(collect_payload["amount0"]) == Decimal("0")
+        assert Decimal(collect_payload["amount1"]) == Decimal("0")
+        assert Decimal(collect_payload["fees0_collected"]) == _to_human(parsed_fees0_collected, dec0)
+        assert Decimal(collect_payload["fees1_collected"]) == _to_human(parsed_fees1_collected, dec1)
 
         print("\nALL CHECKS PASSED")
 

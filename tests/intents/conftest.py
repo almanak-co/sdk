@@ -9,11 +9,15 @@ This module provides common infrastructure for all per-chain Intent tests:
 - Price oracle with CoinGecko
 """
 
+import inspect
 import os
+import sqlite3
 import time
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +26,16 @@ import requests
 from web3 import Web3
 from web3.exceptions import TimeExhausted
 from web3.providers.rpc.async_rpc import AsyncHTTPProvider
+
+from almanak.framework.accounting.basis import FIFOBasisStore
+from almanak.framework.accounting.lp_accounting import _get_pool_address
+from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
+from almanak.framework.connectors.uniswap_v3.slot0_fallback import (
+    enrich_lp_close_with_slot0,
+    enrich_lp_open_with_slot0,
+)
+from almanak.framework.observability.ledger import build_ledger_entry
+from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
 # =============================================================================
 # Test Timeouts (Fail Fast)
@@ -81,6 +95,316 @@ SWAP_MAX_SLIPPAGE = Decimal("0.20")
 # Default Anvil port
 ANVIL_PORT = 8545
 ANVIL_URL = f"http://localhost:{ANVIL_PORT}"
+
+
+@dataclass(frozen=True)
+class Layer5AccountingHarness:
+    """Per-test Layer-5 accounting persistence harness."""
+
+    db_path: Path
+    store: SQLiteStore
+    basis_store: FIFOBasisStore
+    processor: AccountingProcessor
+
+
+@dataclass(frozen=True)
+class Layer5Persisted:
+    """Test-owned accounting persistence result."""
+
+    ledger_entry_id: str
+    outbox_id: str | None
+    drained: Any = None
+
+
+@dataclass(frozen=True)
+class AnvilEthCallAdapter:
+    """Test-scoped gateway-shaped eth_call adapter backed by the Anvil Web3."""
+
+    web3: Web3
+
+    def eth_call(self, chain: str, to: str, data: str) -> str | None:
+        del chain
+        result = self.web3.eth.call(
+            {
+                "to": Web3.to_checksum_address(to),
+                "data": data,
+            }
+        )
+        return Web3.to_hex(result)
+
+
+@pytest.fixture
+def anvil_eth_call_adapter(web3: Web3) -> AnvilEthCallAdapter:
+    return AnvilEthCallAdapter(web3)
+
+
+def _reset_sqlite_file(db_path: Path) -> None:
+    """Drop all SDK-owned tables so setup recreates a clean schema in-place."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        for table in tables:
+            conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest_asyncio.fixture
+async def layer5_accounting_harness(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Layer5AccountingHarness:
+    """Throwaway accounting SQLite for Layer-5 intent-test assertions.
+
+    The path is keyed by xdist worker and reset in setup. We intentionally do
+    not clean up after the test so a failing run leaves the DB for post-mortem.
+    """
+    worker = worker_id or "master"
+    db_dir = tmp_path_factory.getbasetemp() / f"layer5-accounting-{worker}"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "accounting.sqlite"
+    _reset_sqlite_file(db_path)
+
+    store = SQLiteStore(SQLiteConfig(db_path=str(db_path)))
+    await store.initialize()
+    basis_store = FIFOBasisStore()
+    processor = AccountingProcessor(store, basis_store, deployment_id="layer5-intent-test")
+    harness = Layer5AccountingHarness(
+        db_path=db_path,
+        store=store,
+        basis_store=basis_store,
+        processor=processor,
+    )
+    try:
+        yield harness
+    finally:
+        await store.close()
+
+
+def _intent_type_str(intent: Any) -> str:
+    intent_type = getattr(intent, "intent_type", None)
+    if intent_type is None:
+        return ""
+    return intent_type.value if hasattr(intent_type, "value") else str(intent_type)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _default_compute_position_key(intent: Any, *, chain: str, wallet_address: str) -> tuple[str, str]:
+    intent_type = _intent_type_str(intent)
+    protocol = (getattr(intent, "protocol", "") or "").lower()
+    if (
+        intent_type in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"}
+        and "pendle" not in protocol
+    ):
+        pool_address = _get_pool_address(intent)
+        return f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}", pool_address
+    if intent_type == "SWAP":
+        return f"swap:{chain.lower()}:{wallet_address.lower()}", ""
+    return "", ""
+
+
+def _maybe_enrich_with_slot0(result: Any, *, chain: str, eth_call_reader: Any | None) -> None:
+    if eth_call_reader is None:
+        return
+    extracted_data = getattr(result, "extracted_data", None)
+    if not isinstance(extracted_data, dict):
+        return
+
+    lp_open = enrich_lp_open_with_slot0(
+        extracted_data.get("lp_open_data"),
+        gateway_client=eth_call_reader,
+        chain=chain,
+    )
+    if lp_open is not None:
+        extracted_data["lp_open_data"] = lp_open
+
+    lp_close = enrich_lp_close_with_slot0(
+        extracted_data.get("lp_close_data"),
+        gateway_client=eth_call_reader,
+        chain=chain,
+    )
+    if lp_close is not None:
+        extracted_data["lp_close_data"] = lp_close
+        if hasattr(result, "lp_close_data"):
+            result.lp_close_data = lp_close
+
+
+async def _persist_and_drain_for_intent_test(
+    *,
+    state_manager: Any,
+    accounting_processor: AccountingProcessor,
+    strategy_id: str,
+    deployment_id: str,
+    cycle_id: str,
+    execution_mode: str,
+    chain: str,
+    wallet_address: str,
+    intent: Any,
+    result: Any,
+    success: bool,
+    error: str = "",
+    price_oracle: dict[str, Decimal] | None = None,
+    eth_call_reader: Any | None = None,
+) -> Layer5Persisted:
+    """Persist one real intent result through the production outbox path.
+
+    This stays test-scoped on purpose: Layer-5 intent tests need to assert
+    what the existing accounting processor writes without adding a new
+    production helper or changing runner behavior.
+    """
+    _maybe_enrich_with_slot0(result, chain=chain, eth_call_reader=eth_call_reader)
+
+    entry = build_ledger_entry(
+        strategy_id=strategy_id,
+        cycle_id=cycle_id,
+        intent=intent,
+        result=result,
+        chain=chain,
+        success=success,
+        error=error,
+        price_oracle=price_oracle,
+    )
+    entry.deployment_id = deployment_id
+    entry.execution_mode = execution_mode
+    await _maybe_await(state_manager.save_ledger_entry(entry))
+
+    if not success:
+        return Layer5Persisted(ledger_entry_id=entry.id, outbox_id=None)
+
+    position_key, market_id = _default_compute_position_key(
+        intent,
+        chain=chain,
+        wallet_address=wallet_address,
+    )
+    accounting_processor._deployment_id = deployment_id
+    outbox_id = await write_outbox_entry(
+        state_manager,
+        deployment_id=deployment_id,
+        strategy_id=strategy_id,
+        cycle_id=cycle_id,
+        ledger_entry_id=entry.id,
+        intent_type=_intent_type_str(intent),
+        wallet_address=wallet_address,
+        position_key=position_key,
+        market_id=market_id,
+    )
+    drained = await _maybe_await(accounting_processor.drain_one(entry.id)) if outbox_id else None
+    return Layer5Persisted(ledger_entry_id=entry.id, outbox_id=outbox_id, drained=drained)
+
+
+async def assert_accounting_persisted(
+    harness: Layer5AccountingHarness,
+    *,
+    intent: Any,
+    result: Any,
+    chain: str,
+    wallet_address: str,
+    expected_event_type: str,
+    price_oracle: dict[str, Decimal] | None = None,
+    deployment_id: str = "layer5-intent-test",
+    strategy_id: str = "layer5-intent-test",
+    cycle_id: str = "layer5-cycle",
+    execution_mode: str = "paper",
+    eth_call_reader: Any | None = None,
+) -> dict[str, Any]:
+    """Persist a real execution result through Layer 5 and return the event row."""
+    persisted = await _persist_and_drain_for_intent_test(
+        state_manager=harness.store,
+        accounting_processor=harness.processor,
+        strategy_id=strategy_id,
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        execution_mode=execution_mode,
+        chain=chain,
+        wallet_address=wallet_address,
+        intent=intent,
+        result=result,
+        success=bool(getattr(result, "success", False)),
+        price_oracle=price_oracle,
+        eth_call_reader=eth_call_reader,
+    )
+    assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
+    assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"
+
+    rows = await harness.store.get_accounting_events(deployment_id, event_type=expected_event_type, limit=20)
+    matching = [row for row in rows if row.get("ledger_entry_id") == persisted.ledger_entry_id]
+    assert len(matching) == 1, (
+        f"expected exactly one {expected_event_type} accounting_event for ledger "
+        f"{persisted.ledger_entry_id}, got {len(matching)}"
+    )
+
+    # Idempotency: re-draining the same outbox row must not duplicate the typed event.
+    redrained = await harness.processor.drain_one(persisted.ledger_entry_id)
+    assert redrained is True
+    rows_after = await harness.store.get_accounting_events(deployment_id, event_type=expected_event_type, limit=20)
+    matching_after = [row for row in rows_after if row.get("ledger_entry_id") == persisted.ledger_entry_id]
+    assert len(matching_after) == 1, "drain_one must be idempotent for Layer-5 rows"
+    return matching_after[0]
+
+
+async def assert_no_accounting_on_failure(
+    harness: Layer5AccountingHarness,
+    *,
+    intent: Any | None = None,
+    result: Any | None = None,
+    chain: str = "",
+    wallet_address: str = "",
+    price_oracle: dict[str, Decimal] | None = None,
+    deployment_id: str = "layer5-intent-test",
+    strategy_id: str = "layer5-intent-test",
+    cycle_id: str = "layer5-cycle",
+    execution_mode: str = "paper",
+    eth_call_reader: Any | None = None,
+) -> None:
+    """Assert the failure-path accounting contract: no typed events written.
+
+    Drives the failed result through the same Layer-5 persist path as the
+    success helper so the assertion is not vacuous on a fresh harness: a
+    failed entry writes a ledger row but must enqueue no outbox row, drain
+    nothing, and produce no typed ``accounting_events`` row for its
+    ``ledger_entry_id``.
+    """
+    assert intent is not None, "failure assertion requires the intent"
+    assert result is not None, "failure assertion requires the execution result"
+    assert not bool(getattr(result, "success", False)), (
+        "use assert_accounting_persisted() for successful results"
+    )
+
+    persisted = await _persist_and_drain_for_intent_test(
+        state_manager=harness.store,
+        accounting_processor=harness.processor,
+        strategy_id=strategy_id,
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        execution_mode=execution_mode,
+        chain=chain,
+        wallet_address=wallet_address,
+        intent=intent,
+        result=result,
+        success=False,
+        error=str(getattr(result, "error", "") or ""),
+        price_oracle=price_oracle,
+        eth_call_reader=eth_call_reader,
+    )
+    assert persisted.outbox_id is None, "failed execution must not enqueue accounting_outbox"
+    assert persisted.drained is None, "failed execution must not drain a typed event"
+
+    rows = await harness.store.get_accounting_events(deployment_id, limit=20)
+    matching = [row for row in rows if row.get("ledger_entry_id") == persisted.ledger_entry_id]
+    assert matching == [], (
+        f"failed execution must not write accounting_events rows for {persisted.ledger_entry_id}; "
+        f"got {matching!r}"
+    )
 
 # Chain configurations
 CHAIN_CONFIGS = {
