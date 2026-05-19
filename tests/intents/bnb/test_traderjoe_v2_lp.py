@@ -36,6 +36,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
 )
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents import _traderjoe_v2_layer5 as _l5
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -71,6 +72,36 @@ BIN_STEP = 15
 
 
 # =============================================================================
+# Layer-5 accounting helpers (epic VIB-4591, ticket VIB-4598)
+# =============================================================================
+#
+# Shared across all five TraderJoe V2 LP intent-test files via
+# ``tests/intents/_traderjoe_v2_layer5.py`` (gemini PR #2366: de-duplicate
+# the ~180-line-per-file block). The thin chain-bound wrappers below bind
+# this file's ``CHAIN_NAME`` so call sites stay one-liners. The module
+# docstring documents the bin-model directional null-contract in full.
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return _l5.enrich_for_accounting(
+        execution_result,
+        intent,
+        chain=CHAIN_NAME,
+        wallet=wallet,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+_payload = _l5.payload
+_to_human = _l5.to_human
+_assert_identity = _l5.assert_identity
+_assert_no_lot_id = _l5.assert_no_lot_id
+_assert_accounting_persisted_or_xfail = _l5.assert_accounting_persisted_or_xfail
+_assert_bin_model_null_contract = _l5.assert_bin_model_null_contract
+_assert_close_parser_event_equality = _l5.assert_close_parser_event_equality
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 
@@ -92,16 +123,19 @@ def _get_position_via_adapter(
     return adapter.get_position(token_x, token_y, bin_step, wallet=wallet)
 
 
-async def _open_position_via_intent(
+async def _open_position_for_accounting(
     funded_wallet: str,
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     anvil_rpc_url: str,
-) -> None:
-    """Open an LP position via LPOpenIntent.
+):
+    """Open an LP position via LPOpenIntent; return (intent, enriched_result).
 
     TraderJoe V2 uses bin-based positions (no NFT token ID to return).
-    Position is identified by pool + wallet + bin IDs.
+    Position is identified by pool + wallet + bin IDs. The enrichment runs
+    with ``live_mode=False`` (paper) exactly as the runner would in
+    non-live mode, so Layer-5 callers can persist the LP_OPEN through the
+    real accounting pipeline.
     """
     intent = LPOpenIntent(
         pool=POOL,
@@ -125,6 +159,20 @@ async def _open_position_via_intent(
 
     execution_result = await orchestrator.execute(compilation_result.action_bundle)
     assert execution_result.success, f"LP Open execution failed: {execution_result.error}"
+    # Return the RAW result — the caller enriches for accounting only just
+    # before the Layer-5 persistence call, so an enricher regression cannot
+    # mask the close-path Layer-3/4 hard asserts (CodeRabbit PR #2366).
+    return intent, execution_result, compilation_result.action_bundle.metadata
+
+
+async def _open_position_via_intent(
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+) -> None:
+    """Open an LP position via LPOpenIntent (no accounting return)."""
+    await _open_position_for_accounting(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
 
 
 # =============================================================================
@@ -154,6 +202,8 @@ class TestTraderJoeV2LPOpenIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test opening a WBNB/USDT LP position using LPOpenIntent.
 
@@ -165,6 +215,7 @@ class TestTraderJoeV2LPOpenIntent:
         5. Parse receipts - verify DepositedToBins event, extract bin IDs
         6. Query position via adapter - verify bin_ids non-empty, LP shares > 0
         7. Verify balance changes (bilateral: tokens out + shares in)
+        8. Layer 5 - assert the real accounting pipeline persisted LP_OPEN
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdt_addr = tokens["USDT"]
@@ -301,6 +352,33 @@ class TestTraderJoeV2LPOpenIntent:
         assert usdt_spent <= expected_usdt_max, f"USDT spent ({usdt_spent}) exceeds desired ({expected_usdt_max})"
         assert wbnb_spent <= expected_wbnb_max, f"WBNB spent ({wbnb_spent}) exceeds desired ({expected_wbnb_max})"
 
+        # 8. Layer 5 — assert the real accounting pipeline persisted LP_OPEN.
+        # Enrichment runs HERE (after Layers 1–4 hard asserts), so an
+        # enricher regression cannot mask receipt-parse/balance coverage
+        # (CodeRabbit PR #2366).
+        accounting_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
+        accounting_row = await _assert_accounting_persisted_or_xfail(
+            layer5_accounting_harness,
+            intent=intent,
+            result=accounting_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
+        payload = _payload(accounting_row)
+        assert payload["position_key"] == accounting_row["position_key"]
+        _assert_bin_model_null_contract(payload, event_type="LP_OPEN")
+        assert Decimal(payload["amount0"]) >= 0
+        assert Decimal(payload["amount1"]) >= 0
+
         print("\nALL CHECKS PASSED")
 
 
@@ -332,6 +410,8 @@ class TestTraderJoeV2LPCloseIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test #1: Close position that has liquidity.
 
@@ -343,6 +423,7 @@ class TestTraderJoeV2LPCloseIntent:
         5. Parse receipts - verify WithdrawnFromBins events
         6. Verify tokens returned to wallet (bilateral deltas > 0)
         7. Verify position is now empty (LBPair shares burned)
+        8. Layer 5 - assert the real accounting pipeline persisted LP_OPEN + LP_CLOSE
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdt_addr = tokens["USDT"]
@@ -355,8 +436,17 @@ class TestTraderJoeV2LPCloseIntent:
         print("Test #1: LP Close - Position with Liquidity (TraderJoe V2)")
         print(f"{'=' * 80}")
 
-        # 1. Open position
-        await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
+        # 1. Open position. Capture the RAW OPEN result + intent + bundle
+        # metadata now, but DEFER both enrichment and Layer-5 persistence to
+        # the end of the test: the VIB-4634 gap makes the persistence helper
+        # raise pytest.xfail, and enrichment itself could regress — either
+        # firing here would skip the LP_CLOSE compile/execute/parse/balance
+        # hard asserts below (gemini + CodeRabbit PR #2366). Layers 1–4 for
+        # the close run first; all enrichment + Layer-5 persistence (OPEN
+        # then CLOSE) happens at step 8.
+        open_intent, open_result, open_meta = await _open_position_for_accounting(
+            funded_wallet, orchestrator, price_oracle, anvil_rpc_url
+        )
         print("Opened LP position via LPOpenIntent")
 
         # 2. Verify it has liquidity
@@ -411,11 +501,13 @@ class TestTraderJoeV2LPCloseIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
         assert execution_result.success, f"LP Close execution failed: {execution_result.error}"
+        close_meta = compilation_result.action_bundle.metadata
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions")
 
         # 5. Parse receipts - verify WithdrawnFromBins events
         parser = TraderJoeV2ReceiptParser()
         found_withdrawal_event = False
+        lp_close_data = None
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i + 1}:")
@@ -466,6 +558,26 @@ class TestTraderJoeV2LPCloseIntent:
             f"USDT returned: {usdt_returned}, WBNB returned: {wbnb_returned}"
         )
 
+        # Layer 3 (parser amounts) + Layer 4 (exact wallet deltas): the
+        # parser must decode a non-zero close, and the wallet deltas must
+        # equal the parser-extracted amounts exactly — token X = WBNB
+        # (amount0), token Y = USDT (amount1) (CodeRabbit PR #2366).
+        assert lp_close_data is not None, "Receipt parser must decode an LP_CLOSE"
+        parsed_amount0 = int(lp_close_data.amount0_collected or 0)
+        parsed_amount1 = int(lp_close_data.amount1_collected or 0)
+        assert parsed_amount0 > 0 or parsed_amount1 > 0, (
+            f"Parser-extracted close amounts must be non-zero "
+            f"(amount0={parsed_amount0}, amount1={parsed_amount1})"
+        )
+        assert wbnb_returned == parsed_amount0, (
+            f"WBNB wallet delta ({wbnb_returned}) must equal parser "
+            f"amount0_collected ({parsed_amount0})"
+        )
+        assert usdt_returned == parsed_amount1, (
+            f"USDT wallet delta ({usdt_returned}) must equal parser "
+            f"amount1_collected ({parsed_amount1})"
+        )
+
         # 7. Verify position is now empty (LBPair shares fully burned)
         position_after = _get_position_via_adapter(
             rpc_url=anvil_rpc_url,
@@ -483,6 +595,54 @@ class TestTraderJoeV2LPCloseIntent:
             assert len(position_after.bin_ids) == 0, (
                 f"Position should be empty after close, still has {len(position_after.bin_ids)} bins"
             )
+
+        # 8. Layer 5 — assert the real accounting pipeline persisted both
+        # legs. Runs ONLY after every LP_CLOSE Layer-1–4 hard assert above,
+        # so neither the VIB-4634 xfail nor an enricher regression can mask
+        # core close logic. Enrichment also happens HERE, not at execute
+        # time (CodeRabbit PR #2366). Persist the prior OPEN first
+        # (linkage + cost basis), then CLOSE.
+        open_accounting_result = _enrich_for_accounting(
+            open_result, open_intent, funded_wallet, open_meta
+        )
+        close_accounting_result = _enrich_for_accounting(
+            execution_result, close_intent, funded_wallet, close_meta
+        )
+        open_accounting_row = await _assert_accounting_persisted_or_xfail(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_accounting_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        close_accounting_row = await _assert_accounting_persisted_or_xfail(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=close_accounting_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
+        close_payload = _payload(close_accounting_row)
+        open_payload = _payload(open_accounting_row)
+        # #4 linkage: LP_CLOSE.position_key == LP_OPEN.position_key + basis from prior OPEN.
+        assert close_payload["position_key"] == open_payload["position_key"]
+        _assert_no_lot_id(close_accounting_row, close_payload)
+        # #2 bin-model directional null-contract on LP_CLOSE.
+        _assert_bin_model_null_contract(close_payload, event_type="LP_CLOSE")
+        assert close_payload["realized_pnl_usd"] is not None, (
+            "open-then-close must compute realized PnL"
+        )
+        # #3 parser ↔ event exact scaled-int equality.
+        dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
+        dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        _assert_close_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
 
         print("\nALL CHECKS PASSED")
 
@@ -577,6 +737,17 @@ class TestTraderJoeV2LPCloseIntent:
 
         print(f"USDT delta: {usdt_delta}")
         print(f"WBNB delta: {wbnb_delta}")
+
+        # Layer 5 — N/A by construction.
+        # This is a compile-time (L1) no-op: the compiler returns SUCCESS with
+        # an EMPTY ActionBundle (0 transactions), so the test never reaches
+        # ExecutionOrchestrator and there is no ExecutionResult. The Layer-5
+        # helpers operate on a real ExecutionResult — with nothing executed
+        # there is no ledger/outbox/accounting surface to assert against, and
+        # synthesising a fake result here would test the helper, not this
+        # protocol. The "0 TX emitted + balances unchanged" conservation
+        # checks above are the books-side mirror for the no-op path
+        # (epic VIB-4591 #7).
         print("\nALL CHECKS PASSED")
 
 

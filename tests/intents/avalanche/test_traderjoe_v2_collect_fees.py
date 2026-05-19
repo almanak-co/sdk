@@ -81,6 +81,7 @@ from almanak.framework.intents import (
     LPOpenIntent,
 )
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents import _traderjoe_v2_layer5 as _l5
 from tests.intents._permission_onchain_harness import (
     AuthorizationFailed,
     is_zodiac_authz_revert,
@@ -113,6 +114,40 @@ RANGE_LOWER = Decimal("5")
 RANGE_UPPER = Decimal("500")
 
 BIN_STEP = 20
+
+
+# =============================================================================
+# Layer-5 accounting helpers (epic VIB-4591, ticket VIB-4598)
+# =============================================================================
+#
+# Shared across all five TraderJoe V2 LP intent-test files via
+# ``tests/intents/_traderjoe_v2_layer5.py`` (gemini PR #2366: de-duplicate
+# the ~180-line-per-file block). The thin chain-bound wrapper below binds
+# this file's ``CHAIN_NAME`` so call sites stay one-liners. The module
+# docstring documents the bin-model directional null-contract in full.
+#
+# This file only exercises LP_COLLECT_FEES (fee-only harvest); its
+# parser↔event equality is asserted inline against the ClaimedFees
+# ``parsed_fees_x`` / ``parsed_fees_y`` totals, so the close-specific
+# ``assert_close_parser_event_equality`` helper is intentionally not bound.
+
+
+def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
+    return _l5.enrich_for_accounting(
+        execution_result,
+        intent,
+        chain=CHAIN_NAME,
+        wallet=wallet,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+_payload = _l5.payload
+_to_human = _l5.to_human
+_assert_identity = _l5.assert_identity
+_assert_no_lot_id = _l5.assert_no_lot_id
+_assert_accounting_persisted_or_xfail = _l5.assert_accounting_persisted_or_xfail
+_assert_bin_model_null_contract = _l5.assert_bin_model_null_contract
 
 
 # =============================================================================
@@ -233,6 +268,8 @@ class TestTraderJoeV2CollectFeesIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """LP_COLLECT_FEES on a freshly-opened WAVAX/USDC LB position.
 
@@ -393,11 +430,24 @@ class TestTraderJoeV2CollectFeesIntent:
                 "Roles Modifier authorised the call to LBPair.collectFees — "
                 "that's the load-bearing authz proof for #1855."
             )
+            # Layer 5 — N/A on the zero-fee revert path.
+            # ``execution_result.success is False``: the LBPair reverted on
+            # its internal zero-fee guard, so there is no successful
+            # LP_COLLECT_FEES intent to book. The Layer-5 success helper
+            # requires a successful ExecutionResult; ``assert_no_accounting_
+            # on_failure`` would assert the books-side mirror of a *failed
+            # on-chain effect*, but here the contract being proven is authz,
+            # not accounting, and the balance-conservation asserts above are
+            # the correct books-side mirror for this revert. Layer 5 fires
+            # only on the fees>0 success branch below.
             print("\nALL AUTHZ ASSERTIONS PASSED (option (a) — authz-only)")
             return
 
         # Successful execution path — the position had non-zero fees, so we
         # can ALSO exercise the receipt-parsing and balance-delta layers.
+        # Enrichment for accounting is deferred to just before the Layer-5
+        # call (after Layers 3/4), so an enricher regression cannot mask
+        # the receipt-parse/balance hard asserts (CodeRabbit PR #2366).
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions")
 
         # 4. Layer 3: Receipt parsing. Assert ClaimedFees was emitted on
@@ -480,6 +530,38 @@ class TestTraderJoeV2CollectFeesIntent:
             f"(before={sorted(position.bin_ids)}, "
             f"after={sorted(position_after.bin_ids)})"
         )
+
+        # 7. Layer 5 — assert the real accounting pipeline persisted
+        # LP_COLLECT_FEES (fees>0 success branch only; the zero-fee revert
+        # path returned above as Layer-5 N/A by construction). Enrichment
+        # runs HERE, after Layers 1–4 (CodeRabbit PR #2366).
+        accounting_result = _enrich_for_accounting(
+            execution_result, collect_intent, funded_wallet, bundle.metadata
+        )
+        collect_accounting_row = await _assert_accounting_persisted_or_xfail(
+            layer5_accounting_harness,
+            intent=collect_intent,
+            result=accounting_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="LP_COLLECT_FEES",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_identity(collect_accounting_row, event_type="LP_COLLECT_FEES", wallet=funded_wallet)
+        collect_payload = _payload(collect_accounting_row)
+        assert collect_payload["position_key"] == collect_accounting_row["position_key"]
+        _assert_no_lot_id(collect_accounting_row, collect_payload)
+        # #2 bin-model directional null-contract (no fabricated tick/hash fields).
+        _assert_bin_model_null_contract(collect_payload, event_type="LP_COLLECT_FEES")
+        # #3 parser ↔ event exact scaled-int equality. A fee-only harvest:
+        # principal amounts are measured-zero; the fee legs carry the value
+        # and must equal the parser-extracted ClaimedFees amounts exactly
+        # (token X = WAVAX → fees0, token Y = USDC → fees1).
+        assert Decimal(collect_payload["amount0"]) == Decimal("0")
+        assert Decimal(collect_payload["amount1"]) == Decimal("0")
+        assert Decimal(collect_payload["fees0_collected"]) == _to_human(parsed_fees_x, wavax_decimals)
+        assert Decimal(collect_payload["fees1_collected"]) == _to_human(parsed_fees_y, usdc_decimals)
 
         print("\nALL 4 LAYERS PASSED")
 
