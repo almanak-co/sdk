@@ -30,6 +30,7 @@ Usage:
         render_ta_dashboard(strategy_id, strategy_config, session_state, config)
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -47,6 +48,8 @@ from almanak.framework.dashboard.sections import (
     render_pnl_section,
     render_trade_tape_section,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -86,6 +89,224 @@ class TADashboardConfig:
     protocol: str = "Uniswap V3"
     base_token: str = "WETH"
     quote_token: str = "USDC"
+
+
+def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
+    """Compute the rolling RSI series using Wilder's smoothing.
+
+    Matches the scalar implementation in
+    ``almanak.framework.data.indicators.rsi.RSIIndicatorService.calculate_rsi_from_prices``
+    but returns the rolling series (NaN for the first ``period`` rows).
+    """
+    if len(closes) < period + 1:
+        return pd.Series([float("nan")] * len(closes), index=closes.index, name="rsi")
+    delta = closes.astype(float).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    # Wilder's smoothing == EMA with alpha=1/period, adjust=False, min_periods=period
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    # avg_loss == 0 (no losses in window) collapses to RSI=100
+    rsi = rsi.where(avg_loss != 0, other=100.0)
+    return rsi.rename("rsi")
+
+
+def _ohlcv_to_price_history(ohlcv: list[dict[str, Any]]) -> pd.DataFrame:
+    """Normalise an api_client.get_ohlcv() payload into ``{time, price}`` rows."""
+    if not ohlcv:
+        return pd.DataFrame(columns=["time", "price"])
+    df = pd.DataFrame(ohlcv)
+    if "timestamp" not in df.columns or "close" not in df.columns:
+        return pd.DataFrame(columns=["time", "price"])
+    df = df.rename(columns={"timestamp": "time", "close": "price"})
+    df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df = df.dropna(subset=["time", "price"]).sort_values("time").reset_index(drop=True)
+    return df[["time", "price"]]
+
+
+def _trade_rows_to_signals(
+    rows: list[dict[str, Any]],
+    base_token: str,
+    quote_token: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split SWAP rows into buy/sell DataFrames.
+
+    A row counts as a BUY of ``base_token`` when ``token_in == quote_token``
+    AND ``token_out == base_token`` (we paid quote, received base). A SELL
+    is the reverse. Other rows (non-SWAP, or for a different pair) are
+    ignored so dashboards in mixed-strategy folders don't pick up unrelated
+    markers.
+    """
+    empty = pd.DataFrame(columns=["time", "price"])
+    if not rows:
+        return empty, empty
+    buys: list[dict[str, Any]] = []
+    sells: list[dict[str, Any]] = []
+    bu = base_token.upper()
+    qu = quote_token.upper()
+    for r in rows:
+        if str(r.get("intent_type", "")).upper() != "SWAP":
+            continue
+        ti = str(r.get("token_in", "")).upper()
+        to = str(r.get("token_out", "")).upper()
+        ts = r.get("timestamp")
+        price = r.get("effective_price")
+        if ts is None or price in (None, ""):
+            continue
+        marker = {"time": ts, "price": price}
+        if ti == qu and to == bu:
+            buys.append(marker)
+        elif ti == bu and to == qu:
+            sells.append(marker)
+
+    def _frame(items: list[dict[str, Any]]) -> pd.DataFrame:
+        if not items:
+            return empty.copy()
+        df = pd.DataFrame(items)
+        df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        return df.dropna(subset=["time", "price"]).reset_index(drop=True)
+
+    return _frame(buys), _frame(sells)
+
+
+def _trade_tape_rows(api_client: Any) -> list[dict[str, Any]]:
+    """Extract trade-tape rows from whatever shape the api_client exposes."""
+    if api_client is None or not hasattr(api_client, "get_trade_tape"):
+        return []
+    try:
+        tape = api_client.get_trade_tape()
+    except Exception:  # noqa: BLE001
+        logger.debug("api_client.get_trade_tape() failed", exc_info=True)
+        return []
+    if tape is None:
+        return []
+    # Typed dataclass with .rows attribute, OR a dict with "rows" key.
+    rows = getattr(tape, "rows", None)
+    if rows is None and isinstance(tape, dict):
+        rows = tape.get("rows", [])
+    if rows is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append(r)
+            continue
+        # Dataclass-like: harvest the few fields we need by attribute.
+        try:
+            ts: Any = getattr(r, "timestamp", None)
+            if ts is not None and hasattr(ts, "isoformat"):
+                ts = ts.isoformat()
+            out.append(
+                {
+                    "timestamp": ts,
+                    "intent_type": getattr(r, "intent_type", ""),
+                    "token_in": getattr(r, "token_in", ""),
+                    "token_out": getattr(r, "token_out", ""),
+                    "effective_price": getattr(r, "effective_price", ""),
+                }
+            )
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def prepare_ta_session_state(
+    api_client: Any,
+    session_state: dict[str, Any] | None = None,
+    config: TADashboardConfig | None = None,
+) -> dict[str, Any]:
+    """Enrich session state for ``render_ta_dashboard`` (chart subplot).
+
+    Mirrors :func:`prepare_lp_session_state`: fetches OHLCV via the
+    api_client, computes the indicator series client-side, and reads the
+    trade tape for buy/sell markers — strategy authors don't write any of
+    that plumbing. Without this helper the chart section silently degrades
+    to ``Price history data not available`` because nothing populates
+    ``price_history`` / ``rsi_history`` / ``buy_signals`` / ``sell_signals``.
+
+    Args:
+        api_client: ``DashboardAPIClient`` (or a duck-typed mock).
+        session_state: Optional pre-existing state. Caller-supplied keys
+            are preserved — never overwritten — so custom dashboards that
+            already populate ``price_history`` keep working.
+        config: ``TADashboardConfig`` describing the indicator, pair, and
+            chain. Required to know which token to fetch OHLCV for.
+
+    Returns:
+        The enriched session_state dict. Always returns; degrades to the
+        unenriched state on any API failure rather than raising.
+    """
+    result: dict[str, Any] = dict(session_state) if session_state else {}
+    if config is None:
+        return result
+
+    base_token = result.get("base_token") or config.base_token
+    quote_token = result.get("quote_token") or config.quote_token
+    chain = result.get("chain") or config.chain
+
+    # OHLCV + price history (skip if caller already supplied).
+    price_df: pd.DataFrame | None = None
+    if "price_history" not in result and api_client is not None:
+        try:
+            ohlcv = api_client.get_ohlcv(
+                token=base_token,
+                quote=quote_token,
+                timeframe="1h",
+                limit=168,
+                chain=chain,
+            )
+            price_df = _ohlcv_to_price_history(ohlcv or [])
+            if not price_df.empty:
+                result["price_history"] = price_df
+        except Exception:  # noqa: BLE001
+            logger.debug("api_client.get_ohlcv() failed", exc_info=True)
+    elif "price_history" in result:
+        existing = result["price_history"]
+        if isinstance(existing, pd.DataFrame):
+            price_df = existing
+
+    # Indicator series — only RSI today; other indicators fall through.
+    indicator_key = config.indicator_name.lower()
+    history_key = f"{indicator_key}_history"
+    data_key = f"{indicator_key}_data"
+    if (
+        history_key not in result
+        and data_key not in result
+        and price_df is not None
+        and not price_df.empty
+        and indicator_key == "rsi"
+    ):
+        try:
+            rsi = _rsi_series_from_closes(price_df["price"], config.indicator_period)
+            # The renderer's RSI subplot consumes `rsi_history` as a
+            # pandas Series indexed by time (or a list of (time, value)
+            # tuples). Emit a Series so renderer's `rsi_series.values`
+            # access works without further coercion.
+            history_series = pd.Series(
+                rsi.values,
+                index=pd.DatetimeIndex(price_df["time"]),
+                name="rsi",
+            ).dropna()
+            if not history_series.empty:
+                result[history_key] = history_series
+                # Surface the latest value to the metric row too.
+                result.setdefault(f"{indicator_key}_value", float(history_series.iloc[-1]))
+                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
+        except Exception:  # noqa: BLE001
+            logger.debug("RSI series computation failed", exc_info=True)
+
+    # Buy / sell signals from the trade tape (SWAP rows for this pair).
+    if "buy_signals" not in result or "sell_signals" not in result:
+        rows = _trade_tape_rows(api_client)
+        buys, sells = _trade_rows_to_signals(rows, base_token, quote_token)
+        result.setdefault("buy_signals", buys)
+        result.setdefault("sell_signals", sells)
+
+    return result
 
 
 def render_ta_dashboard(
@@ -241,34 +462,49 @@ def _render_charts_section(  # noqa: C901
     buy_signals = session_state.get("buy_signals")
     sell_signals = session_state.get("sell_signals")
 
-    # Convert signals to DataFrame if they're lists
-    buy_df = None
-    sell_df = None
+    # Convert signals to DataFrame if they're lists. Use ``is not None`` +
+    # explicit emptiness checks rather than ``if signals:`` — pandas raises
+    # ``ValueError: The truth value of a DataFrame is ambiguous`` on the
+    # truthiness gate.
+    def _coerce_signals(signals: Any) -> pd.DataFrame | None:
+        if signals is None:
+            return None
+        if isinstance(signals, list):
+            if not signals:
+                return None
+            df = pd.DataFrame(signals, columns=["time", "price"])
+        elif isinstance(signals, pd.DataFrame):
+            if signals.empty:
+                return None
+            df = signals.copy()
+        else:
+            return None
+        if "time" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["time"]):
+            df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+        return df
 
-    if buy_signals:
-        if isinstance(buy_signals, list):
-            buy_df = pd.DataFrame(buy_signals, columns=["time", "price"])
-        elif isinstance(buy_signals, pd.DataFrame):
-            buy_df = buy_signals.copy()
-        if buy_df is not None and "time" in buy_df.columns:
-            if not pd.api.types.is_datetime64_any_dtype(buy_df["time"]):
-                buy_df["time"] = pd.to_datetime(buy_df["time"])
-
-    if sell_signals:
-        if isinstance(sell_signals, list):
-            sell_df = pd.DataFrame(sell_signals, columns=["time", "price"])
-        elif isinstance(sell_signals, pd.DataFrame):
-            sell_df = sell_signals.copy()
-        if sell_df is not None and "time" in sell_df.columns:
-            if not pd.api.types.is_datetime64_any_dtype(sell_df["time"]):
-                sell_df["time"] = pd.to_datetime(sell_df["time"])
+    buy_df = _coerce_signals(buy_signals)
+    sell_df = _coerce_signals(sell_signals)
 
     # Get indicator data
     indicator_key = config.indicator_name.lower()
-    indicator_data = session_state.get(f"{indicator_key}_data") or session_state.get(f"{indicator_key}_history")
+    # Avoid ``a or b`` and ``and data`` truthiness on pandas objects — both
+    # raise ``ValueError: The truth value of a Series/DataFrame is ambiguous``.
+    indicator_data = session_state.get(f"{indicator_key}_data")
+    if indicator_data is None:
+        indicator_data = session_state.get(f"{indicator_key}_history")
+
+    def _has_indicator_data(data: Any) -> bool:
+        if data is None:
+            return False
+        if isinstance(data, pd.Series | pd.DataFrame):
+            return not data.empty
+        if isinstance(data, list):
+            return len(data) > 0
+        return bool(data)
 
     # For RSI specifically, create combined subplot
-    if config.indicator_name.upper() == "RSI" and indicator_data:
+    if config.indicator_name.upper() == "RSI" and _has_indicator_data(indicator_data):
         # Create subplot: price on top, RSI on bottom
         fig = make_subplots(
             rows=2,
@@ -428,7 +664,7 @@ def _render_charts_section(  # noqa: C901
         # Indicator chart if available (for non-RSI indicators)
         # Note: RSI with indicator_data is handled in the if branch above (line 244),
         # so this else branch only handles non-RSI indicators
-        if indicator_data:
+        if _has_indicator_data(indicator_data):
             if isinstance(indicator_data, list):
                 indicator_times = [item[0] for item in indicator_data]
                 indicator_values = [item[1] for item in indicator_data]

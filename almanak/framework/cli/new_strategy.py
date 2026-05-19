@@ -4687,6 +4687,7 @@ from typing import Any
 
 from almanak.framework.dashboard.templates import (
     get_rsi_config,
+    prepare_ta_session_state,
     render_ta_dashboard,
 )
 
@@ -4701,6 +4702,16 @@ def render_custom_dashboard(
         period=int(strategy_config.get("rsi_period", 14)),
         overbought=float(strategy_config.get("rsi_overbought", 70)),
         oversold=float(strategy_config.get("rsi_oversold", 30)),
+    )
+    config.base_token = str(strategy_config.get("base_token", config.base_token))
+    config.quote_token = str(strategy_config.get("quote_token", config.quote_token))
+    config.chain = str(strategy_config.get("chain", config.chain))
+    config.protocol = str(strategy_config.get("protocol", config.protocol))
+
+    session_state = prepare_ta_session_state(
+        api_client,
+        session_state=session_state,
+        config=config,
     )
 
     render_ta_dashboard(strategy_id, strategy_config, session_state, config)
