@@ -1677,8 +1677,6 @@ class IntentCompiler:
             "aerodrome": self._compile_swap_aerodrome,
             # Uniswap V4 - PoolManager-based singleton with different interface.
             "uniswap_v4": self._compile_swap_uniswap_v4,
-            # Fluid DEX - direct pool swapIn call.
-            "fluid": self._compile_swap_fluid,
             # TraderJoe V2 - LBRouter2 with Path struct (VIB-1928), NOT Uniswap V3's
             # exactInputSingle.
             "traderjoe_v2": self._compile_swap_traderjoe_v2,
@@ -2938,10 +2936,6 @@ class IntentCompiler:
         # Pendle LP (single-token liquidity provision)
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_open(intent)
-        # Fluid DEX LP (Arbitrum only, unencumbered positions)
-        if intent.protocol == "fluid":
-            return self._compile_lp_open_fluid(intent)
-
         return None
 
     def _dispatch_lp_open_solana_route(self, intent: LPOpenIntent) -> CompilationResult:
@@ -3034,123 +3028,6 @@ class IntentCompiler:
         if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
             return None
         return sqrt_price_x96, current_tick
-
-    def _compile_lp_open_fluid(self, intent: "LPOpenIntent") -> "CompilationResult":
-        """Compile LP_OPEN intent for Fluid DEX T1 (Arbitrum only).
-
-        Phase 1 limitation: LP deposit is not yet supported on-chain.
-        Fluid DEX deposit() reverts due to complex Liquidity-layer routing.
-        This method short-circuits with a clear FAILED status.
-        """
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=(
-                "Fluid DEX LP_OPEN is not supported in phase 1. "
-                "The Liquidity-layer routing causes on-chain reverts on all pools. "
-                "LP deposit support is a follow-up. Use swap intents instead."
-            ),
-            intent_id=intent.intent_id,
-        )
-
-    def _compile_lp_close_fluid(self, intent: "LPCloseIntent") -> "CompilationResult":
-        """Compile LP_CLOSE intent for Fluid DEX T1 (with encumbrance guard).
-
-        ENCUMBRANCE GUARD: Rejects compilation if the pool has smart-collateral
-        or smart-debt enabled, preventing liquidation risk.
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-
-        try:
-            from almanak.framework.connectors.fluid import FluidAdapter, FluidConfig
-
-            try:
-                nft_id = int(intent.position_id)
-            except ValueError:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid Fluid position ID (must be integer): {intent.position_id}",
-                    intent_id=intent.intent_id,
-                )
-
-            dex_address = intent.pool
-            if not dex_address or not dex_address.startswith("0x"):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Fluid LP_CLOSE requires pool address in pool field. Got pool={intent.pool}"),
-                    intent_id=intent.intent_id,
-                )
-
-            # Prefer the gateway transport when a gateway client is injected
-            # AND actually connected. An injected-but-disconnected client
-            # (e.g., construction order bug in local setups) falls back to
-            # the direct RPC URL — mirrors _get_enso_route() behavior.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            if gateway_client is None:
-                rpc_url = self._get_chain_rpc_url()
-                if not rpc_url:
-                    raise ValueError("Connected gateway_client or RPC URL required for Fluid DEX adapter.")
-            else:
-                rpc_url = None
-
-            config = FluidConfig(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                rpc_url=rpc_url,
-                gateway_client=gateway_client,
-            )
-            fluid_adapter = FluidAdapter(config)
-
-            # COMPILE-TIME ENCUMBRANCE GUARD — raises if pool has smart-debt/collateral
-            lp_tx = fluid_adapter.build_remove_liquidity_transaction(
-                dex_address=dex_address,
-                nft_id=nft_id,
-            )
-
-            transactions.append(
-                TransactionData(
-                    to=lp_tx.to,
-                    value=lp_tx.value,
-                    data=lp_tx.data,
-                    gas_estimate=lp_tx.gas,
-                    description=lp_tx.description,
-                    tx_type="fluid_operate_close",
-                )
-            )
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.LP_CLOSE.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "dex_address": dex_address,
-                    "nft_id": nft_id,
-                    "protocol": "fluid",
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                f"Compiled Fluid LP_CLOSE intent: nft_id={nft_id}, pool={dex_address}, "
-                f"{len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile Fluid LP_CLOSE intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
 
     def _compile_lp_open_uniswap_v4(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for Uniswap V4 via PositionManager.
@@ -3697,10 +3574,6 @@ class IntentCompiler:
         # Pendle LP close
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_close(intent)
-        # Fluid DEX LP close (with encumbrance guard)
-        if intent.protocol == "fluid":
-            return self._compile_lp_close_fluid(intent)
-
         return None
 
     def _dispatch_lp_close_solana_route(self, intent: LPCloseIntent) -> CompilationResult:
@@ -4866,29 +4739,6 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
                 error=str(e),
             )
-
-    def _compile_swap_fluid(self, intent: SwapIntent) -> CompilationResult:
-        """Compile SWAP intent for Fluid DEX (Arbitrum only).
-
-        Uses the pool's swapIn() function directly. Automatically discovers
-        the Fluid DEX pool for the token pair and determines swap direction.
-
-        VIB-2822: All 20 Fluid DEX T1 pools on Arbitrum currently reject swaps
-        at any amount (FluidDexSwapTooSmall / FluidDexLiquidityLimit). The
-        connector fails fast here to spare strategy authors from debugging
-        protocol-level reverts. Remove this guard once pools are confirmed
-        functional again (re-check with a direct eth_call on mainnet).
-        """
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=(
-                "Fluid DEX connector is disabled: all 20 Arbitrum T1 pools "
-                "currently reject swaps at any amount (FluidDexSwapTooSmall / "
-                "FluidDexLiquidityLimit). This is a protocol-level issue, not a "
-                "compiler bug. Use uniswap_v3, sushiswap_v3, or camelot instead."
-            ),
-        )
 
     def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4.

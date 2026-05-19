@@ -32,6 +32,10 @@ class CompilerRegistry:
             "almanak.framework.connectors.curve.compiler",
             "CurveCompiler",
         ),
+        "fluid": (
+            "almanak.framework.connectors.fluid.compiler",
+            "FluidCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

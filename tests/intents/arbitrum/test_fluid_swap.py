@@ -1,11 +1,11 @@
 """Compile-time regression guard for the disabled Fluid DEX connector on Arbitrum.
 
-VIB-2822: ``IntentCompiler._compile_swap_fluid`` (in ``almanak/framework/intents/compiler.py``)
-unconditionally returns ``CompilationStatus.FAILED`` because every Arbitrum
-Fluid DEX T1 pool currently reverts (``FluidDexSwapTooSmall`` /
-``FluidDexLiquidityLimit``). The compile-time short-circuit is the correct
-production state — these tests lock that state in. If someone re-enables
-Fluid without fixing the underlying protocol issue, this guard fails loudly.
+VIB-2822: ``FluidCompiler.compile_swap`` unconditionally returns
+``CompilationStatus.FAILED`` because every Arbitrum Fluid DEX T1 pool
+currently reverts (``FluidDexSwapTooSmall`` / ``FluidDexLiquidityLimit``).
+The compile-time short-circuit is the correct production state — these tests
+lock that state in. If someone re-enables Fluid without fixing the underlying
+protocol issue, this guard fails loudly.
 
 Compile-only — no Anvil, no orchestrator, no network. Replaces an earlier
 on-chain xfail harness that pretended an integration existed.
@@ -59,7 +59,7 @@ class TestFluidSwapCompileGuard:
     # (execution, receipt parsing, balance deltas) are intentionally absent.
     # See module docstring for full rationale.
     @pytest.mark.intent(IntentType.SWAP)
-    @pytest.mark.parametrize(  # noqa: layers
+    @pytest.mark.parametrize(
         "from_token,to_token",
         [
             ("USDC", "USDT"),

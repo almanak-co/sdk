@@ -409,17 +409,28 @@ class TestCompileLPCloseDispatch:
         assert dispatched_intent is intent
         assert kwargs == {}
 
-    def test_fluid_dispatches_to_helper(self) -> None:
+    def test_fluid_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="arbitrum")
         sentinel = MagicMock(name="fluid-result")
-        with patch.object(
-            compiler, "_compile_lp_close_fluid", return_value=sentinel
-        ) as mock_fluid:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_lp_close_intent(protocol="fluid")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_fluid.assert_called_once()
+        mock_get_compiler.assert_called_once_with("fluid")
+        connector_compiler.compile.assert_called_once()
+        args, kwargs = connector_compiler.compile.call_args
+        assert len(args) == 2
+        ctx, dispatched_intent = args
+        assert isinstance(ctx, BaseCompilerContext)
+        assert dispatched_intent is intent
+        assert kwargs == {}
 
 
 # ---------------------------------------------------------------------------

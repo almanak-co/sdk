@@ -1,12 +1,15 @@
-"""Fluid DEX Connector — Phase 1 (Arbitrum swaps + LP scaffolding).
+"""Fluid DEX Connector — Phase 1 (Arbitrum swap surface + LP scaffolding).
 
-Provides swap support for Fluid DEX T1 pools on Arbitrum via swapIn().
-LP open/close intent routing is wired but LP deposit reverts on-chain (phase 2).
+Provides the Fluid DEX T1 integration surface on Arbitrum. Swaps currently
+fail fast because all known T1 pools reject swaps at tested amounts; LP open
+also fails fast while Liquidity-layer routing remains unsupported. LP close
+uses the adapter encumbrance guard before building remove-liquidity calldata.
 
 Scope (phase 1):
 - Arbitrum only
-- Swaps via swapIn() (fully functional)
+- Swaps via swapIn() (compile path currently disabled)
 - LP deposit deferred (Liquidity-layer routing causes reverts)
+- LP close compile support for unencumbered positions
 
 Key contracts (Arbitrum):
 - DexFactory: 0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085
@@ -28,12 +31,14 @@ from almanak.framework.connectors.fluid.adapter import (
     FluidConfig,
     FluidPositionDetails,
 )
+from almanak.framework.connectors.fluid.compiler import FluidCompiler
 from almanak.framework.connectors.fluid.receipt_parser import FluidReceiptParser
 from almanak.framework.connectors.fluid.sdk import FluidSDK
 
 __all__ = [
     "FluidAdapter",
     "FluidConfig",
+    "FluidCompiler",
     "FluidPositionDetails",
     "FluidReceiptParser",
     "FluidSDK",
@@ -47,6 +52,10 @@ from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
 
 register_connector(
     name="fluid",
-    intents=(IntentType.SWAP,),
+    intents=(
+        IntentType.SWAP,
+        IntentType.LP_OPEN,
+        IntentType.LP_CLOSE,
+    ),
     chains=("arbitrum",),
 )
