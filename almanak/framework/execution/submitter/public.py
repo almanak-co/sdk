@@ -57,6 +57,7 @@ from almanak.framework.execution.interfaces import (
     TransactionReceipt,
     TransactionRevertedError,
 )
+from almanak.framework.execution.nonce_recovery import try_recover_nonce_too_low
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,22 @@ class PublicMempoolSubmitter(Submitter):
                 if error_category == "nonce":
                     self._metrics.nonce_errors += 1
                     expected, provided = self._extract_nonce_info(error_message)
+
+                    # "nonce too low" is ambiguous — the tx may have already
+                    # been mined. Check via receipt before declaring failure.
+                    # Full rationale in ``execution/nonce_recovery.py``.
+                    recovery = await try_recover_nonce_too_low(
+                        web3=web3,
+                        error_message=error_message,
+                        signed_tx=signed_tx,
+                    )
+                    if recovery is not None:
+                        latency_ms = (datetime.now(UTC) - start_time).total_seconds() * 1000
+                        self._metrics.total_submissions += 1
+                        self._metrics.successful_submissions += 1
+                        self._metrics.total_latency_ms += latency_ms
+                        return recovery
+
                     logger.warning(
                         f"Nonce error submitting tx: {error_message}, expected={expected}, provided={provided}"
                     )

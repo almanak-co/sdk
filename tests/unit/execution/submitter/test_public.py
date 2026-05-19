@@ -366,6 +366,10 @@ class TestSubmission:
         mock_web3.eth.send_raw_transaction = AsyncMock(
             side_effect=Exception({"message": "nonce too low: expected 5, got 3"})
         )
+        # The 'nonce too low' branch now looks up the receipt before raising;
+        # return None so the recovery path is exercised but doesn't recover —
+        # we want to confirm NonceError still fires on the legacy code shape.
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value=None)
         mock_web3_class.return_value = mock_web3
 
         submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
@@ -377,6 +381,179 @@ class TestSubmission:
         assert exc_info.value.expected == 5
         assert exc_info.value.provided == 3
         assert submitter._metrics.nonce_errors == 1
+
+    @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
+    def test_submit_nonce_too_low_with_mined_receipt_returns_success(
+        self, mock_web3_class: MagicMock, sample_signed_tx: SignedTransaction
+    ) -> None:
+        """A 'nonce too low' error when the tx already landed must return success.
+
+        Reproduces the silent-fund-loss bug observed on Arbitrum mainnet:
+        the submitter sent an LP_OPEN mint tx, the tx landed on-chain
+        successfully, but the submitter's follow-up read saw a state nonce one
+        past ours and raised NONCE_ERROR. The framework's retry then minted a
+        SECOND position, stranding the first one as a zombie position the
+        teardown loop didn't know about (~$3.50 of user funds lost on a
+        single intent).
+
+        The fix: when the error is 'nonce too low', look up the receipt for
+        signed_tx.tx_hash. If it exists with status=1, return success.
+        """
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too low: tx: 1635 state: 1636"})
+        )
+        # Receipt lookup proves the tx is on-chain with status=1.
+        mock_web3.eth.get_transaction_receipt = AsyncMock(
+            return_value={"status": 1, "blockNumber": 464118091}
+        )
+        mock_web3_class.return_value = mock_web3
+
+        submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
+        submitter._web3 = mock_web3
+
+        results = run_async(submitter.submit([sample_signed_tx]))
+
+        assert len(results) == 1
+        assert results[0].submitted is True
+        assert results[0].tx_hash == sample_signed_tx.tx_hash
+        assert submitter._metrics.successful_submissions == 1
+        # The recovered path bumps nonce_errors (we did SEE one) but does NOT
+        # bump failed_submissions — the tx ultimately succeeded.
+        assert submitter._metrics.nonce_errors == 1
+        assert submitter._metrics.failed_submissions == 0
+        # Receipt lookup MUST use OUR signed tx hash — guards against future
+        # regressions that hash-collide on a different tx.
+        mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(sample_signed_tx.tx_hash)
+
+    @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
+    def test_submit_nonce_too_low_with_no_receipt_still_raises(
+        self, mock_web3_class: MagicMock, sample_signed_tx: SignedTransaction
+    ) -> None:
+        """When 'nonce too low' fires and no receipt exists, treat as genuine failure.
+
+        Covers the case where the chain nonce moved past ours but the tx
+        wasn't actually mined (e.g., an external tx from the same wallet
+        consumed the nonce). The submitter must NOT silently succeed.
+        """
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too low: tx: 1635 state: 1636"})
+        )
+        # Receipt query returns None (tx not on chain).
+        mock_web3.eth.get_transaction_receipt = AsyncMock(return_value=None)
+        mock_web3_class.return_value = mock_web3
+
+        submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
+        submitter._web3 = mock_web3
+
+        with pytest.raises(NonceError):
+            run_async(submitter.submit([sample_signed_tx]))
+
+        assert submitter._metrics.nonce_errors == 1
+        assert submitter._metrics.successful_submissions == 0
+        mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(sample_signed_tx.tx_hash)
+
+    @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
+    def test_submit_nonce_too_low_with_reverted_receipt_raises_revert(
+        self, mock_web3_class: MagicMock, sample_signed_tx: SignedTransaction
+    ) -> None:
+        """A reverted (status=0) receipt means the tx WAS mined — surface as revert.
+
+        Codex P2 finding on PR #2358: falling through to NonceError when the
+        receipt shows status=0 misclassifies an on-chain revert as a nonce-
+        assignment failure. The orchestrator's revert-accounting path is then
+        bypassed and retry logic may treat the action as 'never submitted',
+        re-attempting an action that already happened on-chain.
+
+        The right error class is TransactionRevertedError — it carries the
+        tx_hash, gas_used, and block_number so the orchestrator records the
+        mined tx and does not retry.
+        """
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
+        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(
+            return_value={"status": 0, "blockNumber": 100, "gasUsed": 42000}
+        )
+        mock_web3_class.return_value = mock_web3
+
+        submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
+        submitter._web3 = mock_web3
+
+        with pytest.raises(TransactionRevertedError) as exc_info:
+            run_async(submitter.submit([sample_signed_tx]))
+
+        # The revert carries the mined tx's hash / gas / block so the
+        # orchestrator can record it and skip a duplicate retry.
+        assert exc_info.value.tx_hash == sample_signed_tx.tx_hash
+        assert exc_info.value.gas_used == 42000
+        assert exc_info.value.block_number == 100
+        assert submitter._metrics.successful_submissions == 0
+        mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(sample_signed_tx.tx_hash)
+
+    @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
+    def test_submit_nonce_too_low_with_receipt_lookup_error_still_raises(
+        self, mock_web3_class: MagicMock, sample_signed_tx: SignedTransaction
+    ) -> None:
+        """If the receipt lookup itself errors, fall back to NonceError.
+
+        Don't silently succeed when we can't prove the tx landed. RPC
+        transients (timeouts, TransactionNotFound) must surface failure so
+        the upstream retry/escalate path can decide.
+        """
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too low: tx: 5 state: 6"})
+        )
+        mock_web3.eth.get_transaction_receipt = AsyncMock(
+            side_effect=Exception("TransactionNotFound")
+        )
+        mock_web3_class.return_value = mock_web3
+
+        submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
+        submitter._web3 = mock_web3
+
+        with pytest.raises(NonceError):
+            run_async(submitter.submit([sample_signed_tx]))
+
+        assert submitter._metrics.successful_submissions == 0
+        mock_web3.eth.get_transaction_receipt.assert_awaited_once_with(sample_signed_tx.tx_hash)
+
+    @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
+    def test_submit_nonce_too_high_does_not_attempt_receipt_recovery(
+        self, mock_web3_class: MagicMock, sample_signed_tx: SignedTransaction
+    ) -> None:
+        """Only 'nonce too low' triggers receipt-recovery; other nonce patterns must not.
+
+        'nonce too high' means a gap in the nonce sequence — the tx CANNOT
+        have landed by definition. Attempting a receipt lookup is wasteful
+        and would never resolve in our favor.
+        """
+        mock_web3 = MagicMock()
+        mock_web3.eth = AsyncMock()
+        mock_web3.eth.send_raw_transaction = AsyncMock(
+            side_effect=Exception({"message": "nonce too high"})
+        )
+        # If the code (wrongly) calls receipt lookup, this would return a
+        # mined receipt and silently succeed — confirm the call is NOT made.
+        mock_web3.eth.get_transaction_receipt = AsyncMock(
+            return_value={"status": 1, "blockNumber": 99}
+        )
+        mock_web3_class.return_value = mock_web3
+
+        submitter = PublicMempoolSubmitter(rpc_url="https://example.com")
+        submitter._web3 = mock_web3
+
+        with pytest.raises(NonceError):
+            run_async(submitter.submit([sample_signed_tx]))
+
+        mock_web3.eth.get_transaction_receipt.assert_not_called()
 
     @patch("almanak.framework.execution.submitter.public.AsyncWeb3")
     def test_submit_insufficient_funds_raises(

@@ -58,6 +58,7 @@ from almanak.framework.execution.interfaces import (
     TransactionType,
     UnsignedTransaction,
 )
+from almanak.framework.execution.nonce_recovery import try_recover_nonce_too_low
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
@@ -773,6 +774,17 @@ class ChainExecutor:
 
             # Classify and handle error
             if "nonce" in error_message:
+                # "nonce too low" is ambiguous — the tx may have already been
+                # mined. Check via receipt before declaring failure. Full
+                # rationale in ``execution/nonce_recovery.py``.
+                recovery = await try_recover_nonce_too_low(
+                    web3=web3,
+                    error_message=error_message,
+                    signed_tx=signed_tx,
+                    chain_label=self._chain,
+                )
+                if recovery is not None:
+                    return recovery
                 raise NonceError(reason=original_error) from None
             elif "insufficient" in error_message or "balance" in error_message:
                 # Parse actual values from RPC error for better diagnostics.
