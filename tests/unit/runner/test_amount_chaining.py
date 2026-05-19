@@ -7,15 +7,27 @@ Tests that non-swap intents (LP, lending) don't produce spurious warnings.
 """
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from almanak.framework.connectors.enso.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     EnsoReceiptParser,
 )
 from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.intents.vocabulary import LPOpenIntent, SwapIntent
+from almanak.framework.runner.strategy_runner import (
+    IterationResult,
+    IterationStatus,
+    RunIterationState,
+    RunnerConfig,
+    StrategyRunner,
+)
 
 
 class _IterationStatus(StrEnum):
@@ -262,3 +274,151 @@ def test_swap_still_warns(caplog):
     assert result is None
     warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Amount chaining" in r.message]
     assert len(warning_msgs) == 1, "SWAP should still produce WARNING"
+
+
+# ---------------------------------------------------------------------------
+# VIB-2036: warning gate must consult subsequent intents, not just position
+# ---------------------------------------------------------------------------
+#
+# The runner used to log a WARNING whenever a non-last intent in a multi-intent
+# sequence produced no swap_amounts, regardless of whether any subsequent step
+# actually used ``amount='all'``. The hosted ``UsdcWbtcDynamicLpStrategy`` -- a
+# 2-step ``[LP_OPEN, LP_OPEN]`` sequence with explicit amounts on both legs --
+# tripped this every iteration, polluting operator logs. The fix gates the
+# warning on ``Intent.has_chained_amount(...)`` against ``intents[idx+1:]``.
+
+
+def _build_runner_for_chain_test():
+    """Build a real ``StrategyRunner`` with mocked collaborators.
+
+    Mirrors ``test_run_iteration_steps_extended._make_runner`` but inline so
+    this test file stays self-contained.
+    """
+    config = RunnerConfig(
+        default_interval_seconds=1,
+        enable_state_persistence=False,
+        enable_alerting=False,
+        dry_run=False,
+    )
+    return StrategyRunner(
+        price_oracle=MagicMock(),
+        balance_provider=MagicMock(),
+        execution_orchestrator=MagicMock(),
+        state_manager=MagicMock(),
+        config=config,
+        circuit_breaker=None,
+    )
+
+
+def _build_state_for_chain_test(intents, strategy_id="vib-2036-test"):
+    """Build a ``RunIterationState`` populated with ``intents``."""
+    strategy = MagicMock()
+    strategy.strategy_id = strategy_id
+    strategy.chain = "arbitrum"
+    strategy.wallet_address = "0x" + "ab" * 20
+
+    state = RunIterationState(
+        strategy=strategy,
+        strategy_id=strategy_id,
+        start_time=datetime.now(UTC),
+    )
+    state.intents = list(intents)
+    state.market = MagicMock()
+    return state
+
+
+def _success_result_without_swap_amounts(intent, strategy_id):
+    """An ``IterationResult`` whose ``execution_result`` has no swap_amounts."""
+    return IterationResult(
+        status=IterationStatus.SUCCESS,
+        intent=intent,
+        strategy_id=strategy_id,
+        duration_ms=1,
+        execution_result=SimpleNamespace(swap_amounts=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib_2036_no_warning_when_no_subsequent_chained_amount(caplog):
+    """[LP_OPEN, LP_OPEN] both with explicit amounts -> no chaining warning.
+
+    Reproduces the hosted ``UsdcWbtcDynamicLpStrategy`` log pollution from
+    VIB-2036: neither step uses ``amount='all'`` and the warning must stay
+    silent.
+    """
+    intent1 = LPOpenIntent(
+        pool="USDC/WBTC",
+        amount0=Decimal("100"),
+        amount1=Decimal("0.001"),
+        range_lower=Decimal("1000"),
+        range_upper=Decimal("2000"),
+        protocol="uniswap_v3",
+    )
+    intent2 = LPOpenIntent(
+        pool="USDC/WBTC",
+        amount0=Decimal("50"),
+        amount1=Decimal("0.0005"),
+        range_lower=Decimal("1500"),
+        range_upper=Decimal("2500"),
+        protocol="uniswap_v3",
+    )
+    runner = _build_runner_for_chain_test()
+    state = _build_state_for_chain_test([intent1, intent2])
+
+    results = [
+        _success_result_without_swap_amounts(intent1, state.strategy_id),
+        _success_result_without_swap_amounts(intent2, state.strategy_id),
+    ]
+    with (
+        patch.object(runner, "_execute_single_chain", new=AsyncMock(side_effect=results)),
+        caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"),
+    ):
+        await runner._run_single_chain_intents(state)
+
+    chaining_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Amount chaining" in r.getMessage()
+    ]
+    assert chaining_warnings == [], (
+        f"VIB-2036: expected zero chaining warnings for [LP_OPEN, LP_OPEN], "
+        f"got {[r.getMessage() for r in chaining_warnings]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib_2036_warning_still_fires_when_next_intent_uses_all(caplog):
+    """[SWAP(missing swap_amounts), SWAP(amount='all')] -> warning fires.
+
+    Inverse of the false-positive case: when downstream really does need a
+    chained amount and we have nothing to give it, the warning must still
+    surface so operators see the broken sequence.
+    """
+    intent1 = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    intent2 = SwapIntent(from_token="WETH", to_token="DAI", amount="all")
+    runner = _build_runner_for_chain_test()
+    state = _build_state_for_chain_test([intent1, intent2])
+
+    # Only one step actually reaches the orchestrator: step 1 succeeds without
+    # swap_amounts (chain broken), then ``_resolve_chained_amount_for_intent``
+    # short-circuits step 2 with COMPILATION_FAILED before it can dispatch.
+    mock_execute = AsyncMock(
+        side_effect=[_success_result_without_swap_amounts(intent1, state.strategy_id)]
+    )
+    with (
+        patch.object(runner, "_execute_single_chain", new=mock_execute),
+        caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"),
+    ):
+        await runner._run_single_chain_intents(state)
+
+    assert mock_execute.await_count == 1
+    chaining_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Amount chaining" in r.getMessage()
+    ]
+    assert len(chaining_warnings) == 1, (
+        f"VIB-2036: expected exactly one chaining warning when a downstream "
+        f"amount='all' is unsatisfied, got {len(chaining_warnings)}: "
+        f"{[r.getMessage() for r in chaining_warnings]}"
+    )

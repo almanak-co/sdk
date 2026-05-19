@@ -1541,6 +1541,7 @@ class StrategyRunner:
             )
         return await self._run_single_chain_intents(state)
 
+    # crap-allowlist: VIB-4640 — pre-existing intent-dispatch loop; PR #2370 reduced cc 31→30 via _has_downstream_chained_amount extraction
     async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:  # noqa: C901
         """Sequentially execute intents through the single-chain orchestrator.
 
@@ -1627,9 +1628,7 @@ class StrategyRunner:
                     # Reset to None so the next chained step fails explicitly
                     # if it uses amount="all" (prevents stale value reuse).
                     previous_amount_received = None
-                    # Only warn when there's actually a next step that could need chaining.
-                    # Single intents (LP_OPEN, LP_CLOSE, etc.) don't chain amounts.
-                    if is_multi_intent and idx < len(intents) - 1:
+                    if is_multi_intent and self._has_downstream_chained_amount(intents, idx):
                         logger.warning(
                             "Amount chaining: no output amount extracted from step %d; "
                             "subsequent amount='all' steps will fail",
@@ -1688,6 +1687,25 @@ class StrategyRunner:
                 logger.debug("Failed to compute balance deltas", exc_info=True)
 
         return intent_result  # type: ignore[return-value]
+
+    @staticmethod
+    def _has_downstream_chained_amount(intents: list["AnyIntent"], idx: int) -> bool:
+        """VIB-2036: True if the immediate next intent consumes a chained amount.
+
+        The amount-chaining warning is only informative when the immediate
+        next step would fail without ``previous_amount_received`` — i.e. when
+        ``intents[idx + 1]`` declares ``amount='all'`` (or another chained
+        reference). The pre-VIB-2036 predicate fired on every non-last step,
+        producing false-positives for sequences like ``[LP_OPEN, LP_OPEN]``
+        whose legs carry explicit amounts. Further-downstream chained
+        consumers (``intents[idx + 2:]``) are intentionally not anticipated
+        here: if their own predecessor also fails to produce output, the
+        warning fires at that step instead — avoiding the false-positive
+        flagged by CodeRabbit where an intermediate step with explicit amount
+        would refresh ``previous_amount_received``.
+        """
+        next_idx = idx + 1
+        return next_idx < len(intents) and Intent.has_chained_amount(intents[next_idx])
 
     def _resolve_chained_amount_for_intent(
         self,
