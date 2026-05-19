@@ -108,3 +108,103 @@ def test_format_very_small_uses_scientific():
     """Sub-1e-4 → scientific to avoid 0.0000000869 mess."""
     out = format_token_amount("0.0000000868")
     assert "e-" in out.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-3890 acceptance criteria — end-to-end render tests (D1.S2..S4)
+#
+# The helper-level boundary matrix lives in
+# tests/unit/dashboard/test_should_scale_raw_amount.py. These tests verify
+# the rendered string at the format_token_amount boundary (= what the
+# Trade Tape headline actually shows).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_wbtc_dust_renders_as_human_in_default_context():
+    """Post-audit (PR #2371): in default (SWAP/SUPPLY/etc.) context, WBTC raw
+    integers in [1000, 999999] render as human integers — NOT scaled.
+
+    SWAP rows store human Decimals via ``SwapAmounts.amount_*_decimal``; firing
+    the new 8-dec branch on them would mis-scale `5000 CRO` to `0.00005 CRO`.
+    The new branch is reserved for ``_format_lp_ledger_amount``
+    (lp_fallback_context=True); coverage there lives in
+    ``test_should_scale_raw_amount.py`` and ``test_trade_tape_lp_ledger.py``.
+    """
+    # Raw 1346 as a SWAP amount = "1,346.00" human integer.
+    assert format_token_amount("1346", "WBTC", "arbitrum") == "1,346.00"
+    assert format_token_amount("1790", "WBTC", "arbitrum") == "1,790.00"
+
+
+def test_wbtc_human_integers_preserved():
+    """AC #2 / D1.S3 — human integer WBTC sizes pass through unchanged in
+    default (SWAP) context. The audit-found case `1000 WBTC` ≈ $60M whale
+    trade must render as `1,000.00`, never mis-scaled to dust.
+    """
+    assert format_token_amount("100", "WBTC", "arbitrum") == "100.00"
+    assert format_token_amount("999", "WBTC", "arbitrum") == "999.00"
+    assert format_token_amount("1000", "WBTC", "arbitrum") == "1,000.00"
+    assert format_token_amount("5000", "WBTC", "arbitrum") == "5,000.00"
+
+
+def test_legacy_18dec_weth_still_scales():
+    """AC #5 / D1.S4 — the legacy `>= 10⁶` branch still works on 18-dec WETH.
+
+    Raw 891556839636852 = 0.000891556839636852 WETH; .4g render → 0.0008916.
+    """
+    assert format_token_amount("891556839636852", "WETH", "arbitrum") == "0.0008916"
+
+
+def test_six_dec_usdc_raw_scales():
+    """AC #7 — 6-dec USDC raw integers >= 10⁶ continue to scale (legacy branch)."""
+    assert format_token_amount("5000000", "USDC", "arbitrum") == "5.00"
+
+
+def test_six_dec_usdc_below_legacy_threshold_unchanged():
+    """AC #7 — 6-dec USDC raw integers below 10⁶ pass through unchanged (no new branch for dec=6)."""
+    # 999_999 is below 10⁶; the new 8-dec branch is decimals==8 only, so USDC stays human.
+    assert format_token_amount("999999", "USDC", "arbitrum") == "999,999.00"
+
+
+def test_eight_dec_bracket_in_default_context_not_scaled():
+    """Bracket edges (1000, 999999) in default (SWAP-row) context: human integer.
+
+    These are exercised via the LP-fallback path in
+    ``test_trade_tape_lp_ledger.py``; here we verify the default context
+    intentionally does NOT scale (audit-found risk guard).
+    """
+    assert format_token_amount("1000", "WBTC", "arbitrum") == "1,000.00"
+    assert format_token_amount("999999", "WBTC", "arbitrum") == "999,999.00"
+
+
+def test_tbtc_dust_falls_to_human_integer():
+    """tBTC is 18-dec → new 8-dec branch wouldn't apply anyway, AND default
+    context wouldn't enable it. Dust renders as human integer.
+
+    The legacy branch only fires above 10⁶.
+    """
+    assert format_token_amount("1346", "tBTC", "ethereum") == "1,346.00"
+
+
+def test_tbtc_large_raw_scales_via_legacy_branch():
+    """tBTC 18-dec raw of 1 whole token (10**18) → legacy branch scales to 1.00.
+
+    The legacy branch fires regardless of context — preserves PR #2290.
+    """
+    one_tbtc_raw = str(10**18)  # = "1000000000000000000"
+    assert format_token_amount(one_tbtc_raw, "tBTC", "ethereum") == "1.00"
+
+
+def test_cbbtc_swap_context_renders_human():
+    """cbBTC dust on a SWAP row renders as the human integer (default context
+    has no new branch). LP-fallback path coverage is in
+    ``test_trade_tape_lp_ledger.py``.
+    """
+    assert format_token_amount("1346", "cbBTC", "base") == "1,346.00"
+    assert format_token_amount("1346", "cbBTC", "ethereum") == "1,346.00"
+    assert format_token_amount("1346", "cbBTC", "arbitrum") == "1,346.00"
+
+
+def test_lbtc_swap_context_renders_human():
+    """LBTC dust on a SWAP row renders as the human integer."""
+    assert format_token_amount("1346", "LBTC", "ethereum") == "1,346.00"
+    assert format_token_amount("1346", "LBTC", "base") == "1,346.00"

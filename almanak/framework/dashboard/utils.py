@@ -32,6 +32,85 @@ def format_usd(value: Decimal) -> str:
         return f"-${abs(value):,.2f}"
 
 
+def _should_scale_raw_amount(
+    d: Decimal,
+    symbol: str,
+    chain: str,
+    *,
+    lp_fallback_context: bool = False,
+) -> int | None:
+    """Return token decimals when ``d`` should be interpreted as a raw
+    on-chain integer; otherwise return ``None`` (degrade safe).
+
+    Two branches (VIB-3890):
+
+    1. **Legacy** ``abs(d) >= 10**6`` — any decimals. Preserves PR #2290
+       behaviour for 18-dec WETH raw integers, 6-dec USDC raw integers, etc.
+       This branch fires regardless of ``lp_fallback_context``.
+    2. **New 8-dec dust bracket** ``decimals == 8 AND 1000 <= abs(d) < 10**6``.
+       Catches the WBTC residual (raw ``1346`` = 0.00001346 WBTC) that the
+       legacy branch misses. **Only fires when** ``lp_fallback_context=True``.
+
+    Why the ``lp_fallback_context`` gate (PR #2371 audit, Codex + Claude
+    pr-auditor convergent finding):
+
+    * SWAP / SUPPLY / WITHDRAW / BORROW / REPAY / BRIDGE rows in
+      ``transaction_ledger`` store **human Decimals** via
+      ``SwapAmounts.amount_in_decimal`` / ``amount_out_decimal`` (see
+      ``almanak/framework/observability/ledger.py:182-187``). For these
+      rows, an integer-valued amount in ``[1000, 999999]`` for any 8-dec
+      token (WBTC, cbBTC, LBTC, CRO, GALA, ICP, …) is a human value, NOT
+      a raw integer. Firing the new branch on these would mis-scale by
+      ``10**8`` (e.g. ``5000 CRO`` rendered as ``0.00005 CRO``). Callers
+      from this path must NOT set ``lp_fallback_context``.
+    * LP_OPEN / LP_CLOSE rows fall through to ``_format_lp_ledger_amount``
+      ONLY when the typed accounting payload (``payload.amount0/amount1``)
+      is absent. In that fallback path the ledger ``amount_in/out`` can be
+      a raw on-chain integer (`LPOpenData.amount0/amount1` from
+      ``_extract_from_lp_open``). Only this caller sets
+      ``lp_fallback_context=True``.
+
+    Bound to 8-decimal tokens because generalised formulas
+    (``10**(decimals-6)``, bare ratio thresholds) mis-scale small human
+    integer positions for 8-dec and collapse for 18-dec
+    (see ``docs/internal/discussions/vib-3890-trade-tape-units-precision-20260519.md``).
+
+    Pre-filters: symbol and chain must be non-empty; ``d`` must be finite
+    and integral. Resolver miss / exception → ``None`` (never mis-scale on
+    uncertain input).
+
+    NOT called from ``_format_human_amount`` — payload-sourced Decimals
+    (``payload.amount0/amount1/fees0/fees1``) are already human and must
+    pass through verbatim. Mis-routing a human Decimal through this helper
+    would understate the headline by ``10**decimals``.
+    """
+    if not (symbol and chain):
+        return None
+    if not d.is_finite() or d != d.to_integral_value():
+        return None
+    abs_d = abs(d)
+    # Magnitude short-circuit (gemini-code-assist nit on PR #2371): values
+    # below 1000 never fire either branch, so skip the resolver call. Also
+    # skips when the new dust branch is gated off (default context, magnitude
+    # in [1000, 10**6)) — those rows go straight back to the caller.
+    if abs_d < Decimal("1000"):
+        return None
+    if abs_d < Decimal("1000000") and not lp_fallback_context:
+        return None
+    decimals = _try_token_decimals(symbol, chain)
+    if decimals is None or decimals <= 0:
+        return None
+    # Legacy branch — preserves PR #2290 behaviour (18-dec WETH, 6-dec USDC, etc.).
+    if abs_d >= Decimal("1000000"):
+        return decimals
+    # New branch — gated on LP-fallback context (raw integers can legitimately
+    # land in transaction_ledger.amount_in/out on that path; SWAP / SUPPLY /
+    # etc. always store human Decimals and must NOT fire this branch).
+    if decimals == 8 and Decimal("1000") <= abs_d < Decimal("1000000"):
+        return decimals
+    return None
+
+
 def format_token_amount(amount: str | Decimal | int | float, symbol: str = "", chain: str = "") -> str:
     """Render a token amount for the trade-tape headline (VIB-3890).
 
@@ -42,9 +121,15 @@ def format_token_amount(amount: str | Decimal | int | float, symbol: str = "", c
     The formatter:
     1. Returns the input unchanged when not numerically parseable (``""``,
        protocol-specific aliases like "max", etc.).
-    2. Detects raw on-chain integer amounts (heuristic: integer ≥ 10⁶ and
-       the token resolver knows decimals) and scales them down before
-       formatting.
+    2. Delegates the raw-vs-human decision to ``_should_scale_raw_amount``
+       in the **default (non-LP-fallback) mode** — only the legacy
+       ``abs(d) >= 10**6`` branch fires. SWAP / SUPPLY / WITHDRAW / BORROW /
+       REPAY rows store human Decimals via ``SwapAmounts.amount_*_decimal``,
+       and firing the new 8-dec dust branch on them would mis-scale
+       integer-valued amounts (e.g. ``5000 CRO`` rendered as
+       ``0.00005 CRO``). The new dust branch is reserved for
+       ``_format_lp_ledger_amount`` (LP-fallback context) which sets
+       ``lp_fallback_context=True``.
     3. Renders ≥ 1 with two decimals + thousands separator (``2,294.33``);
        < 1 with up to four significant figures (``0.0008688``); scientific
        for tiny values (≤ 1e-9 → ``8.69e-13``).
@@ -62,18 +147,11 @@ def format_token_amount(amount: str | Decimal | int | float, symbol: str = "", c
     if not d.is_finite():
         return str(amount)
 
-    # Heuristic raw-units detection: integers ≥ 10⁶ that match a known
-    # token's decimals get scaled down. False positives are bounded —
-    # human amounts ≥ 10⁶ are rare for the assets that use 18 decimals
-    # (a $1M position in WETH is 4_000+ ETH; the raw-int representation
-    # would be 4e21, not 4_000). For 6-dec USDC, 1M raw = 1 USDC, also
-    # within human range. The resolver's ``decimals`` value is the
-    # truth source.
-    if symbol and chain and d.is_finite() and d == d.to_integral_value() and abs(d) >= Decimal("1000000"):
-        decimals = _try_token_decimals(symbol, chain)
-        if decimals is not None and decimals > 0:
-            scale = Decimal(10) ** decimals
-            d = d / scale
+    # Legacy-only branch — see _should_scale_raw_amount docstring for why
+    # SWAP / SUPPLY / etc. rows MUST NOT enable the new 8-dec branch.
+    decimals = _should_scale_raw_amount(d, symbol, chain)
+    if decimals is not None:
+        d = d / (Decimal(10) ** decimals)
 
     abs_d = abs(d)
     if abs_d == 0:

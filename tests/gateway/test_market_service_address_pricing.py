@@ -8,7 +8,7 @@ must:
   4. CoinGecko then uses its contract-address endpoint to price the token.
 
 This proves the full "resolve unknown token from address -> price it" path
-without relying on any hardcoded entry for the test token (cbBTC on Base).
+without relying on any hardcoded entry for the test token (renBTC on Ethereum).
 """
 
 from datetime import UTC, datetime
@@ -22,7 +22,10 @@ from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.gateway.services.onchain_lookup import TokenMetadata
 
-CBBTC_ADDRESS = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+# renBTC on Ethereum - deprecated Ren protocol BTC, intentionally chosen because it is NOT in the registry.
+# Previously used cbBTC, but cbBTC was added to the registry in VIB-3890 to fix the WBTC-dust
+# dashboard rendering bug. renBTC has no maintained issuer and will not be re-vendored.
+RENBTC_ADDRESS = "0xEB4C2781e4ebA804CE9a9803C67d0893436bB27D"
 
 
 def _mock_coingecko_address_response(source, payload: dict, status: int = 200):
@@ -42,17 +45,17 @@ def _mock_coingecko_address_response(source, payload: dict, status: int = 200):
 
 
 @pytest.mark.asyncio
-async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
-    """cbBTC (not in any registry) should be priced via on-chain resolution
+async def test_getprice_resolves_renbtc_from_address_without_hardcoded_entry():
+    """renBTC (not in any registry) should be priced via on-chain resolution
     plus the CoinGecko contract-address endpoint."""
-    # Pre-flight: if cbBTC ever gets hardcoded this test stops proving anything.
+    # Pre-flight: if renBTC ever gets hardcoded this test stops proving anything.
     from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS, get_coingecko_id
     from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
 
-    assert "CBBTC" not in GLOBAL_TOKEN_IDS
-    assert get_coingecko_id("CBBTC") is None
+    assert "RENBTC" not in GLOBAL_TOKEN_IDS
+    assert get_coingecko_id("RENBTC") is None
     for tok in DEFAULT_TOKENS:
-        assert CBBTC_ADDRESS.lower() not in {a.lower() for a in (tok.addresses or {}).values()}
+        assert RENBTC_ADDRESS.lower() not in {a.lower() for a in (tok.addresses or {}).values()}
 
     # Build a settings stub covering only what _do_initialize touches.
     settings = MagicMock()
@@ -63,13 +66,13 @@ async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
 
     servicer = MarketServiceServicer(settings)
 
-    # Stub OnChainLookup: pretend the ERC20 contract returned symbol="cbBTC",
+    # Stub OnChainLookup: pretend the ERC20 contract returned symbol="renBTC",
     # decimals=8. This is what would happen in production via eth_call on Base.
     fake_metadata = TokenMetadata(
-        symbol="cbBTC",
-        name="Coinbase Wrapped BTC",
+        symbol="renBTC",
+        name="renBTC",
         decimals=8,
-        address=CBBTC_ADDRESS,
+        address=RENBTC_ADDRESS,
         is_native=False,
     )
     fake_lookup = MagicMock()
@@ -90,7 +93,7 @@ async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
     servicer._price_aggregator._sources = [cg_source]
 
     # Mock CoinGecko's contract-address endpoint.
-    payload = {CBBTC_ADDRESS.lower(): {"usd": 65000.0}}
+    payload = {RENBTC_ADDRESS.lower(): {"usd": 65000.0}}
 
     with (
         patch.object(
@@ -101,7 +104,7 @@ async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
         _mock_coingecko_address_response(cg_source, payload),
     ):
         request = gateway_pb2.PriceRequest(
-            token=CBBTC_ADDRESS,
+            token=RENBTC_ADDRESS,
             quote="USD",
             chain="base",
         )
@@ -120,7 +123,7 @@ async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
     # from the address endpoint and not a cached/symbol path.
     assert "coingecko" in list(response.sources_ok)
     # The on-chain lookup must have been called exactly once, on Base.
-    fake_lookup.lookup.assert_awaited_once_with("base", CBBTC_ADDRESS)
+    fake_lookup.lookup.assert_awaited_once_with("base", RENBTC_ADDRESS)
 
 
 @pytest.mark.asyncio
@@ -141,10 +144,10 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
     servicer = MarketServiceServicer(settings)
 
     fake_metadata = TokenMetadata(
-        symbol="cbBTC",
-        name="Coinbase Wrapped BTC",
+        symbol="renBTC",
+        name="renBTC",
         decimals=8,
-        address=CBBTC_ADDRESS,
+        address=RENBTC_ADDRESS,
         is_native=False,
     )
     fake_lookup = MagicMock()
@@ -175,7 +178,7 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
     servicer._price_aggregator.get_last_details = MagicMock(return_value={})
 
     with patch.object(servicer, "_get_onchain_lookup", side_effect=fake_get_onchain_lookup):
-        request = gateway_pb2.PriceRequest(token=CBBTC_ADDRESS, quote="USD", chain="base")
+        request = gateway_pb2.PriceRequest(token=RENBTC_ADDRESS, quote="USD", chain="base")
         context = MagicMock()
         context.set_code = MagicMock()
         context.set_details = MagicMock()
@@ -185,9 +188,9 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
     assert Decimal(response.price) == Decimal("65000")
     resolved = captured["resolved_token"]
     assert isinstance(resolved, ResolvedToken)
-    assert resolved.address.lower() == CBBTC_ADDRESS.lower()
+    assert resolved.address.lower() == RENBTC_ADDRESS.lower()
     assert resolved.chain.value.lower() == "base"
-    assert resolved.symbol == "cbBTC"
+    assert resolved.symbol == "renBTC"
 
 
 @pytest.mark.asyncio
@@ -202,23 +205,23 @@ async def test_getprice_address_without_chain_uses_primary_chain():
     servicer = MarketServiceServicer(settings)
 
     fake_metadata = TokenMetadata(
-        symbol="cbBTC",
-        name="Coinbase Wrapped BTC",
+        symbol="renBTC",
+        name="renBTC",
         decimals=8,
-        address=CBBTC_ADDRESS,
+        address=RENBTC_ADDRESS,
         is_native=False,
     )
     fake_lookup = MagicMock()
     fake_lookup.lookup = AsyncMock(return_value=fake_metadata)
 
     with patch.object(servicer, "_get_onchain_lookup", new=AsyncMock(return_value=fake_lookup)):
-        resolved = await servicer._resolve_token_for_pricing(CBBTC_ADDRESS, "")
+        resolved = await servicer._resolve_token_for_pricing(RENBTC_ADDRESS, "")
 
     assert isinstance(resolved, ResolvedToken)
-    assert resolved.symbol == "cbBTC"
+    assert resolved.symbol == "renBTC"
     assert resolved.chain.value.lower() == "base"
     # The fake was called with the primary chain.
-    fake_lookup.lookup.assert_awaited_once_with("base", CBBTC_ADDRESS)
+    fake_lookup.lookup.assert_awaited_once_with("base", RENBTC_ADDRESS)
 
 
 @pytest.mark.asyncio
@@ -245,7 +248,7 @@ async def test_getprice_multi_chain_gateway_requires_explicit_chain():
 
     with patch.object(servicer, "_get_onchain_lookup", new=AsyncMock(return_value=fake_lookup)):
         with pytest.raises(MultiChainAmbiguousPriceRequest) as exc_info:
-            await servicer._resolve_token_for_pricing(CBBTC_ADDRESS, "")
+            await servicer._resolve_token_for_pricing(RENBTC_ADDRESS, "")
 
     # Error must mention both configured chains for debuggability.
     message = str(exc_info.value)
@@ -275,7 +278,7 @@ async def test_getprice_multi_chain_empty_chain_returns_invalid_argument():
     context.set_details = MagicMock()
 
     # Empty chain + EVM address on a multi-chain gateway → must reject.
-    request = gateway_pb2.PriceRequest(token=CBBTC_ADDRESS, quote="USD", chain="")
+    request = gateway_pb2.PriceRequest(token=RENBTC_ADDRESS, quote="USD", chain="")
     response = await servicer.GetPrice(request, context)
 
     context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)

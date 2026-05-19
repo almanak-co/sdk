@@ -31,6 +31,7 @@ from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.dashboard.gateway_client import TradeTapeRow
 from almanak.framework.dashboard.theme import get_chain_color
 from almanak.framework.dashboard.utils import (
+    _should_scale_raw_amount,
     _try_token_decimals,
     decode_selector,
     format_chain_badge,
@@ -116,34 +117,37 @@ def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
        Same shape as (2).
 
     Without a ``units_kind`` discriminator on the ledger row, the only
-    available signal is the value's magnitude. The ``>= 10⁶`` heuristic
-    matches ``format_token_amount``'s own rule: integers ``>= 10⁶`` AND
-    integral get scaled by token decimals; everything else passes through
-    unscaled. The threshold reliably catches (1) — every 18/8/6-dec raw
-    token holding above one ``raw=10⁶`` boundary scales correctly — and
-    almost always passes (2) and (3) through unchanged.
+    available signal is the value's magnitude. The decision is delegated
+    to ``_should_scale_raw_amount`` (utils.py) — the single chokepoint
+    shared with ``format_token_amount``. Its two branches:
 
-    KNOWN LIMITATIONS (VIB-4396 follow-up — needs a ledger-side
-    ``units_kind`` discriminator, deliberately deferred from this PR
+    - Legacy ``abs(d) >= 10**6`` for any decimals (preserves PR #2290).
+    - New 8-dec dust bracket ``1000 <= abs(d) < 10**6`` (VIB-3890
+      residual: catches small raw WBTC positions like ``1346``).
+
+    Both branches require ``d`` to be integral and the resolver to know
+    the symbol on the chain; otherwise the helper returns ``None`` and
+    the value passes through ``format_token_amount`` unscaled (degrade
+    safe — never mis-scale on uncertain input).
+
+    DURABLE FIX (VIB-4641 follow-up — adds a writer-side ``units_kind``
+    discriminator on the ledger row, deliberately deferred from VIB-3890
     because it crosses writer / schema / metrics-database boundaries):
 
-    - **False POSITIVE** (raw mis-scaled as human): a small raw 8-dec
-      WBTC position (raw=1346 = 0.00001346 WBTC) renders as
-      ``"1,346.00 WBTC"`` because ``1346 < 10⁶`` so the heuristic
-      doesn't scale.
     - **False NEGATIVE** (human mis-scaled as raw): a whole-million
       human position from path (2) / (3) — e.g. ``2_000_000`` USDC LP
       stored as ``Decimal("2000000")`` — would be re-scaled by 6 dec
       and render as ``"2.00 USDC"``. Bounded to (a) LP_CLOSE rows
       whose receipt populated ``SwapAmounts`` instead of ``LPCloseData``
       AND (b) the payload was missing from the accounting event
-      (rare — only when the accounting writer hasn't run yet). Codex
-      P2 on PR #2290 raised this thread; the discriminator fix is
-      the only durable answer.
+      (rare — only when the accounting writer hasn't run yet).
+      ``_format_lp_direction`` short-circuits to ``_format_human_amount``
+      when the typed payload's ``amount0/amount1`` are present, so this
+      window only fires on payload-absent fallback rows.
 
     The operator-trust invariant ("operator never sees a 10**decimals
-    scale lie on a normal-sized position") is preserved for the common
-    path: integer raw amounts ``>= 10⁶`` for 18/8/6-dec tokens.
+    scale lie on a normal-sized position") is preserved by both branches
+    and by the payload-first ordering above.
     """
     if amount in (None, "", "—"):
         return "—"
@@ -151,14 +155,12 @@ def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
         d = Decimal(str(amount))
     except (ArithmeticError, ValueError, TypeError):
         return format_token_amount(amount, symbol, chain)
-    if not d.is_finite() or d != d.to_integral_value():
-        return format_token_amount(amount, symbol, chain)
-    if not (symbol and chain):
-        return format_token_amount(amount, symbol, chain)
-    if abs(d) < Decimal("1000000"):
-        return format_token_amount(amount, symbol, chain)
-    decimals = _try_token_decimals(symbol, chain)
-    if decimals is None or decimals <= 0:
+    # LP-fallback context: enables the new 8-dec dust branch in
+    # _should_scale_raw_amount. See that helper's docstring for why this
+    # gate exists (SWAP / SUPPLY / etc. rows go through format_token_amount
+    # WITHOUT the flag and only ever fire the legacy >=10**6 branch).
+    decimals = _should_scale_raw_amount(d, symbol, chain, lp_fallback_context=True)
+    if decimals is None:
         return format_token_amount(amount, symbol, chain)
     return _format_human_amount(d / (Decimal(10) ** decimals))
 
