@@ -352,6 +352,25 @@ async def test_cancel_idle_timeout_aborts_callback() -> None:
     assert not callback_ran
 
 
+def test_build_gateway_env_preconfigures_managed_serve(tmp_path: Path) -> None:
+    """``_build_gateway_env`` must pre-set every env var the controller-managed
+    gateway needs to boot without per-deploy provisioning. Drift here surfaces
+    as cryptic ``managed_serve exited early`` errors at /start_gateway time.
+    """
+    from almanak.test_controller import __main__ as ctrl
+
+    env = ctrl._build_gateway_env(tmp_path, 12345)
+
+    # Per-call overrides
+    assert env["ALMANAK_GATEWAY_NETWORK"] == "anvil"
+    assert env["ALMANAK_GATEWAY_GRPC_PORT"] == "12345"
+    assert env["ALMANAK_STRATEGY_FOLDER"] == str(tmp_path)
+    assert env["ALMANAK_PRIVATE_KEY"] == ctrl.ANVIL_DEFAULT_PRIVATE_KEY
+    # Loopback-only sidecar shape — auth_token adds no security, allow_insecure
+    # lets the gateway boot without a per-deploy ALMANAK_GATEWAY_AUTH_TOKEN.
+    assert env["ALMANAK_GATEWAY_ALLOW_INSECURE"] == "true"
+
+
 # silence the unrelated incubating-strategy import collected as a warning
 @pytest.fixture(autouse=True)
 def _suppress_unrelated_import(caplog):

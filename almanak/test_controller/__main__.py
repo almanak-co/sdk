@@ -215,6 +215,14 @@ def _build_gateway_env(workspace: Path, port: int) -> dict[str, str]:
         "ALMANAK_GATEWAY_GRPC_PORT": str(port),
         "ALMANAK_STRATEGY_FOLDER": str(workspace),
         "ALMANAK_PRIVATE_KEY": ANVIL_DEFAULT_PRIVATE_KEY,
+        # Controller-managed gateways are loopback-only by design — the
+        # controller spawned them and the worker reaches them via the shared
+        # network namespace. An auth_token between worker and gateway adds no
+        # security in this topology (anything that can reach :9100 already
+        # shares the netns). Pre-set allow_insecure so callers don't have to
+        # provision a per-deploy ALMANAK_GATEWAY_AUTH_TOKEN to make the
+        # sidecar boot.
+        "ALMANAK_GATEWAY_ALLOW_INSECURE": "true",
     }
 
 
