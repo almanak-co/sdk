@@ -92,6 +92,14 @@ dev = [
     "diff-cover>=10.2.0",
 ]
 
+# Test-controller sidecar: HTTP service that orchestrates the SDK test ladder
+# against a per-request managed_serve subprocess. Installed in the Cloud Run
+# multi-container revision that hosts the agent's test workspace; local dev
+# installs this group only when iterating on the controller itself.
+test-controller = [
+    "uvicorn[standard]>=0.30.0",
+]
+
 [tool.poetry]
 include = [
     { path = "almanak/bin/*", format = ["sdist", "wheel"] },

@@ -423,11 +423,18 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             else:
                 from almanak.gateway.data.balance import Web3BalanceProvider
 
+                # Anvil tests run pre-read + tx + post-read inside the cache
+                # window, returning stale pre-tx values to reconciliation
+                # (zero deltas despite swaps landing on-chain). Disable caching
+                # on anvil so post-tx reads always hit the fork; mainnet uses
+                # Web3BalanceProvider's own default cache_ttl.
+                extra_kwargs: dict[str, Any] = {"cache_ttl": 0} if network == "anvil" else {}
                 self._balance_providers[cache_key] = Web3BalanceProvider(
                     rpc_url=rpc_url,
                     wallet_address=wallet_address,
                     chain=chain,
                     dynamic_symbol_resolver=self._make_dynamic_symbol_resolver(),
+                    **extra_kwargs,
                 )
 
         return self._balance_providers[cache_key]

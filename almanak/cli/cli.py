@@ -1329,6 +1329,16 @@ def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | 
     default=50051,
     help="Gateway sidecar gRPC port.",
 )
+@click.option(
+    "--no-gateway",
+    "no_gateway",
+    is_flag=True,
+    default=False,
+    help="Connect to an existing gateway at --gateway-host:--gateway-port instead of "
+    "auto-starting a managed one. Useful when a long-lived gateway sidecar is already "
+    "running (e.g. in a Cloud Run multi-container revision); skips ManagedGateway boot "
+    "and the per-test Anvil cold-start.",
+)
 @click.pass_context
 def strategy_test(
     ctx,
@@ -1340,6 +1350,7 @@ def strategy_test(
     anvil_ports,
     gateway_host,
     gateway_port,
+    no_gateway,
 ):
     """Run a force-action lifecycle test for a strategy on a managed Anvil fork.
 
@@ -1350,12 +1361,18 @@ def strategy_test(
 
     Always runs on --network anvil with --once + --fresh semantics.
 
+    Pass --no-gateway to reuse a long-lived gateway (with Anvil forks already running)
+    at --gateway-host:--gateway-port; ALMANAK_GATEWAY_AUTH_TOKEN must match the
+    gateway's token. Without --no-gateway, ManagedGateway boots a fresh Anvil per
+    invocation.
+
     Examples:
 
         almanak strat test --actions supply --teardown --json
         almanak strat test --actions open,collect --teardown
         almanak strat test --actions supply,withdraw    # no teardown
         almanak strat test --teardown                   # teardown only (no force_actions)
+        almanak strat test --no-gateway --actions open --teardown    # reuse sidecar gateway
     """
     parsed_actions = [a.strip() for a in (actions or "").split(",") if a.strip()]
     if not parsed_actions and not teardown:
@@ -1441,7 +1458,7 @@ def strategy_test(
             network="anvil",
             gateway_host=gateway_host,
             gateway_port=gateway_port,
-            no_gateway=False,
+            no_gateway=no_gateway,
             # Don't override copy_mode — let it stay None so strategy config decides
             # (shadow / replay / live). strat test exposes no copy-mode flag.
             copy_mode=None,
