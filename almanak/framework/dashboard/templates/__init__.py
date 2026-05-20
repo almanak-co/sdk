@@ -31,7 +31,9 @@ Example:
     )
 
     def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
-        render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+        # Pass api_client so the LP template renders the gateway-backed
+        # Positions registry + Position Lifecycle sections (PR #2373).
+        render_lp_dashboard(strategy_id, strategy_config, session_state, config, api_client=api_client)
 """
 
 # Technical Analysis templates

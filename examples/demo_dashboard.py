@@ -9,15 +9,21 @@ the Almanak SDK's built-in dashboard templates.
 
 ✨ KEY POINT: You don't write any Streamlit plot code - just call the template!
 
-Example:
+Example (offline / mocked, matches this demo's actual render call):
     from almanak.framework.dashboard.templates import (
         get_uniswap_v3_config,
         render_lp_dashboard,
     )
-    
+
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
     render_lp_dashboard(strategy_id, strategy_config, session_state, config)
     # That's it! Full dashboard with all LP plots rendered automatically.
+
+In a real strategy with a live gateway, pass ``api_client=api_client`` as a
+fifth kwarg to wire up the gateway-backed Positions registry + Position
+Lifecycle sections (PR #2373). See ``almanak/demo_strategies/uniswap_lp/``
+or the LP scaffold emitted by ``almanak strat new --template dynamic_lp``
+for the canonical 5-arg shape.
 
 This demo shows all available dashboard templates:
 - LP Dashboard (Uniswap V3, TraderJoe V2, Aerodrome, PancakeSwap V3)
@@ -307,10 +313,14 @@ if page == "🏠 Overview":
     ```python
     # That's literally it - 3 lines of code!
     from almanak.framework.dashboard.templates import get_uniswap_v3_config, render_lp_dashboard
-    
+
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
     render_lp_dashboard(strategy_id, strategy_config, session_state, config)
     ```
+
+    In a real strategy with a live gateway, pass `api_client=api_client` as a
+    fifth kwarg so the LP template renders the gateway-backed Positions
+    registry + Position Lifecycle sections (PR #2373).
     
     You get:
     - ✅ Liquidity distribution chart
@@ -397,6 +407,9 @@ from almanak.framework.dashboard.templates import (
 )
 
 config = get_uniswap_v3_config(token0="WETH", token1="USDC", fee_tier="0.30%")
+# In a real strategy: pass api_client=api_client so the LP template
+# renders the gateway-backed Positions + Lifecycle sections (PR #2373).
+# This offline demo uses mocked session_state, so api_client is omitted.
 render_lp_dashboard(strategy_id, strategy_config, session_state, config)
 # That's it! Full dashboard with all LP plots.
 """, language="python")

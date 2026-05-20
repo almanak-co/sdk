@@ -247,6 +247,31 @@ def test_template_dashboard_scaffold_does_not_double_render(
     assert not leaks, f"{template} scaffold leaks {leaks!r} alongside {renderer}"
 
 
+def test_lp_scaffold_passes_api_client_to_render_lp_dashboard() -> None:
+    """The LP scaffold MUST emit ``render_lp_dashboard(..., api_client=api_client)``.
+
+    Regression guard for the silent-empty failure mode observed on hosted in
+    May 2026: when the LP scaffold drops the ``api_client`` kwarg, the
+    gateway-backed Positions registry + Position Lifecycle sections (added
+    in PR #2373) render empty, with no error or warning. AlmanakCode and
+    other LLM-generated strategies pattern-match the scaffold output, so
+    losing this kwarg in the scaffold silently regresses every new LP
+    strategy. The UAT card at
+    ``docs/internal/uat-cards/dashboard-lp-registry-lifecycle-sections.md``
+    §D2 specifies this check; this test makes it a CI gate.
+    """
+    import re
+
+    code = generate_dashboard_ui("Mean Reversion", StrategyTemplate.DYNAMIC_LP)
+    calls = re.findall(r"render_lp_dashboard\([^)]*\)", code, flags=re.DOTALL)
+    assert calls, "LP scaffold emitted no render_lp_dashboard(...) call"
+    for call in calls:
+        assert "api_client=api_client" in call, (
+            "LP scaffold must emit render_lp_dashboard(..., api_client=api_client); "
+            f"got: {call!r}"
+        )
+
+
 @pytest.mark.parametrize(
     "template,_renderer,_additional",
     _TEMPLATE_DASHBOARDS,
