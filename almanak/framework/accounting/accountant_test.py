@@ -1979,6 +1979,102 @@ def _cell22_registry_coherence(  # noqa: C901
 # ─── Primitive-specific cells ────────────────────────────────────────────
 
 
+# IL sanity factor for LP4 — ``|il_usd|`` must not exceed
+# ``_LP4_IL_SANITY_FACTOR × max(|cost_basis_usd|, |hodl_value_usd|)``.
+# Factor 2.0 accommodates legitimate large-IL positions while still
+# catching "IL = entire position value" pathology (lp-close-may20.md §6.5).
+_LP4_IL_SANITY_FACTOR = Decimal("2.0")
+
+
+def _lp4_insanity_signature(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a diagnostic dict if ``payload.il_usd`` violates the LP4 sanity
+    bound on this LP_CLOSE row, else ``None``.
+
+    See ``_cells_lp`` LP4 block for context. Presence-only check was the
+    safety-net gap that let the lp-close-may20.md principal-as-fees bug land
+    green: ``il_usd = −hodl_value_usd`` is not "PASS, il_usd exists" — it is
+    "FAIL, il_usd is economically impossible".
+    """
+    il_raw = payload.get("il_usd")
+    if il_raw is None or row.get("event_type") != "LP_CLOSE":
+        return None
+    try:
+        il = abs(Decimal(str(il_raw)))
+    except (InvalidOperation, ValueError, TypeError):
+        return None  # malformed numeric — handled by the payload_block path
+    cost_basis_raw = payload.get("cost_basis_usd")
+    hodl_raw = payload.get("hodl_value_usd")
+    references: list[Decimal] = []
+    for ref in (cost_basis_raw, hodl_raw):
+        if ref is None:
+            continue
+        try:
+            references.append(abs(Decimal(str(ref))))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+    if not references:
+        return None  # no reference scale to compare against
+    reference_max = max(references)
+    if reference_max == 0:
+        return (
+            {
+                "id": row.get("id"),
+                "il_usd": il_raw,
+                "cost_basis_usd": cost_basis_raw,
+                "hodl_value_usd": hodl_raw,
+            }
+            if il > 0
+            else None
+        )
+    if il > _LP4_IL_SANITY_FACTOR * reference_max:
+        return {
+            "id": row.get("id"),
+            "il_usd": il_raw,
+            "cost_basis_usd": cost_basis_raw,
+            "hodl_value_usd": hodl_raw,
+            "factor": float(il / reference_max),
+        }
+    return None
+
+
+def _lp4_il_sanity_cell(
+    lp_acct: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+) -> CellResult:
+    """Build the LP4 cell with the sanity bound applied.
+
+    PASS — at least one LP_CLOSE payload carries ``il_usd`` and every
+    LP_CLOSE row whose ``il_usd`` is set has it within
+    ``_LP4_IL_SANITY_FACTOR × max(|cost_basis|, |hodl|)``.
+    FAIL — any LP_CLOSE row violates the sanity bound (lp-close-may20.md).
+    XFAIL — no payload carries ``il_usd`` (handler hasn't started emitting it).
+    """
+    has_il = False
+    for row in lp_acct:
+        payload = acct_payloads.get(row.get("id"), {})
+        if payload.get("il_usd") is None:
+            continue
+        has_il = True
+        insane = _lp4_insanity_signature(row, payload)
+        if insane is not None:
+            return CellResult(
+                "LP4",
+                "Impermanent loss (diagnostic, NOT in net PnL)",
+                "FAIL",
+                (
+                    f"il_usd magnitude exceeds {_LP4_IL_SANITY_FACTOR}× max(|cost_basis|,|hodl|) "
+                    f"on LP_CLOSE row {insane.get('id')}: {insane} — "
+                    "see lp-close-may20.md (principal-as-fees signature)."
+                ),
+            )
+    return CellResult(
+        "LP4",
+        "Impermanent loss (diagnostic, NOT in net PnL)",
+        "PASS" if has_il else "XFAIL",
+        "il_usd in LP_CLOSE payload within sanity bound" if has_il else "il_usd not yet emitted by LP close handler",
+    )
+
+
 def _cells_lp(
     pos_events: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
@@ -2043,28 +2139,14 @@ def _cells_lp(
             "position_events.fees_token0/1 populated" if fees_seen else "no fees_token0/1 on any position_event",
         )
     )
-    # LP4: IL diagnostic — VIB-3868: malformed LP payloads can no longer
-    # silently land here as "il_usd missing" → XFAIL. A schema mismatch
-    # surfaces as FAIL via _payload_block_cell.
+    # LP4: IL diagnostic — VIB-3868 / lp-close-may20.md §6.5. Sanity-bound
+    # check (not presence-only): see ``_lp4_il_sanity_cell``.
     lp_acct = [r for r in acct_events if r.get("event_type") in ("LP_OPEN", "LP_CLOSE")]
     blocked = _payload_block_cell("LP4", "Impermanent loss (diagnostic, NOT in net PnL)", lp_acct, payload_errors)
     if blocked is not None:
         out.append(blocked)
     else:
-        has_il = False
-        for r in lp_acct:
-            p = acct_payloads.get(r.get("id"), {})
-            if p.get("il_usd") is not None:
-                has_il = True
-                break
-        out.append(
-            CellResult(
-                "LP4",
-                "Impermanent loss (diagnostic, NOT in net PnL)",
-                "PASS" if has_il else "XFAIL",
-                "il_usd in LP_CLOSE payload" if has_il else "il_usd not yet emitted by LP close handler",
-            )
-        )
+        out.append(_lp4_il_sanity_cell(lp_acct, acct_payloads))
     # LP5: open→close delta decomposition
     out.append(
         CellResult(

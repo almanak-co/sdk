@@ -1139,6 +1139,66 @@ class ResultEnricher:
         )
 
     @staticmethod
+    def _derive_lp_close_fees_from_siblings(chosen: Any, candidates: list[Any]) -> None:
+        """Override ``fees0/fees1`` on a chosen ``collect``-tagged LP close
+        candidate from a sibling ``decrease_liquidity`` candidate.
+
+        Fires when ALL of:
+          1. ``chosen`` is tagged ``source="collect"``.
+          2. A non-self sibling tagged ``source="decrease_liquidity"`` is in
+             ``candidates`` with populated ``amount{0,1}_collected``.
+
+        Derivation: ``fees{i} = max(collect.amount{i}_collected -
+        decrease.amount{i}_collected, 0)``. Clamped at zero to absorb
+        pre-existing ``tokensOwed`` dust where decrease > collect.
+
+        **Always overrides** when a decrease sibling exists — the parser's
+        collect-only attribution (``fees = collect_amount``, treating the
+        whole transfer as fees because no Burn was in the same receipt) is
+        correct semantics for LP_COLLECT_FEES and the
+        no-liquidity-but-owed-tokens scenario (compiler skips the decrease
+        step when ``liquidity == 0``), but WRONG for split-tx LP_CLOSE
+        where the principal lives in the decrease sibling receipt. The
+        aggregator is the only layer that can tell them apart, so it
+        always overrides when a sibling is present. See
+        ``docs/internal/lp-close-may20.md`` §6.3.
+
+        Mutates ``chosen`` in place. Falls back from
+        ``object.__setattr__`` to direct attribute assignment on TypeError
+        so frozen-dataclass instances still receive the derived values.
+        """
+        if getattr(chosen, "source", None) != "collect":
+            return
+        decrease_sib = next(
+            (c for c in candidates if c is not chosen and getattr(c, "source", None) == "decrease_liquidity"),
+            None,
+        )
+        if decrease_sib is None:
+            # LP_COLLECT_FEES / no-liquidity-but-owed: parser's
+            # ``fees = collect_amount`` attribution is correct.
+            return
+        # Split-tx LP_CLOSE: override parser's collect-only attribution.
+        ResultEnricher._derive_one_fee(chosen, decrease_sib, "fees0", "amount0_collected")
+        ResultEnricher._derive_one_fee(chosen, decrease_sib, "fees1", "amount1_collected")
+
+    @staticmethod
+    def _derive_one_fee(chosen: Any, decrease_sib: Any, fee_field: str, amount_field: str) -> None:
+        """Set ``chosen.<fee_field> = max(chosen.<amount_field> - decrease_sib.<amount_field>, 0)``
+        when both amount fields are populated. Always overrides any prior
+        ``chosen.<fee_field>`` value — the caller has already decided this
+        is the split-tx LP_CLOSE branch where the parser's single-receipt
+        attribution is wrong."""
+        c_amt = getattr(chosen, amount_field, None)
+        d_amt = getattr(decrease_sib, amount_field, None)
+        if c_amt is None or d_amt is None:
+            return
+        derived = max(c_amt - d_amt, 0)
+        try:
+            object.__setattr__(chosen, fee_field, derived)
+        except (AttributeError, TypeError):
+            setattr(chosen, fee_field, derived)
+
+    @staticmethod
     def _select_preferred_aggregate(candidates: list[Any], preferred_source: str) -> Any:
         """Pick the preferred-``source`` candidate from a multi-receipt aggregate,
         backfilling complementary fields from sibling candidates.
@@ -1160,9 +1220,21 @@ class ResultEnricher:
         * Pick the first candidate whose ``source`` matches ``preferred_source``;
           fall back to the first candidate when no tagged match exists
           (un-tagged single-tx parsers).
-        * For each ``None`` / empty-string field on the chosen candidate, look
-          for a sibling with a populated value and adopt it. Non-``None``
-          fields on the chosen candidate are authoritative — never overwritten.
+        * **LP_CLOSE fee derivation** (lp-close-may20.md): when both a
+          ``"collect"``-tagged and a ``"decrease_liquidity"``-tagged candidate
+          are present and the chosen (collect) candidate has
+          ``fees0/1 is None``, derive
+          ``fees{0,1} = collect.amount{0,1}_collected - decrease.amount{0,1}_collected``
+          (clamped at zero). This is the only layer that has both sibling
+          receipts visible and can disentangle principal from accrued fees on
+          UniswapV3-fork split-tx closes (decreaseLiquidity + collect emitted
+          as separate transactions). Without this derivation, a guard-only
+          parser fix would silently drop real mainnet fees from the LP_CLOSE
+          accounting event.
+        * For each remaining ``None`` / empty-string field on the chosen
+          candidate, look for a sibling with a populated value and adopt it.
+          Non-``None`` fields on the chosen candidate are authoritative — never
+          overwritten.
         """
         chosen: Any | None = None
         for candidate in candidates:
@@ -1171,6 +1243,9 @@ class ResultEnricher:
                 break
         if chosen is None:
             chosen = candidates[0]
+
+        # LP_CLOSE fee derivation — see helper docstring.
+        ResultEnricher._derive_lp_close_fees_from_siblings(chosen, candidates)
 
         # Backfill ``None`` fields from siblings. Use replace() if the
         # dataclass is frozen; otherwise direct attribute assignment is fine.

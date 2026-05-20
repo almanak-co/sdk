@@ -545,11 +545,24 @@ class TestSushiSwapV3LPCloseIntent:
         assert close_payload["position_hash"] is None, "SushiSwap V3 LP_CLOSE must not fabricate a V4 position_hash"
         assert close_payload["realized_pnl_usd"] is not None, "open-then-close must compute realized PnL"
 
-        # #3 parser ↔ event exact equality.
-        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        # Layer-3 parser assertion (lp-close-may20.md §6.4): per-receipt
+        # parser must extract LPCloseData on at least one receipt. Guards
+        # against parser regressions even when enrichment masks them.
+        assert lp_close_data is not None, "Layer-3 assertion needs parsed LPCloseData"
+        assert lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0, (
+            "Layer-3: parser must report a positive collected amount on at least one leg"
+        )
+
+        # Layer-5 payload parity (lp-close-may20.md §6.3): the persisted
+        # payload reflects ResultEnricher's aggregated LPCloseData (the
+        # parser's collect-only output overridden by collect-decrease diff
+        # when both siblings are present). Compare the payload to the
+        # aggregated value, NOT the loop's last per-receipt output.
+        aggregated_lp_close_data = execution_result.lp_close_data
+        assert aggregated_lp_close_data is not None, "Layer-5 assertion needs aggregated LPCloseData"
         dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
         dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
-        _assert_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
+        _assert_parser_event_equality(close_payload, aggregated_lp_close_data, dec0=dec0, dec1=dec1)
 
         print("\nALL CHECKS PASSED")
 
@@ -809,11 +822,24 @@ class TestSushiSwapV3LPCloseIntent:
         # #2 directional null-contract on LP_CLOSE (V3: no fabricated V4 hash).
         assert close_payload["position_hash"] is None, "SushiSwap V3 LP_CLOSE must not fabricate a V4 position_hash"
 
-        # #3 parser ↔ event exact equality.
-        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        # Layer-3 parser assertion (lp-close-may20.md §6.4): per-receipt
+        # parser must extract LPCloseData on at least one receipt. Guards
+        # against parser regressions even when enrichment masks them.
+        assert lp_close_data is not None, "Layer-3 assertion needs parsed LPCloseData"
+        assert lp_close_data.amount0_collected > 0 or lp_close_data.amount1_collected > 0, (
+            "Layer-3: parser must report a positive collected amount on at least one leg"
+        )
+
+        # Layer-5 payload parity (lp-close-may20.md §6.3): the persisted
+        # payload reflects ResultEnricher's aggregated LPCloseData (the
+        # parser's collect-only output overridden by collect-decrease diff
+        # when both siblings are present). Compare the payload to the
+        # aggregated value, NOT the loop's last per-receipt output.
+        aggregated_lp_close_data = execution_result.lp_close_data
+        assert aggregated_lp_close_data is not None, "Layer-5 assertion needs aggregated LPCloseData"
         dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
         dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
-        _assert_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
+        _assert_parser_event_equality(close_payload, aggregated_lp_close_data, dec0=dec0, dec1=dec1)
 
         print("\nALL CHECKS PASSED")
 

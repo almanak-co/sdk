@@ -188,6 +188,160 @@ class TestSelectPreferredAggregate:
 
 
 # ---------------------------------------------------------------------------
+# lp-close-may20.md — aggregate-layer fee derivation
+# ---------------------------------------------------------------------------
+
+
+class TestAggregatorDerivesFeesFromSiblings:
+    """The aggregator is the only layer that has both the ``collect`` and
+    ``decrease_liquidity`` sibling receipts visible at the same time. For
+    UniswapV3 / PancakeSwap V3 / SushiSwap V3 split-tx LP_CLOSE bundles, the
+    parser emits ``fees0/fees1 = None`` on each receipt (Empty ≠ Zero) and
+    relies on the aggregator to derive true fees as
+    ``collect.amount - decrease.amount`` (clamped at zero).
+
+    See ``docs/internal/lp-close-may20.md`` §6.3 — without this, a guard-only
+    parser fix would silently drop real mainnet fees from LP_CLOSE rows.
+    """
+
+    def test_derives_fees_from_collect_and_decrease_siblings(self) -> None:
+        """Split-tx LP_CLOSE: parser-side ``collect`` candidate has the
+        whole-transfer-as-fees attribution (no Burn in its receipt to
+        subtract). Aggregator overrides ``fees = collect - decrease``
+        using the principal recovered from the decrease sibling."""
+        principal0, principal1 = 1_000_000, 500_000_000_000_000_000
+        fees0, fees1 = 1_234, 9_876_000_000_000
+        decrease = LPCloseData(
+            amount0_collected=principal0,
+            amount1_collected=principal1,
+            fees0=None,
+            fees1=None,
+            liquidity_removed=9_876_543_210,
+            source="decrease_liquidity",
+        )
+        # Parser's collect-only attribution: fees = collect_amount.
+        collect = LPCloseData(
+            amount0_collected=principal0 + fees0,
+            amount1_collected=principal1 + fees1,
+            fees0=principal0 + fees0,
+            fees1=principal1 + fees1,
+            liquidity_removed=None,
+            source="collect",
+        )
+
+        chosen = ResultEnricher._select_preferred_aggregate([decrease, collect], "collect")
+        assert chosen.source == "collect"
+        # amount*_collected stays as transfer truth (principal + fees).
+        assert chosen.amount0_collected == principal0 + fees0
+        assert chosen.amount1_collected == principal1 + fees1
+        # Aggregator OVERRIDES parser's collect-only attribution.
+        assert chosen.fees0 == fees0
+        assert chosen.fees1 == fees1
+        # liquidity_removed backfilled from the decrease sibling.
+        assert chosen.liquidity_removed == 9_876_543_210
+
+    def test_zero_volume_anvil_yields_measured_zero_fees(self) -> None:
+        """On a forked Anvil with zero swap volume, real LP fees are 0.
+        collect.amount == decrease.amount → aggregator derives
+        fees = max(0, 0) = 0, overriding parser's whole-transfer-as-fees.
+        This is the lp-close-may20.md repro path — pre-fix the dashboard
+        showed Earn +$4.26 (entire principal as fees)."""
+        principal0, principal1 = 953_559_913_649_337, 2_244_836
+        decrease = LPCloseData(
+            amount0_collected=principal0,
+            amount1_collected=principal1,
+            fees0=None,
+            fees1=None,
+            liquidity_removed=950_218_044_797,
+            source="decrease_liquidity",
+        )
+        # Parser's collect-only attribution before aggregator overrides:
+        # fees = full collect_amount (matches principal since fees=0).
+        collect = LPCloseData(
+            amount0_collected=principal0,
+            amount1_collected=principal1,
+            fees0=principal0,
+            fees1=principal1,
+            liquidity_removed=None,
+            source="collect",
+        )
+        chosen = ResultEnricher._select_preferred_aggregate([decrease, collect], "collect")
+        # Aggregator overrides: fees = collect - decrease = 0.
+        assert chosen.fees0 == 0
+        assert chosen.fees1 == 0
+        # Principal still recoverable from amount*_collected.
+        assert chosen.amount0_collected == principal0
+        assert chosen.amount1_collected == principal1
+
+    def test_clamps_negative_diff_to_zero(self) -> None:
+        """Pre-existing ``tokensOwed`` dust can make decrease.amount >
+        collect.amount transiently. Aggregator clamps at 0 — never reports
+        negative fees."""
+        decrease = LPCloseData(
+            amount0_collected=1_000_000,
+            amount1_collected=500_000_000_000_000_000,
+            fees0=None,
+            fees1=None,
+            source="decrease_liquidity",
+        )
+        # Parser tagged: fees = full collect (the buggy attribution the
+        # aggregator is responsible for correcting).
+        collect = LPCloseData(
+            amount0_collected=999_999,  # one wei less than decrease
+            amount1_collected=499_999_999_999_999_999,
+            fees0=999_999,
+            fees1=499_999_999_999_999_999,
+            source="collect",
+        )
+        chosen = ResultEnricher._select_preferred_aggregate([decrease, collect], "collect")
+        assert chosen.fees0 == 0
+        assert chosen.fees1 == 0
+
+    def test_multicall_single_receipt_fees_preserved_no_sibling(self) -> None:
+        """When the close lands as a single multicall receipt with BOTH
+        Burn and Collect events, the parser computes fees correctly
+        (``collect - burn``) and emits one ``"collect"``-tagged
+        candidate. No decrease_liquidity sibling exists — aggregator
+        leaves the parser-computed fees alone."""
+        collect = LPCloseData(
+            amount0_collected=1_500_000,
+            amount1_collected=600_000_000_000_000_000,
+            fees0=42,  # parser computed collect - burn in one receipt
+            fees1=84,
+            liquidity_removed=42_424_242,
+            source="collect",
+        )
+        chosen = ResultEnricher._select_preferred_aggregate([collect], "collect")
+        assert chosen.fees0 == 42
+        assert chosen.fees1 == 84
+        assert chosen.liquidity_removed == 42_424_242
+
+    def test_lp_collect_fees_no_sibling_preserves_collect_amount(self) -> None:
+        """LP_COLLECT_FEES intent / fee-only harvest: only ONE collect
+        candidate exists (no decrease was ever called in the same flow).
+        Parser's ``fees = collect_amount`` attribution is CORRECT —
+        the whole transfer IS fees in this case. Aggregator must NOT
+        override it (no decrease sibling to derive from).
+
+        Also covers the no-liquidity-but-owed-tokens LP_CLOSE scenario
+        where the compiler skipped the decrease step because liquidity
+        was already 0.
+        """
+        collect = LPCloseData(
+            amount0_collected=12_345,
+            amount1_collected=6_789_000_000_000,
+            fees0=12_345,           # parser: whole transfer = fees
+            fees1=6_789_000_000_000,
+            source="collect",
+        )
+        chosen = ResultEnricher._select_preferred_aggregate([collect], "collect")
+        # Parser's attribution preserved — no decrease sibling means no
+        # override.
+        assert chosen.fees0 == 12_345
+        assert chosen.fees1 == 6_789_000_000_000
+
+
+# ---------------------------------------------------------------------------
 # Layer 2: ResultEnricher._extract_field end-to-end via a fake parser
 # ---------------------------------------------------------------------------
 

@@ -11,6 +11,20 @@ The parser previously returned ``fees0=0, fees1=0`` unconditionally with
 the comment "Uniswap V3 doesn't separate fees in events". That comment
 was wrong: the protocol DOES separate them — you just need both Burn
 *and* Collect from the same TX.
+
+lp-close-may20.md follow-up: when the V3 compiler emits LP_CLOSE as three
+separate transactions (decreaseLiquidity → collect → burn-NFT), each
+receipt carries only ONE of Burn/Collect. The parser CANNOT distinguish
+the split-tx collect leg from a legitimate fee-only LP_COLLECT_FEES
+harvest from a single receipt — both look identical at the receipt
+level. The parser therefore returns its best single-receipt
+understanding (``fees = collect_amount`` for collect-only, treating the
+whole transfer as fees because no Burn was observed) and tags
+``source="collect"``. The ``ResultEnricher`` aggregate layer overrides
+to ``fees = max(collect.amount - decrease.amount, 0)`` when a
+``decrease_liquidity`` sibling is present (split-tx LP_CLOSE). See
+``tests/unit/execution/test_result_enricher_aggregate_close.py`` for
+the aggregator tests.
 """
 
 from __future__ import annotations
@@ -110,8 +124,9 @@ def parser() -> UniswapV3ReceiptParser:
 def test_burn_plus_collect_yields_principal_and_fees(
     parser: UniswapV3ReceiptParser,
 ) -> None:
-    """The most common LP_CLOSE shape: decreaseLiquidity (Burn) +
-    collect (Collect) in the same TX. fees = collect - burn."""
+    """Single-tx multicall close: ``decreaseLiquidity`` (Burn) +
+    ``collect`` (Collect) in the same TX. fees = collect - burn,
+    ``source="collect"`` because the receipt carries the Collect event."""
     receipt = {
         "logs": [
             _make_burn_log(amount=LIQUIDITY, amount0=PRINCIPAL0, amount1=PRINCIPAL1),
@@ -126,34 +141,55 @@ def test_burn_plus_collect_yields_principal_and_fees(
     assert out.fees0 == FEES0
     assert out.fees1 == FEES1
     assert out.liquidity_removed == LIQUIDITY
+    assert out.source == "collect"
 
 
 def test_collect_only_treats_full_amount_as_fees(
     parser: UniswapV3ReceiptParser,
 ) -> None:
-    """Fee-only collect (in-range fee harvest, no decreaseLiquidity).
-    No Burn event present → entire collected amount is fees, principal=0."""
+    """Collect-only receipt (either: in-range fee harvest, OR the
+    collect-half of the V3 compiler's 3-tx LP_CLOSE bundle, OR
+    LP_CLOSE on a position whose ``liquidity == 0`` already so the
+    compiler skipped the decrease step).
+
+    The parser CANNOT tell those cases apart from a single receipt —
+    intent context lives at the caller. The parser's best single-
+    receipt answer is ``fees = collect_amount`` (treating the whole
+    transfer as fees because no Burn was observed), which is correct
+    for LP_COLLECT_FEES and no-liquidity-but-owed-tokens scenarios.
+
+    For split-tx LP_CLOSE, the aggregate layer
+    (``ResultEnricher._select_preferred_aggregate``) overrides this
+    attribution to ``fees = max(collect.amount - decrease.amount, 0)``
+    when a ``decrease_liquidity`` sibling is present. See
+    ``tests/unit/execution/test_result_enricher_aggregate_close.py``
+    for the aggregator coverage.
+    """
     receipt = {
         "logs": [_make_collect_log(amount0=FEES0, amount1=FEES1)],
         "status": 1,
     }
     out = parser.extract_lp_close_data(receipt)
     assert out is not None
+    # amount*_collected reflects the actual transfer (truth on receipt).
     assert out.amount0_collected == FEES0
     assert out.amount1_collected == FEES1
+    # Parser's best single-receipt attribution: whole transfer as fees.
+    # Aggregator overrides this when a decrease_liquidity sibling exists.
     assert out.fees0 == FEES0
     assert out.fees1 == FEES1
     assert out.liquidity_removed is None
+    # Source tag enables the aggregator's preferred-source picker.
+    assert out.source == "collect"
 
 
 def test_burn_only_yields_principal_with_unmeasured_fees(
     parser: UniswapV3ReceiptParser,
 ) -> None:
-    """A Burn without a matching Collect (uncommon — would require explicit
-    decreaseLiquidity without collecting) yields principal amounts. Per
-    VIB-4470 (Empty ≠ Zero) fees are UNMEASURED in this branch, not zero:
-    no Collect event means the parser did not observe fee amounts and
-    must emit ``None`` rather than fabricate a measured-zero claim."""
+    """The decrease-half of a 3-tx LP_CLOSE bundle: only the Burn event
+    is in this receipt. Principal is measured (from Burn), fees are
+    unmeasured (no Collect to diff against). VIB-4470 / blueprint 27
+    §Empty ≠ Zero. Source tag is ``"decrease_liquidity"``."""
     receipt = {
         "logs": [
             _make_burn_log(amount=LIQUIDITY, amount0=PRINCIPAL0, amount1=PRINCIPAL1),
@@ -167,6 +203,7 @@ def test_burn_only_yields_principal_with_unmeasured_fees(
     assert out.fees0 is None
     assert out.fees1 is None
     assert out.liquidity_removed == LIQUIDITY
+    assert out.source == "decrease_liquidity"
 
 
 def test_no_burn_no_collect_returns_none(parser: UniswapV3ReceiptParser) -> None:

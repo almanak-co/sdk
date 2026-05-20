@@ -998,16 +998,20 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # principal = burn amounts (zero on fee-only collect — that's correct)
-            # fees = collect - burn (clamped at zero in case of pre-existing
-            # tokensOwed dust we can't separate cleanly).
-            # VIB-4470 — when ``saw_collect`` is False the parser has not
-            # observed a Collect event; emit ``None`` (unmeasured) per Empty
-            # ≠ Zero rather than fabricating ``0``.
+            # Fees attribution from a single receipt — see
+            # ``almanak/framework/connectors/uniswap_v3/receipt_parser.py``
+            # for the full rationale. Parser returns its best single-receipt
+            # understanding; the aggregate layer
+            # (``ResultEnricher._select_preferred_aggregate``) disambiguates
+            # LP_COLLECT_FEES (collect-only, no decrease sibling) from
+            # split-tx LP_CLOSE (collect-only with a decrease sibling) and
+            # overrides fees in the second case.
             if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
+                # Burn-only receipt (no Collect): principal is observed, fees
+                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
                 fees0 = None
                 fees1 = None
 
@@ -1017,6 +1021,13 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # will fill the field after parsing.
             current_tick = self._current_tick_from_swap_event(logs, pool_address) if pool_address else None
 
+            # ``source`` tags the receipt shape for the aggregator's
+            # preferred-source picker (VIB-4310,
+            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``). Convention
+            # mirrors Aerodrome Slipstream — see uniswap_v3/receipt_parser.py
+            # for full rationale.
+            source = "collect" if saw_collect else "decrease_liquidity"
+
             return LPCloseData(
                 amount0_collected=collect_amount0 if saw_collect else burn_amount0,
                 amount1_collected=collect_amount1 if saw_collect else burn_amount1,
@@ -1025,6 +1036,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 liquidity_removed=liquidity_removed,
                 current_tick=current_tick,
                 pool_address=pool_address,
+                source=source,
             )
 
         except Exception as e:

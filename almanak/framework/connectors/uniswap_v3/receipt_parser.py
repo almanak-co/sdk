@@ -1897,17 +1897,35 @@ class UniswapV3ReceiptParser:
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # principal = burn amounts (zero on fee-only collect — that's correct)
-            # fees = collect - burn (clamped at zero in case of pre-existing
-            # tokensOwed dust we can't separate cleanly).
-            # VIB-4470 — when ``saw_collect`` is False the parser has not
-            # observed a Collect event in this receipt and therefore cannot
-            # measure fees; emit ``None`` (unmeasured) rather than fabricating
-            # ``0`` (measured zero). See blueprint 27 §Empty ≠ Zero.
+            # Fees attribution from a single receipt — the parser cannot
+            # disambiguate between two legitimate collect-only shapes:
+            #
+            #   (a) LP_COLLECT_FEES intent / fee-only harvest: position never
+            #       had a ``decreaseLiquidity`` call, so no Burn ever existed.
+            #       The collected amount IS the fees. (Mirrors the V3
+            #       compiler's no-liquidity-but-owed-tokens code path at
+            #       ``almanak/framework/connectors/uniswap_v3/compiler.py:907``
+            #       — when ``liquidity == 0`` the decrease step is skipped.)
+            #   (b) LP_CLOSE split-tx collect leg: the V3 compiler emits
+            #       LP_CLOSE as three sequential txs (decreaseLiquidity →
+            #       collect → burn). The collect-only receipt has
+            #       ``burn_amount = 0`` but the principal is real, decoded
+            #       from a sibling decrease receipt.
+            #
+            # The parser returns its best single-receipt understanding and
+            # tags ``source``. Disambiguation happens at the aggregate layer
+            # (``ResultEnricher._select_preferred_aggregate``): when a
+            # ``decrease_liquidity`` sibling is present (case b), the
+            # aggregator OVERRIDES ``fees = max(collect.amount -
+            # decrease.amount, 0)``. When no sibling is present (case a),
+            # the parser's collect-as-fees attribution is correct.
+            # See ``docs/internal/lp-close-may20.md`` §6.3.
             if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
+                # Burn-only receipt (no Collect): principal is observed, fees
+                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
                 fees0 = None
                 fees1 = None
 
@@ -1917,6 +1935,19 @@ class UniswapV3ReceiptParser:
             # slot0() fallback will fill the field after parsing.
             current_tick = self._current_tick_from_swap_event(logs, pool_address) if pool_address else None
 
+            # ``source`` tags the receipt shape so the aggregator's
+            # preferred-source picker (VIB-4310,
+            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``) can prefer
+            # the collect candidate over the decrease candidate. Convention
+            # mirrors Aerodrome Slipstream: ``"collect"`` whenever a Collect
+            # event was observed (including a single-tx multicall close that
+            # carries both Collect AND Burn), ``"decrease_liquidity"`` when
+            # only the Burn/DecreaseLiquidity side was observed. Without the
+            # tag the picker would fall through to ``candidates[0]`` and emit
+            # ``amount*_collected = principal-only`` from the decrease
+            # receipt, silently dropping real fees from mainnet rows.
+            source = "collect" if saw_collect else "decrease_liquidity"
+
             return LPCloseData(
                 amount0_collected=collect_amount0 if saw_collect else burn_amount0,
                 amount1_collected=collect_amount1 if saw_collect else burn_amount1,
@@ -1925,6 +1956,7 @@ class UniswapV3ReceiptParser:
                 liquidity_removed=liquidity_removed,
                 current_tick=current_tick,  # VIB-3940
                 pool_address=pool_address,  # VIB-3940 — for framework slot0 fallback
+                source=source,
             )
 
         except Exception as e:

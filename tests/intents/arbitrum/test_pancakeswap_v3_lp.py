@@ -542,6 +542,9 @@ class TestPancakeSwapV3LPCloseIntent:
         # #3 parser ↔ event exact equality.
         dec0 = get_token_decimals(web3, tokens[close_payload["token0"]])
         dec1 = get_token_decimals(web3, tokens[close_payload["token1"]])
+        # lp-close-may20.md §6.3: read aggregated value (matches persisted payload).
+        # Per-receipt parser loop above is preserved for diagnostic prints.
+        lp_close_data = execution_result.lp_close_data
         _assert_parser_event_equality(close_payload, lp_close_data, dec0=dec0, dec1=dec1)
 
         print("\nALL CHECKS PASSED")

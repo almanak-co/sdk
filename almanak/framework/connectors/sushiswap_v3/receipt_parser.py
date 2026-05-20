@@ -1820,19 +1820,29 @@ class SushiSwapV3ReceiptParser:
 
             liquidity_removed = burn_liquidity_total if saw_burn else None
 
-            # principal = burn amounts; fees = collect - burn when both are
-            # in the same receipt (UV3 single-TX close path), clamped at
-            # zero. On Sushi V3 the 3-TX bundle splits Burn and Collect into
-            # separate receipts; a single receipt that lacks either side
-            # cannot disentangle fees from principal.
-            # VIB-4470 — emit ``None`` rather than fabricating ``0`` when fees
-            # cannot be measured from this receipt (Empty ≠ Zero).
-            if saw_collect and saw_burn:
+            # Fees attribution from a single receipt — see
+            # ``almanak/framework/connectors/uniswap_v3/receipt_parser.py``
+            # for the full rationale. Parser returns its best single-receipt
+            # understanding; the aggregate layer
+            # (``ResultEnricher._select_preferred_aggregate``) disambiguates
+            # LP_COLLECT_FEES (collect-only, no decrease sibling) from
+            # split-tx LP_CLOSE (collect-only with a decrease sibling) and
+            # overrides fees in the second case.
+            if saw_collect:
                 fees0: int | None = max(collect_amount0 - burn_amount0, 0)
                 fees1: int | None = max(collect_amount1 - burn_amount1, 0)
             else:
+                # Burn-only receipt (no Collect): principal is observed, fees
+                # are unmeasured. VIB-4470 / blueprint 27 §Empty ≠ Zero.
                 fees0 = None
                 fees1 = None
+
+            # ``source`` tags the receipt shape for the aggregator's
+            # preferred-source picker (VIB-4310,
+            # ``_AGGREGATE_FIELDS["lp_close_data"] = "collect"``). Convention
+            # mirrors Aerodrome Slipstream — see uniswap_v3/receipt_parser.py
+            # for full rationale.
+            source = "collect" if saw_collect else "decrease_liquidity"
 
             return LPCloseData(
                 amount0_collected=collect_amount0 if saw_collect else burn_amount0,
@@ -1841,6 +1851,7 @@ class SushiSwapV3ReceiptParser:
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
                 pool_address=pool_address,  # VIB-4198 / T12 — registry-mode close
+                source=source,
             )
 
         except Exception as e:

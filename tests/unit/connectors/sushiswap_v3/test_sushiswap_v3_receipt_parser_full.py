@@ -932,11 +932,16 @@ class TestExtractLPCloseData:
         assert result is not None
         assert result.amount0_collected == 100
         assert result.amount1_collected == 200
-        # VIB-4470: without both saw_collect AND saw_burn, the parser
-        # cannot disentangle fees from principal (3-TX Sushi bundle); fees
-        # are unmeasured (None), not a fabricated zero (Empty ≠ Zero).
-        assert result.fees0 is None
-        assert result.fees1 is None
+        # lp-close-may20.md §6.3: parser cannot disambiguate
+        # LP_COLLECT_FEES / no-liquidity-but-owed (collect-only legitimately
+        # means "whole transfer is fees") from split-tx LP_CLOSE collect leg
+        # (principal lives in a sibling receipt). Parser emits its best
+        # single-receipt answer (``fees = collect_amount``) and tags
+        # ``source="collect"``. The aggregator overrides fees when a
+        # ``decrease_liquidity`` sibling exists.
+        assert result.fees0 == 100
+        assert result.fees1 == 200
+        assert result.source == "collect"
         # No burn -> liquidity_removed=None
         assert result.liquidity_removed is None
 
