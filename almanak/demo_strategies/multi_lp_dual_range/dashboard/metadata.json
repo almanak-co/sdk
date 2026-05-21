@@ -1,0 +1,5 @@
+{
+    "display_name": "Multi-LP Dual Range",
+    "description": "Two Uniswap V3 LP positions (narrow + wide) on the same pool, opened one Intent per iteration via a phase machine.",
+    "icon": "🔀"
+}

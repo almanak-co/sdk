@@ -1,0 +1,12 @@
+{
+    "chain": "arbitrum",
+    "pool": "WETH/USDC/500",
+    "narrow_range_width_pct": 0.10,
+    "wide_range_width_pct": 0.40,
+    "lp_capital_split_pct": 0.50,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 4000
+    }
+}
