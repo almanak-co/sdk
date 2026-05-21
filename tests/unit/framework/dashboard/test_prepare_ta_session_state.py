@@ -46,9 +46,11 @@ class _FakeClient:
         self,
         ohlcv: list[dict[str, Any]] | None = None,
         tape_rows: list[dict[str, Any]] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
     ) -> None:
         self._ohlcv = ohlcv or []
         self._tape_rows = tape_rows or []
+        self._timeline = timeline or []
         self.ohlcv_call_count = 0
 
     def get_ohlcv(self, **_: Any) -> list[dict[str, Any]]:
@@ -57,6 +59,9 @@ class _FakeClient:
 
     def get_trade_tape(self) -> dict[str, Any]:
         return {"rows": self._tape_rows, "has_more": False}
+
+    def get_timeline(self, **_: Any) -> list[dict[str, Any]]:
+        return self._timeline
 
 
 # ----------------------------------------------------------------------
@@ -127,20 +132,44 @@ def test_trade_rows_split_by_direction():
             "timestamp": "2026-05-12T01:00:00Z",
             "intent_type": "SWAP",
             "token_in": "USDC",
+            "amount_in": "3",
             "token_out": "WETH",
-            "effective_price": "2200",
+            "amount_out": "0.0015",
+            "effective_price": "0.0005",
         },
         {
             "timestamp": "2026-05-12T05:00:00Z",
             "intent_type": "SWAP",
             "token_in": "WETH",
+            "amount_in": "0.00125",
             "token_out": "USDC",
+            "amount_out": "3",
             "effective_price": "2400",
         },
     ]
     buys, sells = _trade_rows_to_signals(rows, "WETH", "USDC")
-    assert len(buys) == 1 and buys["price"].iloc[0] == 2200.0
+    assert len(buys) == 1 and buys["price"].iloc[0] == 2000.0
     assert len(sells) == 1 and sells["price"].iloc[0] == 2400.0
+
+
+def test_trade_rows_buy_marker_converts_output_per_input_price_to_chart_price():
+    rows = [
+        {
+            "timestamp": "2026-05-20T16:23:23Z",
+            "intent_type": "SWAP",
+            "token_in": "USDC",
+            "amount_in": "3",
+            "token_out": "WETH",
+            "amount_out": "0.001407624092196586",
+            "effective_price": "0.0004692080307321953333333333333",
+        }
+    ]
+
+    buys, sells = _trade_rows_to_signals(rows, "WETH", "USDC")
+
+    assert sells.empty
+    assert len(buys) == 1
+    assert buys["price"].iloc[0] == pytest.approx(2131.251, rel=1e-6)
 
 
 def test_trade_rows_ignore_non_swap_and_off_pair():
@@ -195,6 +224,13 @@ def test_prepare_populates_chart_keys_from_api_client():
                 "effective_price": "2200",
             }
         ],
+        timeline=[
+            {
+                "timestamp": "2026-05-12T04:00:00Z",
+                "event_type": "STRATEGY_STARTED",
+                "description": "Strategy started",
+            }
+        ],
     )
     out = prepare_ta_session_state(client, session_state={}, config=_config())
     # Chart inputs the renderer's _render_charts_section depends on.
@@ -208,6 +244,21 @@ def test_prepare_populates_chart_keys_from_api_client():
     # Buy/sell parsing
     assert len(out["buy_signals"]) == 1
     assert out["sell_signals"].empty
+    assert out["strategy_start_time"] == pd.Timestamp("2026-05-12T04:00:00Z")
+
+
+def test_prepare_prefers_strategy_started_for_start_marker():
+    client = _FakeClient(
+        timeline=[
+            {"timestamp": "2026-05-12T05:00:00Z", "event_type": "STATE_CHANGE"},
+            {"timestamp": "2026-05-12T04:30:00Z", "event_type": "STRATEGY_STARTED"},
+            {"timestamp": "2026-05-12T04:00:00Z", "event_type": "STATE_CHANGE"},
+        ],
+    )
+
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+
+    assert out["strategy_start_time"] == pd.Timestamp("2026-05-12T04:30:00Z")
 
 
 def test_prepare_preserves_caller_keys():
@@ -306,6 +357,7 @@ def test_render_charts_section_tolerates_dataframe_signals():
         "rsi_history": rsi_history,
         "buy_signals": buy_df,
         "sell_signals": sell_df,
+        "strategy_start_time": times[0],
     }
     # Must not raise — Streamlit calls become no-ops without a script
     # context. The point of the test is the type-coercion path.

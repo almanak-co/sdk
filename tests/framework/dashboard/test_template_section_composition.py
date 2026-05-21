@@ -137,7 +137,6 @@ class TestLPTemplateSectionOrdering:
                 "almanak.framework.dashboard.templates.lp_dashboard",
                 call_log,
                 extra_targets=(
-                    "plot_position_range_status",
                     "plot_liquidity_distribution",
                     "plot_positions_over_time",
                     "plot_fee_accumulation",
@@ -161,7 +160,6 @@ class TestLendingTemplateSectionOrdering:
                     "plot_health_factor_gauge",
                     "plot_ltv_ratio",
                     "plot_collateral_breakdown",
-                    "plot_borrow_utilization",
                     "plot_lending_rates_comparison",
                 ),
             )

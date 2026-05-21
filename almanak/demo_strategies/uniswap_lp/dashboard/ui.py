@@ -52,6 +52,16 @@ def _format_fee_tier(value: Any) -> str:
         return "0.30%"
 
 
+def _token_address(strategy_config: dict[str, Any], symbol: str) -> str | None:
+    for item in strategy_config.get("token_funding", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("symbol", "")).upper() == symbol.upper():
+            address = item.get("address")
+            return str(address) if address else None
+    return None
+
+
 def render_custom_dashboard(
     strategy_id: str,
     strategy_config: dict[str, Any],
@@ -70,6 +80,9 @@ def render_custom_dashboard(
         token1=token1,
         fee_tier=fee_tier,
         chain=str(strategy_config.get("chain", "arbitrum")),
+        pool_address=str(strategy_config["pool_address"]) if strategy_config.get("pool_address") else None,
+        token0_address=_token_address(strategy_config, token0),
+        token1_address=_token_address(strategy_config, token1),
     )
 
     session_state = prepare_lp_session_state(

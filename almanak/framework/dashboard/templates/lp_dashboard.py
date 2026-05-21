@@ -47,7 +47,6 @@ from almanak.framework.dashboard.plots import (
     plot_fee_accumulation,
     plot_impermanent_loss,
     plot_liquidity_distribution,
-    plot_position_range_status,
     plot_positions_over_time,
 )
 from almanak.framework.dashboard.sections import (
@@ -86,6 +85,9 @@ class LPDashboardConfig:
     show_fee_accumulation: bool = True
     invert_prices: bool = False
     position_bounds_ratio: float | None = 0.8
+    pool_address: str | None = None
+    token0_address: str | None = None
+    token1_address: str | None = None
 
 
 class LPSessionState(TypedDict, total=False):
@@ -195,6 +197,8 @@ def prepare_lp_session_state(
             except Exception:
                 logger.debug("get_state() merge failed — using caller-provided state only")
 
+    _normalize_position_id(result)
+
     # Derive is_active from position_id
     result.setdefault("is_active", result.get("position_id") is not None)
 
@@ -255,13 +259,26 @@ def prepare_lp_session_state(
     # OHLCVRouter). Always preserve caller-provided ``price_history`` /
     # ``position_history`` — custom dashboards that supply their own chart
     # data must not regress.
-    _populate_position_history(api_client, result)
+    events = _populate_position_history(api_client, result, config)
+    _hydrate_active_position_from_events(result, events, config)
     _populate_price_history_by_pool(api_client, result, config)
+    _populate_liquidity_distribution(api_client, result, config)
+    _refresh_in_range(result)
 
     return result
 
 
-def _populate_position_history(api_client: Any, result: dict[str, Any]) -> None:
+def _normalize_position_id(result: dict[str, Any]) -> None:
+    """Map hosted/local active-position state into the LP template key."""
+    if not result.get("position_id") and result.get("current_position_id"):
+        result["position_id"] = result.get("current_position_id")
+
+
+def _populate_position_history(
+    api_client: Any,
+    result: dict[str, Any],
+    config: LPDashboardConfig | None = None,
+) -> list[dict[str, Any]]:
     """Fetch LP position events into ``session_state``.
 
     Caller-provided ``position_history`` is left untouched. On any RPC
@@ -269,8 +286,10 @@ def _populate_position_history(api_client: Any, result: dict[str, Any]) -> None:
     template already renders a "Position history data not available"
     info banner when the key is missing.
     """
-    if api_client is None or "position_history" in result:
-        return
+    if api_client is None:
+        return []
+    if "position_history" in result:
+        return []
     try:
         # ``position_type`` column stores ``"LP"`` / ``"PERP"`` etc.;
         # ``event_type`` holds ``OPEN`` / ``CLOSE``. Filter on the
@@ -282,11 +301,112 @@ def _populate_position_history(api_client: Any, result: dict[str, Any]) -> None:
                 position_events_to_position_data_dicts,
             )
 
-            result["position_history"] = position_events_to_position_data_dicts(events)
+            result["position_history"] = position_events_to_position_data_dicts(
+                events,
+                token0=config.token0 if config else None,
+                token1=config.token1 if config else None,
+            )
         else:
             result["position_history"] = []
+        return events
     except Exception:
         logger.debug("Failed to fetch position events for LP dashboard", exc_info=True)
+        return []
+
+
+def _hydrate_active_position_from_events(
+    result: dict[str, Any],
+    events: list[dict[str, Any]],
+    config: LPDashboardConfig | None,
+) -> None:
+    """Fill scalar LP status fields from the latest open position event."""
+    if not events:
+        return
+
+    by_position: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        pid = str(event.get("position_id") or "")
+        if pid:
+            by_position.setdefault(pid, []).append(event)
+
+    # Pick the newest active OPEN (no matching CLOSE in its group). The
+    # previous loop silently overwrote ``active_open`` per group and was
+    # therefore order-dependent — for multi-position strategies (lp_dual,
+    # lp_triple) "active" must be the latest unclosed leg by timestamp.
+    active_candidates: list[dict[str, Any]] = []
+    for group in by_position.values():
+        ordered = sorted(group, key=lambda e: e.get("timestamp") or "")
+        open_row = next((e for e in ordered if e.get("event_type") == "OPEN"), None)
+        close_row = next((e for e in ordered if e.get("event_type") == "CLOSE"), None)
+        if open_row is not None and close_row is None:
+            active_candidates.append(open_row)
+
+    if not active_candidates:
+        return
+    active_open = max(active_candidates, key=lambda e: e.get("timestamp") or "")
+
+    if not result.get("position_id"):
+        result["position_id"] = active_open.get("position_id")
+    result["is_active"] = True
+    result.setdefault("lower_tick", active_open.get("tick_lower"))
+    result.setdefault("upper_tick", active_open.get("tick_upper"))
+    amount0 = _token_amount_to_display(active_open.get("amount0"), config.token0 if config else None)
+    amount1 = _token_amount_to_display(active_open.get("amount1"), config.token1 if config else None)
+    if amount0 is not None:
+        result["token0_amount"] = amount0
+    if amount1 is not None:
+        result["token1_amount"] = amount1
+    result.setdefault("total_value_usd", active_open.get("value_usd") or result.get("total_value_usd") or "0")
+
+    if config is not None:
+        lower = _tick_to_display_price(active_open.get("tick_lower"), config)
+        upper = _tick_to_display_price(active_open.get("tick_upper"), config)
+        if lower is not None and not result.get("range_lower"):
+            result["range_lower"] = lower
+        if upper is not None and not result.get("range_upper"):
+            result["range_upper"] = upper
+
+
+def _tick_to_display_price(tick: Any, config: LPDashboardConfig) -> float | None:
+    """Convert a Uniswap-style tick into token1-per-token0 display price."""
+    from math import exp, log
+
+    from almanak.framework.dashboard.custom._token_decimals import TOKEN_DECIMALS
+
+    decimals0 = TOKEN_DECIMALS.get(config.token0.upper())
+    decimals1 = TOKEN_DECIMALS.get(config.token1.upper())
+    if tick is None or decimals0 is None or decimals1 is None:
+        return None
+    try:
+        return exp(int(tick) * log(1.0001)) * (10 ** (decimals0 - decimals1))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _token_amount_to_display(amount: Any, symbol: str | None) -> float | None:
+    from almanak.framework.dashboard.custom._token_decimals import TOKEN_DECIMALS
+
+    if amount in (None, "") or symbol is None:
+        return None
+    token_decimals = TOKEN_DECIMALS.get(symbol.upper())
+    if token_decimals is None:
+        return None
+    try:
+        return float(Decimal(str(amount)) / (Decimal(10) ** token_decimals))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+
+
+def _refresh_in_range(result: dict[str, Any]) -> None:
+    current = result.get("current_price")
+    lower = result.get("range_lower")
+    upper = result.get("range_upper")
+    if current is None or lower is None or upper is None:
+        return
+    try:
+        result["in_range"] = float(lower) <= float(current) <= float(upper)
+    except (ValueError, TypeError):
+        logger.debug("Non-numeric range bounds — cannot compute in_range")
 
 
 def _collect_pool_keys(result: dict[str, Any]) -> list[tuple[str, str]]:
@@ -321,7 +441,7 @@ def _collect_pool_keys(result: dict[str, Any]) -> list[tuple[str, str]]:
 def _fetch_pool_candles(
     api_client: Any,
     chain: str,
-    pool_address: str,
+    pool_address: str | None,
     token0: str,
 ) -> list[Any]:
     """Best-effort OHLCV fetch for a single pool. Empty list on any failure."""
@@ -386,6 +506,75 @@ def _populate_price_history_by_pool(
     if "price_history" not in result and len(by_pool) == 1:
         ((_chain, _pool), candles) = next(iter(by_pool.items()))
         result["price_history"] = candles
+    elif "price_history" not in result and not by_pool and config is not None and _has_position_history(result):
+        candles = _fetch_pool_candles(api_client, config.chain, None, token0)
+        if candles:
+            result["price_history"] = candles
+
+
+def _has_position_history(result: dict[str, Any]) -> bool:
+    history = result.get("position_history")
+    if isinstance(history, list) and history:
+        return True
+    positions = result.get("positions")
+    return isinstance(positions, list) and bool(positions)
+
+
+def _populate_liquidity_distribution(
+    api_client: Any,
+    result: dict[str, Any],
+    config: LPDashboardConfig | None,
+) -> None:
+    if api_client is None or config is None or "tick_data" in result:
+        return
+
+    pool_address = config.pool_address
+    fee_tier = _fee_tier_to_bps(config.fee_tier)
+    if not pool_address and config.token0_address and config.token1_address:
+        try:
+            pool_address = api_client.get_v3_pool_address(
+                chain=config.chain,
+                protocol=config.protocol,
+                token0_address=config.token0_address,
+                token1_address=config.token1_address,
+                fee_tier=fee_tier,
+            )
+        except Exception:
+            logger.debug("Failed to resolve LP pool address for liquidity distribution", exc_info=True)
+            pool_address = None
+
+    if not pool_address:
+        return
+
+    try:
+        rows = api_client.get_liquidity_distribution(
+            pool_address=pool_address,
+            chain=config.chain,
+            fee_tier=fee_tier,
+            token0=config.token0,
+            token1=config.token1,
+        )
+    except Exception:
+        logger.debug("Failed to fetch liquidity distribution", exc_info=True)
+        rows = []
+
+    if rows:
+        result["tick_data"] = rows
+        current_tick = rows[0].get("current_tick") if isinstance(rows[0], dict) else None
+        if current_tick is not None:
+            result.setdefault("current_tick", current_tick)
+
+
+def _fee_tier_to_bps(value: Any) -> int:
+    if isinstance(value, str) and value.endswith("%"):
+        try:
+            return int(round(float(value[:-1]) * 10000))
+        except ValueError:
+            return 3000
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 3000
 
 
 def render_lp_dashboard(
@@ -460,30 +649,13 @@ def render_lp_dashboard(
             return len(data) > 0
         return True
 
-    # Position Range Status
-    current_price = session_state.get("current_price")
-    range_lower = session_state.get("range_lower")
-    range_upper = session_state.get("range_upper")
-    try:
-        if current_price is not None and range_lower is not None and range_upper is not None:
-            fig = plot_position_range_status(
-                current_price=float(current_price),
-                lower_bound=float(range_lower),
-                upper_bound=float(range_upper),
-                token_pair=f"{token0}/{token1}",
-                invert_prices=config.invert_prices,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    except (ValueError, TypeError):
-        logger.debug("Non-numeric range data — skipping position range chart")
-
-    st.divider()
-
     # Liquidity Distribution
     tick_data = session_state.get("tick_data")
     lower_tick = session_state.get("lower_tick")
     upper_tick = session_state.get("upper_tick")
-    position_bounds = (lower_tick, upper_tick) if lower_tick is not None and upper_tick is not None else None
+    position_bounds: tuple[int, int] | list[dict[str, Any]] | None = _liquidity_position_bounds(session_state) or None
+    if position_bounds is None and lower_tick is not None and upper_tick is not None:
+        position_bounds = (int(lower_tick), int(upper_tick))
 
     if config.show_liquidity_distribution and _has_data(tick_data):
         st.subheader("Liquidity Distribution")
@@ -494,6 +666,7 @@ def render_lp_dashboard(
             token_pair=f"{token0}/{token1}",
             fee_tier=fee_tier,
             invert_prices=config.invert_prices,
+            auto_zoom=False,
         )
         st.plotly_chart(fig, use_container_width=True)
     elif config.show_liquidity_distribution:
@@ -639,6 +812,30 @@ def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
         st.warning("Position lifecycle panel failed to render — check logs.")
 
 
+def _liquidity_position_bounds(session_state: dict[str, Any]) -> list[dict[str, Any]]:
+    positions = session_state.get("positions")
+    if not isinstance(positions, list):
+        return []
+
+    bounds: list[dict[str, Any]] = []
+    for idx, pos in enumerate(positions, start=1):
+        if not isinstance(pos, dict) or pos.get("is_active") is False:
+            continue
+        lower = pos.get("lower_tick", pos.get("tick_lower"))
+        upper = pos.get("upper_tick", pos.get("tick_upper"))
+        if lower is None or upper is None:
+            continue
+        label = pos.get("registry_handle") or pos.get("label") or pos.get("position_id") or f"Position {idx}"
+        bounds.append(
+            {
+                "lower_tick": lower,
+                "upper_tick": upper,
+                "label": str(label),
+            }
+        )
+    return bounds
+
+
 def _render_position_status_panel(
     session_state: dict[str, Any],
     config: LPDashboardConfig,
@@ -664,9 +861,9 @@ def _render_position_status_panel(
         # anything that is not a dict (tuple, Pydantic model, string)
         # would 500 the dashboard via ``AttributeError`` on ``.get``.
         # Skip such entries so a single typo can't take the panel down.
-        valid = [p for p in positions if isinstance(p, dict)]
+        valid = [p for p in positions if isinstance(p, dict) and p.get("is_active") is not False]
         if not valid:
-            _render_position_status(session_state, config)
+            st.info("No active LP positions.")
             return
         if len(valid) == 1:
             _render_position_status(_merge_state(session_state, valid[0]), config)
@@ -813,8 +1010,31 @@ def _render_performance_summary(
         st.metric("Net PnL", f"${float(net_pnl):+,.2f}")
 
     with col4:
-        position_value = _safe_decimal(session_state.get("total_value_usd", "0"))
+        position_value = _position_value_usd_for_summary(session_state, _safe_decimal)
         st.metric("Position Value", f"${float(position_value):,.2f}")
+
+
+def _position_value_usd_for_summary(
+    session_state: dict[str, Any],
+    parse_decimal: Any,
+) -> Decimal:
+    positions = session_state.get("positions")
+    if not isinstance(positions, list):
+        return parse_decimal(session_state.get("total_value_usd", "0"))
+
+    total = Decimal("0")
+    seen = False
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        if position.get("is_active") is False:
+            continue
+        total += parse_decimal(position.get("total_value_usd", "0"))
+        seen = True
+
+    if seen:
+        return total
+    return parse_decimal(session_state.get("total_value_usd", "0"))
 
 
 # Pre-configured templates for common LP protocols

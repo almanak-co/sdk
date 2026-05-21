@@ -44,6 +44,7 @@ from almanak.framework.dashboard.templates.lending_dashboard import (
     get_compound_v3_config,
     get_morpho_blue_config,
     get_spark_config,
+    prepare_lending_session_state,
     render_lending_dashboard,
 )
 
@@ -113,6 +114,7 @@ __all__ = [
     # Lending templates
     "LendingDashboardConfig",
     "render_lending_dashboard",
+    "prepare_lending_session_state",
     "get_aave_v3_config",
     "get_morpho_blue_config",
     "get_compound_v3_config",

@@ -14,7 +14,10 @@ gateway state APIs (not ``timeline_events.details_json`` parsing).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import exp, log
 from typing import Any
+
+from ._token_decimals import TOKEN_DECIMALS as _TOKEN_DECIMALS
 
 
 def position_event_to_dict(event: Any) -> dict[str, Any]:
@@ -73,7 +76,12 @@ def position_event_to_dict(event: Any) -> dict[str, Any]:
     }
 
 
-def position_events_to_position_data_dicts(events: list[Any]) -> list[dict[str, Any]]:
+def position_events_to_position_data_dicts(
+    events: list[Any],
+    *,
+    token0: str | None = None,
+    token1: str | None = None,
+) -> list[dict[str, Any]]:
     """Collapse a chronological list of position events into ``PositionData``-shaped dicts.
 
     Walks the events for one (or many) ``position_id`` and produces one dict
@@ -101,10 +109,16 @@ def position_events_to_position_data_dicts(events: list[Any]) -> list[dict[str, 
     rows: list[dict[str, Any]] = [e if isinstance(e, dict) else position_event_to_dict(e) for e in events]
     # Group by position_id while preserving insertion order so output is
     # deterministic for a given input.
+    # Group by position_id. Rows without a position_id are skipped so they
+    # do not collapse into a single synthetic "" position that
+    # ``plot_positions_over_time`` would then render as a merged ghost
+    # position spanning unrelated events.
     by_position: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        pid = row.get("position_id") or ""
-        by_position.setdefault(pid, []).append(row)
+        pid = row.get("position_id")
+        if not pid:
+            continue
+        by_position.setdefault(str(pid), []).append(row)
 
     positions: list[dict[str, Any]] = []
     for pid, group in by_position.items():
@@ -125,11 +139,8 @@ def position_events_to_position_data_dicts(events: list[Any]) -> list[dict[str, 
                 "date_end": _parse_iso(close_row.get("timestamp")) if close_row else None,
                 "bound_tick_lower": anchor.get("tick_lower") or 0,
                 "bound_tick_upper": anchor.get("tick_upper") or 0,
-                # Pool-bound prices: not directly in PositionEventData today;
-                # callers that have them upstream can override. Leave 0.0 so
-                # plot_positions_over_time falls through to its price-range fit.
-                "bound_price_lower": 0.0,
-                "bound_price_upper": 0.0,
+                "bound_price_lower": _tick_to_price(anchor.get("tick_lower"), token0, token1),
+                "bound_price_upper": _tick_to_price(anchor.get("tick_upper"), token0, token1),
                 "is_active": close_row is None,
                 "position_type": anchor.get("position_type", "") or "",
                 "protocol": anchor.get("protocol", "") or "",
@@ -161,6 +172,26 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _tick_to_price(tick: Any, token0: str | None, token1: str | None) -> float:
+    """Convert a Uniswap-style tick into token1-per-token0 display price."""
+    if tick is None or token0 is None or token1 is None:
+        return 0.0
+    try:
+        tick_int = int(tick)
+    except (TypeError, ValueError):
+        return 0.0
+
+    decimals0 = _TOKEN_DECIMALS.get(str(token0).upper())
+    decimals1 = _TOKEN_DECIMALS.get(str(token1).upper())
+    if decimals0 is None or decimals1 is None:
+        return 0.0
+
+    try:
+        return exp(tick_int * log(1.0001)) * (10 ** (decimals0 - decimals1))
+    except (OverflowError, ValueError):
+        return 0.0
 
 
 __all__ = [

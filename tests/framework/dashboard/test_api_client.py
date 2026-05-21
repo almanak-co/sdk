@@ -11,7 +11,7 @@ Tests cover:
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -167,6 +167,37 @@ class TestGetConfig:
         config = api_client.get_config()
 
         assert config == {}
+
+
+class TestGetTradeTape:
+    """Tests for get_trade_tape method."""
+
+    def test_get_trade_tape_scopes_to_strategy(self, api_client, mock_gateway_client):
+        """Test trade-tape fetch is scoped to the current strategy."""
+        response = MagicMock()
+        mock_gateway_client.get_trade_tape.return_value = response
+
+        result = api_client.get_trade_tape(limit=25)
+
+        assert result is response
+        mock_gateway_client.get_trade_tape.assert_called_once_with("test-strategy", limit=25)
+
+    def test_get_trade_tape_error_returns_empty_shape(self, api_client, mock_gateway_client):
+        """Test error handling returns a typed empty ``TradeTapeResponse``.
+
+        Returning a plain dict here would break attribute-style consumers
+        (``response.rows`` / ``response.has_more``) that work against the
+        success path. The fallback shape must match the success shape.
+        """
+        from almanak.framework.dashboard.gateway_client import TradeTapeResponse
+
+        mock_gateway_client.get_trade_tape.side_effect = Exception("Unavailable")
+
+        result = api_client.get_trade_tape()
+
+        assert isinstance(result, TradeTapeResponse)
+        assert result.rows == []
+        assert result.has_more is False
 
 
 class TestGetPosition:
@@ -460,7 +491,7 @@ class TestGetBalance:
         mock_gateway_client._client.market = mock_market
 
         with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
-            balance = api_client.get_balance("ETH", chain="base")
+            api_client.get_balance("ETH", chain="base")
 
             mock_pb2.BalanceRequest.assert_called_once_with(
                 token="ETH", chain="base", wallet_address="0x1234"
@@ -590,7 +621,7 @@ class TestResumeStrategy:
         """Test resume with default reason."""
         mock_gateway_client.execute_action.return_value = True
 
-        result = api_client.resume_strategy()
+        api_client.resume_strategy()
 
         mock_gateway_client.execute_action.assert_called_once_with(
             "test-strategy",

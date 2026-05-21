@@ -11,7 +11,11 @@ Custom dashboards cannot import the gateway client directly because:
 """
 
 import logging
+import math
+from decimal import Decimal
 from typing import Any
+
+from ._token_decimals import token_decimals as _token_decimals
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,63 @@ class _Sentinel:
 
 
 _UNSET: _Sentinel = _Sentinel()
+
+
+def _liquidity_depth_to_rows(depth: Any) -> list[dict[str, Any]]:
+    ticks = sorted(getattr(depth, "ticks", []) or [], key=lambda tick: tick.tick_index)
+    current_tick = int(getattr(depth, "current_tick", 0) or 0)
+    current_liquidity = int(getattr(depth, "total_liquidity", 0) or 0)
+    tick_spacing = int(getattr(depth, "tick_spacing", 0) or 0)
+    token0_decimals = int(getattr(depth, "token0_decimals", 18) or 18)
+    token1_decimals = int(getattr(depth, "token1_decimals", 6) or 6)
+    active_tick = (current_tick // tick_spacing) * tick_spacing if tick_spacing else current_tick
+    liquidity_net_by_tick = {int(tick.tick_index): int(tick.liquidity_net) for tick in ticks}
+
+    def _price_at_tick(tick_index: int) -> Decimal:
+        return Decimal(str(math.pow(1.0001, tick_index))) * (Decimal(10) ** (token0_decimals - token1_decimals))
+
+    def _row(tick_index: int, active_liquidity: int) -> dict[str, Any]:
+        price0 = float(_price_at_tick(tick_index))
+        return {
+            "tick_idx": tick_index,
+            "liquidity_active": max(active_liquidity, 0),
+            "price0": price0,
+            "price1": 1 / price0 if price0 else 0,
+            "current_tick": current_tick,
+        }
+
+    if not tick_spacing:
+        if current_liquidity:
+            return [_row(current_tick, current_liquidity)]
+        return []
+
+    if not ticks:
+        return [_row(active_tick, current_liquidity)] if current_liquidity else []
+
+    min_tick = min(min(liquidity_net_by_tick), active_tick - (200 * tick_spacing))
+    max_tick = max(max(liquidity_net_by_tick), active_tick + (200 * tick_spacing))
+    min_tick = (min_tick // tick_spacing) * tick_spacing
+    max_tick = (max_tick // tick_spacing) * tick_spacing
+
+    rows_by_tick: dict[int, dict[str, Any]] = {active_tick: _row(active_tick, current_liquidity)}
+
+    active = current_liquidity
+    for tick_idx in range(active_tick + tick_spacing, max_tick + tick_spacing, tick_spacing):
+        active += liquidity_net_by_tick.get(tick_idx, 0)
+        rows_by_tick[tick_idx] = _row(tick_idx, active)
+
+    # Walk downward. Row at ``tick_idx`` represents active liquidity in
+    # range ``[tick_idx, tick_idx + tick_spacing)``. To move from the
+    # current range into the next lower one, we cross the *upper* boundary
+    # of the lower range going down, which subtracts ``liquidity_net`` at
+    # that upper boundary tick — not at ``tick_idx`` itself.
+    active = current_liquidity
+    for tick_idx in range(active_tick - tick_spacing, min_tick - tick_spacing, -tick_spacing):
+        upper_boundary = tick_idx + tick_spacing
+        active -= liquidity_net_by_tick.get(upper_boundary, 0)
+        rows_by_tick[tick_idx] = _row(tick_idx, active)
+
+    return [rows_by_tick[tick] for tick in sorted(rows_by_tick)]
 
 
 class DashboardAPIClient:
@@ -149,6 +210,29 @@ class DashboardAPIClient:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get summary: {e}")
             return {}
+
+    def get_trade_tape(self, limit: int = 50) -> Any:
+        """Get the joined trade-tape view for this strategy.
+
+        This is intentionally a thin scoped facade over
+        ``GatewayDashboardClient.get_trade_tape``. Template dashboards consume
+        the typed response directly because it preserves Decimal precision and
+        timestamp types for chart markers.
+
+        Args:
+            limit: Maximum number of rows to return.
+
+        Returns:
+            ``TradeTapeResponse`` from the gateway client, or an empty response
+            shape on failure.
+        """
+        try:
+            return self._client.get_trade_tape(self._strategy_id, limit=limit)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to get trade tape: {e}")
+            from almanak.framework.dashboard.gateway_client import TradeTapeResponse
+
+            return TradeTapeResponse(rows=[], has_more=False)
 
     # =========================================================================
     # Market Data (via gateway)
@@ -378,6 +462,75 @@ class DashboardAPIClient:
             return results
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to fetch OHLCV for {token} on chain={chain}: {e}")
+            return []
+
+    def get_v3_pool_address(
+        self,
+        *,
+        chain: str,
+        protocol: str,
+        token0_address: str,
+        token1_address: str,
+        fee_tier: int,
+    ) -> str | None:
+        """Resolve a V3-compatible pool address through the gateway."""
+        try:
+            from almanak.framework.intents.pool_validation import validate_v3_pool
+
+            gateway = self._client._client
+            result = validate_v3_pool(
+                chain=chain,
+                protocol=protocol,
+                token_a=token0_address,
+                token_b=token1_address,
+                fee_tier=fee_tier,
+                rpc_url=None,
+                gateway_client=gateway,
+            )
+            return result.pool_address if result.exists else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Failed to resolve {protocol} pool address: {e}")
+            return None
+
+    def get_liquidity_distribution(
+        self,
+        *,
+        pool_address: str,
+        chain: str,
+        fee_tier: int | None = None,
+        token0: str = "WETH",
+        token1: str = "USDC",
+        tick_range_multiplier: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Read concentrated-liquidity depth through gateway-routed eth_call."""
+        try:
+            from almanak.framework.data.pools.liquidity import LiquidityDepthReader
+
+            gateway = self._client._client
+
+            def _rpc_call(chain_name: str, to: str, calldata: str) -> bytes:
+                raw = gateway.eth_call(chain=chain_name, to=to, data=calldata)
+                if not raw or raw == "0x":
+                    return b""
+                return bytes.fromhex(raw.removeprefix("0x"))
+
+            decimals0 = _token_decimals(token0)
+            decimals1 = _token_decimals(token1)
+            reader = LiquidityDepthReader(
+                rpc_call=_rpc_call,
+                tick_range_multiplier=tick_range_multiplier,
+                source_name="gateway_rpc",
+            )
+            envelope = reader.read_liquidity_depth(
+                pool_address=pool_address,
+                chain=chain,
+                token0_decimals=decimals0,
+                token1_decimals=decimals1,
+                fee_tier=fee_tier,
+            )
+            return _liquidity_depth_to_rows(envelope.value)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to fetch liquidity distribution for {pool_address}: {e}")
             return []
 
     def get_position_events(

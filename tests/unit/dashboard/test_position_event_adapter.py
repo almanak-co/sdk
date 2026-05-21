@@ -155,3 +155,35 @@ def test_adapter_output_consumable_by_plot_positions_over_time() -> None:
     price_data = pd.DataFrame(columns=["timestamp", "close"])
     fig = plot_positions_over_time(positions=positions, price_data=price_data)
     assert fig is not None
+
+
+def test_plot_positions_over_time_coerces_string_prices_to_numeric() -> None:
+    """Hosted OHLCV rows may carry decimal prices as strings.
+
+    Plotly treats all-string y values as categories, which can reverse/order
+    the axis incorrectly once numeric position rectangles are overlaid.
+    """
+    import pandas as pd
+
+    price_data = pd.DataFrame(
+        [
+            {"timestamp": "2026-05-20T17:00:00+00:00", "price": "2253.81000000"},
+            {"timestamp": "2026-05-20T18:00:00+00:00", "price": "2128.57000000"},
+        ]
+    )
+    positions = [
+        {
+            "position_id": "5497836",
+            "date_start": datetime.fromisoformat("2026-05-20T17:07:47+00:00"),
+            "date_end": None,
+            "bound_price_lower": 1917.973998967273,
+            "bound_price_upper": 2344.938957666446,
+            "bound_tick_lower": -200730,
+            "bound_tick_upper": -198720,
+        }
+    ]
+
+    fig = plot_positions_over_time(positions=positions, price_data=price_data)
+
+    price_trace = fig.data[0]
+    assert list(price_trace.y) == [2253.81, 2128.57]

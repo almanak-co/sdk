@@ -33,7 +33,8 @@ Usage:
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 import pandas as pd
@@ -65,8 +66,6 @@ class TADashboardConfig:
         signal_type: Type of signal logic - "reversion" or "momentum"
         value_format: Format string for displaying indicator value (e.g., "{:.1f}", "{:+.2f}")
         value_suffix: Suffix for indicator value (e.g., "%", " bps")
-        show_progress_bar: Whether to show a progress bar for the indicator
-        progress_range: (min, max) range for progress bar normalization
         custom_signal_fn: Optional custom function for signal determination
         chain: Default chain name
         protocol: Default protocol name
@@ -82,8 +81,6 @@ class TADashboardConfig:
     signal_type: Literal["reversion", "momentum"] = "reversion"
     value_format: str = "{:.1f}"
     value_suffix: str = ""
-    show_progress_bar: bool = False
-    progress_range: tuple[float, float] = (0, 100)
     custom_signal_fn: Callable[[dict[str, Any]], str] | None = None
     chain: str = "Arbitrum"
     protocol: str = "Uniswap V3"
@@ -153,10 +150,9 @@ def _trade_rows_to_signals(
         ti = str(r.get("token_in", "")).upper()
         to = str(r.get("token_out", "")).upper()
         ts = r.get("timestamp")
-        price = r.get("effective_price")
-        if ts is None or price in (None, ""):
+        if ts is None:
             continue
-        marker = {"time": ts, "price": price}
+        marker = {"time": ts, "price": _trade_row_marker_price(r, ti, to, qu, bu)}
         if ti == qu and to == bu:
             buys.append(marker)
         elif ti == bu and to == qu:
@@ -171,6 +167,49 @@ def _trade_rows_to_signals(
         return df.dropna(subset=["time", "price"]).reset_index(drop=True)
 
     return _frame(buys), _frame(sells)
+
+
+def _trade_row_marker_price(
+    row: dict[str, Any],
+    token_in: str,
+    token_out: str,
+    quote_token: str,
+    base_token: str,
+) -> str | None:
+    """Return marker y-value in chart units: quote token per base token.
+
+    Ledger ``effective_price`` is protocol/receipt-shaped and may be stored
+    as output-per-input. For a BUY like ``USDC -> WETH`` that is WETH per
+    USDC (~0.00047), which plots off-screen on a WETH/USD chart. Prefer the
+    explicit amounts and derive quote/base:
+
+    * BUY  quote -> base: amount_in / amount_out
+    * SELL base -> quote: amount_out / amount_in
+
+    Fall back to ``effective_price`` only when amount fields are unavailable.
+    """
+
+    amount_in = _decimal_or_none(row.get("amount_in"))
+    amount_out = _decimal_or_none(row.get("amount_out"))
+    if amount_in is not None and amount_out is not None and amount_in != Decimal("0") and amount_out != Decimal("0"):
+        if token_in == quote_token and token_out == base_token:
+            return str(amount_in / amount_out)
+        if token_in == base_token and token_out == quote_token:
+            return str(amount_out / amount_in)
+
+    price = row.get("effective_price")
+    if price in (None, ""):
+        return None
+    return str(price)
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _trade_tape_rows(api_client: Any) -> list[dict[str, Any]]:
@@ -205,13 +244,53 @@ def _trade_tape_rows(api_client: Any) -> list[dict[str, Any]]:
                     "timestamp": ts,
                     "intent_type": getattr(r, "intent_type", ""),
                     "token_in": getattr(r, "token_in", ""),
+                    "amount_in": getattr(r, "amount_in", ""),
                     "token_out": getattr(r, "token_out", ""),
+                    "amount_out": getattr(r, "amount_out", ""),
                     "effective_price": getattr(r, "effective_price", ""),
                 }
             )
         except Exception:  # noqa: BLE001
             continue
     return out
+
+
+def _event_field(event: Any, field: str) -> Any:
+    if isinstance(event, dict):
+        return event.get(field)
+    return getattr(event, field, None)
+
+
+def _strategy_start_time(api_client: Any) -> datetime | pd.Timestamp | None:
+    """Return the strategy start timestamp from gateway timeline events."""
+    if api_client is None or not hasattr(api_client, "get_timeline"):
+        return None
+    try:
+        events = api_client.get_timeline(limit=200)
+    except Exception:  # noqa: BLE001
+        logger.debug("api_client.get_timeline() failed", exc_info=True)
+        return None
+    if not events:
+        return None
+
+    candidates: list[Any] = []
+    fallback: list[Any] = []
+    for event in events:
+        ts = _event_field(event, "timestamp")
+        if not ts:
+            continue
+        fallback.append(ts)
+        if str(_event_field(event, "event_type")).upper() == "STRATEGY_STARTED":
+            candidates.append(ts)
+
+    source = candidates or fallback
+    if not source:
+        return None
+    parsed = pd.to_datetime(source, utc=True, errors="coerce")
+    parsed = parsed[~pd.isna(parsed)]
+    if len(parsed) == 0:
+        return None
+    return parsed.min()
 
 
 def prepare_ta_session_state(
@@ -306,6 +385,11 @@ def prepare_ta_session_state(
         result.setdefault("buy_signals", buys)
         result.setdefault("sell_signals", sells)
 
+    if "strategy_start_time" not in result:
+        start_time = _strategy_start_time(api_client)
+        if start_time is not None:
+            result["strategy_start_time"] = start_time
+
     return result
 
 
@@ -345,11 +429,6 @@ def render_ta_dashboard(
     # Eyeball — am I making or losing money?
     render_pnl_section(strategy_id)
 
-    # Indicator section
-    _render_indicator_section(session_state, strategy_config, config, period)
-
-    st.divider()
-
     # Charts section - Price with signals and indicator
     _render_charts_section(session_state, strategy_config, config, period)
 
@@ -373,56 +452,6 @@ def render_ta_dashboard(
     # Audit — life-to-date costs + per-intent trade tape
     render_cost_stack_section(strategy_id)
     render_trade_tape_section(strategy_id)
-
-
-def _render_indicator_section(
-    session_state: dict[str, Any],
-    strategy_config: dict[str, Any],
-    config: TADashboardConfig,
-    period: int,
-) -> None:
-    """Render the indicator display section."""
-    st.subheader(f"{config.indicator_name}({period})")
-
-    # Get primary indicator value
-    indicator_key = config.indicator_name.lower()
-    indicator_value = float(session_state.get(f"{indicator_key}_value", session_state.get(indicator_key, 50)))
-
-    # Create columns based on whether we have thresholds
-    if config.upper_threshold is not None and config.lower_threshold is not None:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            formatted_value = config.value_format.format(indicator_value) + config.value_suffix
-            st.metric(config.indicator_name, formatted_value)
-        with col2:
-            st.metric("Upper", f"{config.upper_threshold}{config.value_suffix}")
-        with col3:
-            st.metric("Lower", f"{config.lower_threshold}{config.value_suffix}")
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            formatted_value = config.value_format.format(indicator_value) + config.value_suffix
-            st.metric(config.indicator_name, formatted_value)
-        with col2:
-            st.metric("Period", str(period))
-
-    # Secondary indicator values (e.g., signal line for MACD)
-    if config.secondary_periods:
-        secondary_cols = st.columns(len(config.secondary_periods) + 1)
-        for i, sec_period in enumerate(config.secondary_periods):
-            with secondary_cols[i]:
-                key = f"{indicator_key}_signal_{sec_period}"
-                alt_key = f"{indicator_key}_{sec_period}"
-                value = float(session_state.get(key, session_state.get(alt_key, 0)))
-                formatted = config.value_format.format(value) + config.value_suffix
-                st.metric(f"Signal({sec_period})", formatted)
-
-    # Progress bar visualization
-    if config.show_progress_bar:
-        min_val, max_val = config.progress_range
-        normalized = (indicator_value - min_val) / (max_val - min_val)
-        normalized = max(0, min(1, normalized))
-        st.progress(normalized, text=f"{config.indicator_name}: {config.value_format.format(indicator_value)}")
 
 
 def _render_charts_section(  # noqa: C901
@@ -485,6 +514,7 @@ def _render_charts_section(  # noqa: C901
 
     buy_df = _coerce_signals(buy_signals)
     sell_df = _coerce_signals(sell_signals)
+    strategy_start_time = session_state.get("strategy_start_time")
 
     # Get indicator data
     indicator_key = config.indicator_name.lower()
@@ -584,6 +614,33 @@ def _render_charts_section(  # noqa: C901
                         showlegend=False,
                     ),
                     row=1,
+                    col=1,
+                )
+
+        if strategy_start_time is not None:
+            start_time = pd.to_datetime(strategy_start_time, utc=True, errors="coerce")
+            if not pd.isna(start_time):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[start_time, start_time],
+                        y=[price_df["price"].min(), price_df["price"].max()],
+                        mode="lines",
+                        name="Start",
+                        line={"color": colors.neutral, "width": 1, "dash": "dot"},
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=[start_time, start_time],
+                        y=[0, 100],
+                        mode="lines",
+                        name="Start",
+                        line={"color": colors.neutral, "width": 1, "dash": "dot"},
+                        showlegend=False,
+                    ),
+                    row=2,
                     col=1,
                 )
 
@@ -795,8 +852,6 @@ def get_rsi_config(period: int = 14, overbought: float = 70, oversold: float = 3
         lower_threshold=oversold,
         signal_type="reversion",
         value_suffix="",
-        show_progress_bar=True,
-        progress_range=(0, 100),
     )
 
 
@@ -808,7 +863,6 @@ def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9) -> TADashbo
         secondary_periods=[slow, signal],
         signal_type="momentum",
         value_format="{:+.2f}",
-        show_progress_bar=False,
     )
 
 
@@ -821,8 +875,6 @@ def get_cci_config(period: int = 20, overbought: float = 100, oversold: float = 
         lower_threshold=oversold,
         signal_type="reversion",
         value_format="{:+.1f}",
-        show_progress_bar=True,
-        progress_range=(-200, 200),
     )
 
 
@@ -838,8 +890,6 @@ def get_stochastic_config(
         lower_threshold=oversold,
         signal_type="reversion",
         value_suffix="%",
-        show_progress_bar=True,
-        progress_range=(0, 100),
     )
 
 
@@ -850,7 +900,6 @@ def get_atr_config(period: int = 14) -> TADashboardConfig:
         indicator_period=period,
         signal_type="momentum",
         value_format="${:.2f}",
-        show_progress_bar=False,
     )
 
 
@@ -861,8 +910,6 @@ def get_adx_config(period: int = 14, trend_threshold: float = 25) -> TADashboard
         indicator_period=period,
         lower_threshold=trend_threshold,
         signal_type="momentum",
-        show_progress_bar=True,
-        progress_range=(0, 100),
     )
 
 
@@ -874,5 +921,4 @@ def get_bollinger_config(period: int = 20, std_dev: float = 2.0) -> TADashboardC
         secondary_periods=[int(std_dev * 10)],  # Encode std_dev
         signal_type="reversion",
         value_format="${:.2f}",
-        show_progress_bar=False,
     )

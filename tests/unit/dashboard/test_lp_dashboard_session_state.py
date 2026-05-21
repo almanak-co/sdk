@@ -148,6 +148,54 @@ def test_position_history_populated_from_position_events(api_client_mock: MagicM
     )
 
 
+def test_active_lp_event_hydrates_status_and_plot_bounds(api_client_mock: MagicMock) -> None:
+    api_client_mock.get_state.return_value = {"current_position_id": "5497836"}
+    api_client_mock.get_price.return_value = 2136.8
+    api_client_mock.get_position.return_value = {"token_balances": []}
+    api_client_mock.get_position_events.return_value = [
+        {
+            "position_id": "5497836",
+            "event_type": "OPEN",
+            "timestamp": "2026-05-20T17:07:47+00:00",
+            "tick_lower": -200730,
+            "tick_upper": -198720,
+            "position_type": "LP",
+            "protocol": "uniswap_v3",
+            "chain": "arbitrum",
+            "amount0": "995360453058942",
+            "amount1": "2354621",
+            "value_usd": "4.47",
+        },
+    ]
+    api_client_mock.get_ohlcv.return_value = [
+        {
+            "timestamp": "2026-05-20T17:00:00+00:00",
+            "close": "2136.8",
+            "open": "2136.8",
+            "high": "2136.8",
+            "low": "2136.8",
+            "volume": "0",
+        }
+    ]
+
+    result = prepare_lp_session_state(
+        api_client_mock,
+        {},
+        LPDashboardConfig(token0="WETH", token1="USDC", chain="arbitrum"),
+    )
+
+    assert result["position_id"] == "5497836"
+    assert result["is_active"] is True
+    assert result["in_range"] is True
+    assert result["token0_amount"] == pytest.approx(0.000995360453058942)
+    assert result["token1_amount"] == pytest.approx(2.354621)
+    assert result["range_lower"] == pytest.approx(1917.9, rel=0.01)
+    assert result["range_upper"] == pytest.approx(2344.9, rel=0.01)
+    assert result["position_history"][0]["bound_price_lower"] == pytest.approx(1917.9, rel=0.01)
+    assert result["position_history"][0]["bound_price_upper"] == pytest.approx(2344.9, rel=0.01)
+    assert result["price_history"]
+
+
 def test_position_history_preserves_caller_provided(api_client_mock: MagicMock) -> None:
     """If the caller already populated ``position_history``, do not refetch."""
     api_client_mock.get_position_events.return_value = [{"position_id": "fresh"}]

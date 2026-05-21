@@ -134,12 +134,13 @@ def apply_theme(fig: go.Figure, config: PlotConfig) -> go.Figure:
     """
     template = config.theme.value if config.theme != ChartTheme.ALMANAK else "plotly_dark"
 
+    title_text = fig.layout.title.text or ""
     layout_updates = {
         "template": template,
         "plot_bgcolor": config.colors.background,
         "paper_bgcolor": config.colors.background,
         "font": {"size": config.axis_font_size},
-        "title": {"font": {"size": config.title_font_size}},
+        "title": {"text": title_text, "font": {"size": config.title_font_size}},
         "showlegend": config.show_legend,
         "hovermode": "x unified" if config.interactive else "closest",
     }

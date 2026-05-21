@@ -38,7 +38,6 @@ from typing import Any
 import streamlit as st
 
 from almanak.framework.dashboard.plots import (
-    plot_borrow_utilization,
     plot_collateral_breakdown,
     plot_health_factor_gauge,
     plot_lending_rates_comparison,
@@ -82,6 +81,147 @@ class LendingDashboardConfig:
     show_ltv: bool = True
     show_collateral_breakdown: bool = True
     show_rate_comparison: bool = False
+
+
+def _as_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None or value == "":
+        return default
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _positive_decimal(value: Any) -> bool:
+    return _as_decimal(value) > 0
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _price(api_client: Any, token: str, chain: str) -> Decimal:
+    if token.upper() in {"USDC", "USDT", "DAI"}:
+        return Decimal("1")
+    try:
+        price = api_client.get_price(token, chain=chain)
+    except Exception:  # noqa: BLE001
+        price = None
+    return _as_decimal(price, Decimal("0"))
+
+
+def _apply_risk_metrics(
+    hydrated: dict[str, Any],
+    *,
+    collateral_value: Decimal,
+    borrowed_value: Decimal,
+    collateral_token: str,
+    borrow_token: str,
+    config: LendingDashboardConfig,
+) -> None:
+    if collateral_value > 0:
+        hydrated["ltv"] = str(borrowed_value / collateral_value)
+        available_to_borrow = (collateral_value * Decimal(str(config.max_ltv))) - borrowed_value
+        hydrated["available_to_borrow_usd"] = str(max(Decimal("0"), available_to_borrow))
+        net_value = collateral_value - borrowed_value
+        if net_value > 0:
+            hydrated["leverage"] = str(collateral_value / net_value)
+
+    # Only synthesize ``health_factor`` from config when the strategy did not
+    # already provide one. A lending strategy that queries the on-chain
+    # ``getUserAccountData().healthFactor`` puts the authoritative value here
+    # (often via ``api_client.get_state()`` above). Overwriting that with a
+    # static-config approximation (``liquidation_ltv`` from
+    # ``LendingDashboardConfig`` is a dashboard default, not the on-chain
+    # per-asset ``liquidationThreshold``) would silently mask the real
+    # liquidation distance — for a money-critical metric, that is the exact
+    # failure mode this dashboard exists to prevent.
+    if borrowed_value > 0 and not _positive_decimal(hydrated.get("health_factor")):
+        hydrated["health_factor"] = str((collateral_value * Decimal(str(config.liquidation_ltv))) / borrowed_value)
+    elif borrowed_value <= 0:
+        # No debt -> no liquidation risk. Drop any stale ``health_factor``
+        # left over from a previous iteration so the template default
+        # ("safe") renders instead of a misleading liquidation reading.
+        hydrated.pop("health_factor", None)
+
+    if collateral_value > 0 and not hydrated.get("collateral_assets"):
+        hydrated["collateral_assets"] = {collateral_token: float(collateral_value)}
+    if borrowed_value > 0 and not hydrated.get("borrow_assets"):
+        hydrated["borrow_assets"] = {borrow_token: float(borrowed_value)}
+
+
+def prepare_lending_session_state(
+    api_client: Any,
+    *,
+    session_state: dict[str, Any],
+    config: LendingDashboardConfig,
+    strategy_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Hydrate generic lending dashboard fields from strategy state.
+
+    Hosted/custom dashboards receive raw strategy persistence, which often
+    stores domain names such as ``supplied_token_amount`` and
+    ``borrowed_token_amount``. The lending template renders generic fields
+    (``collateral_amount``, ``borrowed_amount``, ``ltv``, ``health_factor``).
+    This adapter keeps strategy dashboards thin while making the SDK template
+    useful for Aave-style supply/borrow loops.
+    """
+    strategy_config = strategy_config or {}
+    hydrated = dict(session_state or {})
+
+    try:
+        raw_state = api_client.get_state()
+    except Exception:  # noqa: BLE001
+        raw_state = {}
+    if isinstance(raw_state, dict):
+        for key, value in raw_state.items():
+            if key not in hydrated or hydrated[key] in (None, ""):
+                hydrated[key] = value
+
+    collateral_token = str(strategy_config.get("collateral_token") or config.collateral_token)
+    borrow_token = str(strategy_config.get("borrow_token") or config.borrow_token)
+    chain = str(strategy_config.get("chain") or config.chain)
+
+    supplied_amount = _as_decimal(
+        hydrated.get("collateral_amount", hydrated.get("supplied_token_amount", hydrated.get("_supplied_token_amount")))
+    )
+    borrowed_amount = _as_decimal(
+        hydrated.get("borrowed_amount", hydrated.get("borrowed_token_amount", hydrated.get("_borrowed_token_amount")))
+    )
+
+    collateral_price = _price(api_client, collateral_token, chain)
+    borrow_price = _price(api_client, borrow_token, chain)
+    collateral_value = _as_decimal(hydrated.get("collateral_value_usd"))
+    borrowed_value = _as_decimal(hydrated.get("borrowed_value_usd"))
+    if collateral_value <= 0 and supplied_amount > 0 and collateral_price > 0:
+        collateral_value = supplied_amount * collateral_price
+    if borrowed_value <= 0 and borrowed_amount > 0 and borrow_price > 0:
+        borrowed_value = borrowed_amount * borrow_price
+
+    if supplied_amount > 0 and not _positive_decimal(hydrated.get("collateral_amount")):
+        hydrated["collateral_amount"] = str(supplied_amount)
+    if borrowed_amount > 0 and not _positive_decimal(hydrated.get("borrowed_amount")):
+        hydrated["borrowed_amount"] = str(borrowed_amount)
+    if collateral_value > 0 and not _positive_decimal(hydrated.get("collateral_value_usd")):
+        hydrated["collateral_value_usd"] = str(collateral_value)
+    if borrowed_value > 0 and not _positive_decimal(hydrated.get("borrowed_value_usd")):
+        hydrated["borrowed_value_usd"] = str(borrowed_value)
+
+    _apply_risk_metrics(
+        hydrated,
+        collateral_value=collateral_value,
+        borrowed_value=borrowed_value,
+        collateral_token=collateral_token,
+        borrow_token=borrow_token,
+        config=config,
+    )
+
+    return hydrated
 
 
 def render_lending_dashboard(
@@ -150,43 +290,10 @@ def render_lending_dashboard(
 
     st.divider()
 
-    # Collateral Breakdown
+    # Collateral / Borrow Breakdown
     if config.show_collateral_breakdown:
-        st.subheader("Collateral Breakdown")
-        collateral_assets = session_state.get("collateral_assets", {})
-        if collateral_assets:
-            fig = plot_collateral_breakdown(
-                assets=collateral_assets,
-                show_values=True,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            # Show single collateral
-            collateral_value = float(session_state.get("collateral_value_usd", 0))
-            if collateral_value > 0:
-                fig = plot_collateral_breakdown(
-                    assets={collateral_token: collateral_value},
-                    show_values=True,
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No collateral data available")
-
-    st.divider()
-
-    # Borrow Utilization
-    st.subheader("Borrow Utilization")
-    borrowed = float(session_state.get("borrowed_value_usd", 0))
-    available = float(session_state.get("available_to_borrow_usd", 0))
-    if borrowed > 0 or available > 0:
-        fig = plot_borrow_utilization(
-            borrowed=borrowed,
-            available=available,
-            asset_symbol=borrow_token,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No borrow utilization data available")
+        st.subheader("Collateral / Borrow Breakdown")
+        _render_asset_breakdown(session_state, collateral_token, borrow_token)
 
     st.divider()
 
@@ -241,20 +348,65 @@ def _render_position_details(
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        supply_apy = Decimal(str(session_state.get("supply_apy", "0")))
-        st.metric("Supply APY", f"{float(supply_apy) * 100:.2f}%")
+        supply_apy = _decimal_or_none(session_state.get("supply_apy"))
+        st.metric("Supply APY", "N/A" if supply_apy is None else f"{float(supply_apy) * 100:.2f}%")
 
     with col2:
-        borrow_apy = Decimal(str(session_state.get("borrow_apy", "0")))
-        st.metric("Borrow APY", f"{float(borrow_apy) * 100:.2f}%")
+        borrow_apy = _decimal_or_none(session_state.get("borrow_apy"))
+        st.metric("Borrow APY", "N/A" if borrow_apy is None else f"{float(borrow_apy) * 100:.2f}%")
 
     with col3:
-        net_apy = Decimal(str(session_state.get("net_apy", "0")))
-        st.metric("Net APY", f"{float(net_apy) * 100:+.2f}%")
+        net_apy = _decimal_or_none(session_state.get("net_apy"))
+        st.metric("Net APY", "N/A" if net_apy is None else f"{float(net_apy) * 100:+.2f}%")
 
     with col4:
         leverage = Decimal(str(session_state.get("leverage", "1")))
         st.metric("Leverage", f"{float(leverage):.2f}x")
+
+
+def _render_asset_breakdown(
+    session_state: dict[str, Any],
+    collateral_token: str,
+    borrow_token: str,
+) -> None:
+    collateral_assets = session_state.get("collateral_assets", {})
+    if not collateral_assets:
+        collateral_value = float(_as_decimal(session_state.get("collateral_value_usd")))
+        if collateral_value > 0:
+            collateral_assets = {collateral_token: collateral_value}
+
+    borrow_assets = session_state.get("borrow_assets", {})
+    if not borrow_assets:
+        borrowed_value = float(_as_decimal(session_state.get("borrowed_value_usd")))
+        if borrowed_value > 0:
+            borrow_assets = {borrow_token: borrowed_value}
+
+    if not collateral_assets and not borrow_assets:
+        st.info("No collateral or borrow data available")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if collateral_assets:
+            fig = plot_collateral_breakdown(
+                assets=collateral_assets,
+                title="Collateral",
+                show_values=True,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No collateral data available")
+
+    with col2:
+        if borrow_assets:
+            fig = plot_collateral_breakdown(
+                assets=borrow_assets,
+                title="Borrow",
+                show_values=True,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No borrow data available")
 
 
 def _render_performance_summary(session_state: dict[str, Any]) -> None:
@@ -262,20 +414,20 @@ def _render_performance_summary(session_state: dict[str, Any]) -> None:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        interest_earned = Decimal(str(session_state.get("interest_earned_usd", "0")))
-        st.metric("Interest Earned", f"${float(interest_earned):,.2f}")
+        interest_earned = _decimal_or_none(session_state.get("interest_earned_usd"))
+        st.metric("Interest Earned", "N/A" if interest_earned is None else f"${float(interest_earned):,.2f}")
 
     with col2:
-        interest_paid = Decimal(str(session_state.get("interest_paid_usd", "0")))
-        st.metric("Interest Paid", f"${float(interest_paid):,.2f}")
+        interest_paid = _decimal_or_none(session_state.get("interest_paid_usd"))
+        st.metric("Interest Paid", "N/A" if interest_paid is None else f"${float(interest_paid):,.2f}")
 
     with col3:
-        net_interest = Decimal(str(session_state.get("net_interest_usd", "0")))
-        st.metric("Net Interest", f"${float(net_interest):+,.2f}")
+        net_interest = _decimal_or_none(session_state.get("net_interest_usd"))
+        st.metric("Net Interest", "N/A" if net_interest is None else f"${float(net_interest):+,.2f}")
 
     with col4:
-        total_pnl = Decimal(str(session_state.get("total_pnl_usd", "0")))
-        st.metric("Total PnL", f"${float(total_pnl):+,.2f}")
+        total_pnl = _decimal_or_none(session_state.get("total_pnl_usd"))
+        st.metric("Total PnL", "N/A" if total_pnl is None else f"${float(total_pnl):+,.2f}")
 
 
 # Pre-configured templates for common lending protocols

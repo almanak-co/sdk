@@ -125,7 +125,6 @@ def plot_health_factor_gauge(
             mode="gauge+number",
             value=display_value,
             number={"suffix": "" if health_factor <= max_display else "+", "font": {"size": 40}},
-            title={"text": f"{title}<br><span style='font-size:14px;color:{bar_color}'>{status}</span>"},
             gauge={
                 "axis": {"range": [0, max_display], "tickwidth": 1},
                 "bar": {"color": bar_color, "thickness": 0.75},
@@ -150,9 +149,18 @@ def plot_health_factor_gauge(
         )
     )
 
+    fig.add_annotation(
+        x=0.5,
+        y=1.08,
+        xref="paper",
+        yref="paper",
+        text=f"<b>{title}</b><br><span style='font-size:12px;color:{bar_color}'>{status}</span>",
+        showarrow=False,
+        align="center",
+    )
     fig.update_layout(
         height=300,
-        margin={"t": 80, "b": 20, "l": 30, "r": 30},
+        margin={"t": 70, "b": 20, "l": 30, "r": 30},
     )
 
     return apply_theme(fig, config)
@@ -343,6 +351,7 @@ def plot_collateral_breakdown(
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
         height=400,
+        margin={"t": 60 if title else 20, "b": 20, "l": 20, "r": 20},
     )
 
     return apply_theme(fig, config)
@@ -423,14 +432,14 @@ def plot_borrow_utilization(
         font={"size": 14, "color": "white"},
     )
 
-    full_title = f"{title}{asset_label}"
+    full_title = f"{title}{asset_label}" if title else ""
 
     fig.update_layout(
         title={"text": full_title, "font": {"size": config.title_font_size}},
         xaxis={"range": [0, 1], "tickformat": ".0%"},
         yaxis={"visible": False},
         height=150,
-        margin={"t": 60, "b": 20, "l": 20, "r": 20},
+        margin={"t": 60 if full_title else 20, "b": 20, "l": 20, "r": 20},
     )
 
     return apply_theme(fig, config)

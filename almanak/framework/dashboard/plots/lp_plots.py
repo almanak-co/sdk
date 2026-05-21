@@ -37,6 +37,8 @@ Example:
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from math import pow
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -102,7 +104,7 @@ class PositionData:
 def plot_liquidity_distribution(
     tick_data: pd.DataFrame | list[TickData],
     current_tick: int,
-    position_bounds: tuple[int, int] | None = None,
+    position_bounds: tuple[int, int] | list[tuple[int, int]] | list[dict[str, Any]] | None = None,
     token_pair: str = "",
     fee_tier: str = "",
     invert_prices: bool = False,
@@ -123,7 +125,8 @@ def plot_liquidity_distribution(
         tick_data: DataFrame or list with tick liquidity data.
             Expected columns: tick_idx, liquidity_active, price0, price1
         current_tick: The current active tick in the pool
-        position_bounds: Tuple of (lower_tick, upper_tick) for position highlighting
+        position_bounds: Tuple of (lower_tick, upper_tick), or a list of tuples/dicts
+            for multi-position range highlighting. Dicts may include label/color.
         token_pair: Token pair name for display (e.g., "ETH/USDC")
         fee_tier: Fee tier string for display (e.g., "0.30%")
         invert_prices: If True, show prices in terms of token1
@@ -138,28 +141,10 @@ def plot_liquidity_distribution(
     config = config or get_default_config()
     colors = config.colors
 
-    # Convert to DataFrame if necessary
-    if isinstance(tick_data, list):
-        if not tick_data:
-            return create_empty_figure("No tick data available", config)
-        df = pd.DataFrame(
-            [
-                {
-                    "tick_idx": t.tick_idx,
-                    "liquidity_active": float(t.liquidity_active),
-                    "price0": t.price0,
-                    "price1": t.price1,
-                }
-                for t in tick_data
-            ]
-        )
-    else:
-        df = tick_data.copy()
-
+    df = _tick_data_to_frame(tick_data)
     if df.empty:
         return create_empty_figure("No tick data available", config)
 
-    # Ensure liquidity column is numeric
     df["liquidity_active"] = pd.to_numeric(df["liquidity_active"], errors="coerce")
 
     # Select price column based on inversion
@@ -174,17 +159,20 @@ def plot_liquidity_distribution(
     if df.empty:
         return create_empty_figure("No significant liquidity in range", config)
 
-    # Convert price to string for categorical x-axis
-    df[price_col] = df[price_col].astype(float).apply(lambda x: format_price(x, 4))
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+    df = df.dropna(subset=[price_col])
+    if df.empty:
+        return create_empty_figure("No numeric price data available", config)
+
+    bounds = _normalize_liquidity_position_bounds(position_bounds, colors)
+    tick_to_price = _build_tick_price_converter(df, price_col)
+    df = _filter_liquidity_display_window(df, price_col, bounds, tick_to_price, current_tick)
+    df = _bin_liquidity_for_display(df, price_col)
 
     # Determine bar colors based on position and active tick
     def get_bar_color(tick_idx: int) -> str:
         if tick_idx == current_tick:
             return colors.active_tick  # Orange for active tick
-        if position_bounds is not None:
-            lower, upper = position_bounds
-            if lower <= tick_idx <= upper:
-                return colors.in_range  # Blue for in-range
         return colors.out_of_range  # Dark blue for out-of-range
 
     bar_colors = [get_bar_color(idx) for idx in df["tick_idx"]]
@@ -198,7 +186,7 @@ def plot_liquidity_distribution(
             f"Price (token0): {row['price0']}<br>"
             f"Price (token1): {row['price1']}<br>"
             f"Tick: {row['tick_idx']}<br>"
-            f"Liquidity: {row['liquidity_active']:,.0f}"
+            f"Raw Liquidity: {row['liquidity_active']:,.0f}"
         ),
         axis=1,
     )
@@ -207,6 +195,7 @@ def plot_liquidity_distribution(
         go.Bar(
             x=df[price_col],
             y=df["liquidity_active"],
+            width=_bar_widths(df[price_col]),
             marker_color=bar_colors,
             hovertext=hover_text,
             hoverinfo="text",
@@ -214,17 +203,57 @@ def plot_liquidity_distribution(
         )
     )
 
-    # Add legend entries for colors
-    if not simple:
+    current_price = tick_to_price(current_tick)
+    if current_price is not None:
+        fig.add_shape(
+            type="line",
+            x0=current_price,
+            x1=current_price,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="paper",
+            line={"color": colors.active_tick, "width": 3},
+            layer="above",
+        )
+
+    # Add position range overlays. Ranges are vertical bands over the pool
+    # liquidity bars, matching the multi-position palette used by
+    # ``plot_positions_over_time`` so overlapping LP legs remain readable.
+    for idx, bound in enumerate(bounds):
+        lower_tick = bound["lower_tick"]
+        upper_tick = bound["upper_tick"]
+        x0 = tick_to_price(lower_tick)
+        x1 = tick_to_price(upper_tick)
+        if x0 is None or x1 is None:
+            continue
+        x0, x1 = sorted((x0, x1))
+        fig.add_shape(
+            type="rect",
+            x0=x0,
+            x1=x1,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="paper",
+            fillcolor=bound["color"],
+            opacity=0.14,
+            line={"width": 2, "color": bound["color"]},
+            layer="below",
+        )
         fig.add_trace(
-            go.Bar(
+            go.Scatter(
                 x=[None],
                 y=[None],
-                marker_color=colors.in_range,
-                name="Position Range",
-                showlegend=True,
+                mode="lines",
+                name=bound["label"] or ("Position Range" if idx == 0 else f"Position Range {idx + 1}"),
+                line={"color": bound["color"], "width": 8},
+                showlegend=not simple,
             )
         )
+
+    # Add legend entries for colors
+    if not simple:
         fig.add_trace(
             go.Bar(
                 x=[None],
@@ -254,15 +283,246 @@ def plot_liquidity_distribution(
         fig.update_xaxes(showgrid=False, showticklabels=False, title="")
         fig.update_yaxes(showgrid=False, showticklabels=False, title="")
     else:
-        fig.update_xaxes(title="Price", showgrid=False)
-        fig.update_yaxes(title="Total Value Locked (TVL)", autorange=True)
+        fig.update_xaxes(title="Price", showgrid=False, tickformat=",.2f")
+        y_range = _liquidity_y_axis_range(df["liquidity_active"])
+        # Bar height plots active liquidity ``L`` at a tick — a steady-state
+        # level, not a USD stockpile. "TVL" would imply summing per-tick L
+        # across the band, which is not what Uniswap V3 ``liquidity_active``
+        # represents.
+        fig.update_yaxes(title="Active Liquidity", range=y_range, tickformat=".2s")
 
     return apply_theme(fig, config)
 
 
+def _normalize_liquidity_position_bounds(
+    position_bounds: tuple[int, int] | list[tuple[int, int]] | list[dict[str, Any]] | None,
+    colors: Any,
+) -> list[dict[str, Any]]:
+    if position_bounds is None:
+        return []
+
+    palette = [
+        colors.position_fill,
+        colors.primary,
+        colors.secondary,
+        colors.warning,
+        colors.accent,
+        colors.danger,
+    ]
+
+    if isinstance(position_bounds, tuple) and len(position_bounds) == 2:
+        return [
+            {
+                "lower_tick": int(position_bounds[0]),
+                "upper_tick": int(position_bounds[1]),
+                "label": "Position Range",
+                "color": colors.position_fill,
+            }
+        ]
+
+    normalized: list[dict[str, Any]] = []
+    if not isinstance(position_bounds, list):
+        return normalized
+
+    for idx, item in enumerate(position_bounds):
+        color = palette[idx % len(palette)]
+        if isinstance(item, dict):
+            lower = item.get("lower_tick", item.get("tick_lower", item.get("lower")))
+            upper = item.get("upper_tick", item.get("tick_upper", item.get("upper")))
+            label = item.get("label") or item.get("registry_handle") or item.get("position_id")
+            color = item.get("color") or color
+        elif isinstance(item, tuple) and len(item) == 2:
+            lower, upper = item
+            label = f"Position Range {idx + 1}"
+        else:
+            continue
+
+        if lower is None or upper is None:
+            continue
+        try:
+            normalized.append(
+                {
+                    "lower_tick": int(lower),
+                    "upper_tick": int(upper),
+                    "label": str(label) if label else f"Position Range {idx + 1}",
+                    "color": color,
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _filter_liquidity_display_window(
+    df: pd.DataFrame,
+    price_col: str,
+    bounds: list[dict[str, Any]],
+    tick_to_price: Any,
+    current_tick: int,
+) -> pd.DataFrame:
+    if not bounds:
+        return df.sort_values(price_col).copy()
+
+    prices: list[float] = []
+    current_price = tick_to_price(current_tick)
+    if current_price is not None:
+        prices.append(current_price)
+    for bound in bounds:
+        lower = tick_to_price(bound["lower_tick"])
+        upper = tick_to_price(bound["upper_tick"])
+        if lower is not None:
+            prices.append(lower)
+        if upper is not None:
+            prices.append(upper)
+
+    if len(prices) < 2:
+        return df.sort_values(price_col).copy()
+
+    low = min(prices)
+    high = max(prices)
+    span = high - low
+    center = low + (span / 2)
+    if span <= 0 or center <= 0:
+        return df.sort_values(price_col).copy()
+
+    padding = max(span * 0.75, center * 0.15)
+    windowed = df[(df[price_col] >= max(0, low - padding)) & (df[price_col] <= high + padding)].copy()
+    return windowed.sort_values(price_col) if not windowed.empty else df.sort_values(price_col).copy()
+
+
+def _bin_liquidity_for_display(df: pd.DataFrame, price_col: str, max_bins: int = 100) -> pd.DataFrame:
+    """Downsample sparse initialized ticks into readable display bins.
+
+    A wide Uniswap V3 bitmap scan can return hundreds of initialized ticks.
+    Drawing each as an individual numeric-axis bar produces hairlines and
+    dark moire patterns. For dashboard display, keep the wider x-domain but
+    aggregate nearby prices into a fixed number of bins.
+    """
+    if len(df) <= max_bins:
+        return df.sort_values(price_col).copy()
+
+    ordered = df.sort_values(price_col).copy()
+    try:
+        ordered["_bin"] = pd.cut(ordered[price_col], bins=max_bins, duplicates="drop")
+    except ValueError:
+        return ordered
+
+    rows: list[dict[str, Any]] = []
+    for _bucket, group in ordered.groupby("_bin", observed=True):
+        if group.empty:
+            continue
+        strongest = group.loc[group["liquidity_active"].idxmax()]
+        price = float(group[price_col].median())
+        rows.append(
+            {
+                # Pin ``tick_idx`` to the strongest tick in the bin so the
+                # current-price bar highlight (``get_bar_color`` matching on
+                # ``tick_idx == current_tick``) still triggers when the
+                # active tick is the strongest member of its bin.
+                "tick_idx": int(strongest["tick_idx"]),
+                # Bar height = peak active L in the bin. Mean would average
+                # away the depth of the strongest tick; sum would falsely
+                # accumulate a steady-state level into a stockpile shape.
+                # Max preserves "what is the deepest liquidity in this band?".
+                "liquidity_active": float(group["liquidity_active"].max()),
+                price_col: price,
+                "price0": float(group["price0"].median()),
+                "price1": float(group["price1"].median()),
+                "current_tick": strongest.get("current_tick"),
+            }
+        )
+
+    if not rows:
+        return ordered.drop(columns=["_bin"], errors="ignore")
+    return pd.DataFrame(rows).sort_values(price_col)
+
+
+def _liquidity_y_axis_range(values: pd.Series) -> list[float]:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    numeric = numeric[numeric >= 0]
+    if numeric.empty:
+        return [0.0, 1.0]
+
+    low = float(numeric.min())
+    high = float(numeric.max())
+    if high <= 0:
+        return [0.0, 1.0]
+
+    span = high - low
+    if span <= 0:
+        padding = high * 0.01
+        return [max(0.0, low - padding), high + padding]
+
+    padding = span * 0.2
+    if low > 0 and span / high < 0.25:
+        return [max(0.0, low - padding), high + padding]
+    return [0.0, high + padding]
+
+
+def _build_tick_price_converter(df: pd.DataFrame, price_col: str):
+    numeric = df[["tick_idx", price_col]].dropna()
+    if numeric.empty:
+        return lambda _tick: None
+
+    anchor_idx = (numeric["tick_idx"] - numeric["tick_idx"].median()).abs().idxmin()
+    anchor = numeric.loc[anchor_idx]
+    try:
+        anchor_tick = int(anchor["tick_idx"])
+        anchor_price = float(anchor[price_col])
+        coefficient = anchor_price / pow(1.0001, anchor_tick)
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return lambda _tick: None
+
+    def _convert(tick: Any) -> float | None:
+        try:
+            return coefficient * pow(1.0001, int(tick))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    return _convert
+
+
+def _bar_widths(x_values: pd.Series) -> list[float] | None:
+    values = [float(v) for v in x_values.tolist()]
+    if len(values) < 2:
+        return None
+    sorted_values = sorted(values)
+    diffs = [b - a for a, b in zip(sorted_values, sorted_values[1:], strict=False) if b > a]
+    if not diffs:
+        return None
+    default_width = (sum(diffs) / len(diffs)) * 0.75
+    width_by_value: dict[float, float] = {}
+    for idx, value in enumerate(sorted_values):
+        left = value - sorted_values[idx - 1] if idx > 0 else default_width
+        right = sorted_values[idx + 1] - value if idx < len(sorted_values) - 1 else default_width
+        width_by_value[value] = max(min(left, right) * 0.75, 0)
+    return [width_by_value.get(value, default_width) for value in values]
+
+
+def _tick_data_to_frame(tick_data: pd.DataFrame | list[TickData] | list[dict]) -> pd.DataFrame:
+    if isinstance(tick_data, list):
+        if not tick_data:
+            return pd.DataFrame()
+        if isinstance(tick_data[0], dict):
+            return pd.DataFrame(tick_data)
+        ticks: list[TickData] = tick_data  # type: ignore[assignment]
+        return pd.DataFrame(
+            [
+                {
+                    "tick_idx": t.tick_idx,
+                    "liquidity_active": float(t.liquidity_active),
+                    "price0": t.price0,
+                    "price1": t.price1,
+                }
+                for t in ticks
+            ]
+        )
+    return tick_data.copy()
+
+
 def plot_positions_over_time(  # noqa: C901
     positions: list[PositionData] | list[dict],
-    price_data: pd.DataFrame,
+    price_data: pd.DataFrame | list[dict],
     price_column: str = "price",
     time_column: str = "timestamp",
     invert_prices: bool = False,
@@ -296,6 +556,9 @@ def plot_positions_over_time(  # noqa: C901
     config = config or get_default_config()
     colors = config.colors
 
+    if isinstance(price_data, list):
+        price_data = pd.DataFrame(price_data)
+
     if price_data.empty:
         return create_empty_figure("No price data available", config)
 
@@ -326,6 +589,10 @@ def plot_positions_over_time(  # noqa: C901
         df[time_col] = pd.to_datetime(df[time_col])
 
     df = df.sort_values(time_col)
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+    df = df.dropna(subset=[price_col])
+    if df.empty:
+        return create_empty_figure("No numeric price data available", config)
 
     # Invert prices if requested
     if invert_prices:

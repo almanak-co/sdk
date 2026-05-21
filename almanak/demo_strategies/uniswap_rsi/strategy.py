@@ -1,17 +1,16 @@
-"""
-===============================================================================
-TUTORIAL: Uniswap RSI Strategy
-===============================================================================
+"""Config-driven RSI swap strategy demo.
 
-This is a tutorial strategy demonstrating how to build an RSI-based trading
-strategy that executes swaps on Uniswap V3. It's designed to teach you the
-fundamentals of the Almanak strategy framework.
+This demo keeps the historical ``demo_uniswap_rsi`` name because it is widely
+referenced by docs, CI reports, and examples, but the strategy itself is no
+longer tied to Uniswap. The DEX protocol, chain, and token pair are config
+fields, so the same ``strategy.py`` can run as Uniswap V3 WETH/USDC on
+Arbitrum or TraderJoe V2 WAVAX/USDC on Avalanche.
 
 WHAT THIS STRATEGY DOES:
 ------------------------
-1. Monitors the RSI (Relative Strength Index) of (W)ETH
-2. When RSI < 30 (oversold): Buys (W)ETH with USDC
-3. When RSI > 70 (overbought): Sells (W)ETH for USDC
+1. Monitors the RSI (Relative Strength Index) of the configured base token
+2. When RSI < oversold threshold: Buys base token with quote token
+3. When RSI > overbought threshold: Sells base token for quote token
 4. When RSI is between 30-70 (neutral): Holds, no action
 
 RSI EXPLAINED:
@@ -39,17 +38,6 @@ strategies/demo/uniswap_rsi/
     run_anvil.py     - Test script for running on Anvil fork
     README.md        - Documentation
 
-USAGE:
-------
-    # Run once in dry-run mode (no real transactions)
-    python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run
-
-    # Run continuously every 60 seconds
-    python -m src.cli.run --strategy demo_uniswap_rsi --interval 60
-
-    # Test on Anvil (local fork)
-    python strategies/demo/uniswap_rsi/run_anvil.py
-
 ===============================================================================
 """
 
@@ -63,7 +51,7 @@ USAGE:
 import logging
 from datetime import UTC
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Intent is what your strategy returns - a high-level action description
 from almanak.framework.intents import Intent
@@ -77,6 +65,23 @@ from almanak.framework.utils.log_formatters import format_usd
 
 # Logger for debugging and monitoring
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+
+SUPPORTED_PROTOCOL_CHAINS: dict[str, tuple[str, ...]] = {
+    "uniswap_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
+    "traderjoe_v2": ("avalanche", "arbitrum", "bnb", "ethereum"),
+    "aerodrome": ("base", "optimism"),
+    "pancakeswap_v3": ("bnb", "ethereum", "arbitrum", "base"),
+    "sushiswap_v3": ("ethereum", "arbitrum", "base", "optimism", "polygon", "bnb"),
+}
+
+SUPPORTED_SWAP_PROTOCOLS = tuple(SUPPORTED_PROTOCOL_CHAINS)
+SUPPORTED_SWAP_CHAINS = tuple(
+    sorted({chain for chains in SUPPORTED_PROTOCOL_CHAINS.values() for chain in chains})
+)
+DEFAULT_PROTOCOL = "uniswap_v3"
 
 
 # =============================================================================
@@ -96,20 +101,20 @@ logger = logging.getLogger(__name__)
     # Example: python -m src.cli.run --strategy demo_uniswap_rsi
     name="demo_uniswap_rsi",
     # Human-readable description for documentation
-    description="Tutorial RSI strategy - buys when oversold, sells when overbought on Uniswap V3",
+    description="Config-driven RSI swap strategy - buys when oversold, sells when overbought",
     # Semantic versioning for tracking changes
-    version="1.0.0",
+    version="1.1.0",
     # Author information
     author="Almanak",
     # Tags for categorization and search
     # Use descriptive tags that help users find relevant strategies
-    tags=["demo", "tutorial", "trading", "rsi", "mean-reversion", "uniswap"],
+    tags=["demo", "tutorial", "trading", "ta", "rsi", "mean-reversion", "swap", "config-driven"],
     # Which blockchains this strategy supports
     # The strategy can be deployed on any of these chains
-    supported_chains=["arbitrum", "ethereum", "base", "optimism"],
+    supported_chains=list(SUPPORTED_SWAP_CHAINS),
     # Which protocols this strategy interacts with
     # This helps with intent compilation and validation
-    supported_protocols=["uniswap_v3"],
+    supported_protocols=list(SUPPORTED_SWAP_PROTOCOLS),
     # What types of intents this strategy may return
     # SWAP: Exchange one token for another
     # HOLD: No action (wait for better conditions)
@@ -118,7 +123,7 @@ logger = logging.getLogger(__name__)
 )
 class UniswapRSIStrategy(IntentStrategy):
     """
-    A simple RSI-based mean reversion strategy for educational purposes.
+    A config-driven RSI-based mean reversion swap strategy.
 
     This strategy demonstrates:
     - How to read market data (prices, RSI, balances)
@@ -133,6 +138,7 @@ class UniswapRSIStrategy(IntentStrategy):
     - rsi_oversold: RSI level that triggers buy (default: 30)
     - rsi_overbought: RSI level that triggers sell (default: 70)
     - max_slippage_bps: Maximum allowed slippage in basis points (default: 50 = 0.5%)
+    - protocol: Swap connector to route through (default: "uniswap_v3")
     - base_token: Token to trade (default: "WETH")
     - quote_token: Token to use as quote (default: "USDC")
 
@@ -144,6 +150,7 @@ class UniswapRSIStrategy(IntentStrategy):
         "rsi_oversold": 30,
         "rsi_overbought": 70,
         "max_slippage_bps": 50,
+        "protocol": "uniswap_v3",
         "base_token": "WETH",
         "quote_token": "USDC"
     }
@@ -196,8 +203,9 @@ class UniswapRSIStrategy(IntentStrategy):
         # 50 bps = 0.5% slippage tolerance
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 50))
 
-        # Token configuration
-        # WETH/USDC is the most liquid pair on Uniswap
+        # Routing and token configuration. The default preserves the historical
+        # demo behavior; override protocol/chain/tokens together for other DEXs.
+        self.protocol = str(self.get_config("protocol", DEFAULT_PROTOCOL)).strip()
         self.base_token = self.get_config("base_token", "WETH")
         self.quote_token = self.get_config("quote_token", "USDC")
 
@@ -207,6 +215,7 @@ class UniswapRSIStrategy(IntentStrategy):
         # Track how many times we've held in a row
         # This can be useful for logging/debugging
         self._consecutive_holds = 0
+        self._last_rsi_signal = "NEUTRAL"
 
         # Log initialization for debugging
         logger.info(
@@ -215,6 +224,8 @@ class UniswapRSIStrategy(IntentStrategy):
             f"RSI period={self.rsi_period}, "
             f"oversold={self.rsi_oversold}, "
             f"overbought={self.rsi_overbought}, "
+            f"protocol={self.protocol}, "
+            f"chain={self.chain}, "
             f"pair={self.base_token}/{self.quote_token}"
         )
 
@@ -236,9 +247,24 @@ class UniswapRSIStrategy(IntentStrategy):
         """Enforce RSI strategy config invariants.
 
         Raises:
-            ConfigValidationError: If RSI thresholds are invalid. In particular,
-                ``rsi_oversold`` must be strictly less than ``rsi_overbought``.
+            ConfigValidationError: If RSI thresholds or routing config are invalid.
         """
+        protocol = str(self.get_config("protocol", DEFAULT_PROTOCOL)).strip()
+        if not protocol:
+            raise ConfigValidationError("protocol must be a non-empty connector name", field="protocol")
+        if protocol not in SUPPORTED_PROTOCOL_CHAINS:
+            raise ConfigValidationError(
+                f"protocol {protocol!r} is not supported by this demo; "
+                f"supported protocols: {', '.join(SUPPORTED_SWAP_PROTOCOLS)}",
+                field="protocol",
+            )
+        if self.chain not in SUPPORTED_PROTOCOL_CHAINS[protocol]:
+            supported = ", ".join(SUPPORTED_PROTOCOL_CHAINS[protocol])
+            raise ConfigValidationError(
+                f"protocol {protocol!r} does not support chain {self.chain!r}; supported chains: {supported}",
+                field="chain",
+            )
+
         oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
         overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
         if oversold >= overbought:
@@ -336,12 +362,24 @@ class UniswapRSIStrategy(IntentStrategy):
         # This is where the actual strategy logic lives.
         # We check RSI against our thresholds and decide what to do.
 
-        # -----------------------------------------------------------------
-        # CASE 1: OVERSOLD (RSI < 30) -> BUY
-        # -----------------------------------------------------------------
-        # The asset appears undervalued. We want to buy.
+        current_signal = self._classify_rsi_signal(rsi.value)
 
-        if rsi.value <= self.rsi_oversold:
+        # -----------------------------------------------------------------
+        # CASE 1: OVERSOLD (RSI < threshold) -> BUY on signal transition
+        # -----------------------------------------------------------------
+        # The asset appears undervalued. We buy only when entering the
+        # oversold zone. While RSI remains oversold, hold until it resets
+        # through neutral. This prevents buy sprees across continuous ticks
+        # and across restarts because _last_rsi_signal is persisted.
+
+        if current_signal == "OVERSOLD":
+            if self._last_rsi_signal == "OVERSOLD":
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"RSI={rsi.value:.2f} remains oversold; waiting for neutral reset "
+                    f"(hold #{self._consecutive_holds})"
+                )
+
             # First, check we have enough quote token (USDC) to buy
             if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
@@ -355,24 +393,34 @@ class UniswapRSIStrategy(IntentStrategy):
                 f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token}"
             )
 
-            # Reset our hold counter
+            # Reset our hold counter. The ``_last_rsi_signal`` latch is only
+            # updated in ``on_intent_executed`` so a failed swap (transient
+            # RPC / compile error) does not lock us into the "remains oversold"
+            # HOLD path on the next iteration.
             self._consecutive_holds = 0
 
-            # Return a SWAP intent: USDC -> WETH
+            # Return a SWAP intent: quote token -> base token
             return Intent.swap(
-                from_token=self.quote_token,  # Selling USDC
-                to_token=self.base_token,  # Buying WETH
+                from_token=self.quote_token,
+                to_token=self.base_token,
                 amount_usd=self.trade_size_usd,
                 max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
-                protocol="uniswap_v3",  # Explicit protocol (optional but recommended)
+                protocol=self.protocol,
             )
 
         # -----------------------------------------------------------------
-        # CASE 2: OVERBOUGHT (RSI > 70) -> SELL
+        # CASE 2: OVERBOUGHT (RSI > threshold) -> SELL on signal transition
         # -----------------------------------------------------------------
         # The asset appears overvalued. We want to sell.
 
-        elif rsi.value >= self.rsi_overbought:
+        elif current_signal == "OVERBOUGHT":
+            if self._last_rsi_signal == "OVERBOUGHT":
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"RSI={rsi.value:.2f} remains overbought; waiting for neutral reset "
+                    f"(hold #{self._consecutive_holds})"
+                )
+
             # Calculate how much base token we need to sell for our trade size
             min_base_to_sell = self.trade_size_usd / base_price
 
@@ -389,16 +437,19 @@ class UniswapRSIStrategy(IntentStrategy):
                 f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
             )
 
-            # Reset our hold counter
+            # Reset our hold counter. See note on the OVERSOLD branch above —
+            # ``_last_rsi_signal`` is updated only after the framework confirms
+            # the swap, so a failed execution does not falsely persist the
+            # latch.
             self._consecutive_holds = 0
 
-            # Return a SWAP intent: WETH -> USDC
+            # Return a SWAP intent: base token -> quote token
             return Intent.swap(
-                from_token=self.base_token,  # Selling WETH
-                to_token=self.quote_token,  # Buying USDC
+                from_token=self.base_token,
+                to_token=self.quote_token,
                 amount_usd=self.trade_size_usd,
                 max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
-                protocol="uniswap_v3",
+                protocol=self.protocol,
             )
 
         # -----------------------------------------------------------------
@@ -408,6 +459,7 @@ class UniswapRSIStrategy(IntentStrategy):
 
         else:
             self._consecutive_holds += 1
+            self._last_rsi_signal = "NEUTRAL"
 
             return Intent.hold(
                 reason=f"RSI={rsi.value:.2f} in neutral zone "
@@ -441,12 +493,49 @@ class UniswapRSIStrategy(IntentStrategy):
                 "rsi_oversold": str(self.rsi_oversold),
                 "rsi_overbought": str(self.rsi_overbought),
                 "max_slippage_bps": self.max_slippage_bps,
+                "protocol": self.protocol,
                 "pair": f"{self.base_token}/{self.quote_token}",
             },
             "state": {
                 "consecutive_holds": self._consecutive_holds,
+                "last_rsi_signal": self._last_rsi_signal,
             },
         }
+
+    def _classify_rsi_signal(self, rsi_value: Decimal) -> str:
+        if rsi_value <= self.rsi_oversold:
+            return "OVERSOLD"
+        if rsi_value >= self.rsi_overbought:
+            return "OVERBOUGHT"
+        return "NEUTRAL"
+
+    def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
+        """Latch ``_last_rsi_signal`` only on a confirmed successful swap.
+
+        Setting the latch inline in ``decide()`` (before the runner reports
+        success) would mean a transient compile/RPC failure persists OVERSOLD
+        across iterations and silently locks the strategy into the
+        "remains oversold; waiting for neutral reset" HOLD branch instead of
+        retrying. Direction is inferred from the swap intent's tokens.
+        """
+        if not success:
+            return
+        from_token = getattr(intent, "from_token", None)
+        to_token = getattr(intent, "to_token", None)
+        if from_token == self.quote_token and to_token == self.base_token:
+            self._last_rsi_signal = "OVERSOLD"
+        elif from_token == self.base_token and to_token == self.quote_token:
+            self._last_rsi_signal = "OVERBOUGHT"
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {
+            "consecutive_holds": self._consecutive_holds,
+            "last_rsi_signal": self._last_rsi_signal,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        self._consecutive_holds = int(state.get("consecutive_holds", 0) or 0)
+        self._last_rsi_signal = str(state.get("last_rsi_signal", "NEUTRAL") or "NEUTRAL")
 
     # =========================================================================
     # TEARDOWN SUPPORT
@@ -480,13 +569,14 @@ class UniswapRSIStrategy(IntentStrategy):
                 positions.append(
                     PositionInfo(
                         position_type=PositionType.TOKEN,
-                        position_id="uniswap_rsi_token_0",
+                        position_id=f"{self.protocol}_{self.base_token.lower()}_position",
                         chain=self.chain,
-                        protocol="uniswap_v3",
+                        protocol=self.protocol,
                         value_usd=base_balance.balance_usd,
                         details={
                             "asset": self.base_token,
                             "balance": str(base_balance.balance),
+                            "protocol": self.protocol,
                             "base_token": self.base_token,
                             "quote_token": self.quote_token,
                         },
@@ -537,7 +627,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 to_token=self.quote_token,
                 amount="all",  # Swap entire balance
                 max_slippage=max_slippage,
-                protocol="uniswap_v3",
+                protocol=self.protocol,
             )
         )
 

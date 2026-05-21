@@ -269,7 +269,7 @@ def render_money_trail(p: PnLSummary) -> None:
     """
     st.markdown(
         '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
-        'margin-top:0.5rem;margin-bottom:0.25rem;">MONEY TRAIL</div>',
+        'margin-top:0.5rem;margin-bottom:0.25rem;">WALLET TOTALS — INCLUDES IDLE ASSETS</div>',
         unsafe_allow_html=True,
     )
     # VIB-3926 — every tile carries a glossary tooltip. A redesigned
@@ -280,7 +280,7 @@ def render_money_trail(p: PnLSummary) -> None:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric(
-            "Deployed",
+            "Wallet deployed",
             format_usd(p.deployed_usd),
             help=(
                 "Money put in. Wallet pre-state at first action × oracle prices "
@@ -290,7 +290,7 @@ def render_money_trail(p: PnLSummary) -> None:
     with c2:
         confidence_icon = _CONFIDENCE_ICONS.get(p.value_confidence, "")
         st.metric(
-            "NAV now",
+            "Wallet NAV now",
             format_usd(p.nav_usd) + confidence_icon,
             help=(
                 f"Net Asset Value = open positions + cash. "
@@ -302,10 +302,13 @@ def render_money_trail(p: PnLSummary) -> None:
     with c3:
         delta = _signed(p.lifetime_pnl_usd) + f"  ({_pct(p.lifetime_pnl_pct)})"
         st.metric(
-            "Lifetime PnL",
+            "Wallet lifetime PnL",
             format_usd(abs(p.lifetime_pnl_usd)),
             delta=delta,
-            help="Wallet method: NAV now − Deployed. The broker-statement PnL — fees, gas, slippage, IL all baked in.",
+            help=(
+                "Wallet method: Wallet NAV now − Wallet deployed. Includes idle wallet assets, "
+                "so use the Strategy Funds row below to separate open positions from cash."
+            ),
         )
     with c4:
         apr_label = f"{_pct(p.net_apr_pct)} APR"
@@ -316,6 +319,42 @@ def render_money_trail(p: PnLSummary) -> None:
             delta=sub,
             delta_color="off",
             help="Annualised lifetime PnL ÷ Deployed × (365 / age_days). Compare across strategies of different ages.",
+        )
+
+    st.markdown(
+        '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
+        'margin-top:0.75rem;margin-bottom:0.25rem;">STRATEGY-CONTROLLED FUNDS</div>',
+        unsafe_allow_html=True,
+    )
+    open_position_nav = p.nav_usd - p.available_cash_usd
+    if open_position_nav < Decimal("0"):
+        open_position_nav = Decimal("0")
+    c5, c6, c7 = st.columns(3)
+    with c5:
+        open_position_delta = (
+            f"{p.open_position_count} open position(s)" if p.open_position_count > 0 else "active exposure"
+        )
+        st.metric(
+            "Open position NAV",
+            format_usd(open_position_nav),
+            delta=open_position_delta,
+            delta_color="off",
+            help="Current mark-to-market value of positions controlled by the strategy. Excludes idle wallet cash.",
+        )
+    with c6:
+        st.metric(
+            "Open cost basis",
+            format_usd(p.deployed_capital_usd),
+            help="Capital currently deployed into open positions, measured from accounting cost basis.",
+        )
+    with c7:
+        cash_pct = (p.available_cash_usd / p.nav_usd * Decimal("100")) if p.nav_usd > 0 else Decimal("0")
+        st.metric(
+            "Available wallet cash",
+            format_usd(p.available_cash_usd),
+            delta=f"{cash_pct:.0f}% of wallet NAV",
+            delta_color="off",
+            help="Wallet funds not currently in positions. Includes gas ETH and other idle balances.",
         )
 
 
