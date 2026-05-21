@@ -253,13 +253,97 @@ the same `(primitive, semantic_group)`.
   the auto-assigned handle through ADJUST / CLOSE intents from the prior open's result.
 - **Multi-position strategies** (e.g. two LP legs on the same pool): pass an explicit
   per-leg handle on every OPEN so the auto-mode collision guard (`ix_registry_auto_mode`
-  partial unique index) does not reject the second open. Example:
+  partial unique index) does not reject the second open. Use **stable per-position
+  handles** (`leg_narrow`, `leg_wide`) — NOT action-scoped suffixes
+  (`leg_narrow:open` / `leg_narrow:close`), so the same handle survives the full
+  open → close → rebalance lifecycle. Example:
   `Intent.lp_open(..., registry_handle="hedge_leg_long")`.
 
 Synthesising a handle that does not match the prior open will fail at
 `save_ledger_and_registry` with `RegistryAutoCollisionError`. See
 `../../../blueprints/28-position-registry.md` §3.5 and §6 anti-pattern #13 for the
 contract.
+
+### Dispatching multiple opens on the same pool
+
+The reserved-field rule above gets `registry_handle` right; the rule below is about
+the **dispatch cadence**. They are complementary — both must be right for a
+multi-position strategy to work.
+
+**Emit one opening intent per `decide()` iteration**, not as a list. Drive iterations
+with a `_phase` field that advances only when `on_intent_executed` observes a real
+`position_id` on the receipt. The list-return shape (`return [open_a, open_b]`) and
+`Intent.sequence([open_a, open_b])` both commit two legs to a single market snapshot,
+give leg 2 no opportunity to re-size against leg 1's actual on-chain output, and
+provide no clean partial-success state. Reference implementation:
+`strategies/accounting/lp_dual/strategy.py` (two LPs, one pool, phase machine,
+self-sized amounts, position-id-keyed close).
+
+Self-size each leg from live `market.balance(...)` at the moment the open is built —
+leg #1 takes `commit_pct` of the available balance, leg #2 takes `0.99` of what
+remains (the 1% safety margin absorbs gas / dust / slippage drift between balance
+read and tx submission). Hardcoded per-leg amounts in `config.json` work in steady
+state but desync against any real-world mint slippage; the live-balance pattern is
+what `lp_dual` / `lp_triple` use because mint slippage is observable on every
+real-Anvil run.
+
+Skeleton:
+
+```python
+PHASE_INIT = "init"
+PHASE_LP1_OPEN = "lp1_open"
+PHASE_BOTH_OPEN = "both_open"
+
+def decide(self, market):
+    if self._phase == PHASE_INIT:
+        return self._build_lp_open(market, position_index=1)
+    if self._phase == PHASE_LP1_OPEN:
+        return self._build_lp_open(market, position_index=2)
+    if self._phase == PHASE_BOTH_OPEN:
+        return Intent.hold(reason="Both LPs open — awaiting teardown")
+    return Intent.hold(reason=f"Unknown phase {self._phase!r}")
+
+def _build_lp_open(self, market, *, position_index):
+    token0_balance = Decimal(str(market.balance(self.token0_symbol).balance))
+    token1_balance = Decimal(str(market.balance(self.token1_symbol).balance))
+    if position_index == 1:
+        commit_pct = self.lp_capital_split_pct       # e.g. 0.50
+        handle = "leg_narrow"
+    else:
+        commit_pct = Decimal("0.99")                 # leg 2 takes what's left
+        handle = "leg_wide"
+    return Intent.lp_open(
+        pool=self.pool,
+        amount0=token0_balance * commit_pct,
+        amount1=token1_balance * commit_pct,
+        range_lower=...,
+        range_upper=...,
+        registry_handle=handle,
+    )
+
+def on_intent_executed(self, intent, success, result):
+    if not success or intent.intent_type.value != "LP_OPEN":
+        return  # phase stays put → next iteration retries
+    position_id = getattr(result, "position_id", None)
+    if not position_id:
+        return  # mint without id → don't advance, retry next tick (prevents stranding)
+    if self._phase == PHASE_INIT:
+        self._position_id_1 = str(position_id)
+        self._phase = PHASE_LP1_OPEN
+    elif self._phase == PHASE_LP1_OPEN:
+        self._position_id_2 = str(position_id)
+        self._phase = PHASE_BOTH_OPEN
+```
+
+State-transition shape:
+
+```text
+INIT ──LP_OPEN(narrow)──▶ LP1_OPEN ──LP_OPEN(wide)──▶ BOTH_OPEN ──teardown──▶ DONE
+```
+
+For richer patterns (out-of-order middle close on three positions), see
+`strategies/accounting/lp_triple/strategy.py`. The full design contract lives in
+`../../../blueprints/04-strategy-layer.md` §Multi-position dispatch.
 
 ### Not-yet-implemented IntentType values (fail-fast at compile time)
 

@@ -810,7 +810,16 @@ class IntentSequence:
         )
 
 
-# Type for decide() return value: single intent, sequence, or list of parallel intents
+# Type for decide() return value: single intent, sequence, or list of parallel intents.
+#
+# CAVEAT: list returns are for genuinely independent intents (different chains,
+# different venues, different output tokens). For multiple positions sharing a
+# wallet basis-pool, pool/market state, or position-registry semantic group
+# (e.g. two LPs on the same pool, two SUPPLYs on the same Aave market), emit
+# one Intent per iteration via a phase or slot machine that advances only when
+# on_intent_executed observes a real position_id. See strategies/accounting/
+# lp_dual/ and lp_triple/ for reference, and blueprint 04 §Multi-position
+# dispatch for the contract.
 type DecideResult = AnyIntent | IntentSequence | list[AnyIntent | IntentSequence] | None
 
 
