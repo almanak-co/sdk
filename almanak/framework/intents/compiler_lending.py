@@ -5439,14 +5439,26 @@ def _compile_withdraw_pendle(
 ) -> CompilationResult:
     """Compile WITHDRAW for Pendle (redeem from PT/YT).
 
-    Delegates entirely to the compiler's ``_compile_pendle_redeem`` helper.
+    Delegates entirely to the connector-owned Pendle compiler.
     Unique to withdraw: Pendle has no supply/borrow/repay counterpart here.
 
     ``initial_warnings`` carries dispatcher-level warnings (e.g. the
     ``withdraw_all=True`` and ``amount='all'`` fallback notices) and is merged
     into the returned ``CompilationResult.warnings`` so callers see them.
     """
-    result = compiler._compile_pendle_redeem(intent)
+    from ..connectors.compiler_registry import get_compiler as get_connector_compiler
+
+    connector_compiler = get_connector_compiler("pendle")
+    if connector_compiler is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error="Connector compiler for protocol 'pendle' is not registered.",
+        )
+    result = connector_compiler.compile(
+        compiler._build_compiler_context("pendle", connector_compiler),
+        intent,
+    )
     if initial_warnings:
         result.warnings = [*initial_warnings, *result.warnings]
     return result

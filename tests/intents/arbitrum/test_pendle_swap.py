@@ -91,7 +91,7 @@ class TestPendleSwapIntent:
     ):
         """Test WETH -> PT-wstETH-25JUN2026 swap using SwapIntent.
 
-        This tests the token -> PT (buy PT) path in _compile_pendle_swap.
+        This tests the token -> PT (buy PT) path in PendleCompiler.compile_swap.
         The compiler may insert a pre-swap step to convert WETH to wstETH (SY underlying)
         before executing the Pendle swap.
 
@@ -216,7 +216,7 @@ class TestPendleSwapIntent:
     ):
         """Test USDC -> PT-wstETH-25JUN2026 swap using SwapIntent.
 
-        This tests the token_mint_sy pre-swap path in _compile_pendle_swap.
+        This tests the token_mint_sy pre-swap path in PendleCompiler.compile_swap.
         USDC is not the SY underlying (wstETH), so the compiler must insert
         a pre-swap from USDC -> wstETH before the Pendle swap.
 

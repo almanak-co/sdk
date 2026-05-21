@@ -36,6 +36,30 @@ class CompilerRegistry:
             "almanak.framework.connectors.fluid.compiler",
             "FluidCompiler",
         ),
+        "camelot": (
+            "almanak.framework.connectors.camelot.compiler",
+            "CamelotCompiler",
+        ),
+        "uniswap_v4": (
+            "almanak.framework.connectors.uniswap_v4.compiler",
+            "UniswapV4Compiler",
+        ),
+        "traderjoe_v2": (
+            "almanak.framework.connectors.traderjoe_v2.compiler",
+            "TraderJoeV2Compiler",
+        ),
+        "aerodrome": (
+            "almanak.framework.connectors.aerodrome.compiler",
+            "AerodromeCompiler",
+        ),
+        "aerodrome_slipstream": (
+            "almanak.framework.connectors.aerodrome.compiler",
+            "AerodromeCompiler",
+        ),
+        "pendle": (
+            "almanak.framework.connectors.pendle.compiler",
+            "PendleCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

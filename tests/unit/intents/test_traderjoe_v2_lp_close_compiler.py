@@ -5,8 +5,17 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from almanak.framework.connectors.traderjoe_v2.compiler import TraderJoeV2Compiler
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
+
+
+def _compile_lp_close_traderjoe_v2(compiler: IntentCompiler, intent):
+    connector_compiler = TraderJoeV2Compiler()
+    return connector_compiler.compile_lp_close(
+        compiler._build_compiler_context("traderjoe_v2", connector_compiler),
+        intent,
+    )
 
 
 def test_traderjoe_lp_close_uses_known_bin_ids_without_position_rediscovery() -> None:
@@ -54,7 +63,7 @@ def test_traderjoe_lp_close_uses_known_bin_ids_without_position_rediscovery() ->
     )
 
     with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
-        result = compiler._compile_lp_close_traderjoe_v2(intent)
+        result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", result.error
     assert result.action_bundle is not None
@@ -141,7 +150,7 @@ def test_traderjoe_lp_close_falls_back_preserves_slippage_when_targeted_lookup_e
     )
 
     with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
-        result = compiler._compile_lp_close_traderjoe_v2(intent)
+        result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", result.error
     mock_adapter.sdk.get_position_balances_for_ids.assert_called_once_with(
@@ -215,7 +224,7 @@ def test_traderjoe_lp_close_pool_info_failure_does_not_block_compilation() -> No
     )
 
     with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
-        result = compiler._compile_lp_close_traderjoe_v2(intent)
+        result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", (
         "Compilation must NOT fail when get_pool_info reverts; got: "
@@ -229,5 +238,4 @@ def test_traderjoe_lp_close_pool_info_failure_does_not_block_compilation() -> No
     assert position_passed.active_bin == 0
     assert position_passed.amount_x == 1000
     assert position_passed.amount_y == 2000
-
 

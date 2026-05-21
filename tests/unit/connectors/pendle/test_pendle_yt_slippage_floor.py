@@ -12,7 +12,7 @@ import pytest
 def _compute_yt_min_amount_out(amount_in: int, slippage_bps: int) -> tuple[int, str]:
     """Replicate the Pendle compiler's YT floor logic.
 
-    This mirrors the yt_to_token branch in IntentCompiler._compile_pendle_swap().
+    This mirrors the yt_to_token branch in PendleCompiler.compile_swap().
     """
     if slippage_bps >= 500:
         min_amount_out = 1

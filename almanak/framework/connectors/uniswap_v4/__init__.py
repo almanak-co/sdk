@@ -22,6 +22,7 @@ from almanak.framework.connectors.uniswap_v4.adapter import (
     UniswapV4Config,
     UniswapV4UnsupportedPoolError,
 )
+from almanak.framework.connectors.uniswap_v4.compiler import UniswapV4Compiler
 from almanak.framework.connectors.uniswap_v4.hooks import (
     HookDataEncoder,
     HookFlags,
@@ -42,6 +43,7 @@ __all__ = [
     "PoolDiscoveryResult",
     "PoolState",
     "UniswapV4Adapter",
+    "UniswapV4Compiler",
     "UniswapV4Config",
     "UniswapV4ReceiptParser",
     "UniswapV4SDK",

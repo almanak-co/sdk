@@ -318,73 +318,43 @@ class TestCompileLPCloseErrorPaths:
 
 
 class TestCompileLPCloseDispatch:
-    """Verify ``_compile_lp_close`` routes each protocol to the right helper."""
+    """Verify ``_compile_lp_close`` routes folded protocols through the connector registry."""
 
-    def test_uniswap_v4_dispatches_to_helper(self) -> None:
+    def _assert_connector_dispatch(self, *, protocol: str, chain: str, pool: str | None = None) -> None:
+        compiler = _make_compiler(chain=chain)
+        sentinel = MagicMock(name=f"{protocol}-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            intent = _make_lp_close_intent(protocol=protocol, pool=pool)
+            result = compiler.compile(intent)
+
+        assert result is sentinel
+        mock_get_compiler.assert_called_once_with(protocol)
+        connector_compiler.compile.assert_called_once()
+        ctx, routed_intent = connector_compiler.compile.call_args.args
+        assert isinstance(ctx, BaseCompilerContext)
+        assert routed_intent is intent
+
+    def test_uniswap_v4_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="ethereum")
-        sentinel = MagicMock(name="uniswap-v4-result")
-        with patch.object(
-            compiler, "_compile_lp_close_uniswap_v4", return_value=sentinel
-        ) as mock_v4:
-            intent = _make_lp_close_intent(protocol="uniswap_v4")
-            result = compiler.compile(intent)
+        self._assert_connector_dispatch(protocol="uniswap_v4", chain=compiler.chain)
 
-        assert result is sentinel
-        mock_v4.assert_called_once()
+    def test_traderjoe_v2_dispatches_to_connector_compiler(self) -> None:
+        self._assert_connector_dispatch(protocol="traderjoe_v2", chain="avalanche", pool="USDC/AVAX/20")
 
-    def test_traderjoe_v2_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="avalanche")
-        sentinel = MagicMock(name="tj-result")
-        with patch.object(
-            compiler, "_compile_lp_close_traderjoe_v2", return_value=sentinel
-        ) as mock_tj:
-            intent = _make_lp_close_intent(protocol="traderjoe_v2", pool="USDC/AVAX/20")
-            result = compiler.compile(intent)
+    def test_aerodrome_dispatches_to_connector_compiler(self) -> None:
+        self._assert_connector_dispatch(protocol="aerodrome", chain="base", pool="WETH/USDC/volatile")
 
-        assert result is sentinel
-        mock_tj.assert_called_once()
+    def test_aerodrome_slipstream_dispatches_to_connector_compiler(self) -> None:
+        self._assert_connector_dispatch(protocol="aerodrome_slipstream", chain="base", pool="USDC/WETH/500")
 
-    def test_aerodrome_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="base")
-        sentinel = MagicMock(name="aerodrome-result")
-        with patch.object(
-            compiler, "_compile_lp_close_aerodrome", return_value=sentinel
-        ) as mock_aero:
-            intent = _make_lp_close_intent(
-                protocol="aerodrome", pool="WETH/USDC/volatile"
-            )
-            result = compiler.compile(intent)
-
-        assert result is sentinel
-        mock_aero.assert_called_once()
-
-    def test_aerodrome_slipstream_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="base")
-        sentinel = MagicMock(name="slipstream-result")
-        with patch.object(
-            compiler,
-            "_compile_lp_close_aerodrome_slipstream",
-            return_value=sentinel,
-        ) as mock_slipstream:
-            intent = _make_lp_close_intent(
-                protocol="aerodrome_slipstream", pool="USDC/WETH/500"
-            )
-            result = compiler.compile(intent)
-
-        assert result is sentinel
-        mock_slipstream.assert_called_once()
-
-    def test_pendle_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="ethereum")
-        sentinel = MagicMock(name="pendle-result")
-        with patch.object(
-            compiler, "_compile_pendle_lp_close", return_value=sentinel
-        ) as mock_pendle:
-            intent = _make_lp_close_intent(protocol="pendle")
-            result = compiler.compile(intent)
-
-        assert result is sentinel
-        mock_pendle.assert_called_once()
+    def test_pendle_dispatches_to_connector_compiler(self) -> None:
+        self._assert_connector_dispatch(protocol="pendle", chain="ethereum")
 
     def test_curve_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="ethereum")

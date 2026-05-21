@@ -733,7 +733,7 @@ class TestTraderJoeV2LPCloseIntent:
 
         # Should have a warning — the LP_CLOSE compile path appends
         # "No LP position found to close" to result.warnings in this branch
-        # (see ``_compile_lp_close_traderjoe_v2`` in ``almanak/framework/intents/compiler.py``).
+        # (see ``_compile_lp_close_traderjoe_v2`` in ``almanak/framework/connectors/traderjoe_v2/compiler.py``).
         assert compilation_result.warnings, "Expected warning when no LP position exists"
         print(f"Warnings: {compilation_result.warnings}")
 

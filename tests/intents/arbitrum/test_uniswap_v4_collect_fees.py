@@ -241,7 +241,7 @@ class TestUniswapV4CollectFeesIntent:
     These tests verify the fee collection flow:
     - First open a position (setup)
     - CollectFeesIntent creation with protocol_params
-    - IntentCompiler routes to _compile_collect_fees_uniswap_v4()
+    - UniswapV4Compiler compiles LP_COLLECT_FEES
     - Transactions execute successfully on-chain via PositionManager
     - Position remains open after fee collection
     - Balance deltas are non-negative (fees collected >= 0)

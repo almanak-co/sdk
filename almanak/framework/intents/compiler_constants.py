@@ -112,14 +112,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
         "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
-        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
+        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
-        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
+        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
         "camelot": "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18",  # Algebra V3 SwapRouter (VIB-1636)
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
@@ -148,7 +148,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
     },
     "avalanche": {
-        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
+        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",  # SwapRouter02
         # sushiswap_v3 removed: ~54% price impact on $100, on-chain reverts on $10 (VIB-2069)
     },
@@ -157,7 +157,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
         "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",  # SushiSwap V3 SwapRouter
-        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
+        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
     "linea": {

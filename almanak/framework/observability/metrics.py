@@ -14,7 +14,7 @@ dashboard use case these counters serve.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from prometheus_client import CollectorRegistry, Counter
@@ -29,7 +29,7 @@ V4LPDropOutcome = Literal["drop", "raise"]
 FRAMEWORK_REGISTRY = CollectorRegistry()
 
 
-class V4LPDropReason(str, Enum):
+class V4LPDropReason(StrEnum):
     """Stable error codes for Uniswap V4 LP receipt-parser drop paths.
 
     These string values are the label value emitted on the

@@ -49,12 +49,17 @@ _SWAP_PROTOCOLS = {
     "uniswap_v3",
     "pancakeswap_v3",
     "sushiswap_v3",
+    "camelot",
     "aerodrome",
     "traderjoe_v2",
     "pendle",
     "curve",
     # Note: Enso is excluded - its Router address is per-chain and added
     # statically by the generator (not via synthetic intent compilation).
+    # Note: Camelot (Algebra V3 on Arbitrum) is included for SWAP only —
+    # CamelotCompiler ships SWAP-only with fail-closed LP / collect stubs
+    # per docs/internal/plans/camelot-compiler-connector-folding-plan.md.
+    # Not in _NATIVE_IN_SWAP_PROTOCOLS: no native-in SWAP intent test today.
 }
 # Protocols whose SwapRouter wraps the chain's native gas token via msg.value
 # (no ERC-20 approve, single value-bearing tx). Emitting an additional

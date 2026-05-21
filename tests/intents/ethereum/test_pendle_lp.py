@@ -7,7 +7,7 @@ Pendle's WITHDRAW intent path is **PT/YT redemption at maturity** (NOT
 Aave-style lending withdraw). The compiler routes ``WithdrawIntent`` with
 ``protocol="pendle"`` to ``compile_pendle_redeem``, which builds a
 PT-to-token redemption via the Pendle Router. See
-``almanak/framework/intents/compiler_pendle.py::compile_pendle_redeem``.
+``almanak/framework/connectors/pendle/compiler.py::compile_pendle_redeem``.
 
 Active Ethereum market (as of 2026-05-12):
 

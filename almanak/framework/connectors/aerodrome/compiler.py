@@ -1,4 +1,4 @@
-"""Aerodrome/Velodrome compilation helpers extracted from IntentCompiler.
+"""Connector-owned compiler for Aerodrome/Velodrome intents.
 
 These standalone functions receive the compiler instance as their first
 parameter and implement all Aerodrome-related compilation logic (LP open,
@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from ..connectors.base.cl_math import compute_lp_slippage_mins, maybe_recompute_lp_amounts_from_slot0
-from ..models.reproduction_bundle import ActionBundle
-from . import compiler_constants
-from .compiler_models import CompilationResult, CompilationStatus
-from .vocabulary import IntentType
+from almanak.framework.connectors.base.cl_math import compute_lp_slippage_mins, maybe_recompute_lp_amounts_from_slot0
+from almanak.framework.connectors.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
+from almanak.framework.intents import compiler_constants
+from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
 
 if TYPE_CHECKING:
-    from .vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
+    from almanak.framework.intents.vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
@@ -30,6 +32,116 @@ LP_POSITION_MANAGERS = compiler_constants.LP_POSITION_MANAGERS
 # Used by the LP_CLOSE bare-pool-address path to reverse a pool contract into
 # its pair identity, mirroring Uniswap V3's opaque tokenId convention.
 _AERODROME_POOL_METADATA_SELECTOR = "0x392f37e9"
+
+
+class AerodromeCompiler(BaseConcentratedLiquidityCompiler):
+    """Compiler for Aerodrome classic and Slipstream routes."""
+
+    protocols: ClassVar[frozenset[str]] = frozenset({"aerodrome", "aerodrome_slipstream"})
+    intents: ClassVar[frozenset[IntentType]] = frozenset(
+        {
+            IntentType.SWAP,
+            IntentType.LP_OPEN,
+            IntentType.LP_CLOSE,
+            IntentType.LP_COLLECT_FEES,
+        }
+    )
+    chains: ClassVar[frozenset[str]] = frozenset({"base", "optimism"})
+
+    def compile_swap(self, ctx: CLCompilerContext, intent: SwapIntent) -> CompilationResult:
+        return compile_swap_aerodrome(_AerodromeCompileImpl(ctx), intent)
+
+    def compile_lp_open(self, ctx: CLCompilerContext, intent: LPOpenIntent) -> CompilationResult:
+        impl = _AerodromeCompileImpl(ctx)
+        if ctx.protocol == "aerodrome_slipstream":
+            return compile_lp_open_aerodrome_slipstream(impl, intent)
+        return compile_lp_open_aerodrome(impl, intent)
+
+    def compile_lp_close(self, ctx: CLCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        impl = _AerodromeCompileImpl(ctx)
+        if ctx.protocol == "aerodrome_slipstream":
+            return compile_lp_close_aerodrome_slipstream(impl, intent)
+        return compile_lp_close_aerodrome(impl, intent)
+
+    def compile_collect_fees(self, ctx: CLCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
+        if ctx.protocol == "aerodrome_slipstream":
+            return compile_collect_fees_aerodrome_slipstream(_AerodromeCompileImpl(ctx), intent)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=(
+                "Aerodrome/Velodrome classic pools do not support LP_COLLECT_FEES: "
+                "fees auto-compound into the LP token. Use LP_CLOSE to harvest, or "
+                "use Intent.collect_fees(protocol='aerodrome_slipstream', ...) for Slipstream positions."
+            ),
+        )
+
+
+class _AerodromeCompileImpl:
+    """Per-call adapter exposing framework services to relocated Aerodrome functions."""
+
+    def __init__(self, ctx: CLCompilerContext) -> None:
+        self._ctx = ctx
+        self.chain = ctx.chain
+        self.wallet_address = ctx.wallet_address
+        self.price_oracle = ctx.price_oracle
+        self.rpc_timeout = ctx.rpc_timeout
+        self.default_lp_slippage = ctx.default_lp_slippage
+        self.default_deadline_seconds = ctx.default_deadline_seconds
+        self._gateway_client = ctx.gateway_client
+        self._token_resolver = ctx.token_resolver
+        self._config = SimpleNamespace(
+            swap_pool_selection_mode=ctx.swap_pool_selection_mode,
+            fixed_swap_fee_tier=ctx.fixed_swap_fee_tier,
+            max_price_impact_pct=ctx.max_price_impact_pct,
+            allow_placeholder_prices=ctx.allow_placeholder_prices,
+            permission_discovery=ctx.permission_discovery,
+        )
+
+    def _get_chain_rpc_url(self) -> str | None:
+        return self._ctx.rpc_url
+
+    def _resolve_token(self, token: str):
+        return self._ctx.services.resolve_token(token)
+
+    def _require_token_price(self, symbol: str) -> Decimal:
+        return self._ctx.services.require_token_price(symbol)
+
+    def _usd_to_token_amount(self, usd_amount: Decimal, token: Any) -> int:
+        return self._ctx.services.usd_to_token_amount(usd_amount, token)
+
+    def _build_approve_tx(self, token_address: str, spender: str, amount: int):
+        return self._ctx.services.build_approve_tx(token_address, spender, amount)
+
+    def _validate_pool(self, result: Any, intent_id: str):
+        return self._ctx.services.validate_pool(result, intent_id)
+
+    def _format_amount(self, amount: int, decimals: int) -> str:
+        return self._ctx.services.format_amount(amount, decimals)
+
+    def _price_to_tick(self, price: Decimal, *, token0_decimals: int, token1_decimals: int) -> int:
+        return self._ctx.services.price_to_tick(
+            price,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+
+    def _get_tick_spacing(self, fee_tier: int) -> int:
+        return self._ctx.services.get_tick_spacing(fee_tier)
+
+    def _get_wrapped_native_address(self) -> str | None:
+        return self._ctx.services.get_wrapped_native_address()
+
+    def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
+        return self._ctx.services.query_erc20_balance(token_address, wallet_address)
+
+    def _fetch_lp_pool_slot0(self, pool_check: Any) -> Any:
+        from almanak.framework.connectors.uniswap_v3.compiler import UniswapV3Compiler
+
+        return UniswapV3Compiler()._fetch_lp_pool_slot0(self._ctx, pool_check)
+
+    def _get_aerodrome_pool_address(self, token_a: str, token_b: str, stable: bool) -> str | None:
+        return get_aerodrome_pool_address(self, token_a, token_b, stable)
 
 
 def _looks_like_evm_address(value: str) -> bool:
@@ -107,7 +219,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
             )
 
         # Validate pool existence (best-effort)
-        from .pool_validation import validate_aerodrome_pool
+        from almanak.framework.intents.pool_validation import validate_aerodrome_pool
 
         pool_check = validate_aerodrome_pool(
             compiler.chain,
@@ -462,6 +574,11 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
     return result
 
 
+# crap-allowlist: VIB-4687 — pre-existing complexity (cc=26) relocated from
+# compiler_aerodrome.py by the phase-2 connector fold; bodies are byte-identical
+# apart from a .pool_validation -> absolute import-path change. Split into
+# per-route helpers (Slipstream / Aerodrome Classic / Velodrome Classic) under
+# the four-step CRAP refactor protocol.
 def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
     """Compile SWAP intent for Aerodrome/Velodrome (Solidly forks).
 
@@ -562,7 +679,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
 
         # Validate pool existence
         if use_classic:
-            from .pool_validation import validate_aerodrome_pool
+            from almanak.framework.intents.pool_validation import validate_aerodrome_pool
 
             pool_check = validate_aerodrome_pool(
                 compiler.chain,
@@ -573,7 +690,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
                 gateway_client=compiler._gateway_client,
             )
         else:
-            from .pool_validation import validate_aerodrome_cl_pool
+            from almanak.framework.intents.pool_validation import validate_aerodrome_cl_pool
 
             pool_check = validate_aerodrome_cl_pool(
                 compiler.chain,
@@ -757,7 +874,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             )
 
         # Validate pool existence
-        from .pool_validation import validate_aerodrome_cl_pool
+        from almanak.framework.intents.pool_validation import validate_aerodrome_cl_pool
 
         pool_check = validate_aerodrome_cl_pool(
             compiler.chain,

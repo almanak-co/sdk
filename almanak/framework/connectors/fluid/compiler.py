@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from almanak.framework.connectors.base.compiler import BaseCompilerContext, BaseProtocolCompiler
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
@@ -25,6 +25,21 @@ class FluidCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         }
     )
     chains: ClassVar[frozenset[str]] = frozenset({"arbitrum"})
+
+    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type == IntentType.SWAP:
+            return self.compile_swap(ctx, intent)
+        if intent_type == IntentType.LP_OPEN:
+            return self.compile_lp_open(ctx, intent)
+        if intent_type == IntentType.LP_CLOSE:
+            return self.compile_lp_close(ctx, intent)
+        if intent_type == IntentType.LP_COLLECT_FEES:
+            return self.compile_collect_fees(ctx, intent)
+        return self._unsupported(intent)
 
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Fluid DEX (currently disabled)."""

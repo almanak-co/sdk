@@ -100,7 +100,7 @@ def _mock_compiler(chain: str = "ethereum", *, is_solana: bool = False) -> Magic
       - _get_wrapped_native_address()
       - _get_chain_rpc_url()
       - _format_amount()
-      - _compile_jupiter_lend_withdraw() / _compile_kamino_withdraw() / _compile_pendle_redeem()
+      - _compile_jupiter_lend_withdraw() / _compile_kamino_withdraw() / PendleCompiler.compile_withdraw()
     """
     compiler = MagicMock()
     compiler.chain = chain
@@ -785,27 +785,53 @@ class TestSparkHelper:
 
 
 class TestPendleHelper:
-    def test_delegates_to_compiler(self):
+    def test_delegates_to_connector_compiler(self):
         compiler = _mock_compiler(chain="ethereum")
         expected = MagicMock(status=CompilationStatus.SUCCESS)
-        compiler._compile_pendle_redeem.return_value = expected
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = expected
         intent = _withdraw_intent(protocol="pendle")
-        result = cl._compile_withdraw_pendle(compiler, intent, [])
+        with patch(
+            "almanak.framework.connectors.compiler_registry.get_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            result = cl._compile_withdraw_pendle(compiler, intent, [])
         assert result is expected
-        compiler._compile_pendle_redeem.assert_called_once_with(intent)
+        # Pin the routing contract: the Pendle connector must be looked up by
+        # name and invoked with the Pendle-scoped context + the same intent.
+        mock_get_compiler.assert_called_once_with("pendle")
+        compiler._build_compiler_context.assert_called_once_with("pendle", connector_compiler)
+        connector_compiler.compile.assert_called_once()
+        (ctx, passed_intent), kwargs = connector_compiler.compile.call_args
+        assert kwargs == {}
+        assert passed_intent is intent
+        assert ctx is compiler._build_compiler_context.return_value
 
     def test_dispatcher_routes_pendle_through_helper(self):
         """End-to-end check: the dispatcher must route protocol='pendle' to
-        ``_compile_withdraw_pendle`` which in turn delegates to the compiler.
+        ``_compile_withdraw_pendle`` which in turn delegates to the connector compiler.
         """
         compiler = _mock_compiler(chain="ethereum")
         compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
         expected = MagicMock(status=CompilationStatus.SUCCESS)
-        compiler._compile_pendle_redeem.return_value = expected
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = expected
         intent = _withdraw_intent(protocol="pendle")
-        result = cl.compile_withdraw(compiler, intent)
+        with patch(
+            "almanak.framework.connectors.compiler_registry.get_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            result = cl.compile_withdraw(compiler, intent)
         assert result is expected
-        compiler._compile_pendle_redeem.assert_called_once_with(intent)
+        # The dispatcher must route protocol='pendle' through the helper to the
+        # connector compiler with the Pendle-scoped context + unchanged intent.
+        mock_get_compiler.assert_called_once_with("pendle")
+        compiler._build_compiler_context.assert_called_once_with("pendle", connector_compiler)
+        connector_compiler.compile.assert_called_once()
+        (ctx, passed_intent), kwargs = connector_compiler.compile.call_args
+        assert kwargs == {}
+        assert passed_intent is intent
+        assert ctx is compiler._build_compiler_context.return_value
 
     def test_propagates_initial_warnings(self):
         """Dispatcher-level warnings (withdraw_all / amount='all' fallback) must
@@ -817,11 +843,11 @@ class TestPendleHelper:
             intent_id="test",
             warnings=["pendle-inner-warning"],
         )
-        compiler._compile_pendle_redeem.return_value = inner
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = inner
         intent = _withdraw_intent(protocol="pendle")
-        result = cl._compile_withdraw_pendle(
-            compiler, intent, ["Withdrawing all available balance"]
-        )
+        with patch("almanak.framework.connectors.compiler_registry.get_compiler", return_value=connector_compiler):
+            result = cl._compile_withdraw_pendle(compiler, intent, ["Withdrawing all available balance"])
         assert result is inner
         assert result.warnings == [
             "Withdrawing all available balance",
@@ -839,9 +865,11 @@ class TestPendleHelper:
             intent_id="test",
             warnings=[],
         )
-        compiler._compile_pendle_redeem.return_value = inner
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = inner
         intent = _withdraw_intent(protocol="pendle", withdraw_all=True)
-        result = cl.compile_withdraw(compiler, intent)
+        with patch("almanak.framework.connectors.compiler_registry.get_compiler", return_value=connector_compiler):
+            result = cl.compile_withdraw(compiler, intent)
         assert "Withdrawing all available balance" in result.warnings
 
 

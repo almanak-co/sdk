@@ -48,6 +48,7 @@ from .adapter import (
     SwapType,
     TransactionData,
 )
+from .compiler import AerodromeCompiler
 from .receipt_parser import (
     BURN_EVENT_TOPIC,
     EVENT_NAME_TO_TYPE,
@@ -101,6 +102,7 @@ __all__ = [
     "InsufficientLiquidityError",
     # Adapter
     "AerodromeAdapter",
+    "AerodromeCompiler",
     "AerodromeConfig",
     "CLLiquidityResult",
     "SwapQuote",

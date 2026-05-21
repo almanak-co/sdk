@@ -15,6 +15,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Aster Perps](aster_perps.md) | Perpetuals | BSC | `aster_perps` (broker=0) |
 | [PancakeSwap Perps](pancakeswap_perps.md) | Perpetuals | BSC | `pancakeswap_perps` (broker=2, shim over `aster_perps`) |
 | [Aerodrome](aerodrome.md) | DEX | Base | `aerodrome` |
+| [Camelot](camelot.md) | DEX | Arbitrum | `camelot` |
 | [TraderJoe V2](traderjoe_v2.md) | DEX | Avalanche, Arbitrum | `traderjoe_v2` |
 | [PancakeSwap V3](pancakeswap_v3.md) | DEX | BSC, Ethereum, Arbitrum | `pancakeswap_v3` |
 | [SushiSwap V3](sushiswap_v3.md) | DEX | Ethereum, Arbitrum | `sushiswap_v3` |

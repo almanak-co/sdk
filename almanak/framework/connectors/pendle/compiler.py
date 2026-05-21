@@ -1,4 +1,4 @@
-"""Pendle compilation helpers extracted from IntentCompiler.
+"""Connector-owned compiler for Pendle intents.
 
 These standalone functions receive the compiler instance as their first
 parameter and implement all Pendle-related compilation logic (swap, LP open,
@@ -10,17 +10,107 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from ..models.reproduction_bundle import ActionBundle
-from . import compiler_constants
-from .compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
-from .vocabulary import IntentType
+from almanak.framework.connectors.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.framework.intents import compiler_constants
+from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
 
 if TYPE_CHECKING:
-    from .vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent, WithdrawIntent
+    from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent, WithdrawIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
+
+
+class PendleCompiler(BaseProtocolCompiler[BaseCompilerContext]):
+    """Compiler for Pendle swap and LP intents.
+
+    Pendle is its own primitive — PT/YT/SY tokens with a custom AMM — and is
+    NOT concentrated liquidity. The pre-swap V3 leg (when paying with a
+    non-Pendle base token) gets its ``DefaultSwapAdapter`` via
+    ``ctx.services.default_swap_adapter(protocol)`` rather than the
+    CL-specific factory fields.
+    """
+
+    protocols: ClassVar[frozenset[str]] = frozenset({"pendle"})
+    intents: ClassVar[frozenset[IntentType]] = frozenset(
+        {
+            IntentType.SWAP,
+            IntentType.LP_OPEN,
+            IntentType.LP_CLOSE,
+            IntentType.WITHDRAW,
+        }
+    )
+    chains: ClassVar[frozenset[str]] = frozenset({"arbitrum", "ethereum"})
+    context_type: ClassVar[type[BaseCompilerContext]] = BaseCompilerContext
+
+    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type == IntentType.SWAP:
+            return self.compile_swap(ctx, intent)
+        if intent_type == IntentType.LP_OPEN:
+            return self.compile_lp_open(ctx, intent)
+        if intent_type == IntentType.LP_CLOSE:
+            return self.compile_lp_close(ctx, intent)
+        if intent_type == IntentType.WITHDRAW:
+            return self.compile_withdraw(ctx, intent)
+        if intent_type == IntentType.LP_COLLECT_FEES:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=getattr(intent, "intent_id", ""),
+                error="Pendle does not support LP_COLLECT_FEES compilation.",
+            )
+        return self._unsupported(intent)
+
+    def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
+        return compile_pendle_swap(_PendleCompileImpl(ctx), intent)
+
+    def compile_lp_open(self, ctx: BaseCompilerContext, intent: LPOpenIntent) -> CompilationResult:
+        return compile_pendle_lp_open(_PendleCompileImpl(ctx), intent)
+
+    def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        return compile_pendle_lp_close(_PendleCompileImpl(ctx), intent)
+
+    def compile_withdraw(self, ctx: BaseCompilerContext, intent: WithdrawIntent) -> CompilationResult:
+        return compile_pendle_redeem(_PendleCompileImpl(ctx), intent)
+
+
+class _PendleCompileImpl:
+    """Per-call adapter exposing framework services to relocated Pendle functions."""
+
+    def __init__(self, ctx: BaseCompilerContext) -> None:
+        self._ctx = ctx
+        self.chain = ctx.chain
+        self.wallet_address = ctx.wallet_address
+        self.rpc_timeout = ctx.rpc_timeout
+        self.price_oracle = ctx.price_oracle
+        self.default_protocol = ctx.default_protocol
+        self.default_deadline_seconds = ctx.default_deadline_seconds
+        self._gateway_client = ctx.gateway_client
+        self._token_resolver = ctx.token_resolver
+
+    def _get_chain_rpc_url(self) -> str | None:
+        return self._ctx.rpc_url
+
+    def _resolve_token(self, token: str) -> TokenInfo | None:
+        return self._ctx.services.resolve_token(token)
+
+    def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
+        return self._ctx.services.usd_to_token_amount(usd_amount, token)
+
+    def _calculate_expected_output(self, amount_in: int, from_token: TokenInfo, to_token: TokenInfo) -> int:
+        return self._ctx.services.calculate_expected_output(amount_in, from_token, to_token)
+
+    def _build_approve_tx(self, token_address: str, spender: str, amount: int) -> list[TransactionData]:
+        return self._ctx.services.build_approve_tx(token_address, spender, amount)
+
+    def _get_wrapped_native_address(self) -> str | None:
+        return self._ctx.services.get_wrapped_native_address()
 
 
 def _resolve_pt_from_yt(adapter: Any, yt_address: str) -> str | None:
@@ -256,17 +346,7 @@ def _build_pre_swap_tx(
     if not from_token.is_native:
         approvals.extend(compiler._build_approve_tx(from_token.address, v3_router, amount_in))
 
-    from almanak.framework.connectors.base.swap_adapter import DefaultSwapAdapter
-
-    pre_swap_adapter = DefaultSwapAdapter(
-        chain=compiler.chain,
-        protocol=v3_protocol,
-        pool_selection_mode=compiler._config.swap_pool_selection_mode,
-        fixed_fee_tier=compiler._config.fixed_swap_fee_tier,
-        rpc_url=compiler._get_chain_rpc_url(),
-        rpc_timeout=compiler.rpc_timeout,
-        gateway_client=compiler._gateway_client,
-    )
+    pre_swap_adapter = compiler._ctx.services.default_swap_adapter(v3_protocol)
 
     pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
     # Cap Pendle input to the guaranteed pre-swap minimum. When max_slippage > 2%, the V3
@@ -393,14 +473,6 @@ def _check_pendle_chain_supported(compiler, intent_id: str, label: str) -> Compi
     return _failed(intent_id, f"{label} on {compiler.chain}")
 
 
-def _resolve_pendle_rpc_url(compiler, intent_id: str) -> str | CompilationResult:
-    """Return the chain RPC URL for Pendle, or a FAILED CompilationResult."""
-    rpc_url = compiler._get_chain_rpc_url()
-    if not rpc_url:
-        return _failed(intent_id, f"RPC URL not available for {compiler.chain}")
-    return rpc_url
-
-
 def _parse_pendle_lp_open_pool(pool_str: str, intent_id: str) -> tuple[str, str] | CompilationResult:
     """Split LPOpen pool field 'TOKEN/0xmarket_or_PT_name' into (token_symbol, market_part)."""
     if "/" in pool_str:
@@ -511,7 +583,7 @@ def _build_pendle_redeem_pt_approval(pt_address: str, router_address: str) -> Tr
     """
     from web3 import Web3
 
-    from .compiler_constants import MAX_UINT256
+    from almanak.framework.intents.compiler_constants import MAX_UINT256
 
     approve_data = (
         "0x095ea7b3" + Web3.to_checksum_address(router_address)[2:].lower().zfill(64) + hex(MAX_UINT256)[2:].zfill(64)
@@ -735,16 +807,16 @@ def compile_pendle_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
         slippage_bps = 50
         min_lp_out = 0  # Pendle LP minting: use adapter to estimate proper min
 
-        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
-        if isinstance(rpc_url_or_err, CompilationResult):
-            return rpc_url_or_err
-        rpc_url = rpc_url_or_err
+        adapter_inputs = _resolve_pendle_adapter_inputs(compiler, intent.intent_id)
+        if isinstance(adapter_inputs, CompilationResult):
+            return adapter_inputs
+        gateway_client, rpc_url = adapter_inputs
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
-            gateway_client=compiler._gateway_client,
+            gateway_client=gateway_client,
         )
 
         # Build approval
@@ -849,16 +921,16 @@ def compile_pendle_lp_close(compiler, intent: LPCloseIntent) -> CompilationResul
         slippage_bps = 50
         min_token_out = 0  # Pendle LP removal: use adapter to estimate proper min
 
-        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
-        if isinstance(rpc_url_or_err, CompilationResult):
-            return rpc_url_or_err
-        rpc_url = rpc_url_or_err
+        adapter_inputs = _resolve_pendle_adapter_inputs(compiler, intent.intent_id)
+        if isinstance(adapter_inputs, CompilationResult):
+            return adapter_inputs
+        gateway_client, rpc_url = adapter_inputs
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
-            gateway_client=compiler._gateway_client,
+            gateway_client=gateway_client,
         )
 
         # Build approval for LP token (market address IS the LP token)
@@ -964,16 +1036,16 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
         slippage_bps = 50
         min_token_out = 0  # Pendle redeem: use adapter to estimate proper min
 
-        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
-        if isinstance(rpc_url_or_err, CompilationResult):
-            return rpc_url_or_err
-        rpc_url = rpc_url_or_err
+        adapter_inputs = _resolve_pendle_adapter_inputs(compiler, intent.intent_id)
+        if isinstance(adapter_inputs, CompilationResult):
+            return adapter_inputs
+        gateway_client, rpc_url = adapter_inputs
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
-            gateway_client=compiler._gateway_client,
+            gateway_client=gateway_client,
         )
 
         # Approve PT tokens for the Pendle router (required before redeemPyToToken).

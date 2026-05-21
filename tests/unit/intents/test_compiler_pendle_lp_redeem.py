@@ -1,7 +1,7 @@
 """Unit tests for Pendle compile_pendle_lp_open / lp_close / redeem helpers.
 
 VIB-4083 W6 Sub-C: covers the per-route helpers extracted from
-``compiler_pendle.compile_pendle_lp_open``, ``compile_pendle_lp_close``, and
+``connectors.pendle.compiler.compile_pendle_lp_open``, ``compile_pendle_lp_close``, and
 ``compile_pendle_redeem`` plus a few error/happy-path direct entry points
 through each top-level function. Mocks at the PendleAdapter / PendleAdapter
 build_* boundary so no Anvil or live RPC is touched.
@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.intents import compiler_pendle as cp
+from almanak.framework.connectors.pendle import compiler as cp
 from almanak.framework.intents.compiler_models import CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.lending_intents import WithdrawIntent
 from almanak.framework.intents.vocabulary import Intent, LPCloseIntent, LPOpenIntent
@@ -178,17 +178,39 @@ class TestPureHelpers:
         assert result.status == CompilationStatus.FAILED
         assert "Pendle LP not available on base" == result.error
 
-    def test_resolve_pendle_rpc_url_returns_url(self):
+    def test_resolve_pendle_adapter_inputs_prefers_connected_gateway(self):
         compiler = _mock_compiler()
+        gateway = MagicMock(name="GatewayClient")
+        gateway.is_connected = True
+        compiler._gateway_client = gateway
         compiler._get_chain_rpc_url.return_value = "http://node:8545"
-        assert cp._resolve_pendle_rpc_url(compiler, "iid") == "http://node:8545"
+        result = cp._resolve_pendle_adapter_inputs(compiler, "iid")
+        assert result == (gateway, None)
 
-    def test_resolve_pendle_rpc_url_fails_when_missing(self):
+    def test_resolve_pendle_adapter_inputs_normalizes_disconnected_gateway(self):
         compiler = _mock_compiler()
+        gateway = MagicMock(name="GatewayClient")
+        gateway.is_connected = False
+        compiler._gateway_client = gateway
+        compiler._get_chain_rpc_url.return_value = "http://node:8545"
+        result = cp._resolve_pendle_adapter_inputs(compiler, "iid")
+        assert result == (None, "http://node:8545")
+
+    def test_resolve_pendle_adapter_inputs_falls_back_to_rpc_when_no_gateway(self):
+        compiler = _mock_compiler()
+        compiler._gateway_client = None
+        compiler._get_chain_rpc_url.return_value = "http://node:8545"
+        result = cp._resolve_pendle_adapter_inputs(compiler, "iid")
+        assert result == (None, "http://node:8545")
+
+    def test_resolve_pendle_adapter_inputs_fails_when_neither_available(self):
+        compiler = _mock_compiler()
+        compiler._gateway_client = None
         compiler._get_chain_rpc_url.return_value = None
-        result = cp._resolve_pendle_rpc_url(compiler, "iid")
+        result = cp._resolve_pendle_adapter_inputs(compiler, "iid")
         assert result.status == CompilationStatus.FAILED
-        assert "RPC URL not available for arbitrum" in result.error
+        assert "gateway_client" in result.error
+        assert "RPC URL" in result.error
 
     def test_parse_pendle_lp_open_pool_token_and_market(self):
         token, market = cp._parse_pendle_lp_open_pool("WETH/0xabc", "iid")

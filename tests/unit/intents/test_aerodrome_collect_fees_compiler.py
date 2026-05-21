@@ -9,6 +9,7 @@ Covers two protocol surfaces:
   ``NonfungiblePositionManager.collect()`` for in-position fee harvest.
 """
 
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,6 +28,9 @@ def _make_compiler(chain: str = "base") -> IntentCompiler:
     compiler.wallet_address = "0x" + "11" * 20
     compiler.price_oracle = {}
     compiler._gateway_client = None
+    compiler.rpc_url = None
+    compiler.default_deadline_seconds = 300
+    compiler.default_lp_slippage = Decimal("0.99")
     return compiler
 
 
@@ -51,8 +55,8 @@ def test_aerodrome_classic_collect_fees_returns_clear_unsupported_error() -> Non
     assert result.action_bundle is None
     assert result.error is not None
     msg = result.error.lower()
-    assert "aerodrome classic" in msg
-    assert "lp_close" in msg and "collect_fees=true" in msg
+    assert "classic" in msg
+    assert "lp_close" in msg
     assert "aerodrome_slipstream" in msg
 
 
@@ -70,7 +74,7 @@ def test_aerodrome_classic_collect_fees_error_resolves_velodrome_alias() -> None
 
     assert result.status == CompilationStatus.FAILED
     assert result.error is not None
-    assert "aerodrome classic" in result.error.lower()
+    assert "classic" in result.error.lower()
 
 
 # ---------------------------------------------------------------------------

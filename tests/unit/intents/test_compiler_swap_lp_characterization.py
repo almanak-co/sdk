@@ -224,19 +224,25 @@ class TestCompileSwapHappyPaths:
         tx_types = [tx.tx_type for tx in result.transactions]
         assert "swap" in tx_types
 
-    @patch("almanak.framework.intents.compiler_aerodrome.compile_swap_aerodrome")
-    def test_aerodrome_dispatches_to_helper(self, mock_compile_aero: MagicMock) -> None:
-        """Aerodrome protocol dispatches to compiler_aerodrome.compile_swap_aerodrome."""
+    def test_aerodrome_dispatches_to_connector_compiler(self) -> None:
+        """Aerodrome protocol dispatches to the connector compiler registry."""
 
-        sentinel = MagicMock(name="aerodrome-result")
-        mock_compile_aero.return_value = sentinel
         compiler = _make_compiler(chain="base")
+        sentinel = MagicMock(name="aerodrome-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
 
-        intent = _make_swap_intent(protocol="aerodrome")
-        result = compiler.compile(intent)
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            intent = _make_swap_intent(protocol="aerodrome")
+            result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_compile_aero.assert_called_once()
+        mock_get_compiler.assert_called_once_with("aerodrome")
+        connector_compiler.compile.assert_called_once()
 
 
 class TestCompileSwapPriceImpactGuard:
@@ -426,15 +432,22 @@ class TestCompileSwapDispatch:
         assert dispatched_intent is intent
         assert kwargs == {}
 
-    def test_uniswap_v4_dispatches_to_v4_helper(self) -> None:
+    def test_uniswap_v4_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler()
         sentinel = MagicMock(name="v4-result")
-        with patch.object(compiler, "_compile_swap_uniswap_v4", return_value=sentinel) as mock_v4:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_swap_intent(protocol="uniswap_v4")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_v4.assert_called_once()
+        mock_get_compiler.assert_called_once_with("uniswap_v4")
+        connector_compiler.compile.assert_called_once()
 
     def test_fluid_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler()
@@ -459,27 +472,41 @@ class TestCompileSwapDispatch:
         assert dispatched_intent is intent
         assert kwargs == {}
 
-    def test_traderjoe_v2_dispatches_to_tj_helper(self) -> None:
+    def test_traderjoe_v2_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="avalanche", price_oracle={"AVAX": Decimal("30"), "USDC": Decimal("1")})
         sentinel = MagicMock(name="tj-result")
-        with patch.object(compiler, "_compile_swap_traderjoe_v2", return_value=sentinel) as mock_tj:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_swap_intent(protocol="traderjoe_v2", from_token="USDC", to_token="AVAX")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_tj.assert_called_once()
+        mock_get_compiler.assert_called_once_with("traderjoe_v2")
+        connector_compiler.compile.assert_called_once()
 
     def test_pendle_pt_token_autodetect(self) -> None:
         """PT-prefixed to_token auto-routes to Pendle even without protocol set."""
 
         compiler = _make_compiler()
         sentinel = MagicMock(name="pendle-result")
-        with patch.object(compiler, "_compile_pendle_swap", return_value=sentinel) as mock_pendle:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_swap_intent(from_token="USDC", to_token="PT-sUSDe")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_pendle.assert_called_once()
+        mock_get_compiler.assert_called_once_with("pendle")
+        connector_compiler.compile.assert_called_once()
 
     def test_cross_chain_swap_routes_to_cross_chain(self) -> None:
         """destination_chain != chain and protocol!=lifi => _compile_cross_chain_swap."""
@@ -810,26 +837,32 @@ class TestCompileLPOpenHappyPaths:
                 protocol="uniswap_v3",
             )
 
-    @patch("almanak.framework.intents.compiler_aerodrome.compile_lp_open_aerodrome_slipstream")
-    def test_aerodrome_slipstream_dispatches_to_helper(self, mock_helper: MagicMock) -> None:
-        """protocol='aerodrome_slipstream' routes to the slipstream helper."""
+    def test_aerodrome_slipstream_dispatches_to_connector_compiler(self) -> None:
+        """protocol='aerodrome_slipstream' routes through the connector compiler registry."""
 
-        sentinel = MagicMock(name="slipstream-result")
-        mock_helper.return_value = sentinel
         compiler = _make_compiler(chain="base")
+        sentinel = MagicMock(name="slipstream-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
 
-        intent = _make_lp_intent(
-            pool="USDC/WETH/500",
-            protocol="aerodrome_slipstream",
-            # Slipstream accepts tick-based ranges (negative allowed), but
-            # for dispatch-only we just need a valid positive range.
-            range_lower=Decimal("1000"),
-            range_upper=Decimal("3000"),
-        )
-        result = compiler.compile(intent)
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            intent = _make_lp_intent(
+                pool="USDC/WETH/500",
+                protocol="aerodrome_slipstream",
+                # Slipstream accepts tick-based ranges (negative allowed), but
+                # for dispatch-only we just need a valid positive range.
+                range_lower=Decimal("1000"),
+                range_upper=Decimal("3000"),
+            )
+            result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_helper.assert_called_once()
+        mock_get_compiler.assert_called_once_with("aerodrome_slipstream")
+        connector_compiler.compile.assert_called_once()
 
     @patch(VALIDATE_V3_POOL)
     @patch(LP_ADAPTER_CLS)
@@ -859,17 +892,24 @@ class TestCompileLPOpenHappyPaths:
         assert result.status == CompilationStatus.SUCCESS, result.error
         assert result.action_bundle.metadata["protocol"] == "pancakeswap_v3"
 
-    def test_traderjoe_v2_dispatches_to_helper(self) -> None:
-        """protocol='traderjoe_v2' routes to ``_compile_lp_open_traderjoe_v2``."""
+    def test_traderjoe_v2_dispatches_to_connector_compiler(self) -> None:
+        """protocol='traderjoe_v2' routes through the connector compiler registry."""
 
         compiler = _make_compiler(chain="avalanche", price_oracle={"AVAX": Decimal("30"), "USDC": Decimal("1")})
         sentinel = MagicMock(name="tj-result")
-        with patch.object(compiler, "_compile_lp_open_traderjoe_v2", return_value=sentinel) as mock_tj:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_lp_intent(pool="USDC/AVAX/20", protocol="traderjoe_v2")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_tj.assert_called_once()
+        mock_get_compiler.assert_called_once_with("traderjoe_v2")
+        connector_compiler.compile.assert_called_once()
 
 
 class TestCompileLPOpenTokenOrdering:

@@ -863,9 +863,11 @@ class TestCompilerV4LPRouting:
     """Test that the compiler correctly routes V4 LP intents."""
 
     def test_lp_open_routes_to_v4(self):
-        """Verify _compile_lp_open dispatches to V4 when protocol='uniswap_v4'."""
+        """Verify _compile_lp_open dispatches to the V4 connector compiler."""
         from unittest.mock import patch
 
+        from almanak.framework.connectors.base.compiler import BaseCompilerContext
+        from almanak.framework.connectors.uniswap_v4.compiler import UniswapV4Compiler
         from almanak.framework.intents.compiler import IntentCompiler
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
@@ -878,21 +880,26 @@ class TestCompilerV4LPRouting:
             protocol="uniswap_v4",
         )
 
-        compiler = IntentCompiler.__new__(IntentCompiler)
-        compiler.chain = "arbitrum"
-        compiler.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
-        compiler.price_oracle = {}
-        compiler._token_resolver = None
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            price_oracle={},
+            rpc_url="http://127.0.0.1:8545",
+        )
 
-        with patch.object(compiler, "_compile_lp_open_uniswap_v4") as mock_v4:
+        with patch.object(UniswapV4Compiler, "compile_lp_open") as mock_v4:
             mock_v4.return_value = MagicMock()
             compiler._compile_lp_open(intent)
-            mock_v4.assert_called_once_with(intent)
+            ctx, routed_intent = mock_v4.call_args.args
+            assert isinstance(ctx, BaseCompilerContext)
+            assert routed_intent is intent
 
     def test_lp_close_routes_to_v4(self):
-        """Verify _compile_lp_close dispatches to V4 when protocol='uniswap_v4'."""
+        """Verify _compile_lp_close dispatches to the V4 connector compiler."""
         from unittest.mock import patch
 
+        from almanak.framework.connectors.base.compiler import BaseCompilerContext
+        from almanak.framework.connectors.uniswap_v4.compiler import UniswapV4Compiler
         from almanak.framework.intents.compiler import IntentCompiler
         from almanak.framework.intents.vocabulary import LPCloseIntent
 
@@ -901,16 +908,19 @@ class TestCompilerV4LPRouting:
             protocol="uniswap_v4",
         )
 
-        compiler = IntentCompiler.__new__(IntentCompiler)
-        compiler.chain = "arbitrum"
-        compiler.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
-        compiler.price_oracle = {}
-        compiler._token_resolver = None
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            price_oracle={},
+            rpc_url="http://127.0.0.1:8545",
+        )
 
-        with patch.object(compiler, "_compile_lp_close_uniswap_v4") as mock_v4:
+        with patch.object(UniswapV4Compiler, "compile_lp_close") as mock_v4:
             mock_v4.return_value = MagicMock()
             compiler._compile_lp_close(intent)
-            mock_v4.assert_called_once_with(intent)
+            ctx, routed_intent = mock_v4.call_args.args
+            assert isinstance(ctx, BaseCompilerContext)
+            assert routed_intent is intent
 
     def test_v4_in_lp_position_managers(self):
         """Verify V4 PositionManager is in LP_POSITION_MANAGERS for supported chains."""

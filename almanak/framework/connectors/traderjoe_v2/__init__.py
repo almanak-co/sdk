@@ -53,6 +53,7 @@ from .adapter import (
     TraderJoeV2Config,
     TransactionData,
 )
+from .compiler import TraderJoeV2Compiler
 from .receipt_parser import (
     DEPOSITED_TO_BINS_TOPIC,
     EVENT_NAME_TO_TYPE,
@@ -100,6 +101,7 @@ __all__ = [
     "SwapType",
     "LiquidityPosition",
     "TransactionData",
+    "TraderJoeV2Compiler",
     # SDK exports
     "TraderJoeV2SDK",
     "TraderJoeV2SDKError",
@@ -141,6 +143,7 @@ register_connector(
         IntentType.SWAP,
         IntentType.LP_OPEN,
         IntentType.LP_CLOSE,
+        IntentType.LP_COLLECT_FEES,
     ),
     chains=("avalanche", "arbitrum", "bnb", "ethereum"),
 )

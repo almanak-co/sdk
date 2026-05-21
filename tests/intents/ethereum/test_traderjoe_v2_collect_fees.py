@@ -1,9 +1,9 @@
-"""4-layer intent test for TraderJoe V2 LP_COLLECT_FEES on Avalanche Anvil fork.
+"""4-layer intent test for TraderJoe V2 LP_COLLECT_FEES on Ethereum Anvil fork.
 
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for
 collecting fees from a Liquidity Book position via ``LBPair.collectFees``:
 
-1. Open an LP position in the WAVAX/USDC binStep=20 LBPair (setup).
+1. Open an LP position in the USDT/USDC binStep=1 LBPair (setup).
 2. Build a ``CollectFeesIntent`` for the same pool.
 3. Compile to ActionBundle via :class:`IntentCompiler`, dispatching through
    ``TraderJoeV2Compiler.compile_collect_fees``.
@@ -58,7 +58,7 @@ ClaimedFees event + non-negative wallet deltas) or a non-authz revert
 
 To run::
 
-    uv run pytest tests/intents/avalanche/test_traderjoe_v2_collect_fees.py -v -s
+    uv run pytest tests/intents/ethereum/test_traderjoe_v2_collect_fees.py -v -s
 """
 
 from decimal import Decimal
@@ -98,22 +98,28 @@ from tests.intents.pool_helpers import fail_if_traderjoe_pool_missing
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "avalanche"
+CHAIN_NAME = "ethereum"
 
-# WAVAX/USDC LBPair with binStep=20 (0.2% fee tier). Pinned in
+# USDT/USDC LBPair with binStep=1 (the only TJv2 LBPair on Ethereum carrying
+# meaningful reserves as of 2026-05-14: ~497 USDT / ~70 USDC). Pinned in
 # ``almanak.core.contracts.TRADERJOE_V2_LBPAIRS`` so the static permission
 # entry for ``collectFees`` lands on this exact address at manifest time.
-POOL = "WAVAX/USDC/20"
-LP_AMOUNT_WAVAX = Decimal("2.0")  # token X
-LP_AMOUNT_USDC = Decimal("50")  # token Y
+# Token X = USDT, Token Y = USDC (verified on-chain via LBPair.getTokenX/Y).
+POOL = "USDT/USDC/1"
+# Sizing is intentionally tiny: the pool only has ~$500 of total liquidity at
+# this fork block, so opening with 50/50 (the avalanche reference template
+# size) would distort the active bin set and risk reverting. Mirrors the
+# sibling ``test_traderjoe_v2_lp.py`` on this chain for consistency.
+LP_AMOUNT_USDT = Decimal("5")  # token X
+LP_AMOUNT_USDC = Decimal("5")  # token Y
 
-# Wide range to ensure both tokens are deposited (TJv2 LP_OPEN bin selection
-# is range-driven). Mirrors ``test_traderjoe_v2_lp.py`` so the position shape
-# is identical to the other LP intent tests on this fork.
-RANGE_LOWER = Decimal("5")
-RANGE_UPPER = Decimal("500")
+# Stables: USDC-per-USDT range ~1:1. Range bounds mirror the sibling
+# ``test_traderjoe_v2_lp.py`` so the position shape is identical to the
+# other TJv2 LP intent tests on this Ethereum fork.
+RANGE_LOWER = Decimal("0.5")
+RANGE_UPPER = Decimal("2")
 
-BIN_STEP = 20
+BIN_STEP = 1
 
 
 # =============================================================================
@@ -187,7 +193,7 @@ async def _open_position_via_intent(
     """
     intent = LPOpenIntent(
         pool=POOL,
-        amount0=LP_AMOUNT_WAVAX,
+        amount0=LP_AMOUNT_USDT,
         amount1=LP_AMOUNT_USDC,
         range_lower=RANGE_LOWER,
         range_upper=RANGE_UPPER,
@@ -240,14 +246,14 @@ def _is_authz_failure(error_message: str | None) -> bool:
 # =============================================================================
 
 
-@pytest.mark.avalanche
+@pytest.mark.ethereum
 @pytest.mark.lp
 class TestTraderJoeV2CollectFeesIntent:
     """Test TraderJoe V2 LP_COLLECT_FEES using ``CollectFeesIntent``.
 
     Verifies the full Intent flow:
 
-    - LP_OPEN setup mints a position into the WAVAX/USDC binStep=20 LBPair.
+    - LP_OPEN setup mints a position into the USDT/USDC binStep=1 LBPair.
     - ``CollectFeesIntent`` creation succeeds (no protocol_params required —
       the connector adapter discovers the position from the LBPair on-chain).
     - ``IntentCompiler`` routes through ``TraderJoeV2Compiler.compile_collect_fees`` and
@@ -261,7 +267,7 @@ class TestTraderJoeV2CollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
-    async def test_collect_fees_wavax_usdc(
+    async def test_collect_fees_usdt_usdc(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -271,7 +277,7 @@ class TestTraderJoeV2CollectFeesIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """LP_COLLECT_FEES on a freshly-opened WAVAX/USDC LB position.
+        """LP_COLLECT_FEES on a freshly-opened USDT/USDC LB position.
 
         4-Layer Verification:
 
@@ -288,7 +294,7 @@ class TestTraderJoeV2CollectFeesIntent:
            production-correct minimum the ticket calls option (a).
         3. **Receipt parsing** (success path): ``TraderJoeV2ReceiptParser``
            emits a ``CLAIMED_FEES`` event for the LBPair address.
-        4. **Balance deltas** (success path): WAVAX / USDC balances are
+        4. **Balance deltas** (success path): USDT / USDC balances are
            non-negative and equal to the parser-extracted fee amounts.
 
         Per the issue body's "fix shape" option (a): we deliberately do NOT
@@ -299,13 +305,13 @@ class TestTraderJoeV2CollectFeesIntent:
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
-        wavax_addr = tokens["WAVAX"]
-        fail_if_traderjoe_pool_missing(web3, CHAIN_NAME, wavax_addr, usdc_addr, BIN_STEP)
+        usdt_addr = tokens["USDT"]
+        fail_if_traderjoe_pool_missing(web3, CHAIN_NAME, usdt_addr, usdc_addr, BIN_STEP)
         usdc_decimals = get_token_decimals(web3, usdc_addr)
-        wavax_decimals = get_token_decimals(web3, wavax_addr)
+        usdt_decimals = get_token_decimals(web3, usdt_addr)
 
         print(f"\n{'=' * 80}")
-        print("Test: LP_COLLECT_FEES WAVAX/USDC via CollectFeesIntent (TraderJoe V2)")
+        print("Test: LP_COLLECT_FEES USDT/USDC via CollectFeesIntent (TraderJoe V2)")
         print(f"{'=' * 80}")
 
         # 1. Setup: open LP position so collectFees has bins to target.
@@ -315,7 +321,7 @@ class TestTraderJoeV2CollectFeesIntent:
         position = _get_position_via_adapter(
             rpc_url=anvil_rpc_url,
             wallet=funded_wallet,
-            token_x=wavax_addr,
+            token_x=usdt_addr,
             token_y=usdc_addr,
             bin_step=BIN_STEP,
         )
@@ -325,10 +331,10 @@ class TestTraderJoeV2CollectFeesIntent:
         print(f"Position opened across {len(position.bin_ids)} bins")
 
         # Record balances BEFORE collect to drive the balance-delta layer.
-        wavax_before = get_token_balance(web3, wavax_addr, funded_wallet)
+        usdt_before = get_token_balance(web3, usdt_addr, funded_wallet)
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
-        print(f"WAVAX before collect: {format_token_amount(wavax_before, wavax_decimals)}")
-        print(f"USDC before collect:  {format_token_amount(usdc_before, usdc_decimals)}")
+        print(f"USDT before collect: {format_token_amount(usdt_before, usdt_decimals)}")
+        print(f"USDC before collect: {format_token_amount(usdc_before, usdc_decimals)}")
 
         # 2. Layer 1: Compilation
         collect_intent = CollectFeesIntent(
@@ -407,14 +413,14 @@ class TestTraderJoeV2CollectFeesIntent:
             )
             # Layer 4: balance conservation on the failure path. A revert
             # inside the LBPair (e.g. the zero-fee guard) MUST roll back to
-            # the snapshot — neither WAVAX nor USDC may move. Catches a
+            # the snapshot — neither USDT nor USDC may move. Catches a
             # silent partial-effect regression in either the LBPair or the
             # orchestrator's revert handling.
-            wavax_after_failed = get_token_balance(web3, wavax_addr, funded_wallet)
+            usdt_after_failed = get_token_balance(web3, usdt_addr, funded_wallet)
             usdc_after_failed = get_token_balance(web3, usdc_addr, funded_wallet)
-            assert wavax_after_failed == wavax_before, (
-                f"On failed LP_COLLECT_FEES, WAVAX balance must be unchanged "
-                f"(before={wavax_before}, after={wavax_after_failed})."
+            assert usdt_after_failed == usdt_before, (
+                f"On failed LP_COLLECT_FEES, USDT balance must be unchanged "
+                f"(before={usdt_before}, after={usdt_after_failed})."
             )
             assert usdc_after_failed == usdc_before, (
                 f"On failed LP_COLLECT_FEES, USDC balance must be unchanged "
@@ -490,20 +496,20 @@ class TestTraderJoeV2CollectFeesIntent:
         # 5. Layer 4: Balance deltas. Wallet must not LOSE tokens during a
         #    fee collection. Parser-extracted amounts must agree with wallet
         #    deltas — the receipt parser and on-chain state must match.
-        wavax_after = get_token_balance(web3, wavax_addr, funded_wallet)
+        usdt_after = get_token_balance(web3, usdt_addr, funded_wallet)
         usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
-        wavax_delta = wavax_after - wavax_before
+        usdt_delta = usdt_after - usdt_before
         usdc_delta = usdc_after - usdc_before
-        print(f"WAVAX delta: {format_token_amount(wavax_delta, wavax_decimals)}")
-        print(f"USDC delta:  {format_token_amount(usdc_delta, usdc_decimals)}")
-        assert wavax_delta >= 0, (
-            f"WAVAX balance must not decrease during fee collection, got {wavax_delta}"
+        print(f"USDT delta: {format_token_amount(usdt_delta, usdt_decimals)}")
+        print(f"USDC delta: {format_token_amount(usdc_delta, usdc_decimals)}")
+        assert usdt_delta >= 0, (
+            f"USDT balance must not decrease during fee collection, got {usdt_delta}"
         )
         assert usdc_delta >= 0, (
             f"USDC balance must not decrease during fee collection, got {usdc_delta}"
         )
-        assert wavax_delta == parsed_fees_x, (
-            f"WAVAX wallet delta ({wavax_delta}) must equal parser fees_x "
+        assert usdt_delta == parsed_fees_x, (
+            f"USDT wallet delta ({usdt_delta}) must equal parser fees_x "
             f"({parsed_fees_x}) — receipt parser and on-chain state disagree"
         )
         assert usdc_delta == parsed_fees_y, (
@@ -517,7 +523,7 @@ class TestTraderJoeV2CollectFeesIntent:
         position_after = _get_position_via_adapter(
             rpc_url=anvil_rpc_url,
             wallet=funded_wallet,
-            token_x=wavax_addr,
+            token_x=usdt_addr,
             token_y=usdc_addr,
             bin_step=BIN_STEP,
         )
@@ -557,10 +563,10 @@ class TestTraderJoeV2CollectFeesIntent:
         # #3 parser ↔ event exact scaled-int equality. A fee-only harvest:
         # principal amounts are measured-zero; the fee legs carry the value
         # and must equal the parser-extracted ClaimedFees amounts exactly
-        # (token X = WAVAX → fees0, token Y = USDC → fees1).
+        # (token X = USDT → fees0, token Y = USDC → fees1).
         assert Decimal(collect_payload["amount0"]) == Decimal("0")
         assert Decimal(collect_payload["amount1"]) == Decimal("0")
-        assert Decimal(collect_payload["fees0_collected"]) == _to_human(parsed_fees_x, wavax_decimals)
+        assert Decimal(collect_payload["fees0_collected"]) == _to_human(parsed_fees_x, usdt_decimals)
         assert Decimal(collect_payload["fees1_collected"]) == _to_human(parsed_fees_y, usdc_decimals)
 
         print("\nALL 4 LAYERS PASSED")

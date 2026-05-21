@@ -26,6 +26,21 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         }
     )
 
+    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type == IntentType.SWAP:
+            return self.compile_swap(ctx, intent)
+        if intent_type == IntentType.LP_OPEN:
+            return self.compile_lp_open(ctx, intent)
+        if intent_type == IntentType.LP_CLOSE:
+            return self.compile_lp_close(ctx, intent)
+        if intent_type == IntentType.LP_COLLECT_FEES:
+            return self.compile_collect_fees(ctx, intent)
+        return self._unsupported(intent)
+
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:  # noqa: C901
         """Compile SWAP intent for Curve Finance."""
         from almanak.framework.connectors.curve.adapter import (

@@ -44,6 +44,7 @@ from .adapter import (
     PendleSwapParams,
     get_pendle_adapter,
 )
+from .compiler import PendleCompiler
 from .receipt_parser import (
     EVENT_TOPICS,
     BurnEventData,
@@ -84,6 +85,7 @@ __all__ = [
     "PENDLE_GAS_ESTIMATES",
     # Adapter
     "PendleAdapter",
+    "PendleCompiler",
     "PendleSwapParams",
     "PendleLPParams",
     "PendleRedeemParams",

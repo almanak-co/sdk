@@ -5,13 +5,13 @@ to query the active bin and LP token balances, so compilation-based
 discovery fails in offline mode.  Static permissions ensure the
 manifest always includes the LBRouter selectors.
 
-SWAP compilation offline succeeds (``_compile_swap_traderjoe_v2`` falls
-back to a default bin_step when RPC auto-detection is unavailable), but
-``_build_swap_intents`` previously skipped TJv2 because its router is
-stored in ``LP_POSITION_MANAGERS`` rather than ``PROTOCOL_ROUTERS``. That
-gap is now closed in ``synthetic_intents._build_swap_intents``; the
-selector label below ensures the generated manifest carries a
-human-readable name for ``swapExactTokensForTokens`` (issue #1841).
+SWAP compilation offline succeeds through the connector-owned Liquidity Book
+compiler path, which falls back to a default bin_step when RPC auto-detection
+is unavailable. ``_build_swap_intents`` previously skipped TJv2 because its
+router is stored in ``LP_POSITION_MANAGERS`` rather than ``PROTOCOL_ROUTERS``.
+That gap is now closed in ``synthetic_intents._build_swap_intents``; the
+selector label below ensures the generated manifest carries a human-readable
+name for ``swapExactTokensForTokens`` (issue #1841).
 
 LP_CLOSE additionally needs ``approveForAll`` on the LBPair (per-pair
 ERC1155-like contract). The pair address is dynamic (one contract per
@@ -40,7 +40,7 @@ from almanak.framework.permissions.hints import PermissionHints, StaticPermissio
 _TRADERJOE_ADD_LIQUIDITY_SELECTOR = "0xa3c7271a"
 _TRADERJOE_REMOVE_LIQUIDITY_SELECTOR = "0xc22159b6"
 # swapExactTokensForTokens(uint256,uint256,(uint256[],uint8[],address[]),address,uint256)
-# emitted by the dedicated ``_compile_swap_traderjoe_v2`` path (VIB-1928).
+# emitted by the connector-owned Liquidity Book swap compiler path (VIB-1928).
 _TRADERJOE_SWAP_EXACT_TOKENS_FOR_TOKENS_SELECTOR = "0x2a443fae"
 
 # approveForAll(address,bool) — emitted by LP_CLOSE compile path on the LBPair
@@ -129,7 +129,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     # the router can pull LB-tokens during ``removeLiquidity``).
                     # LP_OPEN mints LB-tokens directly to the Safe via
                     # ``addLiquidity`` and never touches this selector — see
-                    # ``_compile_lp_open_traderjoe_v2`` in ``intents/compiler.py``,
+                    # ``_compile_lp_open_traderjoe_v2`` in ``connectors/traderjoe_v2/compiler.py``,
                     # which only emits ERC-20 approvals for tokenX/tokenY before
                     # calling addLiquidity. SWAP doesn't touch LBPair contracts
                     # at all. Scoping to LP_CLOSE keeps SWAP-only / LP_OPEN-only
@@ -147,7 +147,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     },
                     # ``collectFees`` is only emitted by the LP_COLLECT_FEES
                     # compile path (``_compile_collect_fees_traderjoe_v2`` in
-                    # ``intents/compiler.py``). Scoping to LP_COLLECT_FEES
+                    # ``connectors/traderjoe_v2/compiler.py``). Scoping to LP_COLLECT_FEES
                     # keeps this selector out of SWAP / LP_OPEN / LP_CLOSE
                     # manifests where it isn't needed — same least-privilege
                     # principle as the LP_CLOSE-scoped ``approveForAll`` above.

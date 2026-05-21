@@ -257,16 +257,12 @@ class TestCompilation:
     def test_lp_close_compiles_for_avalanche(self):
         """Verify LP_CLOSE dispatches to TraderJoe V2 compiler path.
 
-        Mocks the internal compilation method to avoid on-chain RPC dependency.
+        Mocks the connector compiler to avoid on-chain RPC dependency.
         """
         from unittest.mock import patch
 
-        from almanak.framework.intents.compiler import (
-            CompilationResult,
-            CompilationStatus,
-            IntentCompiler,
-            IntentCompilerConfig,
-        )
+        from almanak.framework.connectors.base.compiler import BaseCompilerContext
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus, IntentCompiler, IntentCompilerConfig
         from almanak.framework.intents.vocabulary import LPCloseIntent
 
         config = IntentCompilerConfig(allow_placeholder_prices=True)
@@ -282,7 +278,14 @@ class TestCompilation:
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
         )
-        with patch.object(compiler, "_compile_lp_close_traderjoe_v2", return_value=mock_result) as mock_method:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = mock_result
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             result = compiler.compile(intent)
-            mock_method.assert_called_once_with(intent)
+            mock_get_compiler.assert_called_once_with("traderjoe_v2")
+            connector_compiler.compile.assert_called_once()
         assert result.status.value == "SUCCESS"

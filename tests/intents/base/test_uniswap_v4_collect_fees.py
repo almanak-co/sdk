@@ -335,7 +335,7 @@ class TestUniswapV4CollectFeesIntent:
     - First open a position (setup)
     - Generate trading fees via counter-swap through the same pool key
     - CollectFeesIntent creation with protocol_params
-    - IntentCompiler routes to ``_compile_collect_fees_uniswap_v4()``
+    - UniswapV4Compiler compiles ``LP_COLLECT_FEES``
     - Transactions execute successfully on-chain via PositionManager
     - Position liquidity is unchanged after fee collection (fees-only)
     - Wallet gains ONLY the fee amounts; principal stays locked in the pool
@@ -716,9 +716,9 @@ class TestUniswapV4CollectFeesIntent:
 
         Compilation must fail with a clear error mentioning the missing
         ``position_id`` -- this is a hard precondition of
-        ``_compile_collect_fees_uniswap_v4``. Layer 5: a failed
-        LP_COLLECT_FEES writes ZERO accounting_events rows (epic VIB-4591
-        decision #7).
+        ``UniswapV4Compiler.compile_collect_fees``.
+        Layer 5: a failed LP_COLLECT_FEES writes ZERO accounting_events
+        rows (epic VIB-4591 decision #7).
         """
         print(f"\n{'=' * 80}")
         print("Test: COLLECT_FEES without position_id (should fail)")

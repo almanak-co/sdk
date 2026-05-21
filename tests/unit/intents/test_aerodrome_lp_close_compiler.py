@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from almanak.framework.connectors.aerodrome.compiler import compile_lp_close_aerodrome
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
 
@@ -27,6 +28,7 @@ def _make_compiler() -> IntentCompiler:
     compiler.wallet_address = "0x" + "11" * 20
     compiler.price_oracle = {}
     compiler._gateway_client = None
+    compiler._get_aerodrome_pool_address = MagicMock()
     return compiler
 
 
@@ -53,7 +55,7 @@ def test_aerodrome_lp_close_zero_lp_balance_is_noop_success() -> None:
         patch.object(compiler, "_query_erc20_balance", return_value=0),
         patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS
     assert result.error is None
@@ -89,7 +91,7 @@ def test_aerodrome_lp_close_nonzero_lp_balance_builds_transactions() -> None:
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
 
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS
     assert result.error is None
@@ -119,7 +121,7 @@ def test_aerodrome_lp_close_propagates_remove_liquidity_build_error() -> None:
             error="lp approval metadata resolution failed",
         )
 
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.FAILED
     assert result.error is not None
@@ -162,7 +164,7 @@ def test_aerodrome_lp_close_permission_discovery_uses_synthetic_balance() -> Non
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
 
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     # Should succeed (NOT a no-op) — synthetic balance bypasses the zero-balance early return
     assert result.status == CompilationStatus.SUCCESS
@@ -216,7 +218,7 @@ def test_aerodrome_lp_close_permission_discovery_none_balance() -> None:
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
 
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS
     assert len(result.transactions) == 2
@@ -261,7 +263,7 @@ def test_aerodrome_lp_close_bare_pool_address_success() -> None:
 
     with (
         patch(
-            "almanak.framework.intents.compiler_aerodrome.get_aerodrome_pool_metadata",
+            "almanak.framework.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
             return_value=(token0_addr, token1_addr, False),
         ),
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
@@ -273,7 +275,7 @@ def test_aerodrome_lp_close_bare_pool_address_success() -> None:
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
 
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS
     assert result.error is None
@@ -297,12 +299,12 @@ def test_aerodrome_lp_close_bare_pool_address_metadata_unresolvable() -> None:
 
     with (
         patch(
-            "almanak.framework.intents.compiler_aerodrome.get_aerodrome_pool_metadata",
+            "almanak.framework.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
             return_value=None,
         ),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
     ):
-        result = compiler._compile_lp_close_aerodrome(intent)
+        result = compile_lp_close_aerodrome(compiler, intent)
 
     assert result.status == CompilationStatus.FAILED
     assert result.error is not None
