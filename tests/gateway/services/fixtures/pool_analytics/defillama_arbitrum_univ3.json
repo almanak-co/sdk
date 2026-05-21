@@ -1,0 +1,27 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "pool": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "chain": "Arbitrum",
+      "project": "uniswap-v3",
+      "symbol": "USDC-WETH",
+      "tvlUsd": 1210000.0,
+      "apyBase": 12.5,
+      "apy": 12.6,
+      "volumeUsd1d": 850000.0,
+      "volumeUsd7d": 6100000.0
+    },
+    {
+      "pool": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "chain": "Ethereum",
+      "project": "uniswap-v3",
+      "symbol": "OTHER-POOL",
+      "tvlUsd": 100.0,
+      "apyBase": 0.1,
+      "apy": 0.1,
+      "volumeUsd1d": 1.0,
+      "volumeUsd7d": 7.0
+    }
+  ]
+}

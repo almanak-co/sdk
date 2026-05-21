@@ -5102,6 +5102,118 @@ class FundingRateSpreadResponse(_message.Message):
 Global___FundingRateSpreadResponse: _TypeAlias = FundingRateSpreadResponse  # noqa: Y015
 
 @_typing.final
+class PoolAnalyticsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    pool_address: _builtins.str
+    """`pool_address` and `chain` are required. Empty / whitespace-only
+    values cause the service to return INVALID_ARGUMENT and the
+    framework to raise DataSourceUnavailable. `protocol` is optional —
+    when provided it tightens the DefiLlama match (e.g. distinguishes
+    a Uniswap V3 pool from an Aerodrome pool at the same address space).
+    Required. Pool contract address (case-insensitive).
+    """
+    chain: _builtins.str
+    """Required. Chain name (e.g. "arbitrum", "ethereum")."""
+    protocol: _builtins.str
+    """Optional protocol hint (e.g. "uniswap_v3")."""
+    def __init__(
+        self,
+        *,
+        pool_address: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "pool_address", b"pool_address", "protocol", b"protocol"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolAnalyticsRequest: _TypeAlias = PoolAnalyticsRequest  # noqa: Y015
+
+@_typing.final
+class PoolAnalyticsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    TVL_USD_FIELD_NUMBER: _builtins.int
+    VOLUME_24H_USD_FIELD_NUMBER: _builtins.int
+    VOLUME_7D_USD_FIELD_NUMBER: _builtins.int
+    FEE_APR_FIELD_NUMBER: _builtins.int
+    FEE_APY_FIELD_NUMBER: _builtins.int
+    UTILIZATION_RATE_FIELD_NUMBER: _builtins.int
+    TOKEN0_WEIGHT_FIELD_NUMBER: _builtins.int
+    TOKEN1_WEIGHT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    OBSERVED_AT_FIELD_NUMBER: _builtins.int
+    IS_LIVE_DATA_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    pool_address: _builtins.str
+    """Echoed-back identity (lower-cased / normalized)"""
+    chain: _builtins.str
+    protocol: _builtins.str
+    tvl_usd: _builtins.str
+    """Money / ratio fields are decimal-as-string (matches PriceResponse,
+    BalanceResponse, FundingRateResponse convention; no double for ratios).
+    An empty string means "not measured by this provider"; never substitute
+    "0" for unmeasured.
+    Total value locked in USD
+    """
+    volume_24h_usd: _builtins.str
+    """24h trading volume in USD"""
+    volume_7d_usd: _builtins.str
+    """7d trading volume in USD (empty when provider doesn't expose)"""
+    fee_apr: _builtins.str
+    """Annualized fee return as a percentage (e.g. "12.5" = 12.5%)"""
+    fee_apy: _builtins.str
+    """Compounded annual fee return as a percentage"""
+    utilization_rate: _builtins.str
+    """Lending-pool utilization 0.0-1.0 (empty for DEX)"""
+    token0_weight: _builtins.str
+    """Fraction of TVL in token0 (0.0-1.0)"""
+    token1_weight: _builtins.str
+    """Fraction of TVL in token1 (0.0-1.0)"""
+    source: _builtins.str
+    """Provenance
+    "defillama" | "geckoterminal" | …
+    """
+    observed_at: _builtins.int
+    """Unix seconds when the gateway fetched the data"""
+    is_live_data: _builtins.bool
+    """False if served from cache or degraded"""
+    success: _builtins.bool
+    """Dual-channel envelope (see header comment)"""
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        pool_address: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        tvl_usd: _builtins.str = ...,
+        volume_24h_usd: _builtins.str = ...,
+        volume_7d_usd: _builtins.str = ...,
+        fee_apr: _builtins.str = ...,
+        fee_apy: _builtins.str = ...,
+        utilization_rate: _builtins.str = ...,
+        token0_weight: _builtins.str = ...,
+        token1_weight: _builtins.str = ...,
+        source: _builtins.str = ...,
+        observed_at: _builtins.int = ...,
+        is_live_data: _builtins.bool = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "fee_apr", b"fee_apr", "fee_apy", b"fee_apy", "is_live_data", b"is_live_data", "observed_at", b"observed_at", "pool_address", b"pool_address", "protocol", b"protocol", "source", b"source", "success", b"success", "token0_weight", b"token0_weight", "token1_weight", b"token1_weight", "tvl_usd", b"tvl_usd", "utilization_rate", b"utilization_rate", "volume_24h_usd", b"volume_24h_usd", "volume_7d_usd", b"volume_7d_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolAnalyticsResponse: _TypeAlias = PoolAnalyticsResponse  # noqa: Y015
+
+@_typing.final
 class ListStrategiesRequest(_message.Message):
     """=============================================================================
     Dashboard Service Messages

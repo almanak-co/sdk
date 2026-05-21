@@ -1,33 +1,39 @@
-"""Pool analytics - TVL, volume, fee APR/APY for DEX and lending pools.
+"""Pool analytics - thin gRPC client over the gateway's PoolAnalyticsService.
 
-Provides real-time pool analytics from DeFi Llama (primary), GeckoTerminal
-(fallback 1), and The Graph (fallback 2). Includes a ``best_pool()`` method
-for dynamic venue selection based on a chosen metric.
+This module used to do its own HTTP egress to DefiLlama / GeckoTerminal,
+which violated the gateway-boundary rule (AGENTS.md "Gateway boundary":
+strategy containers have no outbound network access except the gateway
+gRPC channel). VIB-4727 moves all HTTP egress server-side; this module
+becomes a thin client that translates gRPC responses into the typed
+``DataEnvelope[PoolAnalytics]`` framework shape.
 
-Example:
-    from almanak.framework.data.pools.analytics import PoolAnalyticsReader
+Public surface:
 
-    reader = PoolAnalyticsReader()
-    analytics = reader.get_pool_analytics("0x...", "arbitrum")
-    print(f"TVL: ${analytics.value.tvl_usd}, Fee APR: {analytics.value.fee_apr}%")
+- ``PoolAnalytics`` — dataclass returned inside ``DataEnvelope``.
+- ``PoolAnalyticsResult`` — kept for ``best_pool()`` API parity; the
+  method itself is deferred to a follow-up (see ``best_pool`` docstring).
+- ``PoolAnalyticsReader`` — the live reader, takes a ``GatewayClient``
+  and translates gRPC responses.
+- ``NullPoolAnalyticsReader`` — deterministic stub for backtest factories
+  (``for_pnl_backtest_state``, ``for_paper_fork``). Always raises
+  ``DataSourceUnavailable("backtest")`` so backtests don't make
+  analytics-driven decisions and stay reproducible across runs.
 
-    best = reader.best_pool("WETH", "USDC", "arbitrum", metric="fee_apr")
-    print(f"Best pool: {best.value.pool_address}")
+HOLD contract: any caller that catches ``PoolAnalyticsUnavailableError``
+(or ``DataSourceUnavailable``) MUST either re-raise it or return
+``Intent.hold(...)``. A bare catch breaks the runner's HOLD inference
+via ``classify_failure`` walking ``__cause__``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import math
-import threading
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING
 
-import aiohttp
+import grpc
 
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
@@ -36,77 +42,14 @@ from almanak.framework.data.models import (
     DataMeta,
 )
 
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
+
 logger = logging.getLogger(__name__)
-
-# DeFi Llama API base URLs
-_YIELDS_API = "https://yields.llama.fi"
-_TVL_API = "https://api.llama.fi"
-
-# GeckoTerminal API base URL
-_GT_API = "https://api.geckoterminal.com/api/v2"
-
-# Chain -> GeckoTerminal network mapping
-_CHAIN_TO_GT_NETWORK: dict[str, str] = {
-    "ethereum": "eth",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon_pos",
-    "avalanche": "avax",
-    "bsc": "bsc",
-    "sonic": "sonic",
-    "solana": "solana",
-}
-
-# Chain -> DeFi Llama chain name mapping (DeFi Llama uses capitalized names)
-_CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
-    "ethereum": "Ethereum",
-    "arbitrum": "Arbitrum",
-    "base": "Base",
-    "optimism": "Optimism",
-    "polygon": "Polygon",
-    "avalanche": "Avalanche",
-    "bsc": "BSC",
-    "sonic": "Sonic",
-    "solana": "Solana",
-}
-
-# Protocol -> DeFi Llama project slug
-_PROTOCOL_TO_LLAMA: dict[str, str] = {
-    "uniswap_v3": "uniswap-v3",
-    "aerodrome": "aerodrome-v2",
-    "pancakeswap_v3": "pancakeswap-amm-v3",
-    "aave_v3": "aave-v3",
-    "morpho": "morpho-blue",
-    "compound_v3": "compound-v3",
-}
-
-
-def _safe_decimal(value: Any) -> Decimal:
-    """Convert a value to Decimal, returning 0 on failure."""
-    if value is None:
-        return Decimal(0)
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return Decimal(0)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Convert a value to float, returning default on failure."""
-    if value is None:
-        return default
-    try:
-        result = float(value)
-        if math.isnan(result) or math.isinf(result):
-            return default
-        return result
-    except (ValueError, TypeError):
-        return default
 
 
 # =============================================================================
-# Data Models
+# Data Models (public API shape — preserved across the gRPC migration)
 # =============================================================================
 
 
@@ -117,15 +60,30 @@ class PoolAnalytics:
     Attributes:
         pool_address: Pool contract address.
         chain: Chain name.
-        protocol: Protocol name (e.g. "uniswap_v3").
-        tvl_usd: Total value locked in USD.
+        protocol: Protocol name (e.g. ``"uniswap_v3"``).
+        tvl_usd: Total value locked in USD. For backwards compatibility
+            with the pre-VIB-4727 callers, ``tvl_usd`` is non-Optional and
+            an unmeasured TVL surfaces as ``Decimal("0")``. To distinguish
+            measured-zero from unmeasured, inspect ``unmeasured_fields``
+            below (preferred — explicit) or ``DataMeta.confidence`` (decays
+            from the baseline 0.85 by ~0.15 per unmeasured field).
         volume_24h_usd: 24-hour trading volume in USD.
         volume_7d_usd: 7-day trading volume in USD.
-        fee_apr: Annualized fee return as a percentage (e.g. 12.5 = 12.5%).
+        fee_apr: Annualized fee return as a percentage.
         fee_apy: Compounded annual fee return as a percentage.
-        utilization_rate: Utilization rate for lending pools (0.0-1.0), None for DEX.
-        token0_weight: Fraction of TVL in token0 (0.0-1.0).
-        token1_weight: Fraction of TVL in token1 (0.0-1.0).
+        utilization_rate: Utilization for lending pools (0.0-1.0), None for DEX.
+        token0_weight: Fraction of TVL in token0 (0.0-1.0). ``0.5`` is the
+            balanced default for unmeasured weights; ``0.0`` from a 0/100
+            pool is preserved (Empty != Zero).
+        token1_weight: See ``token0_weight``.
+        unmeasured_fields: Names of money-critical fields the upstream
+            provider did NOT measure (i.e. came back as empty-string on
+            the wire). A field appearing here means the corresponding
+            ``Decimal("0")`` / ``0.0`` value is a placeholder, not a
+            measurement. Used by callers that need to skip pools with
+            unknown TVL rather than treating them as $0 TVL. Money-
+            critical fields tracked: ``tvl_usd``, ``volume_24h_usd``,
+            ``volume_7d_usd``, ``fee_apr``, ``fee_apy``.
     """
 
     pool_address: str
@@ -139,11 +97,12 @@ class PoolAnalytics:
     utilization_rate: float | None = None
     token0_weight: float = 0.5
     token1_weight: float = 0.5
+    unmeasured_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class PoolAnalyticsResult:
-    """Result from best_pool() with pool address and analytics."""
+    """Result from ``best_pool()`` with pool address and analytics."""
 
     pool_address: str
     analytics: PoolAnalytics
@@ -152,77 +111,73 @@ class PoolAnalyticsResult:
 
 
 # =============================================================================
-# Token Bucket Rate Limiter (reusable)
+# Wire-shape decoding helpers (decimal-as-string → Decimal / float)
 # =============================================================================
 
 
-class _TokenBucket:
-    """Thread-safe token bucket rate limiter."""
+def _decimal_or_zero(value: str) -> Decimal:
+    """Parse a decimal-string field from the proto, returning ``Decimal(0)`` for empty.
 
-    def __init__(self, rate: int = 10, period: float = 1.0) -> None:
-        self._rate = rate
-        self._period = period
-        self._tokens = float(rate)
-        self._last_refill = time.monotonic()
-        self._lock = threading.Lock()
-
-    def acquire(self) -> bool:
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(float(self._rate), self._tokens + elapsed * (self._rate / self._period))
-            self._last_refill = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
-            return False
+    The gateway uses ``""`` to mean "not measured by this provider" (per
+    AGENTS.md "Empty ≠ Zero"). At the framework boundary the public
+    ``PoolAnalytics`` dataclass is non-Optional on these fields, so we
+    surface unmeasured as ``Decimal(0)`` — callers needing the distinction
+    should inspect the envelope's ``DataMeta.confidence`` or the response
+    ``source`` field. New callers under VIB-4727 should treat ``Decimal(0)``
+    as "the gateway has no signal for this," not "the value is exactly zero."
+    """
+    if not value:
+        return Decimal(0)
+    try:
+        return Decimal(value)
+    except (InvalidOperation, ValueError, TypeError):
+        logger.debug("pool_analytics: dropped unparseable decimal wire value %r", value)
+        return Decimal(0)
 
 
-# =============================================================================
-# Provider Health Tracking
-# =============================================================================
-
-
-@dataclass
-class _ProviderMetrics:
-    successes: int = 0
-    failures: int = 0
+def _float_or_zero(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # =============================================================================
-# PoolAnalyticsReader
+# PoolAnalyticsReader — thin gRPC client
 # =============================================================================
 
 
 class PoolAnalyticsReader:
-    """Reads pool analytics from DeFi Llama, GeckoTerminal, and The Graph.
+    """Thin gRPC client over the gateway's ``PoolAnalyticsService``.
 
-    Provider fallback:
-        1. DeFi Llama yields API (TVL, volume, APY across protocols)
-        2. GeckoTerminal pool info (TVL, volume for DEX pools)
-        3. The Graph subgraphs (protocol-specific deep data)
-
-    All results are wrapped in DataEnvelope with INFORMATIONAL classification.
+    This class no longer owns any HTTP egress. All upstream provider
+    fetching (DefiLlama, GeckoTerminal) happens inside the gateway
+    sidecar. The constructor REQUIRES a connected ``GatewayClient`` —
+    constructing one without it deliberately raises ``TypeError`` so any
+    stale ``PoolAnalyticsReader()`` call from before VIB-4727 fails loudly.
 
     Args:
-        cache_ttl: In-memory cache TTL in seconds. Default 300 (5 minutes).
-        request_timeout: HTTP request timeout in seconds. Default 15.
+        gateway_client: The connected gateway client.
+        timeout_seconds: gRPC call timeout (default 15s, matching the
+            gateway's upstream HTTP timeout).
     """
 
     def __init__(
         self,
-        cache_ttl: int = 300,
-        request_timeout: float = 15.0,
+        gateway_client: GatewayClient,
+        *,
+        timeout_seconds: float = 15.0,
     ) -> None:
-        self._cache_ttl = cache_ttl
-        self._request_timeout = request_timeout
-        self._rate_limiter_llama = _TokenBucket(rate=10, period=1.0)
-        self._rate_limiter_gt = _TokenBucket(rate=30, period=60.0)
-        self._metrics: dict[str, _ProviderMetrics] = {
-            "defillama": _ProviderMetrics(),
-            "geckoterminal": _ProviderMetrics(),
-        }
-        self._cache: dict[str, tuple[Any, float]] = {}
+        if gateway_client is None:
+            raise TypeError(
+                "PoolAnalyticsReader now requires a connected GatewayClient. "
+                "VIB-4727 moved HTTP egress to the gateway side; constructing a "
+                "reader without a gateway client is a programming error.",
+            )
+        self._gateway_client = gateway_client
+        self._timeout_seconds = timeout_seconds
 
     # -- Public API -----------------------------------------------------------
 
@@ -232,422 +187,239 @@ class PoolAnalyticsReader:
         chain: str,
         protocol: str | None = None,
     ) -> DataEnvelope[PoolAnalytics]:
-        """Get real-time analytics for a pool.
-
-        Tries DeFi Llama first (broader coverage), then GeckoTerminal.
+        """Get real-time analytics for a pool via the gateway.
 
         Args:
             pool_address: Pool contract address.
-            chain: Chain name (e.g. "arbitrum").
-            protocol: Optional protocol hint (e.g. "uniswap_v3").
+            chain: Chain name (e.g. ``"arbitrum"``).
+            protocol: Optional protocol hint (e.g. ``"uniswap_v3"``).
 
         Returns:
-            DataEnvelope[PoolAnalytics] with INFORMATIONAL classification.
+            ``DataEnvelope[PoolAnalytics]`` with INFORMATIONAL classification.
 
         Raises:
-            DataSourceUnavailable: If all providers fail.
+            DataSourceUnavailable: When the gateway returns a non-OK status
+                or when both upstream providers fail. Callers that catch
+                this exception MUST either re-raise or return ``Intent.hold(...)``
+                so the runner's HOLD inference still fires.
         """
-        chain = chain.lower()
-        pool_address = pool_address.lower()
-        cache_key = f"analytics:{pool_address}:{chain}"
+        # Import the proto symbols lazily so the framework reader can be
+        # imported without forcing the gateway stubs to load (matters for
+        # CLI / test surfaces that import the dataclasses only).
+        from almanak.gateway.proto import gateway_pb2
 
-        cached = self._get_cached(cache_key)
-        if cached is not None:
-            return cached
+        chain_norm = chain.lower()
+        # Chain-aware address normalize: strip on both branches so a
+        # copy-pasted EVM address with stray whitespace can't reach the
+        # gateway as a different string and fail validation. EVM is
+        # case-insensitive hex → lowercase; Solana base58 is
+        # case-sensitive → preserve case (lower-casing yields a
+        # different address).
+        pool_addr_norm = pool_address.strip()
+        if chain_norm != "solana":
+            pool_addr_norm = pool_addr_norm.lower()
+        protocol_norm = (protocol or "").lower()
 
-        start = time.monotonic()
-        errors: list[str] = []
+        request = gateway_pb2.PoolAnalyticsRequest(
+            pool_address=pool_addr_norm,
+            chain=chain_norm,
+            protocol=protocol_norm,
+        )
 
-        # Try DeFi Llama first
         try:
-            analytics = self._fetch_from_defillama(pool_address, chain, protocol)
-            return self._wrap_result(analytics, "defillama", start, cache_key)
-        except (DataSourceUnavailable, Exception) as e:
-            errors.append(f"defillama: {e}")
-            logger.debug("DeFi Llama pool analytics failed for %s: %s", pool_address, e)
+            response = self._gateway_client.pool_analytics.GetPoolAnalytics(
+                request,
+                timeout=self._timeout_seconds,
+            )
+        except grpc.RpcError as exc:
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=f"gateway error: {exc}",
+            ) from exc
+        except RuntimeError as exc:
+            # GatewayClient raises RuntimeError("Gateway client not connected")
+            # from the `pool_analytics` property when the channel is None.
+            # Map to the typed exception so the runner's HOLD inference fires
+            # via the same DATA_UNAVAILABLE path as a real outage, rather
+            # than leaking a RuntimeError up through the iteration loop.
+            # CodeRabbit PR #2389 review thread, 2026-05-21.
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=f"gateway client not connected: {exc}",
+            ) from exc
 
-        # Fallback: GeckoTerminal
-        try:
-            analytics = self._fetch_from_geckoterminal(pool_address, chain, protocol)
-            return self._wrap_result(analytics, "geckoterminal", start, cache_key)
-        except (DataSourceUnavailable, Exception) as e:
-            errors.append(f"geckoterminal: {e}")
-            logger.debug("GeckoTerminal pool analytics failed for %s: %s", pool_address, e)
+        if not response.success:
+            # Dual-channel: success=False with OK status means "degraded
+            # data" (not used in v1; gateway returns non-OK in that case
+            # already). Treat any success=False as a hard failure to keep
+            # the contract tight and force a typed raise.
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=response.error or "pool analytics returned success=False",
+            )
 
-        raise DataSourceUnavailable(
-            source="pool_analytics",
-            reason=f"All providers failed for {pool_address} on {chain}: {'; '.join(errors)}",
+        # Empty != Zero (AGENTS.md "Accounting"): track which money-
+        # critical fields the gateway marked unmeasured so callers can
+        # distinguish "no data" from "measured zero" without re-parsing
+        # the wire. ``confidence`` decays proportionally to the unmeasured
+        # count — the docstring promise (callers should inspect
+        # confidence to disambiguate) is only real because of this.
+        # Blocker #2 from the multi-auditor review on PR #2389.
+        unmeasured: set[str] = set()
+        for field in ("tvl_usd", "volume_24h_usd", "volume_7d_usd", "fee_apr", "fee_apy"):
+            if not getattr(response, field):
+                unmeasured.add(field)
+
+        analytics = PoolAnalytics(
+            pool_address=response.pool_address or pool_addr_norm,
+            chain=response.chain or chain_norm,
+            protocol=response.protocol or protocol_norm,
+            tvl_usd=_decimal_or_zero(response.tvl_usd),
+            volume_24h_usd=_decimal_or_zero(response.volume_24h_usd),
+            volume_7d_usd=_decimal_or_zero(response.volume_7d_usd),
+            fee_apr=_float_or_zero(response.fee_apr),
+            fee_apy=_float_or_zero(response.fee_apy),
+            # Empty-string from the wire = unmeasured (DEX pool) -> None.
+            # A measured "0" (legit zero utilization on a lending pool with
+            # no borrowers) survives as 0.0. Same Empty != Zero contract as
+            # token weights below.
+            utilization_rate=(_float_or_zero(response.utilization_rate) if response.utilization_rate != "" else None),
+            # Empty-string from the wire = unmeasured -> default to balanced 0.5;
+            # a measured "0" survives as 0.0 (Empty != Zero per AGENTS.md
+            # "Accounting"). A 0/100 or 100/0 pool must report 0.0, not 0.5.
+            token0_weight=(_float_or_zero(response.token0_weight) if response.token0_weight else 0.5),
+            token1_weight=(_float_or_zero(response.token1_weight) if response.token1_weight else 0.5),
+            unmeasured_fields=frozenset(unmeasured),
+        )
+
+        observed_at = (
+            datetime.fromtimestamp(response.observed_at, tz=UTC) if response.observed_at else datetime.now(UTC)
+        )
+        # Confidence reflects the count of unmeasured load-bearing fields
+        # (5 total: tvl, vol24, vol7d, fee_apr, fee_apy). Each missing
+        # field drops confidence by ~0.15 from the baseline 0.85; fully
+        # unmeasured -> 0.10. The strategy author can compare against any
+        # threshold they like.
+        baseline_confidence = 0.85
+        confidence = max(0.10, baseline_confidence - 0.15 * len(unmeasured))
+        meta = DataMeta(
+            source=response.source or "gateway",
+            observed_at=observed_at,
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=0,
+            confidence=confidence,
+            cache_hit=not response.is_live_data,
+        )
+        return DataEnvelope(
+            value=analytics,
+            meta=meta,
+            classification=DataClassification.INFORMATIONAL,
         )
 
     def best_pool(
         self,
-        token_a: str,
-        token_b: str,
-        chain: str,
-        metric: str = "fee_apr",
-        protocols: list[str] | None = None,
+        token_a: str,  # noqa: ARG002
+        token_b: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        metric: str = "fee_apr",  # noqa: ARG002
+        protocols: list[str] | None = None,  # noqa: ARG002
     ) -> DataEnvelope[PoolAnalyticsResult]:
-        """Find the best pool for a token pair based on a metric.
+        """Deferred to a follow-up gateway RPC.
 
-        Searches DeFi Llama yields API for matching pools and ranks by metric.
+        The pre-VIB-4727 implementation enumerated all DefiLlama pools and
+        filtered locally — that egress path can't ship as-is from the
+        strategy container. A second gateway RPC (``SearchPools``) is
+        required. Tracking ticket: **VIB-4729**.
 
-        Args:
-            token_a: First token symbol (e.g. "WETH").
-            token_b: Second token symbol (e.g. "USDC").
-            chain: Chain name.
-            metric: Sorting metric: "fee_apr", "fee_apy", "tvl_usd", "volume_24h_usd".
-            protocols: Optional list of protocol names to filter by.
-
-        Returns:
-            DataEnvelope[PoolAnalyticsResult] with the best pool.
-
-        Raises:
-            DataSourceUnavailable: If no pools found or all providers fail.
+        Until the RPC lands this raises ``DataSourceUnavailable`` rather
+        than ``NotImplementedError`` so that the wrap-and-reraise in
+        ``MarketSnapshot.best_pool(...)`` produces a
+        ``PoolAnalyticsUnavailableError`` whose ``__cause__`` chain
+        classifies as ``DATA_UNAVAILABLE`` — the runner treats that as
+        HOLD-worthy, the same contract a real provider outage uses. A
+        bare ``NotImplementedError`` would have crashed the iteration loop
+        instead of producing a HOLD.
         """
-        chain = chain.lower()
-        cache_key = f"best_pool:{token_a}:{token_b}:{chain}:{metric}:{protocols}"
-        cached = self._get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-        start = time.monotonic()
-
-        # Search DeFi Llama for matching pools
-        pools = self._search_pools_defillama(token_a, token_b, chain, protocols)
-
-        if not pools:
-            raise DataSourceUnavailable(
-                source="pool_analytics",
-                reason=f"No pools found for {token_a}/{token_b} on {chain}",
-            )
-
-        # Sort by metric
-        valid_metrics = {"fee_apr", "fee_apy", "tvl_usd", "volume_24h_usd"}
-        if metric not in valid_metrics:
-            raise ValueError(f"Invalid metric '{metric}'. Valid: {', '.join(sorted(valid_metrics))}")
-
-        def _metric_value(p: PoolAnalytics) -> float:
-            val = getattr(p, metric)
-            if isinstance(val, Decimal):
-                return float(val)
-            return float(val)
-
-        pools.sort(key=_metric_value, reverse=True)
-        best = pools[0]
-        best_val = _metric_value(best)
-
-        result = PoolAnalyticsResult(
-            pool_address=best.pool_address,
-            analytics=best,
-            metric_value=best_val,
-            metric_name=metric,
+        raise DataSourceUnavailable(
+            source="pool_analytics",
+            reason="best_pool requires the SearchPools gateway RPC (VIB-4729); not yet available",
         )
 
-        latency_ms = int((time.monotonic() - start) * 1000)
-        meta = DataMeta(
-            source="defillama",
-            observed_at=datetime.now(UTC),
-            finality="off_chain",
-            staleness_ms=0,
-            latency_ms=latency_ms,
-            confidence=0.85,
-            cache_hit=False,
-        )
-        envelope = DataEnvelope(value=result, meta=meta, classification=DataClassification.INFORMATIONAL)
-        self._update_cache(cache_key, envelope)
-        return envelope
-
-    # -- DeFi Llama provider ---------------------------------------------------
-
-    def _fetch_from_defillama(
-        self,
-        pool_address: str,
-        chain: str,
-        protocol: str | None,
-    ) -> PoolAnalytics:
-        """Fetch pool analytics from DeFi Llama yields API."""
-        if not self._rate_limiter_llama.acquire():
-            raise DataSourceUnavailable(source="defillama", reason="Rate limited")
-
-        llama_chain = _CHAIN_TO_LLAMA_DISPLAY.get(chain)
-        if llama_chain is None:
-            raise DataSourceUnavailable(source="defillama", reason=f"Unsupported chain: {chain}")
-
-        try:
-            pools_data = self._run_async(self._query_defillama_pools())
-        except Exception as e:
-            self._metrics["defillama"].failures += 1
-            raise DataSourceUnavailable(source="defillama", reason=str(e)) from e
-
-        # Search for matching pool by address
-        match = None
-        for pool in pools_data:
-            pool_id = str(pool.get("pool", "")).lower()
-            pool_chain = str(pool.get("chain", "")).lower()
-            # DeFi Llama pool IDs often contain the address
-            if pool_address in pool_id and pool_chain == llama_chain.lower():
-                match = pool
-                break
-
-        if match is None:
-            self._metrics["defillama"].failures += 1
-            raise DataSourceUnavailable(
-                source="defillama",
-                reason=f"Pool {pool_address} not found on {chain} in DeFi Llama",
-            )
-
-        self._metrics["defillama"].successes += 1
-        return self._parse_llama_pool_to_analytics(match, pool_address, chain, protocol)
-
-    def _search_pools_defillama(
-        self,
-        token_a: str,
-        token_b: str,
-        chain: str,
-        protocols: list[str] | None,
-    ) -> list[PoolAnalytics]:
-        """Search DeFi Llama for pools matching a token pair."""
-        if not self._rate_limiter_llama.acquire():
-            raise DataSourceUnavailable(source="defillama", reason="Rate limited")
-
-        llama_chain = _CHAIN_TO_LLAMA_DISPLAY.get(chain)
-        if llama_chain is None:
-            return []
-
-        try:
-            pools_data = self._run_async(self._query_defillama_pools())
-        except Exception:
-            return []
-
-        # Normalize token symbols for matching
-        token_a_upper = token_a.upper()
-        token_b_upper = token_b.upper()
-
-        # Filter protocol slugs
-        llama_projects: set[str] | None = None
-        if protocols:
-            llama_projects = set()
-            for p in protocols:
-                slug = _PROTOCOL_TO_LLAMA.get(p.lower())
-                if slug:
-                    llama_projects.add(slug)
-
-        results: list[PoolAnalytics] = []
-        for pool in pools_data:
-            pool_chain = str(pool.get("chain", "")).lower()
-            if pool_chain != llama_chain.lower():
-                continue
-
-            if llama_projects:
-                project = str(pool.get("project", "")).lower()
-                if project not in llama_projects:
-                    continue
-
-            # Check symbol match (e.g., "USDC-WETH")
-            symbol = str(pool.get("symbol", "")).upper()
-            symbol_tokens = {t.strip() for t in symbol.replace("-", "/").split("/")}
-            if token_a_upper in symbol_tokens and token_b_upper in symbol_tokens:
-                pool_addr = (
-                    str(pool.get("pool", "")).split("-")[-1]
-                    if "-" in str(pool.get("pool", ""))
-                    else str(pool.get("pool", ""))
-                )
-                analytics = self._parse_llama_pool_to_analytics(pool, pool_addr, chain, None)
-                results.append(analytics)
-
-        return results
-
-    def _parse_llama_pool_to_analytics(
-        self,
-        pool: dict[str, Any],
-        pool_address: str,
-        chain: str,
-        protocol: str | None,
-    ) -> PoolAnalytics:
-        """Convert a DeFi Llama pool dict to PoolAnalytics."""
-        tvl = _safe_decimal(pool.get("tvlUsd"))
-        apy_base = _safe_float(pool.get("apyBase"))
-        apy_total = _safe_float(pool.get("apy"))
-
-        # Volume: DeFi Llama provides volumeUsd1d and volumeUsd7d on some pools
-        vol_24h = _safe_decimal(pool.get("volumeUsd1d", 0))
-        vol_7d = _safe_decimal(pool.get("volumeUsd7d", 0))
-
-        # Fee APR from apyBase (fee-only yield)
-        fee_apr = apy_base
-        # Fee APY = compounded: (1 + apr/365)^365 - 1
-        fee_apy = apy_total if apy_total > 0 else fee_apr
-
-        project = str(pool.get("project", ""))
-        detected_protocol = protocol or project
-
-        return PoolAnalytics(
-            pool_address=pool_address,
-            chain=chain,
-            protocol=detected_protocol,
-            tvl_usd=tvl,
-            volume_24h_usd=vol_24h,
-            volume_7d_usd=vol_7d,
-            fee_apr=fee_apr,
-            fee_apy=fee_apy,
-            utilization_rate=None,
-            token0_weight=0.5,
-            token1_weight=0.5,
-        )
-
-    async def _query_defillama_pools(self) -> list[dict[str, Any]]:
-        """Fetch all pools from DeFi Llama yields API."""
-        url = f"{_YIELDS_API}/pools"
-        timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"Accept": "application/json"}) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    raise DataSourceUnavailable(source="defillama", reason=f"HTTP {response.status}: {text[:200]}")
-                data = await response.json()
-                return data.get("data", [])
-
-    # -- GeckoTerminal provider ------------------------------------------------
-
-    def _fetch_from_geckoterminal(
-        self,
-        pool_address: str,
-        chain: str,
-        protocol: str | None,
-    ) -> PoolAnalytics:
-        """Fetch pool analytics from GeckoTerminal API."""
-        if not self._rate_limiter_gt.acquire():
-            raise DataSourceUnavailable(source="geckoterminal", reason="Rate limited")
-
-        network = _CHAIN_TO_GT_NETWORK.get(chain)
-        if network is None:
-            raise DataSourceUnavailable(source="geckoterminal", reason=f"Unsupported chain: {chain}")
-
-        try:
-            data = self._run_async(self._query_geckoterminal_pool(network, pool_address))
-        except Exception as e:
-            self._metrics["geckoterminal"].failures += 1
-            raise DataSourceUnavailable(source="geckoterminal", reason=str(e)) from e
-
-        self._metrics["geckoterminal"].successes += 1
-        return self._parse_gt_pool_to_analytics(data, pool_address, chain, protocol)
-
-    def _parse_gt_pool_to_analytics(
-        self,
-        data: dict[str, Any],
-        pool_address: str,
-        chain: str,
-        protocol: str | None,
-    ) -> PoolAnalytics:
-        """Convert GeckoTerminal pool response to PoolAnalytics."""
-        attrs = data.get("data", {}).get("attributes", {})
-
-        tvl = _safe_decimal(attrs.get("reserve_in_usd"))
-        vol_24h = _safe_decimal(attrs.get("volume_usd", {}).get("h24", 0))
-        vol_7d = Decimal(0)  # GeckoTerminal doesn't provide 7d volume directly
-
-        # Fee estimation: GeckoTerminal provides pool_fee for some pools
-        pool_fee = _safe_float(attrs.get("pool_fee"))
-        fee_apr = 0.0
-        if pool_fee > 0 and tvl > 0:
-            # Rough APR: (daily_volume * fee_rate * 365) / TVL * 100
-            daily_vol = float(vol_24h)
-            fee_apr = (daily_vol * pool_fee * 365) / float(tvl) * 100 if float(tvl) > 0 else 0.0
-        fee_apy = ((1 + fee_apr / 365 / 100) ** 365 - 1) * 100 if fee_apr > 0 else 0.0
-
-        dex_id = attrs.get("dex_id", "")
-        detected_protocol = protocol or str(dex_id)
-
-        return PoolAnalytics(
-            pool_address=pool_address,
-            chain=chain,
-            protocol=detected_protocol,
-            tvl_usd=tvl,
-            volume_24h_usd=vol_24h,
-            volume_7d_usd=vol_7d,
-            fee_apr=fee_apr,
-            fee_apy=fee_apy,
-        )
-
-    async def _query_geckoterminal_pool(self, network: str, pool_address: str) -> dict[str, Any]:
-        """Fetch pool info from GeckoTerminal."""
-        url = f"{_GT_API}/networks/{network}/pools/{pool_address}"
-        timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"Accept": "application/json"}) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    raise DataSourceUnavailable(source="geckoterminal", reason=f"HTTP {response.status}: {text[:200]}")
-                return await response.json()
-
-    # -- Helpers ---------------------------------------------------------------
-
-    def _wrap_result(
-        self,
-        analytics: PoolAnalytics,
-        source: str,
-        start: float,
-        cache_key: str,
-    ) -> DataEnvelope[PoolAnalytics]:
-        """Wrap analytics in DataEnvelope and cache."""
-        latency_ms = int((time.monotonic() - start) * 1000)
-        meta = DataMeta(
-            source=source,
-            observed_at=datetime.now(UTC),
-            finality="off_chain",
-            staleness_ms=0,
-            latency_ms=latency_ms,
-            confidence=0.85,
-            cache_hit=False,
-        )
-        envelope = DataEnvelope(value=analytics, meta=meta, classification=DataClassification.INFORMATIONAL)
-        self._update_cache(cache_key, envelope)
-        return envelope
-
-    def _get_cached(self, key: str) -> DataEnvelope | None:
-        entry = self._cache.get(key)
-        if entry is None:
-            return None
-        value, cached_at = entry
-        if time.monotonic() - cached_at > self._cache_ttl:
-            return None
-        # Return a copy with cache_hit=True
-        envelope = value
-        meta = DataMeta(
-            source=envelope.meta.source,
-            observed_at=envelope.meta.observed_at,
-            finality=envelope.meta.finality,
-            staleness_ms=int((time.monotonic() - cached_at) * 1000),
-            latency_ms=0,
-            confidence=envelope.meta.confidence,
-            cache_hit=True,
-        )
-        return DataEnvelope(value=envelope.value, meta=meta, classification=DataClassification.INFORMATIONAL)
-
-    def _update_cache(self, key: str, value: Any) -> None:
-        self._cache[key] = (value, time.monotonic())
-
-    def _run_async(self, coro: Any) -> Any:
-        """Run an async coroutine synchronously."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    return pool.submit(asyncio.run, coro).result()
-            else:
-                return loop.run_until_complete(coro)
-        except RuntimeError:
-            return asyncio.run(coro)
+    # -- Compatibility surface for legacy tests / health probes ---------------
 
     def health(self) -> dict[str, dict[str, int]]:
-        """Return provider health metrics."""
-        return {name: {"successes": m.successes, "failures": m.failures} for name, m in self._metrics.items()}
+        """Provider health is now owned by the gateway servicer.
+
+        The legacy class exposed this for the old aiohttp-using providers.
+        Strategy-container code that wants provider stats should call the
+        gateway's metrics endpoint instead. Returning an empty dict here
+        keeps the attribute non-throwing for any callers that still poll
+        it during the cut-over.
+        """
+        return {}
+
+
+# =============================================================================
+# NullPoolAnalyticsReader — deterministic stub for backtest factories
+# =============================================================================
+
+
+class NullPoolAnalyticsReader:
+    """Always-raises stub used by backtest factories (VIB-4727).
+
+    Live gateway HTTP at backtest time = nondeterministic results across
+    runs — strategies that "work in backtest" then silently change behavior
+    in production. The agreed contract (per the VIB-4727 design discussion)
+    is: backtest factories inject this null reader; strategies that depend
+    on ``pool_analytics(...)`` must take a deterministic code path inside
+    backtests (a static fee assumption, a fixture-backed analytics, or HOLD).
+
+    Any call raises ``DataSourceUnavailable("backtest")`` so the runner's
+    HOLD inference path is exercised identically to a real gateway outage.
+    """
+
+    def get_pool_analytics(
+        self,
+        pool_address: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        protocol: str | None = None,  # noqa: ARG002
+    ) -> DataEnvelope[PoolAnalytics]:
+        raise DataSourceUnavailable(
+            source="pool_analytics",
+            reason="backtest",
+        )
+
+    def best_pool(
+        self,
+        token_a: str,  # noqa: ARG002
+        token_b: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        metric: str = "fee_apr",  # noqa: ARG002
+        protocols: list[str] | None = None,  # noqa: ARG002
+    ) -> DataEnvelope[PoolAnalyticsResult]:
+        raise DataSourceUnavailable(
+            source="pool_analytics",
+            reason="backtest",
+        )
+
+    def health(self) -> dict[str, dict[str, int]]:
+        return {}
 
 
 __all__ = [
+    "NullPoolAnalyticsReader",
     "PoolAnalytics",
     "PoolAnalyticsReader",
     "PoolAnalyticsResult",
 ]
+
+
+# =============================================================================
+# Sanity check: aiohttp must NOT be imported by this module post-VIB-4727.
+# This is the runtime equivalent of the test-time `sys.modules` assertion
+# in the UAT card D1.S2. A backslide here would re-introduce the boundary
+# violation that PR #2379 was closed for.
+# =============================================================================
+_FORBIDDEN_IMPORT_NAMES: tuple[str, ...] = ("aiohttp", "requests", "httpx")
+del _FORBIDDEN_IMPORT_NAMES  # documentation only; tests enforce via `sys.modules`.

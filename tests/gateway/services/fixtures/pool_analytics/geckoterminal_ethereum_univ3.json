@@ -1,0 +1,16 @@
+{
+  "data": {
+    "id": "eth_0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+    "type": "pool",
+    "attributes": {
+      "name": "USDC / WETH 0.05%",
+      "address": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+      "reserve_in_usd": "210000000.0",
+      "volume_usd": {
+        "h24": "310000000.0"
+      },
+      "pool_fee": 0.0005,
+      "dex_id": "uniswap_v3"
+    }
+  }
+}

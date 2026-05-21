@@ -44,6 +44,7 @@ from almanak.gateway.services import (
     MarketServiceServicer,
     ObserveServiceServicer,
     PolymarketServiceServicer,
+    PoolAnalyticsServiceServicer,
     PositionServiceServicer,
     RpcServiceServicer,
     SimulationServiceServicer,
@@ -221,6 +222,9 @@ class GatewayServer:
         self._simulation_servicer: SimulationServiceServicer | None = None
         self._polymarket_servicer: PolymarketServiceServicer | None = None
         self._enso_servicer: EnsoServiceServicer | None = None
+        # VIB-4727: pool analytics (off-chain DefiLlama / GeckoTerminal egress
+        # moved from the framework PoolAnalyticsReader to the gateway).
+        self._pool_analytics_servicer: PoolAnalyticsServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
         self._teardown_servicer: TeardownServiceServicer | None = None
@@ -458,6 +462,11 @@ class GatewayServer:
         self._enso_servicer = EnsoServiceServicer(self.settings)
         gateway_pb2_grpc.add_EnsoServiceServicer_to_server(self._enso_servicer, self.server)
 
+        # VIB-4727: pool analytics service. Owns the HTTP egress to
+        # DefiLlama / GeckoTerminal so strategy containers do not.
+        self._pool_analytics_servicer = PoolAnalyticsServiceServicer(self.settings)
+        gateway_pb2_grpc.add_PoolAnalyticsServiceServicer_to_server(self._pool_analytics_servicer, self.server)
+
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
         # Wire TokenService into MarketService so balance providers can fall
@@ -656,6 +665,7 @@ class GatewayServer:
             self._simulation_servicer,
             self._polymarket_servicer,
             self._enso_servicer,
+            self._pool_analytics_servicer,
             self._token_servicer,
         ):
             if servicer:

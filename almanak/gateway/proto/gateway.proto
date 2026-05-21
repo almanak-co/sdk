@@ -1651,6 +1651,79 @@ message FundingRateSpreadResponse {
 }
 
 // =============================================================================
+// PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)
+// =============================================================================
+//
+// VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
+// aiohttp egress from inside the strategy container, violating the gateway
+// boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+// only; the framework reader is a thin gRPC client.
+//
+// Error semantics — dual-channel wire shape, v1 behavior:
+//
+// The envelope carries `success`/`error` fields for forward-compatible
+// "degraded but partial data" envelopes. In v1, however, the framework
+// reader (`almanak.framework.data.pools.analytics.PoolAnalyticsReader`)
+// TIGHTENS the contract: ANY non-success response (whether transport-
+// level non-OK or `success=false` with OK status) maps to
+// `DataSourceUnavailable`. There is no v1 code path where the framework
+// returns a `success=false` envelope to the strategy.
+//
+//   - status OK + success=true   → fresh data, returned as envelope.
+//   - status OK + success=false  → framework raises DataSourceUnavailable
+//                                  (v1: never used; reserved for v2
+//                                  degraded-but-partial mode).
+//   - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+//     PERMISSION_DENIED) → framework raises DataSourceUnavailable.
+
+service PoolAnalyticsService {
+  // Get analytics (TVL, volume, fee APR/APY) for a single pool. Tries
+  // DefiLlama first, GeckoTerminal as fallback. Returns UNAVAILABLE when
+  // both providers fail.
+  rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse);
+}
+
+message PoolAnalyticsRequest {
+  // `pool_address` and `chain` are required. Empty / whitespace-only
+  // values cause the service to return INVALID_ARGUMENT and the
+  // framework to raise DataSourceUnavailable. `protocol` is optional —
+  // when provided it tightens the DefiLlama match (e.g. distinguishes
+  // a Uniswap V3 pool from an Aerodrome pool at the same address space).
+  string pool_address = 1;   // Required. Pool contract address (case-insensitive).
+  string chain = 2;          // Required. Chain name (e.g. "arbitrum", "ethereum").
+  string protocol = 3;       // Optional protocol hint (e.g. "uniswap_v3").
+}
+
+message PoolAnalyticsResponse {
+  // Echoed-back identity (lower-cased / normalized)
+  string pool_address = 1;
+  string chain = 2;
+  string protocol = 3;
+
+  // Money / ratio fields are decimal-as-string (matches PriceResponse,
+  // BalanceResponse, FundingRateResponse convention; no double for ratios).
+  // An empty string means "not measured by this provider"; never substitute
+  // "0" for unmeasured.
+  string tvl_usd = 4;          // Total value locked in USD
+  string volume_24h_usd = 5;   // 24h trading volume in USD
+  string volume_7d_usd = 6;    // 7d trading volume in USD (empty when provider doesn't expose)
+  string fee_apr = 7;          // Annualized fee return as a percentage (e.g. "12.5" = 12.5%)
+  string fee_apy = 8;          // Compounded annual fee return as a percentage
+  string utilization_rate = 9; // Lending-pool utilization 0.0-1.0 (empty for DEX)
+  string token0_weight = 10;   // Fraction of TVL in token0 (0.0-1.0)
+  string token1_weight = 11;   // Fraction of TVL in token1 (0.0-1.0)
+
+  // Provenance
+  string source = 12;          // "defillama" | "geckoterminal" | …
+  int64  observed_at = 13;     // Unix seconds when the gateway fetched the data
+  bool   is_live_data = 14;    // False if served from cache or degraded
+
+  // Dual-channel envelope (see header comment)
+  bool   success = 15;
+  string error = 16;
+}
+
+// =============================================================================
 // DashboardService - provides data for operator dashboards
 // =============================================================================
 

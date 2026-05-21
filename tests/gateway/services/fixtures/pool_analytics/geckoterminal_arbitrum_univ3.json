@@ -1,0 +1,16 @@
+{
+  "data": {
+    "id": "arbitrum_0xc6962004f452be9203591991d15f6b388e09e8d0",
+    "type": "pool",
+    "attributes": {
+      "name": "USDC / WETH 0.05%",
+      "address": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "reserve_in_usd": "1185000.0",
+      "volume_usd": {
+        "h24": "820000.0"
+      },
+      "pool_fee": 0.0005,
+      "dex_id": "uniswap_v3"
+    }
+  }
+}

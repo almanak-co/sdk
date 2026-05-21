@@ -273,6 +273,8 @@ class GatewayClient:
         self._integration_stub: gateway_pb2_grpc.IntegrationServiceStub | None = None
         self._dashboard_stub: gateway_pb2_grpc.DashboardServiceStub | None = None
         self._funding_rate_stub: gateway_pb2_grpc.FundingRateServiceStub | None = None
+        # VIB-4727: PoolAnalyticsService stub for market.pool_analytics(...).
+        self._pool_analytics_stub: gateway_pb2_grpc.PoolAnalyticsServiceStub | None = None
         self._simulation_stub: gateway_pb2_grpc.SimulationServiceStub | None = None
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
@@ -354,6 +356,18 @@ class GatewayClient:
         if self._funding_rate_stub is None:
             raise RuntimeError("Gateway client not connected")
         return self._funding_rate_stub
+
+    @property
+    def pool_analytics(self) -> gateway_pb2_grpc.PoolAnalyticsServiceStub:
+        """Get PoolAnalyticsService stub (VIB-4727). Raises if not connected.
+
+        The strategy-container ``PoolAnalyticsReader`` calls this stub to fetch
+        TVL / volume / fee-APR. All HTTP egress to DefiLlama / GeckoTerminal
+        happens on the gateway side; the strategy container only speaks gRPC.
+        """
+        if self._pool_analytics_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._pool_analytics_stub
 
     @property
     def simulation(self) -> gateway_pb2_grpc.SimulationServiceStub:
@@ -443,6 +457,9 @@ class GatewayClient:
         # Initialize FundingRate service stub
         self._funding_rate_stub = gateway_pb2_grpc.FundingRateServiceStub(self._channel)
 
+        # Initialize PoolAnalytics service stub (VIB-4727)
+        self._pool_analytics_stub = gateway_pb2_grpc.PoolAnalyticsServiceStub(self._channel)
+
         # Initialize Simulation service stub
         self._simulation_stub = gateway_pb2_grpc.SimulationServiceStub(self._channel)
 
@@ -483,6 +500,7 @@ class GatewayClient:
             self._integration_stub = None
             self._dashboard_stub = None
             self._funding_rate_stub = None
+            self._pool_analytics_stub = None
             self._simulation_stub = None
             self._polymarket_stub = None
             self._enso_stub = None

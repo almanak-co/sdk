@@ -88,6 +88,21 @@ class MarketSnapshotBuilder:
         # opted out — the snapshot falls back to its legacy OHLCV module path.
         ohlcv_router = getattr(strategy, "_ohlcv_router", None)
 
+        # VIB-4727: pool analytics reader is a thin gRPC client over the
+        # gateway's PoolAnalyticsService. The strategy container never
+        # makes its own HTTP calls — all DefiLlama / GeckoTerminal egress
+        # happens server-side. Strategies may inject their own reader via
+        # `strategy._pool_analytics_reader` (e.g. for tests); otherwise
+        # build one from the wired gateway_client. When no gateway_client
+        # is available (unusual — typically only in misconfigured tests),
+        # leave it None so MarketSnapshot.pool_analytics(...) raises a
+        # clear "not configured" error instead of silently degrading.
+        pool_analytics_reader = getattr(strategy, "_pool_analytics_reader", None)
+        if pool_analytics_reader is None and gateway_client is not None:
+            from almanak.framework.data.pools.analytics import PoolAnalyticsReader
+
+            pool_analytics_reader = PoolAnalyticsReader(gateway_client=gateway_client)
+
         if chains:
             # Multi-chain path: lift the multi-chain providers and the
             # aave_health_factor_provider off the strategy.
@@ -100,6 +115,7 @@ class MarketSnapshotBuilder:
                 or getattr(strategy, "_multi_chain_balance_provider", None),
                 aave_health_factor_provider=aave_health_factor_provider
                 or getattr(strategy, "_aave_health_factor_provider", None),
+                pool_analytics_reader=pool_analytics_reader,
                 gateway_client=gateway_client,
                 ohlcv_router=ohlcv_router,
                 runtime_surface=runtime_surface,
@@ -123,6 +139,7 @@ class MarketSnapshotBuilder:
             rate_monitor=getattr(strategy, "rate_monitor", None) or getattr(strategy, "_rate_monitor", None),
             funding_rate_provider=getattr(strategy, "funding_rate_provider", None)
             or getattr(strategy, "_funding_rate_provider", None),
+            pool_analytics_reader=pool_analytics_reader,
             gateway_client=gateway_client,
             ohlcv_router=ohlcv_router,
             default_timeframe=default_timeframe or getattr(strategy, "default_timeframe", None),
@@ -141,7 +158,16 @@ class MarketSnapshotBuilder:
 
         The state object exposes ``price_oracle`` / ``balance_provider`` /
         ``indicator_provider`` interfaces; the builder forwards them as-is.
+
+        VIB-4727: backtest factories inject ``NullPoolAnalyticsReader`` so
+        any ``market.pool_analytics(...)`` call raises ``DataSourceUnavailable``
+        deterministically. Live gateway HTTP at backtest time would break
+        reproducibility — strategies must take a deterministic code path
+        (static fee assumption, fixture-backed analytics, or HOLD) inside
+        backtests.
         """
+        from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
+
         return MarketSnapshot(
             chain=chain,
             wallet_address=wallet_address,
@@ -151,6 +177,7 @@ class MarketSnapshotBuilder:
             indicator_provider=getattr(state, "indicator_provider", None),
             rate_monitor=getattr(state, "rate_monitor", None),
             funding_rate_provider=getattr(state, "funding_rate_provider", None),
+            pool_analytics_reader=NullPoolAnalyticsReader(),
             timestamp=getattr(state, "timestamp", None),
             runtime_surface="pnl_backtest",
         )
@@ -169,10 +196,17 @@ class MarketSnapshotBuilder:
         Strategies must NOT see ``fork_rpc_url`` directly — the fork-aware
         market service adapters consume it internally. PRD §4.7.
         """
+        # VIB-4727: paper-fork backtests inject NullPoolAnalyticsReader for
+        # the same determinism reason as for_pnl_backtest_state — a live
+        # gateway HTTP call at paper-trading time would make replay-of-the-
+        # same-fork produce different results across runs.
+        from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
+
         snapshot = MarketSnapshot(
             chain=chain,
             wallet_address=wallet_address,
             gateway_client=gateway_client,
+            pool_analytics_reader=NullPoolAnalyticsReader(),
             runtime_surface="paper_fork",
         )
         # Builder owns the fork URL — strategies never see it.

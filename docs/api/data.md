@@ -52,6 +52,30 @@ Price oracles, balance providers, OHLCV sources, and the indicator/analytics pri
     options:
       show_root_heading: true
 
+### PoolAnalyticsReader
+
+VIB-4727: this reader is a thin gRPC client over the gateway's
+`PoolAnalyticsService`. It owns no HTTP egress; all upstream provider
+calls (DefiLlama / GeckoTerminal) happen inside the gateway sidecar.
+See the [Market Snapshot HOLD contract](market.md#hold-contract-for-data-unavailable-errors)
+for the propagation rule strategy authors must follow.
+
+::: almanak.framework.data.pools.analytics.PoolAnalyticsReader
+    options:
+      show_root_heading: true
+
+### NullPoolAnalyticsReader
+
+Backtest factories (`MarketSnapshotBuilder.for_pnl_backtest_state`,
+`for_paper_fork`) inject this stub. It always raises
+`DataSourceUnavailable("backtest")`, forcing strategies inside a
+backtest to take a deterministic code path (static fee, fixture data,
+or HOLD).
+
+::: almanak.framework.data.pools.analytics.NullPoolAnalyticsReader
+    options:
+      show_root_heading: true
+
 ### LiquidityDepth
 
 ::: almanak.framework.data.LiquidityDepth

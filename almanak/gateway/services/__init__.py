@@ -11,6 +11,7 @@ This package contains the gRPC service implementations for the gateway:
 - FundingRateService: Perpetual funding rate data
 - SimulationService: Transaction simulation via Alchemy/Tenderly
 - PolymarketService: Polymarket CLOB API proxy
+- PoolAnalyticsService: Off-chain pool analytics — TVL / volume / fee APR (VIB-4727)
 - EnsoService: Enso Finance routing API proxy
 - TokenService: Unified token resolution and on-chain metadata discovery
 - LifecycleService: Agent state and command management (V2 deployment)
@@ -27,6 +28,7 @@ from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.gateway.services.observe_service import ObserveServiceServicer
 from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
+from almanak.gateway.services.pool_analytics_service import PoolAnalyticsServiceServicer
 from almanak.gateway.services.position_service import PositionServiceServicer
 from almanak.gateway.services.rpc_service import RpcServiceServicer
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
@@ -49,5 +51,6 @@ __all__ = [
     "FundingRateServiceServicer",
     "SimulationServiceServicer",
     "PolymarketServiceServicer",
+    "PoolAnalyticsServiceServicer",
     "TokenServiceServicer",
 ]

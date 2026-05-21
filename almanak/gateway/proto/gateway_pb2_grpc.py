@@ -3324,6 +3324,159 @@ class FundingRateService(object):
             _registered_method=True)
 
 
+class PoolAnalyticsServiceStub(object):
+    """=============================================================================
+    PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)
+    =============================================================================
+
+    VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
+    aiohttp egress from inside the strategy container, violating the gateway
+    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    only; the framework reader is a thin gRPC client.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+
+    The envelope carries `success`/`error` fields for forward-compatible
+    "degraded but partial data" envelopes. In v1, however, the framework
+    reader (`almanak.framework.data.pools.analytics.PoolAnalyticsReader`)
+    TIGHTENS the contract: ANY non-success response (whether transport-
+    level non-OK or `success=false` with OK status) maps to
+    `DataSourceUnavailable`. There is no v1 code path where the framework
+    returns a `success=false` envelope to the strategy.
+
+    - status OK + success=true   → fresh data, returned as envelope.
+    - status OK + success=false  → framework raises DataSourceUnavailable
+    (v1: never used; reserved for v2
+    degraded-but-partial mode).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED) → framework raises DataSourceUnavailable.
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetPoolAnalytics = channel.unary_unary(
+                '/almanak.gateway.proto.PoolAnalyticsService/GetPoolAnalytics',
+                request_serializer=gateway__pb2.PoolAnalyticsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PoolAnalyticsResponse.FromString,
+                _registered_method=True)
+
+
+class PoolAnalyticsServiceServicer(object):
+    """=============================================================================
+    PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)
+    =============================================================================
+
+    VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
+    aiohttp egress from inside the strategy container, violating the gateway
+    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    only; the framework reader is a thin gRPC client.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+
+    The envelope carries `success`/`error` fields for forward-compatible
+    "degraded but partial data" envelopes. In v1, however, the framework
+    reader (`almanak.framework.data.pools.analytics.PoolAnalyticsReader`)
+    TIGHTENS the contract: ANY non-success response (whether transport-
+    level non-OK or `success=false` with OK status) maps to
+    `DataSourceUnavailable`. There is no v1 code path where the framework
+    returns a `success=false` envelope to the strategy.
+
+    - status OK + success=true   → fresh data, returned as envelope.
+    - status OK + success=false  → framework raises DataSourceUnavailable
+    (v1: never used; reserved for v2
+    degraded-but-partial mode).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED) → framework raises DataSourceUnavailable.
+
+    """
+
+    def GetPoolAnalytics(self, request, context):
+        """Get analytics (TVL, volume, fee APR/APY) for a single pool. Tries
+        DefiLlama first, GeckoTerminal as fallback. Returns UNAVAILABLE when
+        both providers fail.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PoolAnalyticsServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetPoolAnalytics': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPoolAnalytics,
+                    request_deserializer=gateway__pb2.PoolAnalyticsRequest.FromString,
+                    response_serializer=gateway__pb2.PoolAnalyticsResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.PoolAnalyticsService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.PoolAnalyticsService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PoolAnalyticsService(object):
+    """=============================================================================
+    PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)
+    =============================================================================
+
+    VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
+    aiohttp egress from inside the strategy container, violating the gateway
+    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    only; the framework reader is a thin gRPC client.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+
+    The envelope carries `success`/`error` fields for forward-compatible
+    "degraded but partial data" envelopes. In v1, however, the framework
+    reader (`almanak.framework.data.pools.analytics.PoolAnalyticsReader`)
+    TIGHTENS the contract: ANY non-success response (whether transport-
+    level non-OK or `success=false` with OK status) maps to
+    `DataSourceUnavailable`. There is no v1 code path where the framework
+    returns a `success=false` envelope to the strategy.
+
+    - status OK + success=true   → fresh data, returned as envelope.
+    - status OK + success=false  → framework raises DataSourceUnavailable
+    (v1: never used; reserved for v2
+    degraded-but-partial mode).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED) → framework raises DataSourceUnavailable.
+
+    """
+
+    @staticmethod
+    def GetPoolAnalytics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PoolAnalyticsService/GetPoolAnalytics',
+            gateway__pb2.PoolAnalyticsRequest.SerializeToString,
+            gateway__pb2.PoolAnalyticsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class DashboardServiceStub(object):
     """=============================================================================
     DashboardService - provides data for operator dashboards
