@@ -1724,6 +1724,194 @@ message PoolAnalyticsResponse {
 }
 
 // =============================================================================
+// PoolHistoryService - off-chain pool history (TVL / volume / fee revenue
+// over time)
+// =============================================================================
+//
+// VIB-4728 (parent epic) / POOL-1 (VIB-4749). Replaces the in-framework
+// PoolHistoryReader (`almanak/framework/data/pools/history.py`) which used
+// direct aiohttp / GraphQL egress from inside the strategy container,
+// violating the gateway boundary. HTTP / GraphQL egress to The Graph,
+// DefiLlama, and GeckoTerminal happens server-side only; the framework
+// reader is a thin gRPC client (POOL-7 / VIB-4755).
+//
+// Wire conventions (Decimal as string, Empty != Zero, dual-channel envelope)
+// mirror PoolAnalyticsService above; the additions specific to historical
+// time-series data are:
+//
+//   - Decimal money / reserve fields use `string` with the same
+//     "empty string means unmeasured" rule. The framework boundary maps
+//     `""` to Python `None` (NEVER `Decimal("0")`) and surfaces the unmeasured
+//     field names via the per-row `unmeasured_fields`.
+//
+//   - `Resolution` is a closed enum (1h / 4h / 1d). `RESOLUTION_UNSPECIFIED`
+//     is `INVALID_ARGUMENT` — the validator MUST reject unspecified.
+//
+//   - `TruncationReason` is an enum, NOT a bool. It distinguishes:
+//       * `CAP_EXCEEDED` / `PROVIDER_PAGE_CAP`  -> caller may re-chunk from
+//         `next_start_ts` (which is `> 0`).
+//       * `PROVIDER_RETENTION`                  -> upstream provider has no
+//         more data backward (e.g. DefiLlama only carries ~365d on some
+//         pools); `next_start_ts == 0` is the sentinel "do not re-chunk".
+//         Looping anyway would burn the request budget for no progress.
+//
+//   - `finalized_only` is a per-response bit, not per-row, to keep payloads
+//     small. Per-row finality is recomputable client-side from
+//     `(now() - row.timestamp) > finality_cutoff_seconds`.
+//
+// Soft-cap vs hard-cap behavior (UAT card VIB-4728 lock):
+//   - Soft cap (default lookback, e.g. 90d at 1h) exceeded:
+//       success=true + truncation_reason=CAP_EXCEEDED + next_start_ts>0.
+//   - Hard cap (sanity ceiling) exceeded:
+//       gRPC INVALID_ARGUMENT (no next_start_ts over the wire).
+//
+// Window + cursor semantics (locked at this layer; POOL-3 validator + POOL-5
+// dispatcher enforce the alignment side):
+//   - Requested window is treated as **half-open** `[start_ts, end_ts)`:
+//     start inclusive, end exclusive after resolution alignment. Validator
+//     rejects `start_ts == 0` / `end_ts == 0` / `start_ts > end_ts` with
+//     INVALID_ARGUMENT (see message-level field comments below for the
+//     exact validator contract; tightening to `start_ts >= end_ts` is a
+//     POOL-3 follow-up and is intentionally not changed in POOL-1).
+//   - `snapshots` are guaranteed strictly ordered by `timestamp` ascending,
+//     with at most one row per aligned bucket.
+//   - `next_start_ts` is the **inclusive** cursor for the next call: when
+//     `> 0`, the caller continues by issuing a new request with
+//     `start_ts = next_start_ts` (no gaps, no overlaps).
+//
+// Error semantics — dual-channel wire shape, v1 behavior:
+//   - status OK + success=true   -> fresh data, returned as envelope.
+//     NEVER returns `success=true` with `snapshots=[]` — the service treats
+//     an empty range as a not-found failure (UAT card VIB-4728 Trust
+//     statement #1: "No silent zeros"). If a documented failure mode is
+//     hit (gateway unreachable, all providers fail, pool not found),
+//     `success=false` is returned and the framework raises
+//     DataSourceUnavailable.
+//   - status OK + success=false  -> framework raises DataSourceUnavailable
+//                                   (no fake-success empty list).
+//   - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+//     PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+//     DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+
+enum Resolution {
+  RESOLUTION_UNSPECIFIED = 0;
+  RESOLUTION_1H = 1;
+  RESOLUTION_1D = 2;
+  RESOLUTION_4H = 3;  // POOL-0 spike R2: framework dict already supports 4h
+}
+
+enum TruncationReason {
+  TRUNCATION_REASON_UNSPECIFIED = 0;   // truncated == false
+  CAP_EXCEEDED = 1;                    // server cap; next_start_ts > 0
+  PROVIDER_PAGE_CAP = 2;               // provider per-call page limit; next_start_ts > 0
+  PROVIDER_RETENTION = 3;              // provider has no more data backward; next_start_ts == 0
+}
+
+message PoolSnapshot {
+  // Unix seconds, UTC, aligned to the requested resolution
+  // (timestamp % resolution_seconds == 0).
+  int64 timestamp = 1;
+
+  // Money / reserve fields are Decimal-as-string (same convention as
+  // PoolAnalyticsResponse). Empty string means "unmeasured by this
+  // provider for this row"; the corresponding field name is repeated in
+  // `unmeasured_fields`. NEVER substitute "0" for unmeasured.
+  string tvl = 2;               // Total value locked in USD
+  string volume_24h = 3;        // 24h trading volume in USD
+  string fee_revenue_24h = 4;   // 24h fee revenue in USD
+  string token0_reserve = 5;    // token0 reserve in human-readable units
+  string token1_reserve = 6;    // token1 reserve in human-readable units
+
+  // Per-row Empty != Zero metadata (inherited audit row #11). The framework
+  // boundary maps each name in this set to a Python `None` field on its
+  // PoolSnapshot dataclass.
+  repeated string unmeasured_fields = 7;
+}
+
+service PoolHistoryService {
+  // Get a time-series of historical PoolSnapshot rows for a single pool.
+  // Provider fallback order is dispatcher policy (VIB-4753 / POOL-5):
+  //   1h / 4h: TheGraph (primary) -> GeckoTerminal (fallback). DefiLlama is
+  //            SKIPPED (daily-only).
+  //   1d:      TheGraph (primary) -> DefiLlama (fallback) -> GeckoTerminal
+  //            (last resort).
+  // Returns UNAVAILABLE when all eligible providers fail or when the pool
+  // is not found anywhere (NEVER fake-success with snapshots=[]).
+  rpc GetPoolHistory(PoolHistoryRequest) returns (PoolHistoryResponse);
+}
+
+message PoolHistoryRequest {
+  // Required. Pool contract address. Case-insensitive for EVM (validator
+  // strip-then-lowercases); case-sensitive for Solana (base58, strip only).
+  // Empty / whitespace-only / malformed values -> INVALID_ARGUMENT.
+  string pool_address = 1;
+
+  // Required. Chain name (e.g. "arbitrum", "ethereum", "base"). The
+  // validator + dispatcher consult an explicit (chain, protocol) support
+  // table; unsupported pairs -> INVALID_ARGUMENT.
+  string chain = 2;
+
+  // Required. Protocol allowlist (e.g. "uniswap_v3", "aerodrome"). Empty
+  // or unknown values -> INVALID_ARGUMENT (prevents cache-key injection).
+  string protocol = 3;
+
+  // Required. Unix seconds, UTC. Validator rejects `start_ts == 0` and
+  // `start_ts > end_ts` with INVALID_ARGUMENT.
+  int64 start_ts = 4;
+
+  // Required. Unix seconds, UTC. Validator rejects `end_ts == 0` and
+  // `end_ts > now() + clock_skew_tolerance` (future dates) with
+  // INVALID_ARGUMENT. The framework reader resolves a Python `end_date=None`
+  // BEFORE issuing the RPC: direct PoolHistoryReader callers resolve to
+  // datetime.now(UTC); MarketSnapshot.pool_history() callers anchor to the
+  // snapshot's frozen timestamp (deterministic-replay path, VIB-4065).
+  int64 end_ts = 5;
+
+  // Required. Resolution of the requested time-series.
+  // RESOLUTION_UNSPECIFIED -> INVALID_ARGUMENT.
+  Resolution resolution = 6;
+}
+
+message PoolHistoryResponse {
+  // The time-series, strictly ordered by `timestamp` ascending, with at
+  // most one row per aligned bucket. May be empty ONLY when success=false
+  // (failure envelope). The service NEVER returns success=true with
+  // snapshots=[] — an empty range from upstream is treated as a not-found
+  // failure (UAT card VIB-4728 Trust statement #1: "No silent zeros").
+  repeated PoolSnapshot snapshots = 1;
+
+  // Truncation reason — see enum above. UNSPECIFIED when the full requested
+  // range was served.
+  TruncationReason truncation_reason = 2;
+
+  // Re-chunk hint. > 0 only for CAP_EXCEEDED / PROVIDER_PAGE_CAP, in which
+  // case it is the **inclusive** `start_ts` to pass on the next request
+  // (no gaps, no overlaps). == 0 (sentinel) for PROVIDER_RETENTION
+  // ("do not re-chunk") and for TRUNCATION_REASON_UNSPECIFIED.
+  int64 next_start_ts = 3;
+
+  // Provider that served the response: "the_graph" | "defillama" |
+  // "geckoterminal" on success. On failure: "" or "none" (NEVER a provider
+  // name with snapshots=[] — that would imply a (failed) provider's data is
+  // in the envelope).
+  string source = 4;
+
+  // Per-response finality (kept small; per-row finality is recomputable
+  // client-side from row.timestamp and the per-provider finality cutoff).
+  // false when at least one row is provisional (typically the trailing bar
+  // within the finality cutoff); true when every row is finalized.
+  bool finalized_only = 5;
+
+  // Dual-channel envelope. success=false -> framework raises
+  // DataSourceUnavailable (no silent zero-fill). On success=false, ALL
+  // metadata fields above MUST be in their non-stale form:
+  // truncation_reason=UNSPECIFIED, next_start_ts=0, finalized_only=false,
+  // source in ("","none"), snapshots empty, error non-empty.
+  bool success = 6;
+  string error = 7;
+}
+
+// =============================================================================
 // DashboardService - provides data for operator dashboards
 // =============================================================================
 

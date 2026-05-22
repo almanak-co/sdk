@@ -3477,6 +3477,86 @@ class PoolAnalyticsService(object):
             _registered_method=True)
 
 
+class PoolHistoryServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetPoolHistory = channel.unary_unary(
+                '/almanak.gateway.proto.PoolHistoryService/GetPoolHistory',
+                request_serializer=gateway__pb2.PoolHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PoolHistoryResponse.FromString,
+                _registered_method=True)
+
+
+class PoolHistoryServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def GetPoolHistory(self, request, context):
+        """Get a time-series of historical PoolSnapshot rows for a single pool.
+        Provider fallback order is dispatcher policy (VIB-4753 / POOL-5):
+        1h / 4h: TheGraph (primary) -> GeckoTerminal (fallback). DefiLlama is
+        SKIPPED (daily-only).
+        1d:      TheGraph (primary) -> DefiLlama (fallback) -> GeckoTerminal
+        (last resort).
+        Returns UNAVAILABLE when all eligible providers fail or when the pool
+        is not found anywhere (NEVER fake-success with snapshots=[]).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PoolHistoryServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetPoolHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPoolHistory,
+                    request_deserializer=gateway__pb2.PoolHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.PoolHistoryResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.PoolHistoryService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.PoolHistoryService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PoolHistoryService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def GetPoolHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PoolHistoryService/GetPoolHistory',
+            gateway__pb2.PoolHistoryRequest.SerializeToString,
+            gateway__pb2.PoolHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class DashboardServiceStub(object):
     """=============================================================================
     DashboardService - provides data for operator dashboards

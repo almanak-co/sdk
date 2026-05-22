@@ -19,6 +19,104 @@ else:
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class _Resolution:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ResolutionEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Resolution.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    RESOLUTION_UNSPECIFIED: _Resolution.ValueType  # 0
+    RESOLUTION_1H: _Resolution.ValueType  # 1
+    RESOLUTION_1D: _Resolution.ValueType  # 2
+    RESOLUTION_4H: _Resolution.ValueType  # 3
+    """POOL-0 spike R2: framework dict already supports 4h"""
+
+class Resolution(_Resolution, metaclass=_ResolutionEnumTypeWrapper):
+    """=============================================================================
+    PoolHistoryService - off-chain pool history (TVL / volume / fee revenue
+    over time)
+    =============================================================================
+
+    VIB-4728 (parent epic) / POOL-1 (VIB-4749). Replaces the in-framework
+    PoolHistoryReader (`almanak/framework/data/pools/history.py`) which used
+    direct aiohttp / GraphQL egress from inside the strategy container,
+    violating the gateway boundary. HTTP / GraphQL egress to The Graph,
+    DefiLlama, and GeckoTerminal happens server-side only; the framework
+    reader is a thin gRPC client (POOL-7 / VIB-4755).
+
+    Wire conventions (Decimal as string, Empty != Zero, dual-channel envelope)
+    mirror PoolAnalyticsService above; the additions specific to historical
+    time-series data are:
+
+      - Decimal money / reserve fields use `string` with the same
+        "empty string means unmeasured" rule. The framework boundary maps
+        `""` to Python `None` (NEVER `Decimal("0")`) and surfaces the unmeasured
+        field names via the per-row `unmeasured_fields`.
+
+      - `Resolution` is a closed enum (1h / 4h / 1d). `RESOLUTION_UNSPECIFIED`
+        is `INVALID_ARGUMENT` — the validator MUST reject unspecified.
+
+      - `TruncationReason` is an enum, NOT a bool. It distinguishes:
+          * `CAP_EXCEEDED` / `PROVIDER_PAGE_CAP`  -> caller may re-chunk from
+            `next_start_ts` (which is `> 0`).
+          * `PROVIDER_RETENTION`                  -> upstream provider has no
+            more data backward (e.g. DefiLlama only carries ~365d on some
+            pools); `next_start_ts == 0` is the sentinel "do not re-chunk".
+            Looping anyway would burn the request budget for no progress.
+
+      - `finalized_only` is a per-response bit, not per-row, to keep payloads
+        small. Per-row finality is recomputable client-side from
+        `(now() - row.timestamp) > finality_cutoff_seconds`.
+
+    Soft-cap vs hard-cap behavior (UAT card VIB-4728 lock):
+      - Soft cap (default lookback, e.g. 90d at 1h) exceeded:
+          success=true + truncation_reason=CAP_EXCEEDED + next_start_ts>0.
+      - Hard cap (sanity ceiling) exceeded:
+          gRPC INVALID_ARGUMENT (no next_start_ts over the wire).
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+      - status OK + success=true   -> fresh data, returned as envelope.
+      - status OK + success=false  -> framework raises DataSourceUnavailable
+                                      (no fake-success empty list).
+      - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+        PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+        DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+    """
+
+RESOLUTION_UNSPECIFIED: Resolution.ValueType  # 0
+RESOLUTION_1H: Resolution.ValueType  # 1
+RESOLUTION_1D: Resolution.ValueType  # 2
+RESOLUTION_4H: Resolution.ValueType  # 3
+"""POOL-0 spike R2: framework dict already supports 4h"""
+Global___Resolution: _TypeAlias = Resolution  # noqa: Y015
+
+class _TruncationReason:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _TruncationReasonEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_TruncationReason.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    TRUNCATION_REASON_UNSPECIFIED: _TruncationReason.ValueType  # 0
+    """truncated == false"""
+    CAP_EXCEEDED: _TruncationReason.ValueType  # 1
+    """server cap; next_start_ts > 0"""
+    PROVIDER_PAGE_CAP: _TruncationReason.ValueType  # 2
+    """provider per-call page limit; next_start_ts > 0"""
+    PROVIDER_RETENTION: _TruncationReason.ValueType  # 3
+    """provider has no more data backward; next_start_ts == 0"""
+
+class TruncationReason(_TruncationReason, metaclass=_TruncationReasonEnumTypeWrapper): ...
+
+TRUNCATION_REASON_UNSPECIFIED: TruncationReason.ValueType  # 0
+"""truncated == false"""
+CAP_EXCEEDED: TruncationReason.ValueType  # 1
+"""server cap; next_start_ts > 0"""
+PROVIDER_PAGE_CAP: TruncationReason.ValueType  # 2
+"""provider per-call page limit; next_start_ts > 0"""
+PROVIDER_RETENTION: TruncationReason.ValueType  # 3
+"""provider has no more data backward; next_start_ts == 0"""
+Global___TruncationReason: _TypeAlias = TruncationReason  # noqa: Y015
+
 class _CutoverState:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -5212,6 +5310,178 @@ class PoolAnalyticsResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PoolAnalyticsResponse: _TypeAlias = PoolAnalyticsResponse  # noqa: Y015
+
+@_typing.final
+class PoolSnapshot(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    TVL_FIELD_NUMBER: _builtins.int
+    VOLUME_24H_FIELD_NUMBER: _builtins.int
+    FEE_REVENUE_24H_FIELD_NUMBER: _builtins.int
+    TOKEN0_RESERVE_FIELD_NUMBER: _builtins.int
+    TOKEN1_RESERVE_FIELD_NUMBER: _builtins.int
+    UNMEASURED_FIELDS_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC, aligned to the requested resolution
+    (timestamp % resolution_seconds == 0).
+    """
+    tvl: _builtins.str
+    """Money / reserve fields are Decimal-as-string (same convention as
+    PoolAnalyticsResponse). Empty string means "unmeasured by this
+    provider for this row"; the corresponding field name is repeated in
+    `unmeasured_fields`. NEVER substitute "0" for unmeasured.
+    Total value locked in USD
+    """
+    volume_24h: _builtins.str
+    """24h trading volume in USD"""
+    fee_revenue_24h: _builtins.str
+    """24h fee revenue in USD"""
+    token0_reserve: _builtins.str
+    """token0 reserve in human-readable units"""
+    token1_reserve: _builtins.str
+    """token1 reserve in human-readable units"""
+    @_builtins.property
+    def unmeasured_fields(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """Per-row Empty != Zero metadata (inherited audit row #11). The framework
+        boundary maps each name in this set to a Python `None` field on its
+        PoolSnapshot dataclass.
+        """
+
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        tvl: _builtins.str = ...,
+        volume_24h: _builtins.str = ...,
+        fee_revenue_24h: _builtins.str = ...,
+        token0_reserve: _builtins.str = ...,
+        token1_reserve: _builtins.str = ...,
+        unmeasured_fields: _abc.Iterable[_builtins.str] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["fee_revenue_24h", b"fee_revenue_24h", "timestamp", b"timestamp", "token0_reserve", b"token0_reserve", "token1_reserve", b"token1_reserve", "tvl", b"tvl", "unmeasured_fields", b"unmeasured_fields", "volume_24h", b"volume_24h"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolSnapshot: _TypeAlias = PoolSnapshot  # noqa: Y015
+
+@_typing.final
+class PoolHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    RESOLUTION_FIELD_NUMBER: _builtins.int
+    pool_address: _builtins.str
+    """Required. Pool contract address. Case-insensitive for EVM (validator
+    strip-then-lowercases); case-sensitive for Solana (base58, strip only).
+    Empty / whitespace-only / malformed values -> INVALID_ARGUMENT.
+    """
+    chain: _builtins.str
+    """Required. Chain name (e.g. "arbitrum", "ethereum", "base"). The
+    validator + dispatcher consult an explicit (chain, protocol) support
+    table; unsupported pairs -> INVALID_ARGUMENT.
+    """
+    protocol: _builtins.str
+    """Required. Protocol allowlist (e.g. "uniswap_v3", "aerodrome"). Empty
+    or unknown values -> INVALID_ARGUMENT (prevents cache-key injection).
+    """
+    start_ts: _builtins.int
+    """Required. Unix seconds, UTC. Validator rejects `start_ts == 0` and
+    `start_ts > end_ts` with INVALID_ARGUMENT.
+    """
+    end_ts: _builtins.int
+    """Required. Unix seconds, UTC. Validator rejects `end_ts == 0` and
+    `end_ts > now() + clock_skew_tolerance` (future dates) with
+    INVALID_ARGUMENT. The framework reader resolves a Python `end_date=None`
+    BEFORE issuing the RPC: direct PoolHistoryReader callers resolve to
+    datetime.now(UTC); MarketSnapshot.pool_history() callers anchor to the
+    snapshot's frozen timestamp (deterministic-replay path, VIB-4065).
+    """
+    resolution: Global___Resolution.ValueType
+    """Required. Resolution of the requested time-series.
+    RESOLUTION_UNSPECIFIED -> INVALID_ARGUMENT.
+    """
+    def __init__(
+        self,
+        *,
+        pool_address: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        resolution: Global___Resolution.ValueType = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "end_ts", b"end_ts", "pool_address", b"pool_address", "protocol", b"protocol", "resolution", b"resolution", "start_ts", b"start_ts"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolHistoryRequest: _TypeAlias = PoolHistoryRequest  # noqa: Y015
+
+@_typing.final
+class PoolHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SNAPSHOTS_FIELD_NUMBER: _builtins.int
+    TRUNCATION_REASON_FIELD_NUMBER: _builtins.int
+    NEXT_START_TS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    FINALIZED_ONLY_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    truncation_reason: Global___TruncationReason.ValueType
+    """Truncation reason — see enum above. UNSPECIFIED when the full requested
+    range was served.
+    """
+    next_start_ts: _builtins.int
+    """Re-chunk hint. > 0 only for CAP_EXCEEDED / PROVIDER_PAGE_CAP.
+    == 0 (sentinel) for PROVIDER_RETENTION ("do not re-chunk") and
+    for TRUNCATION_REASON_UNSPECIFIED.
+    """
+    source: _builtins.str
+    """Provider that served the response: "the_graph" | "defillama" |
+    "geckoterminal" on success. On failure: "" or "none" (NEVER a provider
+    name with snapshots=[] — that would imply a (failed) provider's data is
+    in the envelope).
+    """
+    finalized_only: _builtins.bool
+    """Per-response finality (kept small; per-row finality is recomputable
+    client-side from row.timestamp and the per-provider finality cutoff).
+    false when at least one row is provisional (typically the trailing bar
+    within the finality cutoff); true when every row is finalized.
+    """
+    success: _builtins.bool
+    """Dual-channel envelope. success=false -> framework raises
+    DataSourceUnavailable (no silent zero-fill). On success=false, ALL
+    metadata fields above MUST be in their non-stale form:
+    truncation_reason=UNSPECIFIED, next_start_ts=0, finalized_only=false,
+    source in ("","none"), snapshots empty, error non-empty.
+    """
+    error: _builtins.str
+    @_builtins.property
+    def snapshots(self) -> _containers.RepeatedCompositeFieldContainer[Global___PoolSnapshot]:
+        """The time-series. May be empty when success=false (failure envelope) or
+        when the requested window contained no upstream data (still success=true
+        when the upstream confirmed the empty range — that case is rare for
+        active pools).
+        """
+
+    def __init__(
+        self,
+        *,
+        snapshots: _abc.Iterable[Global___PoolSnapshot] | None = ...,
+        truncation_reason: Global___TruncationReason.ValueType = ...,
+        next_start_ts: _builtins.int = ...,
+        source: _builtins.str = ...,
+        finalized_only: _builtins.bool = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "finalized_only", b"finalized_only", "next_start_ts", b"next_start_ts", "snapshots", b"snapshots", "source", b"source", "success", b"success", "truncation_reason", b"truncation_reason"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PoolHistoryResponse: _TypeAlias = PoolHistoryResponse  # noqa: Y015
 
 @_typing.final
 class ListStrategiesRequest(_message.Message):
