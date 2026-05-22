@@ -209,11 +209,11 @@ almanak agent status
 Ejemplo de salida:
 
 ```text
-Agent skill status (SDK v2.16.0):
+Agent skill status (SDK v2.15.0):
 
-  claude      up to date (v2.16.0)
+  claude      up to date (v2.15.0)
   codex       not installed
-  cursor      outdated (v2.15.0 -> v2.16.0)
+  cursor      outdated (v2.14.0 -> v2.15.0)
   copilot     not installed
   ...
 

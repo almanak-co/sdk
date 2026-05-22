@@ -323,6 +323,7 @@ class UniswapV3PoolPriceReader:
     _factory_addresses: dict[str, str] = UNISWAP_V3_FACTORY
     _known_pools: dict[str, dict[tuple[str, str, int], str]] = _KNOWN_POOLS
     protocol_name: str = "uniswap_v3"
+    _get_pool_selector: str = GET_POOL_SELECTOR
 
     def __init__(
         self,
@@ -515,7 +516,7 @@ class UniswapV3PoolPriceReader:
         try:
             # getPool(address,address,uint24) -> address
             # Encode: selector + address_a (padded) + address_b (padded) + fee (padded)
-            calldata = GET_POOL_SELECTOR
+            calldata = self._get_pool_selector
             calldata += sorted_a.replace("0x", "").zfill(64)
             calldata += sorted_b.replace("0x", "").zfill(64)
             calldata += hex(fee_tier)[2:].zfill(64)
@@ -647,6 +648,7 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
     _factory_addresses: dict[str, str] = AERODROME_CL_FACTORY
     _known_pools: dict[str, dict[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
     protocol_name: str = "aerodrome"
+    _get_pool_selector: str = "0x28af8d0b"  # int24 (tick_spacing), not v3 uint24 (fee_tier)
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +681,8 @@ class PancakeSwapV3PoolReader(UniswapV3PoolPriceReader):
 # Default mapping of protocol names to reader classes
 _PROTOCOL_READER_CLASSES: dict[str, type[UniswapV3PoolPriceReader]] = {
     "uniswap_v3": UniswapV3PoolPriceReader,
-    "aerodrome": AerodromePoolReader,
+    "aerodrome": AerodromePoolReader,  # legacy name used by existing demo strategies
+    "aerodrome_slipstream": AerodromePoolReader,  # canonical name used by executor / CLI
     "pancakeswap_v3": PancakeSwapV3PoolReader,
 }
 

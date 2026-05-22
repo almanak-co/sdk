@@ -282,6 +282,24 @@ from .compiler_models import (  # noqa: F401
 # ``almanak.framework.data.tokens.resolver.SOLANA_ADDRESS_PATTERN``.
 _SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
+# Lending connectors with connector-owned compilers — used only to build the
+# "Supported: ..." hint in the unsupported-protocol error. Keep in sync with
+# the lending entries in connectors.compiler_registry.CompilerRegistry.
+_LENDING_PROTOCOLS = (
+    "aave_v3",
+    "benqi",
+    "compound_v3",
+    "curvance",
+    "euler_v2",
+    "jupiter_lend",
+    "kamino",
+    "morpho",
+    "morpho_blue",
+    "radiant_v2",
+    "silo_v2",
+    "spark",
+)
+
 
 def _is_solana_mint(token: str) -> bool:
     """True when ``token`` matches a Solana base58 mint (32-44 chars)."""
@@ -1317,60 +1335,6 @@ class IntentCompiler:
         from .compiler_solana import compile_jupiter_swap
 
         return compile_jupiter_swap(self, intent)
-
-    def _compile_kamino_supply(self, intent: SupplyIntent) -> CompilationResult:
-        """Compile a SUPPLY intent using Kamino for Solana chains."""
-        from .compiler_solana import compile_kamino_supply
-
-        return compile_kamino_supply(self, intent)
-
-    def _compile_kamino_borrow(self, intent: BorrowIntent) -> CompilationResult:
-        """Compile a BORROW intent using Kamino for Solana chains."""
-        from .compiler_solana import compile_kamino_borrow
-
-        return compile_kamino_borrow(self, intent)
-
-    def _compile_kamino_repay(self, intent: RepayIntent) -> CompilationResult:
-        """Compile a REPAY intent using Kamino for Solana chains."""
-        from .compiler_solana import compile_kamino_repay
-
-        return compile_kamino_repay(self, intent)
-
-    def _compile_kamino_withdraw(self, intent: WithdrawIntent) -> CompilationResult:
-        """Compile a WITHDRAW intent using Kamino for Solana chains."""
-        from .compiler_solana import compile_kamino_withdraw
-
-        return compile_kamino_withdraw(self, intent)
-
-    def _get_jupiter_lend_adapter(self) -> Any:
-        """Get or create a cached JupiterLendAdapter instance."""
-        from .compiler_solana import get_jupiter_lend_adapter
-
-        return get_jupiter_lend_adapter(self)
-
-    def _compile_jupiter_lend_supply(self, intent: SupplyIntent) -> CompilationResult:
-        """Compile a SUPPLY intent using Jupiter Lend for Solana chains."""
-        from .compiler_solana import compile_jupiter_lend_supply
-
-        return compile_jupiter_lend_supply(self, intent)
-
-    def _compile_jupiter_lend_borrow(self, intent: BorrowIntent) -> CompilationResult:
-        """Compile a BORROW intent using Jupiter Lend for Solana chains."""
-        from .compiler_solana import compile_jupiter_lend_borrow
-
-        return compile_jupiter_lend_borrow(self, intent)
-
-    def _compile_jupiter_lend_repay(self, intent: RepayIntent) -> CompilationResult:
-        """Compile a REPAY intent using Jupiter Lend for Solana chains."""
-        from .compiler_solana import compile_jupiter_lend_repay
-
-        return compile_jupiter_lend_repay(self, intent)
-
-    def _compile_jupiter_lend_withdraw(self, intent: WithdrawIntent) -> CompilationResult:
-        """Compile a WITHDRAW intent using Jupiter Lend for Solana chains."""
-        from .compiler_solana import compile_jupiter_lend_withdraw
-
-        return compile_jupiter_lend_withdraw(self, intent)
 
     def _compile_raydium_lp_open(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile an LP_OPEN intent using Raydium CLMM for Solana chains."""
@@ -3188,27 +3152,33 @@ class IntentCompiler:
 
     def _compile_borrow(self, intent: BorrowIntent) -> CompilationResult:
         """Compile a BORROW intent into an ActionBundle."""
-        from .compiler_lending import compile_borrow
-
-        return compile_borrow(self, intent)
+        return self._compile_lending_via_registry(intent, "BORROW")
 
     def _compile_repay(self, intent: RepayIntent) -> CompilationResult:
         """Compile a REPAY intent into an ActionBundle."""
-        from .compiler_lending import compile_repay
-
-        return compile_repay(self, intent)
+        return self._compile_lending_via_registry(intent, "REPAY")
 
     def _compile_supply(self, intent: SupplyIntent) -> CompilationResult:
         """Compile a SUPPLY intent into an ActionBundle."""
-        from .compiler_lending import compile_supply
-
-        return compile_supply(self, intent)
+        return self._compile_lending_via_registry(intent, "SUPPLY")
 
     def _compile_withdraw(self, intent: WithdrawIntent) -> CompilationResult:
         """Compile a WITHDRAW intent into an ActionBundle."""
-        from .compiler_lending import compile_withdraw
+        return self._compile_lending_via_registry(intent, "WITHDRAW")
 
-        return compile_withdraw(self, intent)
+    def _compile_lending_via_registry(self, intent: Any, primitive: str) -> CompilationResult:
+        protocol = self._resolve_protocol(intent.protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Unsupported lending protocol for {primitive}: {intent.protocol}. "
+                f"Supported: {', '.join(_LENDING_PROTOCOLS)}"
+            ),
+            intent_id=intent.intent_id,
+        )
 
     def _compile_ensure_balance(self, intent: Any) -> CompilationResult:
         """Compile an ENSURE_BALANCE meta-intent by resolving it first.

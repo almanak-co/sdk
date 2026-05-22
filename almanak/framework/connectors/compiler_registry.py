@@ -60,6 +60,54 @@ class CompilerRegistry:
             "almanak.framework.connectors.pendle.compiler",
             "PendleCompiler",
         ),
+        "aave_v3": (
+            "almanak.framework.connectors.aave_v3.compiler",
+            "AaveV3Compiler",
+        ),
+        "radiant_v2": (
+            "almanak.framework.connectors.radiant_v2.compiler",
+            "RadiantV2Compiler",
+        ),
+        "compound_v3": (
+            "almanak.framework.connectors.compound_v3.compiler",
+            "CompoundV3Compiler",
+        ),
+        "morpho": (
+            "almanak.framework.connectors.morpho_blue.compiler",
+            "MorphoBlueCompiler",
+        ),
+        "morpho_blue": (
+            "almanak.framework.connectors.morpho_blue.compiler",
+            "MorphoBlueCompiler",
+        ),
+        "spark": (
+            "almanak.framework.connectors.spark.compiler",
+            "SparkCompiler",
+        ),
+        "silo_v2": (
+            "almanak.framework.connectors.silo_v2.compiler",
+            "SiloV2Compiler",
+        ),
+        "euler_v2": (
+            "almanak.framework.connectors.euler_v2.compiler",
+            "EulerV2Compiler",
+        ),
+        "benqi": (
+            "almanak.framework.connectors.benqi.compiler",
+            "BenqiCompiler",
+        ),
+        "curvance": (
+            "almanak.framework.connectors.curvance.compiler",
+            "CurvanceCompiler",
+        ),
+        "jupiter_lend": (
+            "almanak.framework.connectors.jupiter_lend.compiler",
+            "JupiterLendCompiler",
+        ),
+        "kamino": (
+            "almanak.framework.connectors.kamino.compiler",
+            "KaminoCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 
@@ -86,10 +134,20 @@ class CompilerRegistry:
         """Return True when ``protocol`` has a connector compiler."""
         return protocol.lower().replace("-", "_") in cls._BUILTIN_LOADERS
 
+    @classmethod
+    def supported_protocols(cls) -> tuple[str, ...]:
+        """Return all protocol names with connector-owned compilers."""
+        return tuple(sorted(cls._BUILTIN_LOADERS))
+
 
 def get_compiler(protocol: str) -> BaseProtocolCompiler | None:
     """Module-level convenience wrapper."""
     return CompilerRegistry.get(protocol)
 
 
-__all__ = ["CompilerRegistry", "get_compiler"]
+def supported_protocols() -> tuple[str, ...]:
+    """Module-level convenience wrapper."""
+    return CompilerRegistry.supported_protocols()
+
+
+__all__ = ["CompilerRegistry", "get_compiler", "supported_protocols"]

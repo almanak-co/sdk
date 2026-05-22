@@ -1921,10 +1921,14 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
                 "protocol": protocol,
             },
         )
+        if protocol == "aerodrome_slipstream":
+            title_suffix = f"tick_spacing={fee_tier}"
+        else:
+            title_suffix = f"{fee_tier / 10000:.2f}%"
         render_result(
             response,
             json_output=json_output,
-            title=f"Pool: {token_a.upper()}/{token_b.upper()} ({fee_tier / 10000:.2f}%)",
+            title=f"Pool: {token_a.upper()}/{token_b.upper()} ({title_suffix})",
         )
         if response.status == "error":
             sys.exit(1)

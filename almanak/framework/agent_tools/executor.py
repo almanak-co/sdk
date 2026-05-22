@@ -1344,7 +1344,7 @@ class ToolExecutor:
 
         if tool_name == "withdraw_lending":
             # The WithdrawIntent compiler already falls back to the withdraw_all
-            # path when amount=="all" (see compiler_lending.py). We set the flag
+            # path when amount=="all" (see connectors/base/lending/aave_helpers.py). We set the flag
             # explicitly here only to match repay_lending's intent shape (which
             # uses repay_full) so response-enrichment and strategy-author code
             # reading the intent see a consistent "full close" signal.
@@ -1856,9 +1856,10 @@ class ToolExecutor:
 
     # ── POOL / POSITION READ TOOLS ─────────────────────────────────────
 
+    # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
-        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
         from almanak.framework.connectors.protocol_aliases import normalize_protocol
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
@@ -1876,7 +1877,9 @@ class ToolExecutor:
             "agni_finance": AGNI_FINANCE,
             "pancakeswap_v3": PANCAKESWAP_V3,
             "sushiswap_v3": SUSHISWAP_V3,
+            "aerodrome_slipstream": AERODROME,
         }
+        _FACTORY_KEY = {"aerodrome_slipstream": "cl_factory"}
         registry = _PROTOCOL_REGISTRIES.get(protocol)
         if registry is None:
             return ToolResponse(
@@ -1899,18 +1902,18 @@ class ToolExecutor:
         pool_address = args.get("pool_address")
         if not pool_address:
             chain_contracts = registry.get(chain, {})
-            factory_address = chain_contracts.get("factory")
+            factory_address = chain_contracts.get(_FACTORY_KEY.get(protocol, "factory"))
             if not factory_address:
                 return ToolResponse(
                     status="error",
                     error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
                 )
-            # getPool(address,address,uint24) selector = 0x1698ee82
-            # Calldata: 4-byte selector + 32-byte padded token_a + 32-byte padded token_b + 32-byte padded fee
+            # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
+            get_pool_selector = "0x28af8d0b" if protocol == "aerodrome_slipstream" else "0x1698ee82"
             addr_a_padded = token_a.address.lower().removeprefix("0x").zfill(64)
             addr_b_padded = token_b.address.lower().removeprefix("0x").zfill(64)
             fee_padded = hex(fee_tier)[2:].zfill(64)
-            get_pool_calldata = "0x1698ee82" + addr_a_padded + addr_b_padded + fee_padded
+            get_pool_calldata = get_pool_selector + addr_a_padded + addr_b_padded + fee_padded
             get_pool_resp = self._client.rpc.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,
@@ -2027,8 +2030,11 @@ class ToolExecutor:
             },
         )
 
+    # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901
         """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
+        from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
         from almanak.framework.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
         from almanak.gateway.proto import gateway_pb2
 
@@ -2039,12 +2045,18 @@ class ToolExecutor:
         # and we pass "" to let the gateway use its configured default.
         network = args.get("network", "")
         position_id = int(args["position_id"])
+        lp_protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
 
-        nft_manager = POSITION_MANAGER_ADDRESSES.get(chain)
+        if lp_protocol == "aerodrome_slipstream":
+            nft_manager = AERODROME.get(chain, {}).get("cl_nft")
+        else:
+            nft_manager = POSITION_MANAGER_ADDRESSES.get(chain)
         if not nft_manager:
             return ToolResponse(
                 status="error",
-                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No position manager on {chain}"),
+                error=_error_dict(
+                    AgentErrorCode.UNSUPPORTED_CHAIN, f"No position manager on {chain} for {lp_protocol}"
+                ),
             )
 
         # positions(uint256) selector = 0x99fbab88
@@ -2085,16 +2097,14 @@ class ToolExecutor:
         # Read current tick to determine if in range.
         # We need the pool address -- query factory.getPool() via gateway RPC to avoid
         # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
-        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
-
-        lp_protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
         _LP_PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
             "uniswap_v3": UNISWAP_V3,
             "agni_finance": AGNI_FINANCE,
             "pancakeswap_v3": PANCAKESWAP_V3,
             "sushiswap_v3": SUSHISWAP_V3,
+            "aerodrome_slipstream": AERODROME,
         }
+        _LP_FACTORY_KEY = {"aerodrome_slipstream": "cl_factory"}
         lp_registry = _LP_PROTOCOL_REGISTRIES.get(lp_protocol)
         if lp_registry is None:
             return ToolResponse(
@@ -2105,16 +2115,16 @@ class ToolExecutor:
                     recoverable=True,
                 ),
             )
-        lp_factory_address = lp_registry.get(chain, {}).get("factory")
+        lp_factory_address = lp_registry.get(chain, {}).get(_LP_FACTORY_KEY.get(lp_protocol, "factory"))
 
         in_range: bool | None = None
         pool_current_tick = None
         if lp_factory_address:
-            # getPool(address,address,uint24) selector = 0x1698ee82
+            get_pool_selector = "0x28af8d0b" if lp_protocol == "aerodrome_slipstream" else "0x1698ee82"
             addr0_padded = token0.lower().removeprefix("0x").zfill(64)
             addr1_padded = token1.lower().removeprefix("0x").zfill(64)
             fee_hex_padded = hex(fee)[2:].zfill(64)
-            get_pool_cd = "0x1698ee82" + addr0_padded + addr1_padded + fee_hex_padded
+            get_pool_cd = get_pool_selector + addr0_padded + addr1_padded + fee_hex_padded
             gp_resp = self._client.rpc.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,

@@ -32,11 +32,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.intents import BorrowIntent
-from almanak.framework.intents.compiler_lending import (
-    _DecodedReserveConfig,
+from almanak.framework.connectors.base.lending.aave_helpers import (
     _check_lending_reserve_borrowable,
+    _DecodedReserveConfig,
 )
+from almanak.framework.intents import BorrowIntent
 from almanak.framework.intents.intent_errors import LendingBorrowNotEnabledError
 from almanak.framework.intents.state_machine import IntentStateMachine
 
@@ -79,7 +79,7 @@ class TestCheckLendingReserveBorrowable:
     def test_borrowing_enabled_returns_none(self) -> None:
         compiler = _make_compiler()
         with patch(
-            "almanak.framework.intents.compiler_lending._fetch_reserve_config"
+            "almanak.framework.connectors.base.lending.aave_helpers._fetch_reserve_config"
         ) as mock_fetch:
             mock_fetch.return_value = _DecodedReserveConfig(
                 ltv=8000,
@@ -99,7 +99,7 @@ class TestCheckLendingReserveBorrowable:
     def test_borrowing_disabled_returns_reason(self) -> None:
         compiler = _make_compiler()
         with patch(
-            "almanak.framework.intents.compiler_lending._fetch_reserve_config"
+            "almanak.framework.connectors.base.lending.aave_helpers._fetch_reserve_config"
         ) as mock_fetch:
             mock_fetch.return_value = _DecodedReserveConfig(
                 ltv=8000,
@@ -122,7 +122,7 @@ class TestCheckLendingReserveBorrowable:
     def test_fetch_returns_none_yields_fail_open(self) -> None:
         compiler = _make_compiler()
         with patch(
-            "almanak.framework.intents.compiler_lending._fetch_reserve_config",
+            "almanak.framework.connectors.base.lending.aave_helpers._fetch_reserve_config",
             return_value=None,
         ):
             result = _check_lending_reserve_borrowable(
@@ -137,7 +137,7 @@ class TestCheckLendingReserveBorrowable:
         """No PoolDataProvider registration → fail-open, no fetch attempted."""
         compiler = _make_compiler(chain="solana")
         with patch(
-            "almanak.framework.intents.compiler_lending._fetch_reserve_config"
+            "almanak.framework.connectors.base.lending.aave_helpers._fetch_reserve_config"
         ) as mock_fetch:
             result = _check_lending_reserve_borrowable(
                 compiler,
@@ -196,7 +196,7 @@ class TestBorrowFrozenReserveGate:
     """
 
     def _setup(self):
-        from almanak.framework.intents import compiler_lending as cl_mod
+        from almanak.framework.connectors.base.lending import aave_helpers as cl_mod
         from almanak.framework.intents.compiler_models import CompilationStatus
 
         compiler = MagicMock()

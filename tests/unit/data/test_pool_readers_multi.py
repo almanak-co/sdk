@@ -194,6 +194,24 @@ class TestAerodromePoolReader:
         assert addr is not None
         assert addr.lower() == expected_pool.lower()
 
+    def test_resolve_sends_int24_selector(self):
+        """Slipstream factory.getPool uses the int24 selector, not the v3 uint24 one."""
+        seen: dict[str, str] = {}
+
+        def capture_rpc(chain, to, calldata):
+            seen["calldata"] = calldata
+            return _address_bytes("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+        reader = AerodromePoolReader(rpc_call=capture_rpc, cache_ttl_seconds=0)
+        reader.resolve_pool_address(
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "base",
+            fee_tier=100,
+        )
+        assert seen["calldata"].startswith("0x28af8d0b")  # getPool(address,address,int24)
+        assert not seen["calldata"].startswith("0x1698ee82")  # not v3's uint24 selector
+
     def test_resolve_no_factory_for_chain(self):
         """Chain without factory returns None for unknown pools."""
 
@@ -322,6 +340,23 @@ class TestPancakeSwapV3PoolReader:
         assert addr is not None
         assert addr.lower() == expected_pool.lower()
 
+    def test_resolve_sends_uint24_selector(self):
+        """v3-family factories receive the uint24 getPool selector (subclass inherits default)."""
+        seen: dict[str, str] = {}
+
+        def capture_rpc(chain, to, calldata):
+            seen["calldata"] = calldata
+            return _address_bytes("0xabcdef1234567890abcdef1234567890abcdef12")
+
+        reader = PancakeSwapV3PoolReader(rpc_call=capture_rpc, cache_ttl_seconds=0)
+        reader.resolve_pool_address(
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "arbitrum",
+            fee_tier=500,
+        )
+        assert seen["calldata"].startswith("0x1698ee82")  # getPool(address,address,uint24)
+
     def test_rpc_error_raises_data_unavailable(self):
         """RPC failure wraps as DataUnavailableError."""
 
@@ -373,6 +408,15 @@ class TestPoolReaderRegistry:
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         reader = registry.get_reader("base", "aerodrome")
         assert isinstance(reader, AerodromePoolReader)
+
+    def test_get_reader_aerodrome_slipstream_alias(self):
+        """The canonical 'aerodrome_slipstream' name resolves to AerodromePoolReader."""
+        registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
+        reader = registry.get_reader("base", "aerodrome_slipstream")
+        assert isinstance(reader, AerodromePoolReader)
+        # And resolves to the same class as the legacy 'aerodrome' alias
+        legacy = registry.get_reader("base", "aerodrome")
+        assert type(reader) is type(legacy)
 
     def test_get_reader_pancakeswap(self):
         """Get a PancakeSwapV3PoolReader from the registry."""

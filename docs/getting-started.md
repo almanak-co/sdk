@@ -214,7 +214,6 @@ class MyStrategy(IntentStrategy):
 | `UnwrapNativeIntent` | Unwrap native tokens (e.g., WETH to ETH). Factory: `Intent.unwrap()` |
 | `Intent.bridge()` | Bridge tokens cross-chain (factory method returning a composite intent) |
 | `Intent.ensure_balance()` | Ensure minimum token balance on a target chain (factory method resolving to a bridge or hold) |
-| `Intent.sequence()` | Atomic multi-step composite (`IntentSequence`) executing child intents in order with shared rollback semantics |
 
 ## State Persistence (Required for Stateful Strategies)
 

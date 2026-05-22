@@ -117,58 +117,6 @@ Notes:
 
 ---
 
-## Gateway Auth & Security
-
-Load-bearing for hosted (Almanak Infra) deployments. Each variable is read once at gateway startup; changes require a restart.
-
-| Variable | Description |
-|----------|-------------|
-| `ALMANAK_GATEWAY_AUTH_TOKEN` | Shared-secret token for gRPC authentication. When set, clients must provide this token in metadata to access services. **Required on hosted deployments.** |
-| `ALMANAK_GATEWAY_ALLOW_INSECURE` | When `true`, allows the gateway to start without `ALMANAK_GATEWAY_AUTH_TOKEN`. Default `false` (gateway refuses to start). **Local development only** — never set on hosted deployments. |
-| `ALMANAK_GATEWAY_OPERATOR_TOKEN` | Second-factor token (VIB-4493 Phase 1) required for mutation RPCs on `DashboardService` (`PreviewReconcile`, `ApplyReconcile`, `RefreshRegistryFromChain`). Callers must send the same value in the `x-operator-token` metadata header in addition to the regular auth token. When unset (default), the handlers fall back to auth-token-only — safe for single-user / local deployments. |
-
-!!! danger "Hosted deployments are unsafe without these"
-    Omitting `ALMANAK_GATEWAY_AUTH_TOKEN` (or enabling `ALMANAK_GATEWAY_ALLOW_INSECURE=true`) on a hosted gateway exposes every gRPC service to unauthenticated callers — including `ExecutionService`, which signs and submits transactions. Treat both as production secrets.
-
----
-
-## Manual Price Overrides
-
-Last-resort fallback for tokens that no real oracle source can price (e.g., long-tail tokens on emerging chains).
-
-| Variable | Description |
-|----------|-------------|
-| `ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES` | Enable the `ManualPriceOverrideSource` fallback. Default `false`. Off by default because a mis-set env var can feed a wrong price into slippage / teardown decisions. |
-| `ALMANAK_PRICE_OVERRIDE_<TOKEN>` | Per-token override price in USD. Consulted only when every real oracle source failed to price the token. Example: `ALMANAK_PRICE_OVERRIDE_W0G=0.012`. |
-
-Set both: the enable flag turns the source on; the per-token vars supply the prices.
-
----
-
-## Tenderly Simulation
-
-Used by `SimulationService.SimulateBundle` when the simulator is set to `"tenderly"` (or auto-selected). All three must be set together — leaving any one empty disables Tenderly and falls back to Alchemy simulation when available.
-
-| Variable | Description |
-|----------|-------------|
-| `ALMANAK_GATEWAY_TENDERLY_ACCOUNT_SLUG` | Tenderly account slug (the `<account>` segment of the dashboard URL). |
-| `ALMANAK_GATEWAY_TENDERLY_PROJECT_SLUG` | Tenderly project slug within the account. |
-| `ALMANAK_GATEWAY_TENDERLY_ACCESS_KEY` | Tenderly access key with simulation permissions ([account settings → access keys](https://dashboard.tenderly.co/account/authorization)). |
-
----
-
-## Portfolio Provider (Multi-Provider)
-
-Configures the gateway's portfolio valuation source(s). Used by `IntegrationService.GetWalletPortfolio` / `GetWalletPositions` to aggregate balances and DeFi positions across chains.
-
-| Variable | Description |
-|----------|-------------|
-| `ALMANAK_GATEWAY_PORTFOLIO_API_KEY` | Single-provider API key (legacy single-provider path). |
-| `ALMANAK_GATEWAY_PORTFOLIO_API_PROVIDER` | Single-provider name. Default `zerion`. |
-| `ALMANAK_GATEWAY_PORTFOLIO_PROVIDERS` | Multi-provider override. Comma-separated provider names in priority order (e.g., `zerion,moralis`). When set, takes precedence over the single-provider keys. Each provider reads its own API key from `{NAME}_API_KEY` (e.g., `ZERION_API_KEY`, `MORALIS_API_KEY`). |
-
----
-
 ## Safe Wallet
 
 For strategies that execute through a Gnosis Safe multisig.

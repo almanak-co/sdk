@@ -110,7 +110,7 @@ class TestLineaTeardownDoesNotRequireSelfState:
 
 from unittest.mock import MagicMock, patch  # noqa: E402
 
-from almanak.framework.intents import PoolReserveFrozenError  # noqa: E402
+from almanak.framework.connectors.base.lending.aave_helpers import PoolReserveFrozenError  # noqa: E402
 from almanak.framework.intents.vocabulary import (  # noqa: E402
     HoldIntent,
     RepayIntent,

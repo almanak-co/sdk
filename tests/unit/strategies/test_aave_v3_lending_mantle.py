@@ -24,7 +24,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.intents import PoolReserveFrozenError
+from almanak.framework.connectors.base.lending.aave_helpers import PoolReserveFrozenError
 from almanak.framework.intents.vocabulary import (
     HoldIntent,
     RepayIntent,

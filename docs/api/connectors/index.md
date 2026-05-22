@@ -33,7 +33,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Across](across.md) | Bridge | Multi-chain | `across` |
 | [Stargate](stargate.md) | Bridge | Multi-chain | `stargate` |
 | [Flash Loan](flash_loan.md) | Utility | Multi-chain | `flash_loan` |
-| Agni Finance | DEX | Mantle | `agni_finance` (enum only, no connector yet) |
+| Agni Finance | DEX | Mantle | `agni_finance` |
 | [BenQi](benqi.md) | Lending | Avalanche | `benqi` |
 | [Silo V2](silo_v2.md) | Lending | Avalanche | `silo_v2` |
 | [Drift](drift.md) | Perpetuals | Solana | `drift` |
@@ -50,5 +50,5 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Orca](orca.md) | DEX / LP | Solana | `orca` |
 | [Raydium](raydium.md) | DEX / LP | Solana | `raydium` |
 | [LiFi](lifi.md) | Bridge Aggregator | Multi-chain | `lifi` |
-| [Radiant V2](radiant_v2.md) | Lending | Arbitrum, BSC | `radiant_v2` (Aave V2 fork) |
+| Radiant V2 | Lending | Arbitrum | (via Aave V2 fork) |
 | [Base Infrastructure](base.md) | Shared | N/A | `base` |

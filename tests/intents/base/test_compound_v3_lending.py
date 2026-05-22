@@ -543,7 +543,7 @@ class TestCompoundV3SupplyIntent:
         The compiler picks the path by address comparison against the market's
         base_token_address; tests do NOT set ``use_as_collateral`` because the
         default (True) is the only correct value for a non-base token (setting
-        False fails closed in compiler_lending.py).
+        False fails closed in connectors/base/lending/aave_helpers.py).
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         weth = tokens["WETH"]

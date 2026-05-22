@@ -187,7 +187,7 @@ class TestSparkLendingRegistration:
     that unblocks synthetic discovery.
 
     Note on compiler dispatch: spark does NOT go through the
-    AAVE_COMPATIBLE_PROTOCOLS branch. ``compiler_lending.py`` has dedicated
+    AAVE_COMPATIBLE_PROTOCOLS branch. ``connectors/base/lending/aave_helpers.py`` has dedicated
     ``_compile_{supply,withdraw,borrow,repay}_spark`` functions matched by an
     explicit ``if protocol_lower == "spark"`` check after the Aave-compatible
     branch. So pool registration alone (no adapter-registry change) is

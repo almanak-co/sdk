@@ -730,7 +730,7 @@ def _capture_aave_v3_pre_state(
             aave_state.interest_rate_mode = str(rate_mode)
         else:
             # codex review: when the intent leaves ``interest_rate_mode`` unset,
-            # ``compiler_lending.py`` will dispatch the BORROW/REPAY with
+            # ``connectors/base/lending/aave_helpers.py`` will dispatch the BORROW/REPAY with
             # ``AAVE_VARIABLE_RATE_MODE`` (stable mode is deprecated on Aave V3).
             # Surface the rate mode the on-chain tx will actually carry so
             # registry/PnL consumers see the real rate mode, not ``null``.
@@ -811,7 +811,7 @@ def _derive_morpho_token_symbols(
     True). True → ``morpho.supplyCollateral()`` and ``intent.token`` is the
     collateral asset. False → ``morpho.supply()`` (loan-side deposit) and
     ``intent.token`` is the loan asset. The compiler's two-branch routing is
-    documented in ``compiler_lending.py:3851-3852``.
+    documented in ``connectors/base/lending/aave_helpers.py:3851-3852``.
 
     WITHDRAW: mirror of SUPPLY using ``WithdrawIntent.is_collateral``
     (default True).
