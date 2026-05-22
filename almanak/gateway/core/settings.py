@@ -88,6 +88,19 @@ class GatewaySettings(BaseSettings):
     # Set via ``ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true``.
     pool_history_enabled: bool = False
 
+    # PoolHistory soft caps (days). POOL-3 (VIB-4751) exposes these for
+    # POOL-6 (VIB-4754) to read when deciding truncation. 90d at 1h is the
+    # spike R2 sizing for ~432 KB payloads; 180d at 4h is symmetric;
+    # 730d at 1d covers a 2-year backtest. Operators override via
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_{1H,4H,1D}``. The validator
+    # does NOT enforce these — they are a handler concern (UAT card
+    # §"Soft-cap vs hard-cap"). Non-positive overrides fall back to the
+    # default via ``_validate_pool_history_max_days`` so a typo can't
+    # silently kill the cap.
+    pool_history_max_days_1h: int = 90
+    pool_history_max_days_4h: int = 180
+    pool_history_max_days_1d: int = 730
+
     # Metrics settings
     metrics_enabled: bool = True
     metrics_port: int = 9090
@@ -296,3 +309,32 @@ class GatewaySettings(BaseSettings):
             except ValueError:
                 normalized.append(chain.lower())
         return normalized
+
+    @field_validator(
+        "pool_history_max_days_1h",
+        "pool_history_max_days_4h",
+        "pool_history_max_days_1d",
+        mode="before",
+    )
+    @classmethod
+    def _validate_pool_history_max_days(cls, value: object, info: ValidationInfo) -> int:
+        # Soft caps must be > 0; non-positive or malformed env values fall
+        # back to the field default so a typo (``MAX_DAYS_1H=0``) can't
+        # silently disable the cap. Defaults are sourced from the model
+        # so a single edit point updates both branches.
+        defaults: dict[str, int] = {
+            "pool_history_max_days_1h": 90,
+            "pool_history_max_days_4h": 180,
+            "pool_history_max_days_1d": 730,
+        }
+        field_name = info.field_name or ""
+        default = defaults[field_name]
+        if value is None or value == "":
+            return default
+        try:
+            days = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if days <= 0:
+            return default
+        return days
