@@ -7,19 +7,21 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Service | Methods | Description |
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
-| MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 27 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
+| MarketService | 5 | Price data, balances, batch balances, technical indicators, and Uniswap V4 pool key lookup |
+| StateService | 29 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
 | IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
-| DashboardService | 16 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, and activity feed |
+| DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
+| PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
 | LifecycleService | 6 | Agent state management, heartbeat, and commands |
+| TeardownService | 23 | Hosted teardown state routing (V2 deployments): teardown requests, execution state, and operator approvals |
 | PositionService | 1 | Position registry reconciliation against on-chain truth (T24 / VIB-4210) |
 
 ## Health
@@ -164,6 +166,14 @@ Calculate a technical indicator.
 
 ```protobuf
 rpc GetIndicator(IndicatorRequest) returns (IndicatorResponse)
+```
+
+### LookupV4PoolKey
+
+Resolve a Uniswap V4 `bytes32` pool id back to its structured `PoolKey`. Useful for receipt parsers and indexers that observe on-chain events whose log payload carries the bytes32 id rather than the structured key. The gateway populates the cache from observed `PoolManager.Initialize` events; unknown ids return `NOT_FOUND`.
+
+```protobuf
+rpc LookupV4PoolKey(LookupV4PoolKeyRequest) returns (LookupV4PoolKeyResponse)
 ```
 
 ## StateService
@@ -1068,6 +1078,54 @@ shows only trade fills.
 rpc GetActivityFeed(GetActivityFeedRequest) returns (GetActivityFeedResponse)
 ```
 
+### GetPositions
+
+Registry-authoritative position identity (`position_registry`) joined with snapshot-authoritative valuation (`portfolio_snapshots` + `position_state_snapshots`). Replaces SQLite-direct reads in `framework/dashboard/pages/detail.py`. Carries `cutover_state` per `accounting_category` so renderers can split authoritative positions from pre-cutover "Unverified Holdings". (VIB-4493)
+
+```protobuf
+rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse)
+```
+
+### GetPositionRangeHistory
+
+Per-position range / fee / balance history. Source-routes by primitive: LP/PERP from `position_events`, lending from `accounting_events`. Swap/prediction return empty + `stub_message` (history concept N/A). (VIB-4493)
+
+```protobuf
+rpc GetPositionRangeHistory(GetPositionRangeHistoryRequest) returns (GetPositionRangeHistoryResponse)
+```
+
+### GetReconciliationReport
+
+Three-way diff across `transaction_ledger` / `portfolio_snapshots` / `position_registry`. Read-only. LP-only in v1; non-LP primitives surface per-primitive stubs (pending VIB-4202/4209/4501). 5s TTL cache. (VIB-4493)
+
+```protobuf
+rpc GetReconciliationReport(GetReconciliationReportRequest) returns (GetReconciliationReportResponse)
+```
+
+### PreviewReconcile
+
+Dry-run reconciliation. Thin wrapper over `PositionService.Reconcile(apply=false)`. Returns a `preview_token` bound to current registry/ledger state hashes — pass to `ApplyReconcile` to apply. Operator-only; requires the `x-operator-token` second-factor header when `ALMANAK_GATEWAY_OPERATOR_TOKEN` is set. (VIB-4493)
+
+```protobuf
+rpc PreviewReconcile(PreviewReconcileRequest) returns (PreviewReconcileResponse)
+```
+
+### ApplyReconcile
+
+Applies a previously-issued preview. Fails with `STATE_DRIFT` if registry/ledger state changed since the preview was issued. Operator-only; requires the `x-operator-token` second-factor header when `ALMANAK_GATEWAY_OPERATOR_TOKEN` is set. (VIB-4493)
+
+```protobuf
+rpc ApplyReconcile(ApplyReconcileRequest) returns (ApplyReconcileResponse)
+```
+
+### RefreshRegistryFromChain
+
+Forces fresh on-chain reads for every position in `position_registry` for the strategy. Updates `on_chain_verified_at`, re-emits divergent events. Rate-limited at the DashboardService layer to one in-flight per strategy. Operator-only; requires the `x-operator-token` second-factor header when `ALMANAK_GATEWAY_OPERATOR_TOKEN` is set. (VIB-4493)
+
+```protobuf
+rpc RefreshRegistryFromChain(RefreshRegistryFromChainRequest) returns (RefreshRegistryFromChainResponse)
+```
+
 ## FundingRateService
 
 Provides perpetual funding rate data from venues like GMX V2 and Hyperliquid.
@@ -1158,6 +1216,16 @@ message SimulateBundleResponse {
   string simulator_used = 7;
   string error = 8;
 }
+```
+
+## PoolAnalyticsService
+
+Aggregated DEX pool analytics (TVL, volume, fees) sourced through the gateway's analytics providers. Used by risk-adjusted strategies that gate position size on pool depth or 24h turnover.
+
+### GetPoolAnalytics
+
+```protobuf
+rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse)
 ```
 
 ## PolymarketService
@@ -1339,6 +1407,43 @@ Write a command to an agent.
 ```protobuf
 rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
 ```
+
+## TeardownService
+
+Hosted teardown state routing for V2 deployments. Splits into two halves: the **request half** (`teardown_requests`) which tracks operator-issued teardown signals through their lifecycle (acknowledged → started → progress → completed / failed / cancelled), and the **adapter half** (`teardown_execution_state` + `teardown_approvals`) which persists the in-flight intent state machine and operator approvals required for risk-elevated teardown steps. See `blueprints/14-teardown-system.md`.
+
+### Request Half (teardown_requests)
+
+| Method | Description |
+|--------|-------------|
+| `CreateTeardownRequest` | Insert a new teardown request (operator-issued signal). |
+| `GetTeardownRequest` | Fetch a single teardown request by id. |
+| `GetActiveTeardownRequest` | Fetch the active (non-terminal) request for a strategy. |
+| `GetPendingTeardownRequests` | List requests not yet acknowledged by any runner. |
+| `GetAllActiveTeardownRequests` | List every non-terminal request across strategies. |
+| `GetAllTeardownRequests` | List every teardown request (admin / audit). |
+| `UpdateTeardownRequest` | Generic update (mode, slippage, operator note). |
+| `AcknowledgeTeardownRequest` | Mark a request acknowledged by the runner that owns the strategy. |
+| `MarkTeardownStarted` | Transition to `started` once the teardown manager begins executing. |
+| `UpdateTeardownProgress` | Stream per-step progress (intent index, status, last tx_hash). |
+| `MarkTeardownCompleted` | Terminal success state. |
+| `MarkTeardownFailed` | Terminal failure state with error code + message. |
+| `RequestTeardownCancel` | Operator-issued cancellation signal (cooperative). |
+| `MarkTeardownCancelled` | Terminal cancellation state. |
+| `DeleteTeardownRequest` | Hard-delete a request row (admin only). |
+
+### Adapter Half (teardown_execution_state + teardown_approvals)
+
+| Method | Description |
+|--------|-------------|
+| `SaveTeardownState` | Persist the teardown intent state machine snapshot. |
+| `LoadTeardownState` | Restore the state machine on runner restart. |
+| `DeleteTeardownState` | Clear teardown state after terminal completion. |
+| `CreateApprovalRequest` | Block on operator approval for risk-elevated steps (e.g., HARD-mode slippage bumps). |
+| `GetApprovalResponse` | Poll for an operator response by approval id. |
+| `WriteApprovalResponse` | Operator writes an approve/deny decision. |
+| `GetLatestPendingApproval` | Fetch the most recent pending approval for an operator UI. |
+| `WriteApprovalResponseByStrategy` | Approve/deny by strategy id when approval id is not known. |
 
 ## PositionService
 

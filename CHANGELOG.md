@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-05-22
+
 ### BREAKING — VIB-4281 Retired PAUSE / RESUME lifecycle commands
 
 The `PAUSE` and `RESUME` lifecycle commands have been removed from the gateway's
@@ -18,9 +20,14 @@ The `PAUSED` state is no longer in the gateway's writable vocabulary, but
 historical `agent_state` rows still readable for backwards compatibility.
 
 Local SDK behaviour: `almanak strat pause` / `almanak strat resume` CLI surfaces
-that route through the lifecycle channel will now error with
-`INVALID_ARGUMENT`. Use `almanak strat stop` instead; a future PR will remove
-the broken CLI surfaces.
+still return success at the CLI layer (they route through
+`DashboardService.ExecuteAction`, not the lifecycle channel) but the queued
+PAUSE/RESUME row is now silently dropped by the runner with a `WARNING` log.
+Scripts that called `almanak strat pause --wait` will time out waiting for a
+`PAUSED` status that never arrives. Use `almanak strat stop` instead; a future
+PR will remove the broken CLI surfaces. Direct callers of
+`LifecycleService.WriteCommand` (PAUSE / RESUME) or `WriteState` (PAUSED) at
+the gRPC layer do now receive `INVALID_ARGUMENT`.
 
 Migration guidance:
 - Restart a stopped strategy with `restartAgent` / `/v2/agent/restart`
@@ -39,10 +46,14 @@ class at `almanak.framework.market.snapshot.MarketSnapshot`.
 
 **Imports that now hard-fail with `ImportError`**:
 - `from almanak.framework.strategies import MarketSnapshot`
+- `from almanak.framework.data.market_snapshot import MarketSnapshot`
+
+**Imports that still work but are DISCOURAGED** (kept as transitional re-exports
+to soften the upgrade for existing strategies; will be removed in a future
+release):
 - `from almanak.framework.strategies.intent_strategy import MarketSnapshot`
 - `from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot`
 - `from almanak.framework.strategies.multichain import MultiChainMarketSnapshot`
-- `from almanak.framework.data.market_snapshot import MarketSnapshot`
 
 See the migration guide at `docs/migration/vib-4062-marketsnapshot.md`. The
 PRD at `docs/internal/PRD-MarketSnapshotFix.md` is the implementation
@@ -52,8 +63,11 @@ source-of-truth.
 - Multi-chain snapshots raise `AmbiguousChainError` on `chain=None` (was: silent
   default-to-primary). Single-chain snapshots raise `ChainNotConfiguredError`
   on a chain= mismatch (was: silent ignore).
-- `fork_rpc_url` is deleted from the production strategy surface. Paper
-  trading routes fork-aware reads via internal service adapters.
+- `fork_rpc_url` is neutered on the production strategy surface: the property
+  remains on `MarketSnapshot` for compatibility but returns `None` outside
+  paper trading. Paper trading routes fork-aware reads via internal service
+  adapters. Strategies relying on this attribute for production logic will
+  now silently receive `None`.
 - New public `seed_*` API on `MarketSnapshot` (legacy `set_*` retained as
   aliases until deprecation).
 - New `MarketSnapshotBuilder` with named factories per runtime surface
@@ -66,6 +80,240 @@ source-of-truth.
   import orders, caller-bifurcation anti-bypass, private-cache-write
   anti-bypass, direct-constructor anti-bypass, dynamic-import discovery
   sweep, lean-import regression test.
+
+### Added
+
+#### Connectors & chains
+- Camelot DEX connector (folded into connector framework alongside Fluid) (#2360)
+- Register `aave_v3` on bnb / mantle / xlayer chains (VIB-4345) (#2272)
+- Register `balancer` on avalanche (VIB-4346) (#2271)
+- Land 3 deferred chain×connector entries + ethereum traderjoe_v2 LP test (VIB-4419) (#2312)
+- Register `stargate` bnb USDT BRIDGE chain (VIB-4354) (#2277)
+- Register `uniswap_v3` on monad + bnb chains (VIB-4349, VIB-4350, VIB-4351) (#2274, #2275, #2276)
+- Register `traderjoe_v2` on bnb, ethereum, arbitrum (VIB-4374–4378) (#2304, #2306, #2307, #2308)
+
+#### Other
+- Per-test gateway sidecar — `managed_serve` entrypoint, `test_controller` HTTP service, `strat test --no-gateway` flag, anvil balance-cache fix (#2351)
+- Gateway `PoolAnalyticsService` + framework thin-client (VIB-4727) (#2389)
+- `multi_lp_dual_range` demo — reference template for multi-position LP dispatch (#2388)
+- Uniswap V4 LP accounting end-to-end V0 (VIB-4426): `lp_v4` fixture + Anvil-Base E2E proof, canonical V4 PoolKey seed registry, V4 `extract_lp_open_data` gateway PoolKey lookup, V4 connector hygiene (#2335, #2339, #2340, #2341, #2342)
+- Accounting QA framework (matrix harness + protocol-agnostic algos) (VIB-4316) (#2257)
+- Layer 5 typed accounting events for TA, LP, Looping (VIB-4085 / VIB-4086 / VIB-4087) (#2161)
+- Accountant Test cell #22 registry coherence (VIB-4201 / T15) (#2221)
+- UniV3 LP registry-mode cutover (VIB-4198 / T12) (#2214)
+- L0 persistence-invariant sweep (VIB-4193 / T07) (#2215)
+- `position_reference` JSON shape on accounting_events (VIB-4196 / T10) (#2211)
+- Stamp per-primitive `primitive_version` on every event (VIB-4166) (#2206)
+- `MatchingPolicy.for_primitive()` typed accessor (VIB-4195) (#2204)
+- `Intent.registry_handle` reserved field (VIB-4192) (#2205)
+- Reclassify BRIDGE → TRANSFER + gateway whitelist (VIB-4164) (#2196)
+- Category-handler registry + transfer stub (VIB-4163) (#2194)
+- Canonical primitives taxonomy module (VIB-4161) (#2181)
+- Five placeholder IntentType values + fail-fast compiler guard (VIB-4165) (#2199)
+- `agent_tools` PolicyEngine refuses placeholder primitives (VIB-4167) (#2203)
+- Aerodrome Slipstream local readiness W1+W2+W3 (VIB-4434) (#2331)
+- Aave V3 pre-state `e_mode_category` + `interest_rate_mode` (VIB-4213 / T27) (#2286)
+- PancakeSwap V3 LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures (#2248)
+- SushiSwap V3 LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures (#2247)
+- Aerodrome Slipstream LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures, E2E Anvil verified (#2241)
+- `lp_triple` fixture — order-invariant 3-LP position tracking (VIB-4185) (#2244)
+- `lp_dual` fixture (2 LP positions, basis-pool FIFO) (#2228)
+- Compile-time borrow capacity pre-flight for lending intents (#2129)
+- Intent-coverage gate (opt-out warn-only → enforce by default) — VIB-4298 / VIB-4303 (#2246, #2263)
+- Intent-coverage excused YAML (50 structural cells) (VIB-4309) (#2261)
+- Intent-coverage backlog (98 tests + 3 fixes) (VIB-4307) (#2253)
+- 9 BridgeIntent tests + retire LiFi BRIDGE / FlashLoan / aggregator SWAP (VIB-4341, VIB-4309) (#2267)
+- AST attribution for BridgeIntent + FlashLoanIntent (VIB-4340) (#2264)
+- `ConnectorRegistry` foundation (VIB-4302 / VIB-4298 PR 1) (#2242)
+- Aerodrome §8 follow-up bundle (W5+W6+W7+W8) (VIB-4468) (#2333)
+- VIB-4285 factory UX + 3 mixed-primitive accounting fixtures + dashboard UX (#2237)
+- VIB-4488 Morpho post-merge cleanups (4 tickets) (#2343)
+- VIB-4488 Morpho looping G15 cell + L3 HF guard (16/21 → 17/21+) (#2336)
+- DashboardService RPCs + reconciliation primitives (VIB-4493 Phase 1) (#2337)
+- Dashboard template-renderer scaffold + double-title fix (#2352)
+- Dashboard hosted-parity single-strategy entrypoint (Problem A1) (#2372)
+- Dashboard gateway-backed Positions + Lifecycle wired into LP template (Problem A2) (#2373)
+- Dashboard TA chart subplot — `prepare_ta_session_state` for OHLCV + RSI + buy/sell markers (#2368)
+- Dashboard position alias, positions table, range-history plot (#2326)
+- Dashboard position-value fixes for `lp_dual` audit + multi-position panel (#2290)
+- Dashboard trade-tape readability — LP +/fees, failure reason, datetime, TA exports (#2160)
+- Dashboard reconciliation tab wired + delete unverified-lane scaffolding (VIB-4548) (#2348)
+- Dashboard authoring docs (#2177)
+- 5 framework dashboard templates bake in 3 accounting sections (#2176)
+- RSI custom dashboards (4 strategies) (VIB-3975) (#2325)
+- OHLCV single composition path — factory + dashboard API (VIB-4347) (#2270)
+- Gateway announces `INITIALIZING` state from strategy-pod gateway (#2310)
+- Gateway stamps running almanak version on `agent_state` writes (#2138)
+- Gateway `SumLedgerGasUsd` RPC (#2255)
+- Postgres state RPCs (hosted half of `SaveLedgerAndRegistry`) — VIB-4205 / T19 (#2239)
+- Gateway migration_state RPCs + cutover boot guard (SQLite half) — VIB-4208 / T22 (#2230)
+- `RegistryAutoCollisionError` typed exception (VIB-4200 / T14) (#2222)
+- `save_ledger_and_registry` atomic commit primitive (local SQLite) — VIB-4197 (#2207)
+- Blueprint 28 + `position_registry` schema (VIB-4188 + VIB-4190) (#2197)
+- `PositionService.Reconcile` + `ax positions reconcile` CLI (VIB-4210 / T24) (#2240)
+- Hosted-mode Postgres teardown backend + collapse `is_hosted` forks (VIB-4049) (#2234)
+- Hosted teardown state routed through gateway (VIB-4317) (#2258)
+- `accounting-timeline` rescoped to UX activity feed (VIB-4039 epic) (#2117)
+- `portfolio_snapshots` Phase 4 identity end-to-end (VIB-4091, 8 tickets) (#2162)
+- Config service Phase 6 — typed `AgentToolsConfig` + `FrameworkConfig` submodels migrate framework env reads (#2156)
+- Config service Phase 5 — typed submodels replace 120 env reads (#2152)
+- Config service Phases 0–3 — skeleton, lint gate, gateway boot cutover, Click options helper, strategy schema (#2107)
+- Migrate demo `run_anvil` env reads to config service (VIB-4425) (#2328)
+- Migrate gateway env reads to config service (VIB-4424) (#2324)
+- Migrate framework/service env reads to config service (VIB-4423) (#2313)
+- ALM-2725 report running Almanak version (#2168)
+- `/pr-merger` Stage 6.5 step-back drift check skill (VIB-4141) (#2173)
+- UAT-GATE v2 + pr-merger blocked-PR diagnosis + targeted kitchenloop skills (#2171)
+- `kitchenloop` prd-shred phase for large architectural PRDs (#2198)
+- `kitchenloop` demo-gate re-run gate before PR creation (VIB-4181) (#2190)
+- `accountant` Blueprint 27 v2 rewrite + native-gas in PnL (VIB-4224 ACC-01 + VIB-4225 ACC-02) (#2208)
+
+### Changed
+
+- Fold Uniswap V3 compiler into connector (#2350)
+- Fold Curve compiler into connector (#2354)
+- Fold Fluid / Camelot compilers into connectors (#2360)
+- Fold phase 2 compilers into connectors (#2375)
+- Coverage W1 — accounting category-handlers + basis decomposition (VIB-4078) (#2145)
+- Coverage W2 — gateway services: simulation, funding-rate, dashboard (VIB-4079) (#2149)
+- Coverage W3 — CLI hotspots Phase 4 follow-on extractions (VIB-4080) (#2153)
+- Coverage W4 — dashboard scope clarification (VIB-4081) (#2154)
+- Coverage W5 — backtesting long tail: dead code + paper/engine + risk/reconciler (VIB-4082) (#2157)
+- Coverage W6 — Pendle compilers Phase 2 follow-on (VIB-4083) (#2158)
+- Ratchet `fail_under` floor 72 → 75 (e64c8f028)
+- Audit-engine consolidation + Empty≠Zero deletion (VIB-4228) (#2201)
+- Re-point 4 consumers at `primitives.taxonomy` + per-primitive `matching_policy_version` (VIB-4162) (#2192)
+- Split CDP/LIQUIDATION from LENDING placeholder mapping (VIB-4248) (#2209)
+- Per-protocol extraction-spec overlay (VIB-4320) (#2269)
+- Config service Phase 4b — private key via kwarg, no `os.environ` mutation (#2111)
+- Config service Phase 4c — centralise `ALMANAK_STRATEGY_FOLDER` mutation (#2112)
+- Retire PAUSE/RESUME commands and PAUSED state (VIB-4281) — see BREAKING (#2266)
+- VIB-4218 / T18a — UniV3 LP 21-cell post-T12 baseline (#2219)
+- Layer 5 Uniswap V3 LP assertions added (#2359)
+- Layer 5 Uniswap V4 LP assertions (VIB-4594) (#2369)
+- Layer 5 TraderJoe V2 LP assertions (VIB-4598) (#2366)
+- Layer 5 Morpho Blue lending assertions (VIB-4604) (#2367)
+- Layer 5 Compound V3 lending assertions (VIB-4603) (#2365)
+- Layer 5 Aerodrome + Slipstream LP assertions (VIB-4597) (#2364)
+- Layer 5 Aave V3 lending assertions (VIB-4593) (#2361)
+- Layer 5 SushiSwap V3 LP assertions, all chains (VIB-4595) (#2363)
+- Layer 5 PancakeSwap V3 LP assertions, all chains (VIB-4596) (#2362)
+- Intent-tests for traderjoe_v2 SWAP / LP_OPEN / LP_CLOSE across bnb / ethereum / arbitrum (VIB-4371–4378) (#2300–#2308)
+- Intent-tests for uniswap_v4 SWAP / LP_OPEN / LP_CLOSE / LP_COLLECT_FEES across base / optimism / polygon / avalanche / bnb (VIB-4355–4373) (#2280–#2302)
+- Intent-tests for pancakeswap_v3 base SWAP + LP_OPEN/CLOSE/COLLECT_FEES (VIB-4352, VIB-4353) (#2278, #2279)
+- Intent-tests for uniswap_v3 monad + bnb + avalanche LP / SWAP / COLLECT_FEES (VIB-4348, VIB-4349, VIB-4350, VIB-4351) (#2273–#2276)
+- Optimism aerodrome SWAP intent tests + Zodiac permissions (VIB-4389) (#2319)
+- Optimism aerodrome LP_OPEN + LP_CLOSE intent tests (VIB-4390) (#2318)
+- xfail fork-pin flakes (VIB-4314, VIB-4590) (#2355)
+- Restore sushiswap_v3 SWAP coverage (#2136)
+- BNB pancakeswap_v3 insufficient-balance compile failure intent test fix (#2151)
+- Switch xlayer Uniswap V3 swap to USDT0/USDG (#2133)
+- VIB-4199 / T13 — bug #2130 acceptance test (local-mode) (#2224)
+- VIB-4216 — anti-bypass guard for open-position queries (T30) static test (#2210)
+- VIB-4194 — UniV3 L1 offline goldens incl. `expected_registry_row.json` (T08) (#2212)
+- T02 Tier-1 parser-coverage audit (VIB-4187, Hard Gate 1) docs (#2200)
+- Improve intent-test CI RPC proxy caching (#2121)
+- Sync hand-written docs pages with current SDK state (#2142)
+- Migration spec — T04 Hard Gate 3 cutover for `position_registry` (VIB-4189) (#2202)
+- Catch primitives + position-registry blueprint docs up to 2026-05-11 main (#2229)
+- Blueprints + docs + skill sync to 2026-05-12 main (audit-driven catch-up) (#2243)
+- AGENTS.md slim from 556 to 423 lines (#2220)
+- AGENTS.md — refactor (not allowlist) is the default when CRAP trips (#2134)
+- AGENTS.md — drop uv references; add `almanak strat test` (#2137)
+- E2E flow non-negotiables — add uv-run prefix (#2226)
+- Lending pre/post-state pipeline blueprint + QA cleanup (VIB-3474 shipped) (#2217)
+- Boundary doc — T01 accounting × position registry (VIB-4186) (#2195)
+- VIB-4426 V0 last-mile session report + scalability proof (#2344)
+- VIB-1939 audit — close as resolved + mark W9 done (#2334)
+- VIB-4299 config-service Phase 7 completion record (#2329)
+- Strategy-layer docs — multi-position dispatch one Intent per iteration (#2387)
+- Dashboard docs — canonical `api_client` kwarg in LP examples + regression test (#2380)
+- Dashboard plots package exports + blueprint 23 alignment with actual API (#2155)
+- Dashboard anatomy split into template vs custom paths (#2180)
+- Delete blueprint 09; consolidate dashboard docs into 22 + 23 (#2159)
+- Connector additions documented as required step — ConnectorRegistry (#2245)
+- UAT-card test inventory restored (17→41) (VIB-4210) (#2249)
+- CRAP refactor protocol skill — blueprint-first, Plan-agent handoff, test baseline (#2178)
+- `pr-merger` Stage 4 skill — name CI checks where easy fix is wrong fix (#2175)
+- Bump almanak-code to v1.0.13 (#2144)
+- Bump almanak-code to v1.0.15 (#2179)
+- Misc cleanup — salvage stranded commits + preserve history + drop 14 superseded notes (#2174)
+- Cleanup batch — remove 341 stale internal docs/notes (#2001)
+- Drop stale MarketSnapshot import paths post-VIB-4062 (#2172)
+- Strip Linear ticket refs from user-visible strings (#2163)
+- CI — notify platform repo after RC artifacts publish (#2268)
+- CI — backfill_runtime_images workflow for older SDK releases (#2135)
+- CI — refresh `runtime-image-prepull` DaemonSet after every release (#2139)
+- CI — fix `gke-gcloud-auth-plugin` install on apt-managed gcloud (#2143)
+- Kitchen loop iter 177 / 178 / 179 artifacts (#2184, #2186, #2188)
+- Kitchen loop hotfix tickets in Todo + Triage rescue (VIB-4179) (#2189)
+- Wave 1 accounting/portfolio/teardown/simulator fixes (VIB-4581/4584/4587/4588) (#2353)
+- F1 PRD artifacts + Codex P2/P4 fixes (VIB-4159 follow-up) (#2213)
+- Codex-reproduced bug bundle — VIB-4178 + VIB-4310 + VIB-3210 (#2256)
+- Add `crap-diff-fresh` make target for CI-parity local CRAP gate (#2218)
+- Dependency updates:
+  - bump `actions/cache` from 4 to 5 (#2059)
+  - bump `google-github-actions/setup-gcloud` from 2 to 3 (#2164)
+  - bump `gitpython` from 3.1.47 → 3.1.49 (#2167)
+  - bump `gitpython` from 3.1.49 → 3.1.50 (#2193)
+  - bump `mako` from 1.3.11 → 1.3.12 (#2166)
+  - bump `urllib3` from 2.6.3 → 2.7.0 (#2238)
+
+### Fixed
+
+- Submitter receipt-recover from "nonce too low" to prevent zombie positions (#2358)
+- LP_CLOSE fees-vs-principal conflation on UniV3 / PancakeSwap V3 (#2385)
+- Block-anchored lending post-state reads (VIB-4589 / F7) (#2357)
+- Stale gateway balance cache + S2 preflight design (VIB-4613, VIB-4614) (#2356)
+- `SwapEventPayload` tolerates unmeasured `amount_in` / `amount_out` (VIB-4490, G6 unblock) (#2338)
+- Wire Track-C `position_state_snapshots` through gateway (VIB-4541) (#2347)
+- Drop WETH from `lp_v4` anvil_funding + re-baseline (VIB-4538) (#2345)
+- Fall back to TokenResolver for Aave V3 reserves missing from static registry (#2327)
+- Re-baseline `lp-uniswap_v4-base` LP4 PASS → XFAIL (VIB-4426) (#2332)
+- Morpho looping repay liquid wallet balance before WITHDRAW (#2330)
+- Morpho SUPPLY consumes `supply_collateral_amount` (VIB-4437, MorphoMay15 F2) (#2322)
+- Morpho pre-state resolves loan_token from registry for SUPPLY / WITHDRAW (VIB-4432) (#2321)
+- PriceAggregator fails closed on 2-source divergence (VIB-4439, MorphoMay15 F1) (#2323)
+- Silence misleading "free public RPC" log (VIB-4429) (#2317)
+- Avoid doubled "dashboard" in loading spinner label (#2314)
+- Hosted strategy dashboards general improvements (#2390)
+- Token-decimals-aware tape formatter (WBTC dust) (VIB-3890) (#2371)
+- `test_controller` pre-sets `ALMANAK_GATEWAY_ALLOW_INSECURE` so `managed_serve` subprocess boots (#2374)
+- Runner amount-chaining warning gated on chained 'all' usage (VIB-2036) (#2370)
+- Codex fix — looping demo teardown sequences (#2316)
+- Codex fix — demo teardown routes (#2048)
+- Safe slot probing + revert-reason decoding for FiatToken-proxy funding (#2283)
+- LP payload `pool_address` stored V3 descriptor, not on-chain address (VIB-4396) (#2289)
+- V4 collect-fees flake from live oracle ↔ fork-block coupling (VIB-4427) (#2315)
+- `uniswap_v3` `extract_liquidity` reads wrong slot; strict uint128/uint160 decoding (VIB-4395) (#2288)
+- Aerodrome `extract_registry_payload_open/close` so `position_registry` fills (VIB-4305) (#2251)
+- `swap_handler` resolves address-keyed `token_in` to symbol for `price_inputs_json` lookup (VIB-4304) (#2250)
+- PostgresStore write path for `position_events` (VIB-4315) (#2254)
+- `state_service` asyncpg datetime binding in `UpdateMigrationState` / `MarkBackfillComplete` (VIB-4313) (#2252)
+- Augmentation chokepoint reads `position_registry` (VIB-4278, closes L5_22) (#2236)
+- Guard against pool-descriptor strings at LP consumer sites + producer sweep (VIB-4274) (#2231)
+- `lp_dual` explicit `registry_handle` per leg (VIB-4279) (#2233)
+- Wire LP wallet-basis hooks (VIB-4262, G6 reconciliation closer) (#2225)
+- Populate lending `_before` fields from `pre_state_json` (VIB-4257) (#2223)
+- Merge intent-token prices into teardown ledger oracle (VIB-4318) (#2260)
+- Emit `il_usd` and `hodl_value_usd` on LP close (VIB-4319) (#2259)
+- Rotate Pendle test fixture to live YT-sUSDe-13AUG2026; flag expiries in intent tests (#2235)
+- CoinGecko fail fast on 429 with one bounded 1s retry instead of compounding backoff (#2232)
+- CI mirror BNB fork-block pin to framework-canonical BSC env var (VIB-4003) (#2140)
+- State machine — classify host-unreachable RPC errors as permanent (VIB-1215) (#2187)
+- State machine — expand non-retryable keywords for market/pool/Drift errors (VIB-2866) (#2182)
+- Submitter — decode TraderJoe V2 custom error selectors (VIB-3102) (#2183)
+- Demo-runner — clear `ALMANAK_CHAIN`/`CHAINS` in `run_demo.py` subprocess env (VIB-4177) (#2185)
+- `pr-manager` waits for maturing PRs in post-batch loop (VIB-4180) (#2191)
+- `_fund_anvil_wallets` honors `settings.private_key` fallback (#2170)
+- Expose Quant Data Layer methods on canonical MarketSnapshot (ALM-2696) (#2125)
+- `pcs-v3` swap parser preserves "Empty != zero" (#2127)
+- Teardown retries init under WAL contention; surface init failures (ALM-2705) (#2119)
+- Detect stale CEX upstream + failover to keep RSI fresh (ALM-2697) (#2120)
+
+### Security
+
+- PriceAggregator fails closed on 2-source divergence — prevents single-source manipulation of LP/oracle prices (VIB-4439) (#2323)
 
 ## [2.15.0] - 2026-04-23
 

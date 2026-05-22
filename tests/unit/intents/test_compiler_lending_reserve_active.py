@@ -20,12 +20,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
-from almanak.framework.connectors.base.lending.aave_helpers import (
+from almanak.framework.intents import (
     PoolReserveFrozenError,
+    SupplyIntent,
     assert_lending_reserve_active,
 )
-from almanak.framework.intents import SupplyIntent
+from almanak.framework.intents import compiler_lending as cl
 from almanak.framework.intents.compiler_models import CompilationStatus
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"

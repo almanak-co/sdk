@@ -1092,7 +1092,7 @@ class IntentStateMachine:
             "mint zero liquidity",
             # VIB-3825: LendingBorrowNotEnabledError.ERROR_PREFIX
             # (intent_errors.py) surfaces from the BORROW compile-time
-            # borrowable pre-flight in aave_helpers._check_lending_reserve_borrowable.
+            # borrowable pre-flight in compiler_lending._check_lending_reserve_borrowable.
             # Retrying with the same asset always reproduces the on-chain
             # Aave V3 code 11 (BORROWING_NOT_ENABLED) revert — strategy must
             # HOLD until governance enables borrowing or pick a different
@@ -1100,7 +1100,7 @@ class IntentStateMachine:
             "lending borrow not enabled",
             # LendingBorrowExceedsCapacityError.ERROR_PREFIX (intent_errors.py)
             # surfaces from the BORROW compile-time capacity pre-flight in
-            # aave_helpers._check_lending_borrow_capacity_{aave_v3,benqi}.
+            # compiler_lending._check_lending_borrow_capacity_{aave_v3,benqi}.
             # Retrying with the same (collateral, borrow_amount) reproduces the
             # on-chain revert (Aave V3 code 35
             # COLLATERAL_CANNOT_COVER_NEW_BORROW; Compound V2 / BENQI

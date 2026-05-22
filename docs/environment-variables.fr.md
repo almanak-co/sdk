@@ -76,6 +76,58 @@ Nécessaires uniquement si votre stratégie utilise ces protocoles spécifiques.
 
 ---
 
+## Authentification et sécurité de la passerelle
+
+Critique pour les déploiements hébergés (Almanak Infra). Chaque variable est lue une fois au démarrage de la passerelle ; les modifications nécessitent un redémarrage.
+
+| Variable | Description |
+|----------|-------------|
+| `ALMANAK_GATEWAY_AUTH_TOKEN` | Jeton secret partagé pour l'authentification gRPC. Lorsqu'il est défini, les clients doivent fournir ce jeton dans les métadonnées pour accéder aux services. **Requis sur les déploiements hébergés.** |
+| `ALMANAK_GATEWAY_ALLOW_INSECURE` | Lorsque `true`, autorise la passerelle à démarrer sans `ALMANAK_GATEWAY_AUTH_TOKEN`. Par défaut `false` (la passerelle refuse de démarrer). **Uniquement pour le développement local** — ne jamais activer sur un déploiement hébergé. |
+| `ALMANAK_GATEWAY_OPERATOR_TOKEN` | Jeton de second facteur (VIB-4493 Phase 1) requis pour les RPC de mutation sur `DashboardService` (`PreviewReconcile`, `ApplyReconcile`, `RefreshRegistryFromChain`). Les appelants doivent envoyer la même valeur dans l'en-tête de métadonnées `x-operator-token` en plus du jeton d'authentification habituel. Lorsqu'il n'est pas défini (par défaut), les handlers se rabattent sur l'authentification par jeton seul — sûr pour les déploiements mono-utilisateur / locaux. |
+
+!!! danger "Les déploiements hébergés sont non sécurisés sans ces variables"
+    Omettre `ALMANAK_GATEWAY_AUTH_TOKEN` (ou activer `ALMANAK_GATEWAY_ALLOW_INSECURE=true`) sur une passerelle hébergée expose chaque service gRPC à des appelants non authentifiés — y compris `ExecutionService`, qui signe et soumet les transactions. Traitez les deux comme des secrets de production.
+
+---
+
+## Surcharges de prix manuelles
+
+Solution de dernier recours pour les tokens qu'aucune source d'oracle réelle ne peut tarifer (ex. tokens long-tail sur des chaînes émergentes).
+
+| Variable | Description |
+|----------|-------------|
+| `ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES` | Active le repli `ManualPriceOverrideSource`. Par défaut `false`. Désactivé par défaut car une variable mal configurée pourrait injecter un prix erroné dans les décisions de slippage / teardown. |
+| `ALMANAK_PRICE_OVERRIDE_<TOKEN>` | Prix de surcharge par token en USD. Consulté uniquement lorsque toutes les sources d'oracle réelles ont échoué à tarifer le token. Exemple : `ALMANAK_PRICE_OVERRIDE_W0G=0.012`. |
+
+Configurez les deux : le drapeau d'activation allume la source ; les variables par token fournissent les prix.
+
+---
+
+## Simulation Tenderly
+
+Utilisée par `SimulationService.SimulateBundle` lorsque le simulateur est réglé sur `"tenderly"` (ou auto-sélectionné). Les trois doivent être définis ensemble — laisser l'un vide désactive Tenderly et bascule vers la simulation Alchemy si disponible.
+
+| Variable | Description |
+|----------|-------------|
+| `ALMANAK_GATEWAY_TENDERLY_ACCOUNT_SLUG` | Slug de compte Tenderly (le segment `<account>` de l'URL du tableau de bord). |
+| `ALMANAK_GATEWAY_TENDERLY_PROJECT_SLUG` | Slug de projet Tenderly dans le compte. |
+| `ALMANAK_GATEWAY_TENDERLY_ACCESS_KEY` | Clé d'accès Tenderly avec permissions de simulation ([paramètres du compte → clés d'accès](https://dashboard.tenderly.co/account/authorization)). |
+
+---
+
+## Fournisseur de portefeuille (multi-fournisseur)
+
+Configure la ou les source(s) d'évaluation de portefeuille de la passerelle. Utilisé par `IntegrationService.GetWalletPortfolio` / `GetWalletPositions` pour agréger les soldes et les positions DeFi sur plusieurs chaînes.
+
+| Variable | Description |
+|----------|-------------|
+| `ALMANAK_GATEWAY_PORTFOLIO_API_KEY` | Clé API mono-fournisseur (chemin hérité mono-fournisseur). |
+| `ALMANAK_GATEWAY_PORTFOLIO_API_PROVIDER` | Nom du fournisseur unique. Par défaut `zerion`. |
+| `ALMANAK_GATEWAY_PORTFOLIO_PROVIDERS` | Surcharge multi-fournisseur. Noms de fournisseurs séparés par des virgules, par ordre de priorité (ex. `zerion,moralis`). Lorsque défini, prend le pas sur les clés mono-fournisseur. Chaque fournisseur lit sa propre clé API depuis `{NAME}_API_KEY` (ex. `ZERION_API_KEY`, `MORALIS_API_KEY`). |
+
+---
+
 ## Portefeuille Safe
 
 Pour les stratégies qui s'exécutent via un multisig Gnosis Safe.

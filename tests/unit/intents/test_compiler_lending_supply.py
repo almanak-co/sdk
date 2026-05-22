@@ -1,7 +1,7 @@
 """Unit tests targeting the per-protocol helpers extracted from ``compile_supply``.
 
 Phase 2c of the coverage-improvement plan. The helpers are private module-level
-functions in ``almanak.framework.connectors.base.lending.aave_helpers``:
+functions in ``almanak.framework.intents.compiler_lending``:
 
 - ``compile_supply`` (thin dispatcher)
 - ``_compile_supply_jupiter_lend`` (Solana)
@@ -12,6 +12,7 @@ functions in ``almanak.framework.connectors.base.lending.aave_helpers``:
 - ``_compile_supply_spark``
 - ``_compile_supply_compound_v3``
 - ``_compile_supply_benqi``
+- ``_compile_supply_joelend``
 - ``_compile_supply_euler_v2``
 - ``_compile_supply_silo_v2``
 
@@ -25,15 +26,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
 from almanak.framework.intents import SupplyIntent
+from almanak.framework.intents import compiler_lending as cl
 from almanak.framework.intents.compiler_models import CompilationStatus
-
-MORPHO_ADAPTER = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueAdapter"
-MORPHO_CONFIG = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueConfig"
-COMPOUND_ADAPTER = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Adapter"
-COMPOUND_CONFIG = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Config"
-COMPOUND_MARKETS = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 TEST_POOL = "0xpooladdress000000000000000000000000000001"
@@ -139,6 +134,170 @@ def _supply_intent(
 # ---------------------------------------------------------------------------
 # Dispatcher - routing and unsupported-protocol handling
 # ---------------------------------------------------------------------------
+
+
+class TestDispatcher:
+    def test_unsupported_protocol_returns_failed(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _supply_intent(protocol="nonexistent_proto")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Unsupported lending protocol: nonexistent_proto" in result.error
+        for expected in (
+            "aave_v3",
+            "morpho",
+            "morpho_blue",
+            "curvance",
+            "spark",
+            "compound_v3",
+            "benqi",
+            "euler_v2",
+            "silo_v2",
+        ):
+            assert expected in result.error
+
+    def test_unknown_supply_token(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.return_value = None
+
+        intent = _supply_intent(protocol="aave_v3", token="FAKE")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Unknown token: FAKE" in result.error
+
+    def test_amount_all_unresolved_fails(self):
+        """``amount="all"`` must be pre-resolved before hitting the dispatcher."""
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = SupplyIntent(
+            protocol="aave_v3",
+            token="USDC",
+            amount="all",
+        )
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "amount='all' for supply must be resolved" in result.error
+
+    def test_jupiter_lend_on_non_solana_fails(self):
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _supply_intent(protocol="jupiter_lend")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "only available on Solana chains" in result.error
+
+    def test_jupiter_lend_on_solana_delegates(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_jupiter_lend_supply.return_value = expected
+        intent = _supply_intent(protocol="jupiter_lend")
+        result = cl.compile_supply(compiler, intent)
+        assert result is expected
+        compiler._compile_jupiter_lend_supply.assert_called_once_with(intent)
+
+    def test_kamino_dispatches_to_helper_on_solana(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_kamino_supply.return_value = expected
+        intent = _supply_intent(protocol="kamino")
+        result = cl.compile_supply(compiler, intent)
+        assert result is expected
+        compiler._compile_kamino_supply.assert_called_once_with(intent)
+
+    def test_kamino_on_non_solana_fails(self):
+        """Kamino dispatched on a non-Solana chain must fail-fast at compile time.
+
+        Symmetric to the jupiter_lend guard. Regression test for issue #1622.
+        """
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _supply_intent(protocol="kamino")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Protocol 'kamino' is only available on Solana chains." in result.error
+        compiler._compile_kamino_supply.assert_not_called()
+
+    def test_non_solana_evm_protocol_on_solana_chain_rejected(self):
+        """On a Solana chain, any non-morpho/morpho_blue/jupiter_lend protocol is rejected."""
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        intent = _supply_intent(protocol="aave_v3")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "not supported for SUPPLY on Solana" in result.error
+
+    def test_outer_exception_returns_failed(self):
+        """An unhandled exception inside the dispatcher is caught and returned as FAILED."""
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = RuntimeError("boom")
+        intent = _supply_intent(protocol="aave_v3")
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "boom" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Solana helpers
+# ---------------------------------------------------------------------------
+
+
+class TestJupiterLendHelper:
+    def test_non_solana_fails(self):
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _supply_intent(protocol="jupiter_lend")
+        result = cl._compile_supply_jupiter_lend(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "only available on Solana chains" in result.error
+
+    def test_solana_delegates_to_compiler(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_jupiter_lend_supply.return_value = expected
+        intent = _supply_intent(protocol="jupiter_lend")
+        result = cl._compile_supply_jupiter_lend(compiler, intent)
+        assert result is expected
+        compiler._compile_jupiter_lend_supply.assert_called_once_with(intent)
+
+
+class TestKaminoHelper:
+    def test_non_solana_delegates_to_compiler(self):
+        """The dispatcher routes here when protocol_lower == 'kamino' even on
+        non-Solana chains. Original (pre-refactor) behaviour is to hand off to
+        ``_compile_kamino_supply`` without a fail-fast — this is tracked as
+        issue #1622.
+
+        This test only asserts the *delegation call*, not the final result,
+        so the eventual fail-fast fix will not register as a regression here.
+        """
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        compiler._compile_kamino_supply.return_value = MagicMock(status=CompilationStatus.SUCCESS)
+        intent = _supply_intent(protocol="kamino")
+        cl._compile_supply_kamino(compiler, intent)
+        compiler._compile_kamino_supply.assert_called_once_with(intent)
+
+    def test_solana_unsupported_protocol_rejected(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        intent = _supply_intent(protocol="aave_v3")
+        result = cl._compile_supply_kamino(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "not supported for SUPPLY on Solana" in result.error
+
+    def test_solana_kamino_delegates(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_kamino_supply.return_value = expected
+        intent = _supply_intent(protocol="kamino")
+        result = cl._compile_supply_kamino(compiler, intent)
+        assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# Morpho Blue
+# ---------------------------------------------------------------------------
+
+
+MORPHO_ADAPTER = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueAdapter"
+MORPHO_CONFIG = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueConfig"
 
 
 class TestMorphoBlueHelper:
@@ -893,8 +1052,132 @@ class TestSiloV2Helper:
 # ---------------------------------------------------------------------------
 
 
+class TestDispatcherRouting:
+    """Smoke tests - each protocol routes to its dedicated helper and returns SUCCESS."""
+
+    def test_morpho_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(MORPHO_ADAPTER) as mock_cls, patch(MORPHO_CONFIG):
+            mock_adapter = MagicMock()
+            mock_adapter.morpho_address = "0xmorpho"
+            mock_adapter.supply_collateral.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _supply_intent(protocol="morpho_blue", market_id="0xmarket")
+            result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_aave_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(AAVE_ADAPTER_CLS) as mock_cls:
+            mock_adapter = MagicMock()
+            mock_adapter.get_pool_address.return_value = TEST_POOL
+            mock_adapter.get_supply_calldata.return_value = b"\x01"
+            mock_adapter.estimate_supply_gas.return_value = 150_000
+            mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+            mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+            mock_cls.return_value = mock_adapter
+
+            intent = _supply_intent(protocol="aave_v3")
+            result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_compound_v3_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with (
+            patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
+            patch(COMPOUND_ADAPTER) as mock_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = "0xcomet"
+            base_addr = "0x" + "ab" * 20
+            mock_adapter.market_config = {"base_token_address": base_addr}
+            mock_adapter.supply.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _supply_intent(protocol="compound_v3")
+            result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_spark_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with (
+            patch(SPARK_POOL_ADDRESSES, {"ethereum": "0xspark"}),
+            patch(SPARK_ADAPTER) as mock_cls,
+            patch(SPARK_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.pool_address = TEST_POOL
+            mock_adapter.supply.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _supply_intent(protocol="spark")
+            result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# Entry-point sanity check: module exposes what callers expect
+# ---------------------------------------------------------------------------
+
+
+def test_module_exposes_all_helpers():
+    """Regression guard: all helper symbols must remain exported at module level."""
+    for name in (
+        "compile_supply",
+        "_compile_supply_jupiter_lend",
+        "_compile_supply_kamino",
+        "_compile_supply_morpho_blue",
+        "_compile_supply_curvance",
+        "_compile_supply_aave_compatible",
+        "_compile_supply_spark",
+        "_compile_supply_compound_v3",
+        "_compile_supply_benqi",
+        "_compile_supply_joelend",
+        "_compile_supply_euler_v2",
+        "_compile_supply_silo_v2",
+    ):
+        assert hasattr(cl, name), f"Missing module-level helper: {name}"
+
+
 class TestJoeLendDormant:
-    """JoeLend remains retired at the adapter boundary."""
+    """Lock the VIB-3960 dormancy contract: dispatch short-circuits and
+    adapter constructor raises. These tests are the *positive assertion*
+    that the wind-down guard fires; without them a future refactor that
+    removes the short-circuit at the top of compile_supply would silently
+    re-route joelend intents into the (now-stub) helper functions.
+    """
+
+    def test_dispatch_returns_failed_with_deprecation_message(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _supply_intent(protocol="joelend", token="USDC")
+        result = cl.compile_supply(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+
+    def test_dispatch_short_circuits_before_solana_fallback(self):
+        """A misconfigured (joelend, solana) intent must NOT route to Kamino.
+        Codex P2 finding on PR #2023 audit."""
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _supply_intent(protocol="joelend", token="USDC")
+        result = cl.compile_supply(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+        # Mock-call assertion: confirms the dispatcher returned BEFORE
+        # reaching the Solana fallback (which would have invoked
+        # compiler._compile_kamino_supply). Locks Codex P2 #1 from the PR audit.
+        compiler._compile_kamino_supply.assert_not_called()
 
     def test_adapter_constructor_raises_deprecated_error(self):
         from almanak.framework.connectors.joelend.adapter import (

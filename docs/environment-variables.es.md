@@ -76,6 +76,58 @@ Solo necesarias si tu estrategia usa estos protocolos específicos.
 
 ---
 
+## Autenticación y seguridad de la pasarela
+
+Crítico para los despliegues alojados (Almanak Infra). Cada variable se lee una vez al iniciar la pasarela; los cambios requieren reiniciarla.
+
+| Variable | Descripción |
+|----------|-------------|
+| `ALMANAK_GATEWAY_AUTH_TOKEN` | Token de secreto compartido para la autenticación gRPC. Cuando está definido, los clientes deben proporcionar este token en los metadatos para acceder a los servicios. **Obligatorio en despliegues alojados.** |
+| `ALMANAK_GATEWAY_ALLOW_INSECURE` | Cuando es `true`, permite que la pasarela arranque sin `ALMANAK_GATEWAY_AUTH_TOKEN`. Por defecto `false` (la pasarela se niega a arrancar). **Solo desarrollo local** — nunca lo actives en un despliegue alojado. |
+| `ALMANAK_GATEWAY_OPERATOR_TOKEN` | Token de segundo factor (VIB-4493 Fase 1) requerido para los RPC de mutación en `DashboardService` (`PreviewReconcile`, `ApplyReconcile`, `RefreshRegistryFromChain`). Los llamadores deben enviar el mismo valor en el encabezado de metadatos `x-operator-token` además del token de autenticación habitual. Cuando no está definido (por defecto), los handlers caen de nuevo a autenticación solo con auth-token — seguro para despliegues mono-usuario / locales. |
+
+!!! danger "Los despliegues alojados son inseguros sin estas variables"
+    Omitir `ALMANAK_GATEWAY_AUTH_TOKEN` (o activar `ALMANAK_GATEWAY_ALLOW_INSECURE=true`) en una pasarela alojada expone cada servicio gRPC a llamadores no autenticados — incluido `ExecutionService`, que firma y envía transacciones. Trata ambos como secretos de producción.
+
+---
+
+## Sobrescrituras manuales de precios
+
+Recurso de último resorte para tokens que ninguna fuente de oráculo real puede valorar (p. ej., tokens long-tail en cadenas emergentes).
+
+| Variable | Descripción |
+|----------|-------------|
+| `ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES` | Habilita el fallback `ManualPriceOverrideSource`. Por defecto `false`. Desactivado por defecto porque una variable mal configurada podría inyectar un precio erróneo en las decisiones de slippage / teardown. |
+| `ALMANAK_PRICE_OVERRIDE_<TOKEN>` | Precio de sobrescritura por token en USD. Solo se consulta cuando todas las fuentes de oráculo reales fallaron al valorar el token. Ejemplo: `ALMANAK_PRICE_OVERRIDE_W0G=0.012`. |
+
+Configura ambas: el flag de habilitación enciende la fuente; las variables por token suministran los precios.
+
+---
+
+## Simulación con Tenderly
+
+Usada por `SimulationService.SimulateBundle` cuando el simulador está fijado a `"tenderly"` (o autoseleccionado). Las tres deben establecerse juntas — dejar una vacía desactiva Tenderly y cae al simulador Alchemy si está disponible.
+
+| Variable | Descripción |
+|----------|-------------|
+| `ALMANAK_GATEWAY_TENDERLY_ACCOUNT_SLUG` | Slug de cuenta Tenderly (el segmento `<account>` de la URL del panel). |
+| `ALMANAK_GATEWAY_TENDERLY_PROJECT_SLUG` | Slug de proyecto Tenderly dentro de la cuenta. |
+| `ALMANAK_GATEWAY_TENDERLY_ACCESS_KEY` | Clave de acceso Tenderly con permisos de simulación ([ajustes de la cuenta → claves de acceso](https://dashboard.tenderly.co/account/authorization)). |
+
+---
+
+## Proveedor de portafolio (multi-proveedor)
+
+Configura la(s) fuente(s) de valoración de portafolio de la pasarela. Usado por `IntegrationService.GetWalletPortfolio` / `GetWalletPositions` para agregar saldos y posiciones DeFi a través de cadenas.
+
+| Variable | Descripción |
+|----------|-------------|
+| `ALMANAK_GATEWAY_PORTFOLIO_API_KEY` | Clave API mono-proveedor (ruta heredada mono-proveedor). |
+| `ALMANAK_GATEWAY_PORTFOLIO_API_PROVIDER` | Nombre del proveedor único. Por defecto `zerion`. |
+| `ALMANAK_GATEWAY_PORTFOLIO_PROVIDERS` | Sobrescritura multi-proveedor. Nombres de proveedores separados por comas en orden de prioridad (p. ej., `zerion,moralis`). Cuando se define, tiene prioridad sobre las claves mono-proveedor. Cada proveedor lee su propia clave API desde `{NAME}_API_KEY` (p. ej., `ZERION_API_KEY`, `MORALIS_API_KEY`). |
+
+---
+
 ## Wallet Safe
 
 Para estrategias que se ejecutan a través de un multisig de Gnosis Safe.

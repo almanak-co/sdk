@@ -62,11 +62,11 @@ from typing import Any
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
-from almanak.framework.connectors.base.lending.aave_helpers import (
+from almanak.framework.intents import (
     PoolReserveFrozenError,
     assert_lending_reserve_active,
 )
+from almanak.framework.intents import compiler_lending as cl
 
 logger = logging.getLogger(__name__)
 

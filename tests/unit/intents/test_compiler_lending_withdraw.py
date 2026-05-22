@@ -1,7 +1,7 @@
 """Unit tests targeting the per-protocol helpers extracted from ``compile_withdraw``.
 
 Phase 2d of the coverage-improvement plan. The helpers are private module-level
-functions in ``almanak.framework.connectors.base.lending.aave_helpers``:
+functions in ``almanak.framework.intents.compiler_lending``:
 
 - ``compile_withdraw`` (thin dispatcher)
 - ``_compile_withdraw_jupiter_lend`` (Solana)
@@ -13,6 +13,7 @@ functions in ``almanak.framework.connectors.base.lending.aave_helpers``:
 - ``_compile_withdraw_pendle`` (unique to withdraw)
 - ``_compile_withdraw_compound_v3``
 - ``_compile_withdraw_benqi``
+- ``_compile_withdraw_joelend``
 - ``_compile_withdraw_euler_v2``
 - ``_compile_withdraw_silo_v2``
 
@@ -26,15 +27,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
 from almanak.framework.intents import WithdrawIntent
+from almanak.framework.intents import compiler_lending as cl
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
-
-MORPHO_ADAPTER = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueAdapter"
-MORPHO_CONFIG = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueConfig"
-COMPOUND_ADAPTER = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Adapter"
-COMPOUND_CONFIG = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Config"
-COMPOUND_MARKETS = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 TEST_POOL = "0xpooladdress000000000000000000000000000001"
@@ -142,6 +137,199 @@ def _withdraw_intent(
 # ---------------------------------------------------------------------------
 # Dispatcher - routing and unsupported-protocol handling
 # ---------------------------------------------------------------------------
+
+
+class TestDispatcher:
+    def test_unsupported_protocol_returns_failed(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _withdraw_intent(protocol="nonexistent_proto")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Unsupported lending protocol: nonexistent_proto" in result.error
+        # Pendle MUST appear in withdraw's supported list (withdraw-only protocol).
+        for expected in (
+            "aave_v3",
+            "morpho",
+            "morpho_blue",
+            "curvance",
+            "spark",
+            "pendle",
+            "compound_v3",
+            "benqi",
+            "euler_v2",
+            "silo_v2",
+        ):
+            assert expected in result.error
+
+    def test_unknown_withdraw_token(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.return_value = None
+
+        intent = _withdraw_intent(protocol="aave_v3", token="FAKE")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Unknown token: FAKE" in result.error
+
+    def test_jupiter_lend_on_non_solana_fails(self):
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _withdraw_intent(protocol="jupiter_lend")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "only available on Solana chains" in result.error
+
+    def test_jupiter_lend_on_solana_delegates(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_jupiter_lend_withdraw.return_value = expected
+        intent = _withdraw_intent(protocol="jupiter_lend")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result is expected
+        compiler._compile_jupiter_lend_withdraw.assert_called_once_with(intent)
+
+    def test_kamino_dispatches_to_helper_on_solana(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_kamino_withdraw.return_value = expected
+        intent = _withdraw_intent(protocol="kamino")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result is expected
+        compiler._compile_kamino_withdraw.assert_called_once_with(intent)
+
+    def test_kamino_on_non_solana_fails(self):
+        """Kamino dispatched on a non-Solana chain must fail-fast at compile time.
+
+        Symmetric to the jupiter_lend guard. Regression test for issue #1622.
+        """
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _withdraw_intent(protocol="kamino")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Protocol 'kamino' is only available on Solana chains." in result.error
+        compiler._compile_kamino_withdraw.assert_not_called()
+
+    def test_non_solana_evm_protocol_on_solana_chain_rejected(self):
+        """On a Solana chain, any non-morpho/morpho_blue/jupiter_lend protocol is rejected."""
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        intent = _withdraw_intent(protocol="aave_v3")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "not supported for WITHDRAW on Solana" in result.error
+
+    def test_outer_exception_returns_failed(self):
+        """An unhandled exception inside the dispatcher is caught and returned as FAILED."""
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = RuntimeError("boom")
+        intent = _withdraw_intent(protocol="aave_v3")
+        result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "boom" in result.error
+
+    def test_amount_all_fallback_sets_withdraw_all(self):
+        """When amount='all' reaches the dispatcher unresolved, it must fall
+        back to ``withdraw_all=True`` before routing to the helper.
+        """
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        with patch("almanak.framework.intents.compiler_adapters.AaveV3Adapter") as mock_cls:
+            mock_adapter = MagicMock()
+            mock_adapter.get_pool_address.return_value = TEST_POOL
+            mock_adapter.get_withdraw_calldata.return_value = b"\x01\x02"
+            mock_adapter.estimate_withdraw_gas.return_value = 200_000
+            mock_cls.return_value = mock_adapter
+
+            intent = WithdrawIntent(
+                protocol="aave_v3",
+                token="USDC",
+                amount="all",
+                withdraw_all=False,
+            )
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+        # Fallback warning present
+        assert any("amount='all' fallback" in w for w in result.warnings)
+        # withdraw_all=True => MAX_UINT256 sentinel used
+        assert result.action_bundle.metadata["withdraw_amount"] == str(cl.MAX_UINT256)
+        assert result.action_bundle.metadata["withdraw_all"] is True
+
+    def test_withdraw_all_warning_surfaces_in_result(self):
+        """Explicit withdraw_all should attach the informational warning."""
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        with patch("almanak.framework.intents.compiler_adapters.AaveV3Adapter") as mock_cls:
+            mock_adapter = MagicMock()
+            mock_adapter.get_pool_address.return_value = TEST_POOL
+            mock_adapter.get_withdraw_calldata.return_value = b"\x01"
+            mock_adapter.estimate_withdraw_gas.return_value = 150_000
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="aave_v3", withdraw_all=True, amount=Decimal("1"))
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+        assert any("Withdrawing all available balance" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Solana helpers
+# ---------------------------------------------------------------------------
+
+
+class TestJupiterLendHelper:
+    def test_non_solana_fails(self):
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _withdraw_intent(protocol="jupiter_lend")
+        result = cl._compile_withdraw_jupiter_lend(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "only available on Solana chains" in result.error
+
+    def test_solana_delegates_to_compiler(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_jupiter_lend_withdraw.return_value = expected
+        intent = _withdraw_intent(protocol="jupiter_lend")
+        result = cl._compile_withdraw_jupiter_lend(compiler, intent)
+        assert result is expected
+        compiler._compile_jupiter_lend_withdraw.assert_called_once_with(intent)
+
+
+class TestKaminoHelper:
+    def test_non_solana_delegates_to_compiler(self):
+        """The dispatcher routes here when protocol_lower == 'kamino' even on
+        non-Solana chains. Original behaviour is to hand off to the compiler.
+        """
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_kamino_withdraw.return_value = expected
+        intent = _withdraw_intent(protocol="kamino")
+        result = cl._compile_withdraw_kamino(compiler, intent)
+        assert result is expected
+
+    def test_solana_unsupported_protocol_rejected(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        intent = _withdraw_intent(protocol="aave_v3")
+        result = cl._compile_withdraw_kamino(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "not supported for WITHDRAW on Solana" in result.error
+
+    def test_solana_kamino_delegates(self):
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        compiler._compile_kamino_withdraw.return_value = expected
+        intent = _withdraw_intent(protocol="kamino")
+        result = cl._compile_withdraw_kamino(compiler, intent)
+        assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# Morpho Blue
+# ---------------------------------------------------------------------------
+
+
+MORPHO_ADAPTER = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueAdapter"
+MORPHO_CONFIG = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueConfig"
 
 
 class TestMorphoBlueHelper:
@@ -596,6 +784,105 @@ class TestSparkHelper:
 # ---------------------------------------------------------------------------
 
 
+class TestPendleHelper:
+    def test_delegates_to_connector_compiler(self):
+        compiler = _mock_compiler(chain="ethereum")
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = expected
+        intent = _withdraw_intent(protocol="pendle")
+        with patch(
+            "almanak.framework.connectors.compiler_registry.get_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            result = cl._compile_withdraw_pendle(compiler, intent, [])
+        assert result is expected
+        # Pin the routing contract: the Pendle connector must be looked up by
+        # name and invoked with the Pendle-scoped context + the same intent.
+        mock_get_compiler.assert_called_once_with("pendle")
+        compiler._build_compiler_context.assert_called_once_with("pendle", connector_compiler)
+        connector_compiler.compile.assert_called_once()
+        (ctx, passed_intent), kwargs = connector_compiler.compile.call_args
+        assert kwargs == {}
+        assert passed_intent is intent
+        assert ctx is compiler._build_compiler_context.return_value
+
+    def test_dispatcher_routes_pendle_through_helper(self):
+        """End-to-end check: the dispatcher must route protocol='pendle' to
+        ``_compile_withdraw_pendle`` which in turn delegates to the connector compiler.
+        """
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        expected = MagicMock(status=CompilationStatus.SUCCESS)
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = expected
+        intent = _withdraw_intent(protocol="pendle")
+        with patch(
+            "almanak.framework.connectors.compiler_registry.get_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            result = cl.compile_withdraw(compiler, intent)
+        assert result is expected
+        # The dispatcher must route protocol='pendle' through the helper to the
+        # connector compiler with the Pendle-scoped context + unchanged intent.
+        mock_get_compiler.assert_called_once_with("pendle")
+        compiler._build_compiler_context.assert_called_once_with("pendle", connector_compiler)
+        connector_compiler.compile.assert_called_once()
+        (ctx, passed_intent), kwargs = connector_compiler.compile.call_args
+        assert kwargs == {}
+        assert passed_intent is intent
+        assert ctx is compiler._build_compiler_context.return_value
+
+    def test_propagates_initial_warnings(self):
+        """Dispatcher-level warnings (withdraw_all / amount='all' fallback) must
+        be merged into the Pendle redeem result, matching the other EVM helpers.
+        """
+        compiler = _mock_compiler(chain="ethereum")
+        inner = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id="test",
+            warnings=["pendle-inner-warning"],
+        )
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = inner
+        intent = _withdraw_intent(protocol="pendle")
+        with patch("almanak.framework.connectors.compiler_registry.get_compiler", return_value=connector_compiler):
+            result = cl._compile_withdraw_pendle(compiler, intent, ["Withdrawing all available balance"])
+        assert result is inner
+        assert result.warnings == [
+            "Withdrawing all available balance",
+            "pendle-inner-warning",
+        ]
+
+    def test_dispatcher_propagates_withdraw_all_warning_through_pendle(self):
+        """End-to-end dispatcher check: when withdraw_all=True, the resulting
+        ``CompilationResult.warnings`` must include the dispatcher-level notice.
+        """
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        inner = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id="test",
+            warnings=[],
+        )
+        connector_compiler = MagicMock()
+        connector_compiler.compile.return_value = inner
+        intent = _withdraw_intent(protocol="pendle", withdraw_all=True)
+        with patch("almanak.framework.connectors.compiler_registry.get_compiler", return_value=connector_compiler):
+            result = cl.compile_withdraw(compiler, intent)
+        assert "Withdrawing all available balance" in result.warnings
+
+
+# ---------------------------------------------------------------------------
+# Compound V3
+# ---------------------------------------------------------------------------
+
+
+COMPOUND_ADAPTER = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Adapter"
+COMPOUND_CONFIG = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Config"
+COMPOUND_MARKETS = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
+
+
 class TestCompoundV3Helper:
     def test_unsupported_chain_fails(self):
         compiler = _mock_compiler(chain="berachain")
@@ -1006,8 +1293,150 @@ class TestSiloV2Helper:
 # ---------------------------------------------------------------------------
 
 
+class TestDispatcherRouting:
+    """Smoke tests - each protocol routes to its dedicated helper and returns SUCCESS."""
+
+    def test_morpho_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(MORPHO_ADAPTER) as mock_cls, patch(MORPHO_CONFIG):
+            mock_adapter = MagicMock()
+            mock_adapter.morpho_address = "0xmorpho"
+            mock_adapter.withdraw_collateral.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="morpho_blue", market_id="0xmarket")
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_aave_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(AAVE_ADAPTER_CLS) as mock_cls:
+            mock_adapter = MagicMock()
+            mock_adapter.get_pool_address.return_value = TEST_POOL
+            mock_adapter.get_withdraw_calldata.return_value = b"\x03\x04"
+            mock_adapter.estimate_withdraw_gas.return_value = 200_000
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="aave_v3")
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_compound_v3_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(
+            symbol=t, address="0xbase" if t == "USDC" else "0xother"
+        )
+        with (
+            patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
+            patch(COMPOUND_ADAPTER) as mock_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": "0xbase"}
+            mock_adapter.withdraw.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="compound_v3")
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_silo_v2_routes_through_dispatcher(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(SILO_ADAPTER) as mock_cls, patch(SILO_CONFIG):
+            mock_adapter = MagicMock()
+            market = MagicMock()
+            market.silo_config = "0xsc"
+            market.market_name = "m"
+            mock_adapter.find_silo_for_asset.return_value = (market, "0xsilo", "0xtok")
+            mock_adapter.withdraw.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="silo_v2")
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_withdraw_all_warning_propagated_to_result(self):
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        with patch(AAVE_ADAPTER_CLS) as mock_cls:
+            mock_adapter = MagicMock()
+            mock_adapter.get_pool_address.return_value = TEST_POOL
+            mock_adapter.get_withdraw_calldata.return_value = b"\x01"
+            mock_adapter.estimate_withdraw_gas.return_value = 100_000
+            mock_cls.return_value = mock_adapter
+
+            intent = _withdraw_intent(protocol="aave_v3", withdraw_all=True, amount=Decimal("1"))
+            result = cl.compile_withdraw(compiler, intent)
+        assert result.status == CompilationStatus.SUCCESS
+        assert any("Withdrawing all available balance" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Entry-point sanity check: module exposes what callers expect
+# ---------------------------------------------------------------------------
+
+
+def test_module_exposes_all_helpers():
+    """Regression guard: all helper symbols must remain exported at module level."""
+    for name in (
+        "compile_withdraw",
+        "_compile_withdraw_jupiter_lend",
+        "_compile_withdraw_kamino",
+        "_compile_withdraw_morpho_blue",
+        "_compile_withdraw_curvance",
+        "_compile_withdraw_aave_compatible",
+        "_compile_withdraw_spark",
+        "_compile_withdraw_pendle",
+        "_compile_withdraw_compound_v3",
+        "_compile_withdraw_benqi",
+        "_compile_withdraw_joelend",
+        "_compile_withdraw_euler_v2",
+        "_compile_withdraw_silo_v2",
+    ):
+        assert hasattr(cl, name), f"Missing module-level helper: {name}"
+
+
 class TestJoeLendDormant:
-    """JoeLend remains retired at the adapter boundary."""
+    """Lock the VIB-3960 dormancy contract: dispatch short-circuits and
+    adapter constructor raises. These tests are the *positive assertion*
+    that the wind-down guard fires; without them a future refactor that
+    removes the short-circuit at the top of compile_withdraw would silently
+    re-route joelend intents into the (now-stub) helper functions.
+    """
+
+    def test_dispatch_returns_failed_with_deprecation_message(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _withdraw_intent(protocol="joelend")
+        result = cl.compile_withdraw(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+        # Mock-call assertion: confirms the dispatcher returned BEFORE
+        # reaching the Solana fallback (which would have invoked
+        # compiler._compile_kamino_withdraw). Locks Codex P2 #1 from the PR audit.
+        compiler._compile_kamino_withdraw.assert_not_called()
+
+    def test_dispatch_short_circuits_before_solana_fallback(self):
+        """A misconfigured (joelend, solana) intent must NOT route to Kamino.
+        Codex P2 finding on PR #2023 audit."""
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _withdraw_intent(protocol="joelend")
+        result = cl.compile_withdraw(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+        # Mock-call assertion: confirms the dispatcher returned BEFORE
+        # reaching the Solana fallback (which would have invoked
+        # compiler._compile_kamino_withdraw). Locks Codex P2 #1 from the PR audit.
+        compiler._compile_kamino_withdraw.assert_not_called()
 
     def test_adapter_constructor_raises_deprecated_error(self):
         from almanak.framework.connectors.joelend.adapter import (
