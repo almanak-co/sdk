@@ -45,6 +45,7 @@ from almanak.gateway.services import (
     ObserveServiceServicer,
     PolymarketServiceServicer,
     PoolAnalyticsServiceServicer,
+    PoolHistoryServiceServicer,
     PositionServiceServicer,
     RpcServiceServicer,
     SimulationServiceServicer,
@@ -225,6 +226,11 @@ class GatewayServer:
         # VIB-4727: pool analytics (off-chain DefiLlama / GeckoTerminal egress
         # moved from the framework PoolAnalyticsReader to the gateway).
         self._pool_analytics_servicer: PoolAnalyticsServiceServicer | None = None
+        # VIB-4728 / POOL-2 (VIB-4750): pool history skeleton. Default-disabled
+        # kill-switch (ALMANAK_GATEWAY_POOL_HISTORY_ENABLED) gates the handler;
+        # the servicer is always registered so auth + telemetry surfaces work
+        # from day 1. POOL-5 (VIB-4753) wires actual providers.
+        self._pool_history_servicer: PoolHistoryServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
         self._teardown_servicer: TeardownServiceServicer | None = None
@@ -466,6 +472,12 @@ class GatewayServer:
         # DefiLlama / GeckoTerminal so strategy containers do not.
         self._pool_analytics_servicer = PoolAnalyticsServiceServicer(self.settings)
         gateway_pb2_grpc.add_PoolAnalyticsServiceServicer_to_server(self._pool_analytics_servicer, self.server)
+
+        # VIB-4728 / POOL-2: pool history skeleton. Default-disabled; POOL-5
+        # wires providers. Registered here so the auth interceptor +
+        # telemetry surface engage from day 1.
+        self._pool_history_servicer = PoolHistoryServiceServicer(self.settings)
+        gateway_pb2_grpc.add_PoolHistoryServiceServicer_to_server(self._pool_history_servicer, self.server)
 
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)

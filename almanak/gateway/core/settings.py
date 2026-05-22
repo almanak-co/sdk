@@ -77,6 +77,17 @@ class GatewaySettings(BaseSettings):
     # alongside the per-token ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` values.
     enable_manual_price_overrides: bool = False
 
+    # PoolHistoryService kill-switch (VIB-4728 / POOL-2).
+    # Default false until POOL-5 wires real providers. The servicer is
+    # always REGISTERED on the gRPC server; this flag gates the handler.
+    # When false, GetPoolHistory returns UNAVAILABLE with a clear message
+    # pointing at VIB-4728. When true but providers are not yet wired
+    # (POOL-2 → POOL-5 window), the handler returns UNIMPLEMENTED.
+    # POOL-9 acceptance flips the default to true after end-to-end smoke
+    # validates the feature (see ``docs/internal/PoolX.md`` POOL-2 §AC).
+    # Set via ``ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true``.
+    pool_history_enabled: bool = False
+
     # Metrics settings
     metrics_enabled: bool = True
     metrics_port: int = 9090
