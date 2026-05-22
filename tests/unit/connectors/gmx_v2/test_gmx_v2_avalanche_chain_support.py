@@ -143,16 +143,16 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     mock_adapter_result.acceptable_price_30dec = 1_000_000_000_000_000_000_000_000_000_000_000
 
     with (
-        patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-        patch("almanak.framework.connectors.GMXv2Config"),
-        patch("almanak.framework.connectors.gmx_v2.GMXV2SDK", return_value=mock_sdk),
+        patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+        patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
+        patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
         patch(
-            "almanak.framework.connectors.gmx_v2.GMX_V2_MARKETS",
+            "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
             {"avalanche": {"ETH/USD": "0xmarket"}},
         ),
     ):
         mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
-        result = compiler._compile_perp_open(intent)
+        result = compiler.compile(intent)
 
     # Specific failure mode the test pins: an "Unknown collateral token: WETH.e"
     # error indicates the case-insensitive lookup regressed. Anything else
@@ -170,10 +170,10 @@ def test_native_wrapped_decimals_documented_for_avalanche() -> None:
     future contributor doesn't reintroduce the WETH/ETH-only special case.
     """
     native_wrapped_18 = {"WETH", "ETH", "WAVAX", "AVAX"}
-    # The perp compiler's native-wrapped set (line 5557 in compiler.py) must
-    # include all of these; if someone removes WAVAX/AVAX, a real WAVAX long
-    # would underfund collateral by 1e12 and be picked up by this test.
-    from almanak.framework.intents import compiler as compiler_mod
+    # The connector-owned perp compiler's native-wrapped set must include all
+    # of these; if someone removes WAVAX/AVAX, a real WAVAX long would
+    # underfund collateral by 1e12 and be picked up by this test.
+    from almanak.framework.connectors.gmx_v2 import compiler as compiler_mod
 
     src = compiler_mod.__file__
     with open(src) as f:

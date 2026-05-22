@@ -11,9 +11,7 @@ do NOT require approval.
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 
 
 def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
@@ -23,7 +21,15 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
     compiler.wallet_address = "0x" + "1" * 40
     compiler.rpc_url = "http://localhost:8545"
     compiler._approve_cache = {}
+    compiler._allowance_cache = {}
     compiler._gateway_client = None
+    compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
+    compiler._using_placeholders = False
+    compiler._placeholder_warning_logged = False
+    compiler.price_oracle = None
+    compiler.default_deadline_seconds = 600
+    compiler.default_protocol = "gmx_v2"
+    compiler._token_resolver = None
     return compiler
 
 
@@ -112,19 +118,19 @@ class TestPerpOpenApproval:
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
         with (
-            patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.framework.connectors.gmx_v2.GMX_V2_MARKETS", {
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
                 "arbitrum": {"ETH/USD": "0xmarket"},
             }),
-            patch("almanak.framework.connectors.gmx_v2.GMX_V2_TOKENS", {
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
             }),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
 
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
         # Should succeed
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
@@ -181,19 +187,19 @@ class TestPerpOpenApproval:
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
         with (
-            patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.framework.connectors.gmx_v2.GMX_V2_MARKETS", {
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
                 "arbitrum": {"ETH/USD": "0xmarket"},
             }),
-            patch("almanak.framework.connectors.gmx_v2.GMX_V2_TOKENS", {
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
             }),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
 
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
 

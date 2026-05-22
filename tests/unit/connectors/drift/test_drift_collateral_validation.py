@@ -33,10 +33,9 @@ from almanak.framework.connectors.drift.market_rules import (
     is_supported_collateral,
     validate_drift_collateral,
 )
-from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 from almanak.framework.intents.vocabulary import PerpOpenIntent
-
 
 # =============================================================================
 # Fixtures / Helpers
@@ -54,10 +53,16 @@ def _make_mock_compiler(chain: str = "solana") -> IntentCompiler:
     compiler.wallet_address = "11111111111111111111111111111112"  # base58 system program pk
     compiler.rpc_url = "http://localhost:8899"
     compiler._approve_cache = {}
+    compiler._allowance_cache = {}
     compiler._gateway_client = None
     compiler._cached_drift_adapter = None
     compiler.default_protocol = "drift"
     compiler._token_resolver = None
+    compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
+    compiler._using_placeholders = False
+    compiler._placeholder_warning_logged = False
+    compiler.price_oracle = None
+    compiler.default_deadline_seconds = 600
     return compiler
 
 
@@ -231,23 +236,18 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         """(Drift, unsupported collateral) must fail compilation up-front."""
         compiler = _make_mock_compiler(chain="solana")
 
-        # We want to prove the Step 1.5 gate fires before the Drift-specific
-        # compiler path touches anything. Patch the Drift compile entrypoint
-        # and assert it is NEVER called when collateral is invalid.
-        with patch.object(
-            compiler,
-            "_compile_drift_perp_open",
-            wraps=lambda *_a, **_kw: MagicMock(),
-        ) as mock_drift_compile:
+        # Patch the connector adapter class and assert it is never constructed
+        # when collateral is invalid.
+        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             intent = _make_perp_open_intent(
                 collateral_token="WETH-on-arbitrum",
                 market="SOL-PERP",
             )
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
-            assert mock_drift_compile.called is False, (
+            assert mock_drift_adapter.called is False, (
                 "Drift collateral validation must short-circuit before the Drift "
-                "compiler branch runs; otherwise invalid configs reach the adapter."
+                "adapter is constructed; otherwise invalid configs reach tx building."
             )
 
         assert result.status.value == "FAILED"
@@ -259,14 +259,14 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         """Garbage collateral symbols are rejected up-front too."""
         compiler = _make_mock_compiler(chain="solana")
 
-        with patch.object(compiler, "_compile_drift_perp_open") as mock_drift_compile:
+        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             intent = _make_perp_open_intent(
                 collateral_token="!!!",
                 market="SOL-PERP",
             )
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
-            assert mock_drift_compile.called is False
+            assert mock_drift_adapter.called is False
 
         assert result.status.value == "FAILED"
         assert "!!!" in result.error
@@ -275,50 +275,41 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         """Valid collateral must reach the Drift compiler branch."""
         compiler = _make_mock_compiler(chain="solana")
 
-        # Stub out the Drift compile so we can assert it was invoked with
-        # the correct intent, without actually building a Solana transaction.
-        stub_result = MagicMock()
-        stub_result.status = MagicMock()
-        stub_result.status.value = "SUCCESS"
+        bundle = MagicMock()
+        bundle.metadata = {}
 
-        with patch.object(
-            compiler,
-            "_compile_drift_perp_open",
-            return_value=stub_result,
-        ) as mock_drift_compile:
+        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+            mock_drift_adapter.return_value.compile_perp_open_intent.return_value = bundle
             intent = _make_perp_open_intent(
                 collateral_token="USDC",
                 market="SOL-PERP",
             )
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
-            # Valid collateral -> dispatch reaches the Drift compile branch.
-            assert mock_drift_compile.called is True
-            assert mock_drift_compile.call_args.args[0] is intent
-            assert result is stub_result
+            assert mock_drift_adapter.called is True
+            assert mock_drift_adapter.return_value.compile_perp_open_intent.call_args.args[0] is intent
+            assert result.status.value == "SUCCESS"
+            assert result.action_bundle is bundle
 
     def test_valid_collateral_case_insensitive_dispatches(self):
         """Case-variant valid symbols must still dispatch to the Drift branch."""
         compiler = _make_mock_compiler(chain="solana")
 
-        stub_result = MagicMock()
-        stub_result.status = MagicMock()
-        stub_result.status.value = "SUCCESS"
+        bundle = MagicMock()
+        bundle.metadata = {}
 
-        with patch.object(
-            compiler,
-            "_compile_drift_perp_open",
-            return_value=stub_result,
-        ) as mock_drift_compile:
+        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+            mock_drift_adapter.return_value.compile_perp_open_intent.return_value = bundle
             # "msol" (lowercase) is the same as Drift's canonical "mSOL".
             intent = _make_perp_open_intent(
                 collateral_token="msol",
                 market="SOL-PERP",
             )
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
-            assert mock_drift_compile.called is True
-            assert result is stub_result
+            assert mock_drift_adapter.called is True
+            assert result.status.value == "SUCCESS"
+            assert result.action_bundle is bundle
 
     def test_error_structure_exposes_allowed_collaterals(self):
         """Business contract: callers can programmatically read the allowed set."""

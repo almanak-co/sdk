@@ -1,9 +1,10 @@
-"""Tests for GMX V2 (market, collateral) validation in the PERP_OPEN compile path.
+"""Tests for GMX V2 (market, collateral) validation in the perp compile paths.
 
-GMX V2 silently burns keeper execution fees when ``PERP_OPEN`` orders are
-submitted with collateral tokens that are not the market's ``longToken`` or
-``shortToken``. The compiler must validate this pair BEFORE emitting any
-transactions. This test suite exercises the three relevant behaviours:
+GMX V2 silently burns keeper execution fees when ``PERP_OPEN`` or
+``PERP_CLOSE`` orders are submitted with collateral tokens that are not the
+market's ``longToken`` or ``shortToken``. The compiler must validate this
+pair BEFORE emitting any transactions — on both the open and close paths.
+This test suite exercises the three relevant behaviours:
 
 1. Valid ``(market, collateral)`` pairs compile successfully.
 2. Invalid pairs produce a ``FAILED`` compilation result whose error lists the
@@ -23,16 +24,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.connectors.base.compiler import PerpCompilerContext
+from almanak.framework.connectors.gmx_v2.compiler import GMXV2Compiler
 from almanak.framework.connectors.gmx_v2.market_rules import (
     get_allowed_collaterals,
     is_market_registered,
     registered_markets,
     validate_collateral,
 )
-from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
+from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
-from almanak.framework.intents.vocabulary import PerpOpenIntent
-
+from almanak.framework.intents.vocabulary import PerpCloseIntent, PerpOpenIntent
 
 # =============================================================================
 # Fixtures / Helpers
@@ -50,7 +53,15 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
     compiler.wallet_address = "0x" + "1" * 40
     compiler.rpc_url = "http://localhost:8545"
     compiler._approve_cache = {}
+    compiler._allowance_cache = {}
     compiler._gateway_client = None
+    compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
+    compiler._using_placeholders = False
+    compiler._placeholder_warning_logged = False
+    compiler.price_oracle = None
+    compiler.default_deadline_seconds = 600
+    compiler.default_protocol = "gmx_v2"
+    compiler._token_resolver = None
     return compiler
 
 
@@ -253,20 +264,20 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch(
-                "almanak.framework.connectors.gmx_v2.GMX_V2_MARKETS",
+                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
                 {"arbitrum": {"SOL/USD": "0xmarket"}},
             ),
             patch(
-                "almanak.framework.connectors.gmx_v2.GMX_V2_TOKENS",
+                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"}},
             ),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
 
@@ -291,8 +302,8 @@ class TestPerpOpenCompilerCollateralValidation:
 
         # Do NOT patch GMXV2SDK / adapter — we want to prove the compiler
         # short-circuits before they are touched.
-        with patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls:
-            result = compiler._compile_perp_open(intent)
+        with patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
+            result = compiler.compile(intent)
             assert mock_adapter_cls.called is False, (
                 "Collateral validation must happen BEFORE GMXv2Adapter is instantiated; "
                 "otherwise strategies burn gas on a doomed order."
@@ -332,20 +343,20 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch(
-                "almanak.framework.connectors.gmx_v2.GMX_V2_MARKETS",
+                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
                 {"arbitrum": {"ETH/USD": "0xmarket"}},
             ),
             patch(
-                "almanak.framework.connectors.gmx_v2.GMX_V2_TOKENS",
+                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"}},
             ),
         ):
             mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
 
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
 
@@ -369,11 +380,11 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.GMXv2Config"),
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.framework.connectors.gmx_v2.sdk.Web3"),
         ):
-            result = compiler._compile_perp_open(intent)
+            result = compiler.compile(intent)
             assert mock_adapter_cls.called is False, (
                 "Collateral validation must short-circuit before adapter construction."
             )
@@ -396,3 +407,87 @@ class TestPerpOpenCompilerCollateralValidation:
         assert err.allowed_collaterals == ["SOL", "USDC"]
         assert err.chain == "arbitrum"
         assert err.protocol == "gmx_v2"
+
+
+# =============================================================================
+# Close path — the same gate must guard PERP_CLOSE
+# =============================================================================
+
+
+def _make_perp_ctx(chain: str = "arbitrum") -> PerpCompilerContext:
+    """Build a minimal PerpCompilerContext for connector-compiler unit tests."""
+    return PerpCompilerContext(
+        chain=chain,
+        wallet_address="0x" + "ab" * 20,
+        rpc_url=None,
+        rpc_timeout=10.0,
+        permission_discovery=False,
+        allow_placeholder_prices=True,
+        token_resolver=None,
+        gateway_client=None,
+        price_oracle=None,
+        cache={},
+        services=MagicMock(),
+        default_protocol="gmx_v2",
+        protocol="gmx_v2",
+    )
+
+
+class TestPerpCloseCompilerCollateralValidation:
+    """`compile_perp_close` must reject bad (market, collateral) pairs.
+
+    The open path validates (market, collateral) up-front; the close path
+    must do the same. With an explicit ``size_usd`` the close path skips the
+    on-chain position lookup, so without this gate a doomed close order
+    compiles and burns keeper execution fees just like a bad open.
+    """
+
+    def test_invalid_close_combo_rejects_before_adapter(self):
+        """(SOL/USD, WETH) close fails before the adapter/SDK are constructed."""
+        compiler = GMXV2Compiler()
+        ctx = _make_perp_ctx()
+        intent = PerpCloseIntent(
+            market="SOL/USD",
+            collateral_token="WETH",
+            is_long=True,
+            size_usd=Decimal("1000"),
+            protocol="gmx_v2",
+        )
+
+        with patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
+            result = compiler.compile_perp_close(ctx, intent)
+            assert mock_adapter_cls.called is False, (
+                "Close-path collateral validation must short-circuit before the "
+                "adapter is constructed; otherwise doomed close orders burn keeper fees."
+            )
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.error is not None
+        # Error message must list the allowed collaterals for SOL/USD.
+        assert "SOL/USD" in result.error
+        assert "WETH" in result.error
+        assert "SOL" in result.error
+        assert "USDC" in result.error
+
+
+class TestResolveCollateralAddressForms:
+    """`_resolve_collateral` accepts raw addresses in both 0x and 0X forms."""
+
+    def test_uppercase_0x_address_resolves(self):
+        """A 0X-prefixed address must resolve as a raw address, not 'unknown'.
+
+        Regression guard: a lowercase-only ``startswith("0x")`` check rejected
+        valid ``0X...`` inputs. ``market_rules.validate_collateral`` already
+        treats either prefix as a raw address — the two must agree.
+        """
+        compiler = GMXV2Compiler()
+        ctx = _make_perp_ctx()
+        addr = "0X82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        assert compiler._resolve_collateral(ctx, addr, "intent-1") == addr
+
+    def test_lowercase_0x_address_resolves(self):
+        """A standard 0x-prefixed address still resolves as a raw address."""
+        compiler = GMXV2Compiler()
+        ctx = _make_perp_ctx()
+        addr = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        assert compiler._resolve_collateral(ctx, addr, "intent-1") == addr

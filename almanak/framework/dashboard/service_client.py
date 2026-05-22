@@ -39,7 +39,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import grpc
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-class CutoverState(str, Enum):
+class CutoverState(StrEnum):
     """Per-(strategy, accounting_category) registry cutover progression.
 
     Derived from ``migration_state.position_registry_backfill_complete``
@@ -84,7 +84,7 @@ _CUTOVER_STATE_PROTO_TO_ENUM: dict[int, CutoverState] = {
 }
 
 
-class PositionSource(str, Enum):
+class PositionSource(StrEnum):
     UNSPECIFIED = "UNSPECIFIED"
     REGISTRY = "REGISTRY"
     SNAPSHOT = "SNAPSHOT"
@@ -103,7 +103,7 @@ _POSITION_SOURCE_PROTO_TO_ENUM: dict[int, PositionSource] = {
 }
 
 
-class PositionConfidence(str, Enum):
+class PositionConfidence(StrEnum):
     UNSPECIFIED = "UNSPECIFIED"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -124,7 +124,7 @@ _POSITION_CONFIDENCE_PROTO_TO_ENUM: dict[int, PositionConfidence] = {
 }
 
 
-class PositionStatus(str, Enum):
+class PositionStatus(StrEnum):
     UNSPECIFIED = "UNSPECIFIED"
     OPEN = "OPEN"
     CLOSED = "CLOSED"
@@ -160,7 +160,7 @@ _POSITION_STATUS_ENUM_TO_PROTO: dict[PositionStatus, gateway_pb2.PositionStatus.
 }
 
 
-class ReconciliationSeverity(str, Enum):
+class ReconciliationSeverity(StrEnum):
     UNSPECIFIED = "UNSPECIFIED"
     INFO = "INFO"
     WARN = "WARN"

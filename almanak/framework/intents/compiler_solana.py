@@ -1,8 +1,9 @@
 """Solana compilation helpers extracted from IntentCompiler.
 
 These standalone functions receive the compiler instance as their first
-parameter and implement all Solana-related compilation logic (Jupiter,
-Kamino, Raydium, Meteora, Orca, Drift).
+parameter and implement Solana spot/lending/LP compilation logic (Jupiter,
+Kamino, Raydium, Meteora, Orca). Drift perps live in the Drift connector
+compiler.
 """
 
 from __future__ import annotations
@@ -17,8 +18,6 @@ if TYPE_CHECKING:
         BorrowIntent,
         LPCloseIntent,
         LPOpenIntent,
-        PerpCloseIntent,
-        PerpOpenIntent,
         RepayIntent,
         SupplyIntent,
         SwapIntent,
@@ -140,19 +139,6 @@ def get_orca_adapter(compiler, *, needs_rpc: bool = False) -> Any:
         config = OrcaConfig(wallet_address=compiler.wallet_address)
         compiler._cached_orca_adapter = OrcaAdapter(config=config, token_resolver=compiler._token_resolver)
     return compiler._cached_orca_adapter
-
-
-def get_drift_adapter(compiler) -> Any:
-    """Get or create a cached DriftAdapter instance."""
-    if compiler._cached_drift_adapter is None:
-        from almanak.framework.connectors.drift import DriftAdapter, DriftConfig
-
-        config = DriftConfig(
-            wallet_address=compiler.wallet_address,
-            gateway_client=compiler._gateway_client,
-        )
-        compiler._cached_drift_adapter = DriftAdapter(config=config, token_resolver=compiler._token_resolver)
-    return compiler._cached_drift_adapter
 
 
 def get_jupiter_lend_adapter(compiler) -> Any:
@@ -530,79 +516,6 @@ def compile_orca_lp_close(compiler, intent: LPCloseIntent) -> CompilationResult:
             result.action_bundle = bundle
     except Exception as e:
         logger.exception(f"Orca LP close compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-# =============================================================================
-# Drift perpetuals
-# =============================================================================
-
-
-def compile_drift_perp_open(compiler, intent: PerpOpenIntent) -> CompilationResult:
-    """Compile a PERP_OPEN intent using Drift for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        if not is_solana_chain(compiler):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Drift is only supported on Solana",
-                intent_id=intent.intent_id,
-            )
-
-        # Validate collateral_amount is not chained
-        if intent.collateral_amount == "all":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="collateral_amount='all' must be resolved before compilation.",
-                intent_id=intent.intent_id,
-            )
-
-        adapter = get_drift_adapter(compiler)
-        bundle = adapter.compile_perp_open_intent(intent, price_oracle=compiler.price_oracle)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-
-    except Exception as e:
-        logger.exception(f"Drift perp open compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-def compile_drift_perp_close(compiler, intent: PerpCloseIntent) -> CompilationResult:
-    """Compile a PERP_CLOSE intent using Drift for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        if not is_solana_chain(compiler):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Drift is only supported on Solana",
-                intent_id=intent.intent_id,
-            )
-
-        adapter = get_drift_adapter(compiler)
-        bundle = adapter.compile_perp_close_intent(intent, price_oracle=compiler.price_oracle)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-
-    except Exception as e:
-        logger.exception(f"Drift perp close compilation failed: {e}")
         result.status = CompilationStatus.FAILED
         result.error = str(e)
     return result

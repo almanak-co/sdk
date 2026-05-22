@@ -15,6 +15,8 @@ if TYPE_CHECKING:
         CollectFeesIntent,
         LPCloseIntent,
         LPOpenIntent,
+        PerpCloseIntent,
+        PerpOpenIntent,
         SwapIntent,
     )
 
@@ -31,6 +33,8 @@ class CompilerServices(Protocol):
     def calculate_expected_output(self, amount_in: int, from_token: TokenInfo, to_token: TokenInfo) -> int: ...
 
     def build_approve_tx(self, token_address: str, spender: str, amount: int) -> list[TransactionData]: ...
+
+    def get_chain_rpc_url(self) -> str | None: ...
 
     def validate_pool(self, result: Any, intent_id: str) -> CompilationResult | None: ...
 
@@ -117,6 +121,18 @@ class CLCompilerContext(SwapCompilerContext):
     default_lp_slippage: Decimal
 
 
+@dataclass(frozen=True, kw_only=True)
+class PerpCompilerContext(BaseCompilerContext):
+    """Perpetuals compiler context.
+
+    Perp connector compilers need the normalized protocol key because several
+    venue surfaces share one implementation while preserving distinct strategy
+    protocol names, e.g. ``aster_perps`` and ``pancakeswap_perps``.
+    """
+
+    protocol: str
+
+
 class BaseProtocolCompiler[CompilerContextT: BaseCompilerContext](ABC):
     """Root ABC for connector-owned intent compilers.
 
@@ -198,12 +214,39 @@ class BaseConcentratedLiquidityCompiler(BaseProtocolCompiler[CLCompilerContext])
     def compile_collect_fees(self, ctx: CLCompilerContext, intent: CollectFeesIntent) -> CompilationResult: ...
 
 
+class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
+    """Perpetuals connector compilers — open and close positions."""
+
+    context_type: ClassVar[type[BaseCompilerContext]] = PerpCompilerContext
+
+    def compile(self, ctx: PerpCompilerContext, intent: Any) -> CompilationResult:
+        from almanak.framework.intents.vocabulary import IntentType
+
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type == IntentType.PERP_OPEN:
+            return self.compile_perp_open(ctx, intent)
+        if intent_type == IntentType.PERP_CLOSE:
+            return self.compile_perp_close(ctx, intent)
+        return self._unsupported(intent)
+
+    @abstractmethod
+    def compile_perp_open(self, ctx: PerpCompilerContext, intent: PerpOpenIntent) -> CompilationResult: ...
+
+    @abstractmethod
+    def compile_perp_close(self, ctx: PerpCompilerContext, intent: PerpCloseIntent) -> CompilationResult: ...
+
+
 __all__ = [
     "BaseCompilerContext",
     "BaseConcentratedLiquidityCompiler",
+    "BasePerpCompiler",
     "BaseProtocolCompiler",
     "CLCompilerContext",
     "CompilerServices",
+    "PerpCompilerContext",
     "SwapCompilerContext",
 ]
 

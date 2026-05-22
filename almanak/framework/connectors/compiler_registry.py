@@ -108,6 +108,26 @@ class CompilerRegistry:
             "almanak.framework.connectors.kamino.compiler",
             "KaminoCompiler",
         ),
+        "gmx_v2": (
+            "almanak.framework.connectors.gmx_v2.compiler",
+            "GMXV2Compiler",
+        ),
+        "aster_perps": (
+            "almanak.framework.connectors.aster_perps.compiler",
+            "AsterPerpsCompiler",
+        ),
+        "pancakeswap_perps": (
+            "almanak.framework.connectors.aster_perps.compiler",
+            "AsterPerpsCompiler",
+        ),
+        "drift": (
+            "almanak.framework.connectors.drift.compiler",
+            "DriftCompiler",
+        ),
+        "hyperliquid": (
+            "almanak.framework.connectors.hyperliquid.compiler",
+            "HyperliquidCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

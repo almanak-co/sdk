@@ -35,6 +35,7 @@ from ..connectors.base.compiler import (
     BaseCompilerContext,
     BaseProtocolCompiler,
     CLCompilerContext,
+    PerpCompilerContext,
     SwapCompilerContext,
 )
 from ..connectors.base.swap_adapter import DefaultSwapAdapter
@@ -57,7 +58,6 @@ from ..utils.log_formatters import (
     format_slippage_bps,
     format_token_amount,
 )
-from .intent_errors import InvalidCollateralForMarketError
 from .vocabulary import (
     AnyIntent,
     BorrowIntent,
@@ -95,13 +95,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# One-shot deprecation signal: the ``pancakeswap_perps`` protocol key is the
-# legacy attribution (broker_id=2) for Aster v1. New strategies should use
-# ``protocol="aster_perps"`` directly. Warn at compile time (not just at
-# module import) so strategies that import from aster_perps but keep the old
-# intent-level key still see the signal.
-_PCS_PERPS_KEY_WARNED = False
-
 
 @dataclass(frozen=True)
 class _ConnectorCompilerServices:
@@ -123,6 +116,9 @@ class _ConnectorCompilerServices:
 
     def build_approve_tx(self, token_address: str, spender: str, amount: int) -> list["TransactionData"]:
         return self.compiler._build_approve_tx(token_address, spender, amount)
+
+    def get_chain_rpc_url(self) -> str | None:
+        return self.compiler._get_chain_rpc_url()
 
     def validate_pool(self, result: "PoolValidationResult", intent_id: str) -> "CompilationResult | None":
         return self.compiler._validate_pool(result, intent_id)
@@ -173,19 +169,6 @@ class _ConnectorCompilerServices:
             rpc_timeout=self.compiler.rpc_timeout,
             gateway_client=self.compiler._gateway_client,
         )
-
-
-def _warn_pcs_perps_protocol_key_once() -> None:
-    global _PCS_PERPS_KEY_WARNED
-    if _PCS_PERPS_KEY_WARNED:
-        return
-    _PCS_PERPS_KEY_WARNED = True
-    logger.warning(
-        "Intent protocol='pancakeswap_perps' is deprecated; route through "
-        "'aster_perps' (canonical, broker_id=0) unless you explicitly need "
-        "PancakeSwap attribution (broker_id=2). This compiler path will be "
-        "removed once pancakeswap_delta_neutral_lp migrates."
-    )
 
 
 # =============================================================================
@@ -299,6 +282,14 @@ _LENDING_PROTOCOLS = (
     "silo_v2",
     "spark",
 )
+
+# Perp connectors with connector-owned compilers — used only to build the
+# "known perp protocols" hint in the unsupported-protocol error. Grouped by
+# chain family (Solana vs non-Solana); the hint deliberately does NOT claim
+# per-chain support — each venue compiles only on its own chains. Keep in
+# sync with the perp entries in connectors.compiler_registry.CompilerRegistry.
+_PERP_PROTOCOLS_SOLANA = ("drift",)
+_PERP_PROTOCOLS_NON_SOLANA = ("gmx_v2", "aster_perps", "pancakeswap_perps", "hyperliquid")
 
 
 def _is_solana_mint(token: str) -> bool:
@@ -617,14 +608,14 @@ class IntentCompiler:
 
         return normalize_protocol(self.chain, intent_protocol)
 
-    def _base_compiler_context_kwargs(self) -> dict[str, Any]:
+    def _base_compiler_context_kwargs(self, *, resolve_rpc_url: bool = True) -> dict[str, Any]:
         """Build common connector compiler context fields."""
         config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
 
         return {
             "chain": self.chain,
             "wallet_address": self.wallet_address,
-            "rpc_url": self._get_chain_rpc_url(),
+            "rpc_url": self._get_chain_rpc_url() if resolve_rpc_url else getattr(self, "rpc_url", None),
             "rpc_timeout": getattr(self, "rpc_timeout", 10.0),
             "permission_discovery": getattr(config, "permission_discovery", False),
             "allow_placeholder_prices": config.allow_placeholder_prices,
@@ -665,6 +656,8 @@ class IntentCompiler:
         context_type = getattr(connector_compiler, "context_type", BaseCompilerContext)
         if issubclass(context_type, CLCompilerContext):
             return self._build_cl_compiler_context(protocol)
+        if issubclass(context_type, PerpCompilerContext):
+            return PerpCompilerContext(**self._base_compiler_context_kwargs(resolve_rpc_url=False), protocol=protocol)
         if issubclass(context_type, SwapCompilerContext):
             return SwapCompilerContext(**self._swap_compiler_context_kwargs())
         if context_type is not BaseCompilerContext:
@@ -1038,9 +1031,9 @@ class IntentCompiler:
             elif intent_type == IntentType.WITHDRAW:
                 return self._compile_withdraw(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PERP_OPEN:
-                return self._compile_perp_open(intent)  # type: ignore[arg-type]
+                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PERP_CLOSE:
-                return self._compile_perp_close(intent)  # type: ignore[arg-type]
+                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.HOLD:
                 return self._compile_hold(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.FLASH_LOAN:
@@ -1319,12 +1312,6 @@ class IntentCompiler:
         from .compiler_solana import get_orca_adapter
 
         return get_orca_adapter(self, needs_rpc=needs_rpc)
-
-    def _get_drift_adapter(self) -> Any:
-        """Get or create a cached DriftAdapter instance."""
-        from .compiler_solana import get_drift_adapter
-
-        return get_drift_adapter(self)
 
     # =========================================================================
     # Solana compilation methods (delegated to compiler_solana)
@@ -3166,6 +3153,24 @@ class IntentCompiler:
         """Compile a WITHDRAW intent into an ActionBundle."""
         return self._compile_lending_via_registry(intent, "WITHDRAW")
 
+    def _compile_perp_via_registry(self, intent: PerpOpenIntent | PerpCloseIntent) -> CompilationResult:
+        """Compile a PERP intent through a connector-owned compiler."""
+        protocol = self._resolve_protocol(intent.protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+
+        primitive = intent.intent_type.value if hasattr(intent.intent_type, "value") else str(intent.intent_type)
+        supported = _PERP_PROTOCOLS_SOLANA if self._is_solana_chain() else _PERP_PROTOCOLS_NON_SOLANA
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Protocol '{intent.protocol}' is not supported for {primitive} on {self.chain}. "
+                f"Known perp protocols (each compiles only on its own chains): {', '.join(supported)}."
+            ),
+            intent_id=intent.intent_id,
+        )
+
     def _compile_lending_via_registry(self, intent: Any, primitive: str) -> CompilationResult:
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
@@ -3286,1003 +3291,6 @@ class IntentCompiler:
             total_gas_estimate=0,
             intent_id=intent.intent_id,
         )
-
-    def _compile_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:  # noqa: C901
-        """Compile a PERP_OPEN intent into an ActionBundle.
-
-        Routes to protocol-specific adapter based on intent.protocol:
-        - "drift": Drift Protocol on Solana (via DriftAdapter)
-        - "gmx_v2": GMX V2 on Arbitrum/Avalanche (via GMXv2Adapter)
-
-        Args:
-            intent: PerpOpenIntent to compile
-
-        Returns:
-            CompilationResult with perp open ActionBundle
-        """
-        protocol = self._resolve_protocol(intent.protocol)
-        if protocol == "drift":
-            # Step 1.5 (Drift): Validate the collateral token is a supported
-            # Drift spot-market mint BEFORE dispatching to the Drift compiler.
-            # Drift is cross-margin, so the rule is a single global allow-list
-            # (see almanak.framework.connectors.drift.market_rules). An invalid
-            # mint would otherwise fail opaquely at Solana submission time
-            # with a Drift program error — validating up-front surfaces a
-            # clean, actionable compile-time error instead.
-            from ..connectors.drift.market_rules import validate_drift_collateral as _validate_drift_collateral
-
-            try:
-                _validate_drift_collateral(intent.collateral_token)
-            except InvalidCollateralForMarketError as exc:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=str(exc),
-                    intent_id=intent.intent_id,
-                )
-            return self._compile_drift_perp_open(intent)
-        # Aster Perps powers PancakeSwap Perps (PCS = broker id 2 on Aster).
-        # Route both protocol keys through the same compiler method, differing
-        # only in the broker_id attribution we plumb to the adapter.
-        if protocol == "pancakeswap_perps":
-            from ..connectors.aster_perps import PCS_BROKER_ID
-
-            _warn_pcs_perps_protocol_key_once()
-            return self._compile_aster_perps_perp_open(intent, broker_id=PCS_BROKER_ID)
-        if protocol == "aster_perps":
-            from ..connectors.aster_perps import ASTER_BROKER_RAW
-
-            return self._compile_aster_perps_perp_open(intent, broker_id=ASTER_BROKER_RAW)
-
-        # Fail explicitly for unsupported perp protocols on Solana
-        if self._is_solana_chain():
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Protocol '{intent.protocol}' is not supported for PERP_OPEN on Solana. Supported: drift",
-            )
-
-        # Gate the GMX path on the canonical key so a typo / unknown alias fails fast
-        # instead of silently compiling a GMX order for the wrong venue.
-        if protocol != "gmx_v2":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    f"Protocol '{intent.protocol}' is not supported for PERP_OPEN on "
-                    f"{self.chain}. Supported: gmx_v2, aster_perps, pancakeswap_perps (bsc)."
-                ),
-            )
-
-        from ..connectors import GMXv2Adapter, GMXv2Config
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
-        try:
-            # Step 1: Validate chain (GMX v2 only supports arbitrum and avalanche)
-            if self.chain not in ["arbitrum", "avalanche"]:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"GMX v2 not supported on chain: {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 1.5: Validate the (market, collateral_token) pair BEFORE
-            # emitting any transactions. GMX V2 silently burns keeper fees when
-            # orders are submitted with collateral that is not the market's
-            # longToken/shortToken. See almanak.framework.connectors.gmx_v2.market_rules
-            # for the authoritative rule table.
-            from ..connectors.gmx_v2.market_rules import validate_collateral as _validate_gmx_collateral
-
-            try:
-                _validate_gmx_collateral(
-                    chain=self.chain,
-                    market=intent.market,
-                    collateral_token=intent.collateral_token,
-                )
-            except InvalidCollateralForMarketError as exc:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=str(exc),
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 2: Create GMX adapter
-            slippage_bps = int(intent.max_slippage * 10000)
-            gmx_config = GMXv2Config(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                default_slippage_bps=slippage_bps,
-            )
-            adapter = GMXv2Adapter(gmx_config)
-
-            # Step 3: Calculate acceptable price
-            # For longs: max price willing to pay (price * (1 + slippage))
-            # For shorts: min price willing to accept (price * (1 - slippage))
-            # We'll calculate based on current price estimate from intent size_usd
-            acceptable_price = None  # Let adapter use default max/min
-            if intent.is_long:
-                acceptable_price = Decimal(10**30)  # Max uint for long
-            else:
-                acceptable_price = Decimal("0")  # Min for short
-
-            # Step 3.5: Validate collateral amount is not chained
-            if intent.collateral_amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="collateral_amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 4: Build position open order
-            order_result = adapter.open_position(
-                market=intent.market,
-                collateral_token=intent.collateral_token,
-                collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]  # Validated above
-                size_delta_usd=intent.size_usd,
-                is_long=intent.is_long,
-                acceptable_price=acceptable_price,
-            )
-
-            if not order_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=order_result.error or "Failed to create position order",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 5: Create transaction data using GMX V2 SDK
-            # Use the real SDK to build calldata with proper ABI encoding
-            from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
-
-            # GMX V2 SDK accepts either a connected gateway_client (production
-            # path) or an RPC URL (local/backtest fallback). Normalize a
-            # disconnected gateway_client to None so we fall back cleanly.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"GMX V2 requires either a connected gateway_client or an RPC URL. "
-                        f"Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, ALCHEMY_API_KEY, "
-                        "or use GatewayExecutionOrchestrator."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            # Initialize SDK
-            sdk = GMXV2SDK(rpc_url=rpc_url, chain=self.chain, gateway_client=gateway_client)
-
-            # Resolve market address
-            market_address = GMX_V2_MARKETS.get(self.chain, {}).get(intent.market)
-            if not market_address:
-                try:
-                    market_address = sdk.get_market_address(intent.market)
-                except ValueError:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Unknown market: {intent.market}",
-                        intent_id=intent.intent_id,
-                    )
-
-            # Resolve collateral token address. Case-insensitive against the
-            # GMX_V2_TOKENS registry — Avalanche uses mixed-case keys
-            # (WETH.e, BTC.b) that would never match if we just upper-cased
-            # the user input. VIB-1720.
-            collateral_token_upper = intent.collateral_token.upper()
-            chain_tokens = GMX_V2_TOKENS.get(self.chain, {})
-            collateral_address = next(
-                (addr for sym, addr in chain_tokens.items() if sym.upper() == collateral_token_upper),
-                None,
-            )
-            if not collateral_address:
-                if intent.collateral_token.startswith("0x"):
-                    collateral_address = intent.collateral_token
-                else:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Unknown collateral token: {intent.collateral_token}",
-                        intent_id=intent.intent_id,
-                    )
-
-            # Calculate collateral in wei. Resolve real decimals via TokenResolver
-            # (USDC=6, WETH=18, WAVAX=18, BTC.b=8, ...) — the previous "WETH/ETH=18 else 6"
-            # heuristic underfunded WAVAX longs by 12 orders of magnitude on Avalanche.
-            collateral_token_info = None
-            if getattr(self, "_token_resolver", None) is not None:
-                # The resolver returns None on a clean lookup miss; only
-                # AttributeError happens when test compilers strip the
-                # resolver. Don't swallow other exceptions — they signal a
-                # genuine resolver bug we want to surface, not silently fall
-                # back to a 6-decimal guess that mis-sizes the order.
-                try:
-                    collateral_token_info = self._resolve_token(intent.collateral_token)
-                except AttributeError:
-                    collateral_token_info = None
-            if collateral_token_info is not None:
-                collateral_decimals = collateral_token_info.decimals
-            elif collateral_token_upper in ("WETH", "WETH.E", "ETH", "WAVAX", "AVAX"):
-                # Native-wrapped fallback when the resolver can't map the symbol.
-                # WETH.e on Avalanche is the bridged 18-decimal WETH variant —
-                # missing it would underfund a WETH.e long by 12 orders of magnitude.
-                collateral_decimals = 18
-            elif collateral_token_upper in ("WBTC", "BTC.B", "WBTC.E"):
-                # GMX V2 BTC variants are 8-decimal; do not silently default to 6.
-                collateral_decimals = 8
-            else:
-                # Stablecoin default — USDC/USDT and their bridged variants are 6.
-                collateral_decimals = 6
-            collateral_amount_decimal: Decimal = intent.collateral_amount  # type: ignore[assignment]
-            collateral_wei = int(collateral_amount_decimal * Decimal(10**collateral_decimals))
-
-            # Calculate size in USD (GMX uses 30 decimals for USD)
-            size_delta_usd = int(intent.size_usd * Decimal(10**30))
-
-            # Calculate acceptable price (GMX uses 30 decimals)
-            acceptable_price_wei = int(acceptable_price)
-
-            # Get dynamic execution fee
-            execution_fee = sdk.get_execution_fee(order_type="increase")
-
-            # Build order parameters
-            order_params = GMXV2OrderParams(
-                from_address=self.wallet_address,
-                market=market_address,
-                initial_collateral_token=collateral_address,
-                initial_collateral_delta_amount=collateral_wei,
-                size_delta_usd=size_delta_usd,
-                is_long=intent.is_long,
-                acceptable_price=acceptable_price_wei,
-                execution_fee=execution_fee,
-            )
-
-            # Build the multicall transaction with real calldata
-            tx_data = sdk.build_increase_order_multicall(order_params)
-
-            # Step 5.5: Prepend ERC-20 approval for collateral token.
-            # ExchangeRouter.sendTokens() delegates to Router.pluginTransfer(),
-            # which calls IERC20.safeTransferFrom() — so the Router is the msg.sender
-            # that needs the allowance, NOT the ExchangeRouter.
-            # Native tokens (WETH/ETH) are sent as msg.value via sendWnt(), no approval needed.
-            is_native_collateral = collateral_token_upper in ("WETH", "ETH", "WAVAX", "AVAX")
-            if not is_native_collateral and collateral_wei > 0:
-                approve_txs = self._build_approve_tx(
-                    token_address=collateral_address,
-                    spender=sdk.ROUTER_ADDRESS,
-                    amount=collateral_wei,
-                )
-                transactions.extend(approve_txs)
-
-            open_tx = TransactionData(
-                to=tx_data.to,
-                value=tx_data.value,
-                data=tx_data.data,
-                gas_estimate=tx_data.gas_estimate,
-                description=(
-                    f"Open {'LONG' if intent.is_long else 'SHORT'} {intent.market} position: ${intent.size_usd} size, {intent.collateral_amount} collateral"
-                ),
-                tx_type="perp_open",
-            )
-            transactions.append(open_tx)
-
-            # Step 6: Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.PERP_OPEN.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "market": intent.market,
-                    "collateral_token": intent.collateral_token,
-                    "collateral_amount": str(intent.collateral_amount),
-                    "size_usd": str(intent.size_usd),
-                    "is_long": intent.is_long,
-                    "leverage": str(intent.leverage),
-                    "max_slippage": str(intent.max_slippage),
-                    "order_key": order_result.order_key,
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled PERP_OPEN intent: {'LONG' if intent.is_long else 'SHORT'} {intent.market}, ${intent.size_usd} size, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile PERP_OPEN intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:  # noqa: C901
-        """Compile a PERP_CLOSE intent into an ActionBundle.
-
-        Routes to protocol-specific adapter based on intent.protocol:
-        - "drift": Drift Protocol on Solana (via DriftAdapter)
-        - "gmx_v2": GMX V2 on Arbitrum/Avalanche (via GMXv2Adapter)
-
-        Args:
-            intent: PerpCloseIntent to compile
-
-        Returns:
-            CompilationResult with perp close ActionBundle
-        """
-        protocol = self._resolve_protocol(intent.protocol)
-        if protocol == "drift":
-            return self._compile_drift_perp_close(intent)
-        # PERP_CLOSE does not attribute a broker fee (the broker_id is on the
-        # open payload only), but we plumb it through the adapter for symmetry
-        # so the same adapter instance can close positions it did not open.
-        if protocol == "pancakeswap_perps":
-            from ..connectors.aster_perps import PCS_BROKER_ID
-
-            _warn_pcs_perps_protocol_key_once()
-            return self._compile_aster_perps_perp_close(intent, broker_id=PCS_BROKER_ID)
-        if protocol == "aster_perps":
-            from ..connectors.aster_perps import ASTER_BROKER_RAW
-
-            return self._compile_aster_perps_perp_close(intent, broker_id=ASTER_BROKER_RAW)
-
-        # Fail explicitly for unsupported perp protocols on Solana
-        if self._is_solana_chain():
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Protocol '{intent.protocol}' is not supported for PERP_CLOSE on Solana. Supported: drift",
-            )
-
-        # Gate the GMX path on the canonical key so a typo / unknown alias fails fast
-        # instead of silently compiling a GMX close for the wrong venue.
-        if protocol != "gmx_v2":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    f"Protocol '{intent.protocol}' is not supported for PERP_CLOSE on "
-                    f"{self.chain}. Supported: gmx_v2, aster_perps, pancakeswap_perps (bsc)."
-                ),
-            )
-
-        from ..connectors import GMXv2Adapter, GMXv2Config
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
-        try:
-            # Step 1: Validate chain
-            if self.chain not in ["arbitrum", "avalanche"]:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"GMX v2 not supported on chain: {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 2: Create GMX adapter
-            slippage_bps = int(intent.max_slippage * 10000)
-            gmx_config = GMXv2Config(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                default_slippage_bps=slippage_bps,
-            )
-            adapter = GMXv2Adapter(gmx_config)
-
-            # Step 3: Calculate acceptable price for closing
-            # For closing longs: min price to sell at (price * (1 - slippage))
-            # For closing shorts: max price to buy back at (price * (1 + slippage))
-            acceptable_price = None
-            if intent.is_long:
-                acceptable_price = Decimal("0")  # Min price for closing long
-            else:
-                acceptable_price = Decimal(10**30)  # Max price for closing short
-
-            # Step 4: Initialize SDK and resolve addresses (needed before adapter call
-            # so we can query on-chain position size for full closes — VIB-1946)
-            from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
-
-            # GMX V2 SDK accepts either a connected gateway_client (production
-            # path) or an RPC URL (local/backtest fallback). Normalize a
-            # disconnected gateway_client to None so we fall back cleanly.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"GMX V2 requires either a connected gateway_client or an RPC URL. "
-                        f"Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, ALCHEMY_API_KEY, "
-                        "or use GatewayExecutionOrchestrator."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            # Initialize SDK
-            sdk = GMXV2SDK(rpc_url=rpc_url, chain=self.chain, gateway_client=gateway_client)
-
-            # Resolve market address
-            market_address = GMX_V2_MARKETS.get(self.chain, {}).get(intent.market)
-            if not market_address:
-                try:
-                    market_address = sdk.get_market_address(intent.market)
-                except ValueError:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Unknown market: {intent.market}",
-                        intent_id=intent.intent_id,
-                    )
-
-            # Resolve collateral token address — same case-insensitive policy
-            # as the open path so WETH.e / BTC.b match on Avalanche. VIB-1720.
-            collateral_token_upper = intent.collateral_token.upper()
-            chain_tokens = GMX_V2_TOKENS.get(self.chain, {})
-            collateral_address = next(
-                (addr for sym, addr in chain_tokens.items() if sym.upper() == collateral_token_upper),
-                None,
-            )
-            if not collateral_address:
-                if intent.collateral_token.startswith("0x"):
-                    collateral_address = intent.collateral_token
-                else:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Unknown collateral token: {intent.collateral_token}",
-                        intent_id=intent.intent_id,
-                    )
-
-            # Step 5: Resolve position size in USD (GMX uses 30 decimals)
-            # GMX V2 validates sizeDeltaUsd <= position.sizeInUsd — max uint and any
-            # overshoot burns keeper fees without closing (VIB-1946).
-            resolved_size_usd = intent.size_usd
-            if intent.size_usd:
-                size_delta_usd = int(intent.size_usd * Decimal(10**30))
-            else:
-                queried_size = self._get_gmx_position_size_onchain(
-                    sdk, market_address, collateral_address, intent.is_long
-                )
-                if queried_size is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            "Cannot close full GMX V2 position: unable to read position size on-chain. "
-                            "Either specify size_usd explicitly or ensure RPC/API connectivity. "
-                            "Refusing to guess — incorrect sizes burn keeper execution fees."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                size_delta_usd = queried_size
-                # Convert on-chain size (30-decimal int) to Decimal for adapter
-                resolved_size_usd = Decimal(size_delta_usd) / Decimal(10**30)
-
-            # Step 6: Build position close order via adapter (with resolved size)
-            order_result = adapter.close_position(
-                market=intent.market,
-                collateral_token=intent.collateral_token,
-                is_long=intent.is_long,
-                size_delta_usd=resolved_size_usd,
-                acceptable_price=acceptable_price,
-            )
-
-            if not order_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=order_result.error or "Failed to create close order",
-                    intent_id=intent.intent_id,
-                )
-
-            # Calculate acceptable price (GMX uses 30 decimals)
-            acceptable_price_wei = int(acceptable_price)
-
-            # Get dynamic execution fee
-            execution_fee = sdk.get_execution_fee(order_type="decrease")
-
-            # Build order parameters
-            order_params = GMXV2OrderParams(
-                from_address=self.wallet_address,
-                market=market_address,
-                initial_collateral_token=collateral_address,
-                initial_collateral_delta_amount=0,  # No additional collateral for decrease
-                size_delta_usd=size_delta_usd,
-                is_long=intent.is_long,
-                acceptable_price=acceptable_price_wei,
-                execution_fee=execution_fee,
-            )
-
-            # Build the decrease order transaction with real calldata
-            tx_data = sdk.build_decrease_order_multicall(order_params)
-
-            size_desc = f"${intent.size_usd}" if intent.size_usd else "full position"
-            close_tx = TransactionData(
-                to=tx_data.to,
-                value=tx_data.value,
-                data=tx_data.data,
-                gas_estimate=tx_data.gas_estimate,
-                description=(f"Close {'LONG' if intent.is_long else 'SHORT'} {intent.market} position: {size_desc}"),
-                tx_type="perp_close",
-            )
-            transactions.append(close_tx)
-
-            # Step 6: Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.PERP_CLOSE.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "market": intent.market,
-                    "collateral_token": intent.collateral_token,
-                    "is_long": intent.is_long,
-                    "size_usd": str(intent.size_usd) if intent.size_usd else None,
-                    "close_full_position": intent.close_full_position,
-                    "max_slippage": str(intent.max_slippage),
-                    "order_key": order_result.order_key,
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled PERP_CLOSE intent: {'LONG' if intent.is_long else 'SHORT'} {intent.market}, {size_desc}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile PERP_CLOSE intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _get_gmx_position_size_onchain(
-        self,
-        sdk: Any,
-        market_address: str,
-        collateral_address: str,
-        is_long: bool,
-    ) -> int | None:
-        """Read exact GMX V2 position size from on-chain for close-full-position.
-
-        GMX V2 validates sizeDeltaUsd <= position.sizeInUsd strictly.
-        Any overshoot burns keeper fees without closing the position (VIB-1946).
-
-        Args:
-            sdk: GMXV2SDK instance (already initialized with RPC)
-            market_address: Market contract address
-            collateral_address: Collateral token address
-            is_long: Position direction
-
-        Returns:
-            size_in_usd in 30-decimal int format, or None if query failed.
-        """
-        from ..connectors.gmx_v2.sdk import PositionQueryError
-
-        try:
-            positions = sdk.get_account_positions(self.wallet_address)
-        except PositionQueryError as e:
-            logger.warning("GMX V2 position query failed: %s", e)
-            return None
-        except Exception as e:
-            logger.warning("Unexpected error querying GMX V2 positions: %s", e)
-            return None
-
-        if not positions:
-            logger.warning("No GMX V2 positions found for %s", self.wallet_address)
-            return None
-
-        # Match position by (market, collateral_token, is_long)
-        market_lower = market_address.lower()
-        collateral_lower = collateral_address.lower()
-        for pos in positions:
-            if (
-                pos.get("market", "").lower() == market_lower
-                and pos.get("collateral_token", "").lower() == collateral_lower
-                and pos.get("is_long") == is_long
-                and pos.get("size_in_usd", 0) > 0
-            ):
-                size_in_usd = pos["size_in_usd"]  # Already in 30 decimals from chain
-                logger.info(
-                    "Read on-chain GMX V2 position size: %s (30-decimal) for market=%s is_long=%s",
-                    size_in_usd,
-                    market_address,
-                    is_long,
-                )
-                return int(size_in_usd)
-
-        logger.warning(
-            "No matching GMX V2 position found for market=%s collateral=%s is_long=%s",
-            market_address,
-            collateral_address,
-            is_long,
-        )
-        return None
-
-    # ==========================================================================
-    # DRIFT PERPS (Solana)
-    # ==========================================================================
-
-    def _compile_drift_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:
-        """Compile a PERP_OPEN intent using Drift for Solana chains."""
-        from .compiler_solana import compile_drift_perp_open
-
-        return compile_drift_perp_open(self, intent)
-
-    def _compile_drift_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:
-        """Compile a PERP_CLOSE intent using Drift for Solana chains."""
-        from .compiler_solana import compile_drift_perp_close
-
-        return compile_drift_perp_close(self, intent)
-
-    # ==========================================================================
-    # ASTER PERPS (Aster/ApolloX Diamond on BSC; PCS = broker id 2)
-    # ==========================================================================
-
-    def _compile_aster_perps_perp_open(
-        self,
-        intent: PerpOpenIntent,
-        *,
-        broker_id: int,
-    ) -> CompilationResult:
-        """Compile a PERP_OPEN intent via Aster Perps (BSC, Phase 1).
-
-        Used by both ``protocol="aster_perps"`` (broker_id=0, no attribution)
-        and ``protocol="pancakeswap_perps"`` (broker_id=2, PCS attribution).
-        See docs/internal/discussions/aster-dex-integration-20260418.md (PRD).
-
-        Phase 1 limitations:
-          - chain must be 'bsc'
-          - market must be in ASTER_PERPS_MARKETS['bsc'] (BTC/USD, ETH/USD, BNB/USD)
-          - native BNB margin (collateral_token='BNB') goes via openMarketTradeBNB (value-carrying)
-          - ERC20 margin (USDT/USDC) goes via openMarketTrade (compiler prepends approve)
-          - no SL/TP, no limit orders
-        """
-        from ..connectors.aster_perps import AsterPerpsAdapter, AsterPerpsConfig
-
-        if self.chain != "bsc":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Aster Perps Phase 1 requires chain='bsc', got '{self.chain}'",
-            )
-
-        if intent.collateral_amount == "all":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    "collateral_amount='all' must be resolved before compilation. "
-                    "Use Intent.set_resolved_amount() to resolve chained amounts."
-                ),
-            )
-
-        result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
-        transactions: list[TransactionData] = []
-        warnings: list[str] = []
-
-        try:
-            adapter = AsterPerpsAdapter(
-                AsterPerpsConfig(
-                    broker_id=broker_id,
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-            )
-
-            # Resolve mark price for the base asset (e.g. 'BTC/USD' -> 'BTC').
-            # Aster trades crypto perps as synthetics; the *trading* market name
-            # uses canonical symbols ('BTC', 'ETH'), but on-chain price oracles
-            # for BSC are keyed on the wrapped/bridged token ('WBTC' for BTCB,
-            # 'WETH' for ETH-bsc, etc.). We try the bare symbol first and fall
-            # back to the wrapped symbol so strategies can pass either.
-            base_symbol = intent.market.split("/")[0] if "/" in intent.market else intent.market
-            _BSC_PERP_PRICE_ALIAS = {"BTC": "WBTC", "ETH": "WETH", "BNB": "WBNB"}
-            try:
-                mark_price = self._require_token_price(base_symbol)
-            except ValueError:
-                wrapped = _BSC_PERP_PRICE_ALIAS.get(base_symbol.upper())
-                if not wrapped:
-                    raise
-                mark_price = self._require_token_price(wrapped)
-
-            # Resolve collateral decimals and normalize the collateral input for the adapter.
-            # Accept either symbol (case-insensitive) or a 0x-prefixed address — per the
-            # PerpOpenIntent docstring both forms are supported.
-            from almanak.core.contracts import ASTER_PERPS_TOKENS
-
-            from ..connectors.aster_perps.sdk import NATIVE_BNB_ADDRESS
-
-            raw_collateral = intent.collateral_token
-            # The native sentinel (address(0) via NATIVE_BNB_ADDRESS) is only honoured by
-            # AsterPerpsAdapter.build_open() when spelled as a symbol ("BNB"/"NATIVE").
-            # Normalize the sentinel address *to* the "BNB" symbol so address-form callers
-            # still route through openMarketTradeBNB instead of falling into the ERC-20 branch.
-            if (
-                isinstance(raw_collateral, str)
-                and raw_collateral.startswith("0x")
-                and raw_collateral.lower() == NATIVE_BNB_ADDRESS.lower()
-            ):
-                normalized_collateral = "BNB"
-                resolver_key = "BNB"
-            elif isinstance(raw_collateral, str) and raw_collateral.startswith("0x"):
-                normalized_collateral = raw_collateral
-                resolver_key = raw_collateral  # preserve case for address lookups
-            else:
-                normalized_collateral = raw_collateral
-                resolver_key = raw_collateral.upper()
-
-            # Venue allowlist: Aster Perps only accepts BNB (native), WBNB, USDT, USDC as
-            # margin. Reject anything else at compile time so we never approve an unrelated
-            # ERC-20 to the router or submit an openMarketTrade that will revert on-chain.
-            # The native sentinel was already normalized to "BNB" above, so the address
-            # allowlist intentionally only contains real ERC-20 margin tokens.
-            supported_tokens = ASTER_PERPS_TOKENS.get(self.chain, {})
-            allowed_symbols = {"BNB", "NATIVE"} | set(supported_tokens.keys())
-            allowed_addresses = {addr.lower() for addr in supported_tokens.values()}
-            if resolver_key.startswith("0x"):
-                if resolver_key.lower() not in allowed_addresses:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        intent_id=intent.intent_id,
-                        error=(
-                            f"Collateral address '{intent.collateral_token}' is not a supported "
-                            f"Aster Perps margin token on {self.chain}. "
-                            f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
-                        ),
-                    )
-            elif resolver_key not in allowed_symbols:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=(
-                        f"Collateral symbol '{intent.collateral_token}' is not a supported "
-                        f"Aster Perps margin token on {self.chain}. "
-                        f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
-                    ),
-                )
-
-            if resolver_key in ("BNB", "NATIVE", "WBNB"):
-                collateral_decimals = 18
-            else:
-                try:
-                    collateral_decimals = self._token_resolver.get_decimals(self.chain, resolver_key)
-                except Exception as e:  # noqa: BLE001 — TokenNotFoundError or similar
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        intent_id=intent.intent_id,
-                        error=(
-                            f"Could not resolve decimals for collateral token "
-                            f"'{intent.collateral_token}' on {self.chain}: {e}"
-                        ),
-                    )
-
-            order = adapter.build_open(
-                market=intent.market,
-                collateral_token=normalized_collateral,
-                collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]  # validated above
-                collateral_decimals=collateral_decimals,
-                size_usd=intent.size_usd,
-                mark_price=mark_price,
-                is_long=intent.is_long,
-                max_slippage=intent.max_slippage,
-            )
-            if not order.success or order.tx is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=order.error or "Adapter failed to build open transaction",
-                )
-
-            # Prepend ERC20 approve when the margin is non-native.
-            if not order.native and order.margin_token_address:
-                approve_txs = self._build_approve_tx(
-                    token_address=order.margin_token_address,
-                    spender=order.tx.to,
-                    amount=order.amount_in_wei,
-                )
-                transactions.extend(approve_txs)
-
-            open_tx = TransactionData(
-                to=order.tx.to,
-                value=order.tx.value,
-                data="0x" + order.tx.data.hex(),
-                gas_estimate=order.tx.gas_estimate,
-                description=order.tx.description,
-                tx_type="perp_open",
-            )
-            transactions.append(open_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.PERP_OPEN.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "market": intent.market,
-                    "pair_base": order.pair_base,
-                    "collateral_token": intent.collateral_token,
-                    "collateral_amount": str(intent.collateral_amount),
-                    "size_usd": str(intent.size_usd),
-                    "is_long": intent.is_long,
-                    "max_slippage": str(intent.max_slippage),
-                    "qty_1e10": order.qty,  # qty is 10-decimal fixed-point on ApolloX
-                    "limit_price_1e8": order.limit_price,
-                    "native_margin": order.native,
-                    "chain": self.chain,
-                    "broker_id": adapter.config.broker_id,
-                },
-            )
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-            logger.info(
-                f"Compiled Aster Perps PERP_OPEN (broker_id={broker_id}): "
-                f"{'LONG' if intent.is_long else 'SHORT'} "
-                f"{intent.market} size=${intent.size_usd} margin={intent.collateral_amount} "
-                f"{intent.collateral_token} ({len(transactions)} txs, {total_gas} gas)"
-            )
-        except Exception as e:
-            logger.exception(f"Failed to compile Aster Perps PERP_OPEN: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_aster_perps_perp_close(
-        self,
-        intent: PerpCloseIntent,
-        *,
-        broker_id: int,
-    ) -> CompilationResult:
-        """Compile a PERP_CLOSE intent via Aster Perps (BSC, Phase 1).
-
-        Used by both ``protocol="aster_perps"`` and ``protocol="pancakeswap_perps"``.
-        Closes the position identified by ``intent.position_id`` (a 0x-prefixed
-        bytes32 ``tradeHash``). Strategies obtain the ``tradeHash`` from the
-        open receipt's ``MarketPendingTrade`` event (surfaced as
-        ``result.position_id`` / ``result.extracted_data['position_id']`` by
-        the receipt parser + ``ResultEnricher``) and persist it across ticks.
-
-        Phase 1 limitations:
-          - chain must be 'bsc'
-          - ``closeTrade(bytes32)`` always flattens the full position; partial closes
-            are NOT supported. If ``intent.size_usd`` is set, compilation fails fast
-            (``CompilationStatus.FAILED``) instead of silently flattening the full
-            position — callers must omit ``size_usd`` to opt into the full-close semantics.
-
-        See ``almanak/framework/intents/perp_intents.py::PerpCloseIntent.position_id``
-        for the cross-venue rationale.
-        """
-        from ..connectors.aster_perps import AsterPerpsAdapter, AsterPerpsConfig
-
-        if self.chain != "bsc":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Aster Perps Phase 1 requires chain='bsc', got '{self.chain}'",
-            )
-
-        position_id = intent.position_id
-        if not position_id:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    "Aster Perps PERP_CLOSE requires intent.position_id (the bytes32 "
-                    "tradeHash returned from the open). Strategies must persist the tradeHash "
-                    "from on_intent_executed(result.position_id) after the open."
-                ),
-            )
-
-        # Strict bytes32 validation for the Aster path: 0x + 64 hex chars = 66 chars total,
-        # all characters must be valid hex. Generic vocabulary validation accepts any
-        # shape; the venue compiler enforces length + hex-ness so malformed hashes fail
-        # at compile time instead of surfacing as an opaque adapter/tx error later.
-        pid_clean = position_id.lower()
-        if not pid_clean.startswith("0x") or len(pid_clean) != 66:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    f"Aster Perps requires a 0x-prefixed bytes32 tradeHash "
-                    f"(66 chars total). Got: '{position_id}' (len={len(position_id)})."
-                ),
-            )
-        try:
-            int(pid_clean[2:], 16)
-        except ValueError:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(f"Aster Perps requires position_id to be a valid hex bytes32 tradeHash. Got: '{position_id}'."),
-            )
-
-        # Partial closes (size_usd) are NOT representable on the closeTrade(bytes32)
-        # selector — it always closes 100% of the position. Reject fast so callers asking
-        # for a partial close never silently execute a full close.
-        if intent.size_usd is not None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    "Aster Perps does not support partial PERP_CLOSE via size_usd. "
-                    "Omit size_usd to close the full position identified by position_id."
-                ),
-            )
-        warnings: list[str] = []
-
-        try:
-            adapter = AsterPerpsAdapter(
-                AsterPerpsConfig(
-                    broker_id=broker_id,
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-            )
-            close_tx = adapter.build_close(trade_hash=position_id)
-        except Exception as e:
-            logger.exception(f"Failed to build Aster Perps close transaction: {e}")
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=str(e),
-            )
-
-        tx = TransactionData(
-            to=close_tx.to,
-            value=close_tx.value,
-            data="0x" + close_tx.data.hex(),
-            gas_estimate=close_tx.gas_estimate,
-            description=close_tx.description,
-            tx_type="perp_close",
-        )
-        action_bundle = ActionBundle(
-            intent_type=IntentType.PERP_CLOSE.value,
-            transactions=[tx.to_dict()],
-            metadata={
-                "protocol": intent.protocol,
-                "market": intent.market,
-                "collateral_token": intent.collateral_token,
-                "is_long": intent.is_long,
-                "max_slippage": str(intent.max_slippage),
-                "position_id": position_id,
-                "chain": self.chain,
-                "broker_id": broker_id,
-            },
-        )
-        result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
-        result.action_bundle = action_bundle
-        result.transactions = [tx]
-        result.total_gas_estimate = tx.gas_estimate
-        result.warnings = warnings
-        logger.info(
-            f"Compiled Aster Perps PERP_CLOSE (broker_id={broker_id}): "
-            f"tradeHash={position_id[:18]}... market={intent.market} (1 tx, {tx.gas_estimate} gas)"
-        )
-        return result
 
     def _compile_flash_loan(self, intent: FlashLoanIntent) -> CompilationResult:
         """Compile a FLASH_LOAN intent into an ActionBundle."""
