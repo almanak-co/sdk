@@ -101,6 +101,19 @@ class GatewaySettings(BaseSettings):
     pool_history_max_days_4h: int = 180
     pool_history_max_days_1d: int = 730
 
+    # PoolHistory cache caps (POOL-4 / VIB-4752). Two-tier in-memory cache
+    # bounds: entries ceiling mirrors the analytics-service ceiling
+    # (VIB-4727) so they scale identically; bytes ceiling is sized for a
+    # long-uptime gateway hosting multiple strategies without leaking
+    # memory under unique-key traffic. Operators override via
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_ENTRIES`` and
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_BYTES``. Non-positive /
+    # malformed overrides fall back to the default via
+    # ``_validate_pool_history_cache_caps`` so a typo can't silently
+    # disable the bound (mirrors the soft-cap fallback semantics).
+    pool_history_cache_max_entries: int = 5000
+    pool_history_cache_max_bytes: int = 64 * 1024 * 1024
+
     # Metrics settings
     metrics_enabled: bool = True
     metrics_port: int = 9090
@@ -338,3 +351,29 @@ class GatewaySettings(BaseSettings):
         if days <= 0:
             return default
         return days
+
+    @field_validator(
+        "pool_history_cache_max_entries",
+        "pool_history_cache_max_bytes",
+        mode="before",
+    )
+    @classmethod
+    def _validate_pool_history_cache_caps(cls, value: object, info: ValidationInfo) -> int:
+        # Cache caps must be > 0; non-positive or malformed env values
+        # fall back to the field default so a typo (``MAX_ENTRIES=0``)
+        # can't silently disable the cap.
+        defaults: dict[str, int] = {
+            "pool_history_cache_max_entries": 5000,
+            "pool_history_cache_max_bytes": 64 * 1024 * 1024,
+        }
+        field_name = info.field_name or ""
+        default = defaults[field_name]
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if parsed <= 0:
+            return default
+        return parsed

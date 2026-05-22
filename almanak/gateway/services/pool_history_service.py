@@ -1,7 +1,7 @@
-"""PoolHistoryService skeleton + validator (VIB-4728 / POOL-2 + POOL-3).
+"""PoolHistoryService skeleton + validator + cache (VIB-4728 POOL-2/3/4).
 
 Server-side handler for the gateway-backed PoolHistoryReader migration.
-Two tickets ship in this file:
+Three tickets ship in this file:
 
 * **POOL-2 (VIB-4750)** — Servicer skeleton + kill-switch + ``health()``
   schema lock. The servicer is registered on the gRPC server from day 1
@@ -12,6 +12,12 @@ Two tickets ship in this file:
   allowlist + ``(chain, protocol)`` compatibility table. The validator
   rejects malformed requests with ``INVALID_ARGUMENT`` BEFORE any
   provider is consulted (and is independent of the kill-switch).
+
+* **POOL-4 (VIB-4752)** — Two-tier cache instances are constructed on
+  the servicer; ``health()`` reads live cache stats. The cache is not
+  yet INVOKED from the handler — POOL-5 wires the dispatcher to call
+  ``get_or_fetch`` on the public cache and to write raw-cache entries
+  per provider.
 
 Handler decision order:
 
@@ -52,6 +58,14 @@ import grpc
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services._history_cache import (
+    HistoryCache,
+    PoolHistoryPublicKey,
+    PoolHistoryRawKey,
+    extract_provider_from_raw_key,
+    load_max_bytes_from_settings,
+    load_max_entries_from_settings,
+)
 from almanak.gateway.services._history_common import (
     END_TS_FUTURE_TOLERANCE_SECONDS,
     ValidationFailure,
@@ -240,24 +254,66 @@ def _zero_health_snapshot() -> dict[str, dict[str, int | dict[str, int]]]:
     }
 
 
+def _pool_history_response_size(msg: gateway_pb2.PoolHistoryResponse) -> int:
+    """Byte-size estimator for the cache. Uses protobuf's
+    ``ByteSize()`` which counts the wire-format size without
+    allocating the serialized bytes (cheaper than
+    ``len(SerializeToString())`` per put-call)."""
+    return msg.ByteSize()
+
+
 class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
     """Pool history gRPC servicer.
 
-    Skeleton in POOL-2; providers wired in POOL-5; caching in POOL-4;
-    truncation / finality in POOL-6; telemetry in POOL-8. The skeleton
-    only honours the kill-switch and exposes the locked ``health()`` shape.
+    Lifecycle by ticket:
+
+    * POOL-2 (VIB-4750) — skeleton + kill-switch + ``health()`` schema lock.
+    * POOL-3 (VIB-4751) — validator + protocol allowlist + (chain, protocol)
+      compatibility table.
+    * **POOL-4 (VIB-4752)** — two-tier cache instances are now constructed
+      on the servicer; ``health()`` reads live cache stats. The cache is
+      not yet INVOKED from the handler (no providers populate it) — POOL-5
+      wires the dispatcher to call ``get_or_fetch``.
+    * POOL-5 (VIB-4753) — providers + dispatcher.
+    * POOL-6 (VIB-4754) — truncation + finality re-promotion semantics.
+    * POOL-8 (VIB-4756) — per-RPC + per-provider counter values.
     """
 
     def __init__(self, settings: GatewaySettings) -> None:
         self._settings = settings
         self._enabled = bool(settings.pool_history_enabled)
-        # ``_metrics`` is the live counter store; POOL-8 will increment it.
-        # Initialized to the zero-snapshot shape so health() can return a
-        # stable schema from day 1.
+        # ``_metrics`` is the live counter store for fields the cache
+        # doesn't own (truncation_reason split, errors_by_grpc_code,
+        # provider_fallback, budget). The cache owns hit/miss/eviction
+        # counters; ``health()`` merges both sources into the locked
+        # schema.
         self._metrics: dict[str, dict[str, int | dict[str, int]]] = _zero_health_snapshot()
+
+        # Two-tier cache (POOL-4 / PoolX.md §D6):
+        #   public: 7-tuple key, no provider, ``get_or_fetch`` lives here.
+        #   raw   : 8-tuple key, includes provider; per-provider partition
+        #           tracking via ``extract_provider_from_raw_key``.
+        max_entries = load_max_entries_from_settings(settings)
+        max_bytes = load_max_bytes_from_settings(settings)
+        self._public_cache: HistoryCache[PoolHistoryPublicKey, gateway_pb2.PoolHistoryResponse] = HistoryCache(
+            max_entries=max_entries,
+            max_bytes=max_bytes,
+            size_estimator=_pool_history_response_size,
+            name="pool_history_public",
+        )
+        self._raw_cache: HistoryCache[PoolHistoryRawKey, gateway_pb2.PoolHistoryResponse] = HistoryCache(
+            max_entries=max_entries,
+            max_bytes=max_bytes,
+            size_estimator=_pool_history_response_size,
+            partition_extractor=extract_provider_from_raw_key,
+            name="pool_history_raw",
+        )
+
         logger.debug(
-            "Initialized PoolHistoryService (enabled=%s); kill-switch via ALMANAK_GATEWAY_POOL_HISTORY_ENABLED",
+            "Initialized PoolHistoryService (enabled=%s, max_entries=%d, max_bytes=%d)",
             self._enabled,
+            max_entries,
+            max_bytes,
         )
 
     # -- Health -----------------------------------------------------------
@@ -265,17 +321,54 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
     def health(self) -> dict[str, dict[str, int | dict[str, int]]]:
         """Per-RPC + per-provider + budget counter snapshot.
 
-        Schema is LOCKED in POOL-2; POOL-8 only updates VALUES. Adding a
-        new key requires bumping POOL-8 acceptance and the umbrella UAT
-        card. Counter NAMES are listed in module-level constants above
-        so they're trivially diff-able.
+        Schema is LOCKED in POOL-2; later tickets only update VALUES.
+        Adding a new key requires bumping POOL-8 acceptance and the
+        umbrella UAT card. Counter NAMES are listed in module-level
+        constants above so they're trivially diff-able.
+
+        Sources of truth merged into one snapshot:
+
+        * Cache instances own ``cache_hits``, ``cache_misses``,
+          ``cache_evictions_by_*``, ``cache_bytes_resident``,
+          ``inflight_dedup_hits`` — read via ``stats()``.
+        * ``raw_cache_entries_by_provider`` comes from the raw cache's
+          ``entries_by_partition``.
+        * ``_metrics`` owns the rest (``requests_total``, fallback,
+          truncation_reason, errors_by_grpc_code, per_provider, budget).
         """
+        public_stats = self._public_cache.stats()
+        raw_stats = self._raw_cache.stats()
+        # Cache hit/miss counters aggregate across BOTH tiers (a public
+        # hit avoids an upstream call regardless of which tier served it).
+        cache_hits = public_stats["cache_hits"] + raw_stats["cache_hits"]
+        cache_misses = public_stats["cache_misses"] + raw_stats["cache_misses"]
+        evictions_by_entries = public_stats["cache_evictions_by_entries"] + raw_stats["cache_evictions_by_entries"]
+        evictions_by_bytes = public_stats["cache_evictions_by_bytes"] + raw_stats["cache_evictions_by_bytes"]
+        # ``cache_bytes_resident`` is also the sum (both tiers consume
+        # gateway memory).
+        cache_bytes_resident = public_stats["bytes_resident"] + raw_stats["bytes_resident"]
+        # ``inflight_dedup_hits`` only lives on the public cache (raw cache
+        # has no ``get_or_fetch`` surface); summing for forward-compat.
+        inflight_dedup_hits = public_stats["inflight_dedup_hits"] + raw_stats["inflight_dedup_hits"]
+
         # Defensive copy: callers should not be able to mutate the live
         # metrics store (the analytics service test harness has done this
         # historically and surfaced flakes). Generic shallow-deep copy via
         # dict comprehension — when POOL-8 adds new nested-dict counters
         # they're defensively copied automatically.
         rpc_metrics = {k: (dict(v) if isinstance(v, dict) else v) for k, v in self._metrics["per_rpc"].items()}
+        # Overlay live cache values (these supersede the zero-initialised
+        # per_rpc placeholders from ``_zero_health_snapshot``).
+        rpc_metrics["cache_hits"] = cache_hits
+        rpc_metrics["cache_misses"] = cache_misses
+        rpc_metrics["cache_evictions_by_entries"] = evictions_by_entries
+        rpc_metrics["cache_evictions_by_bytes"] = evictions_by_bytes
+        rpc_metrics["cache_bytes_resident"] = cache_bytes_resident
+        rpc_metrics["inflight_dedup_hits"] = inflight_dedup_hits
+        # The raw-cache partition counts are live; POOL-5's dispatcher
+        # writes to the raw cache and updates this map on each put.
+        rpc_metrics["raw_cache_entries_by_provider"] = self._raw_cache.entries_by_partition
+
         return {
             "per_rpc": rpc_metrics,
             "per_provider": {
