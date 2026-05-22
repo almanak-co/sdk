@@ -1,4 +1,4 @@
-"""Lending compilation helpers extracted from IntentCompiler.
+"""Lending compilation helpers for connector-owned lending compilers.
 
 These standalone functions receive the compiler instance as their first
 parameter and implement all lending-related compilation logic (borrow,
@@ -13,15 +13,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import AAVE_V3
-
-from ..models.reproduction_bundle import ActionBundle
-from ..utils.log_formatters import format_token_amount
-from . import compiler_constants
-from .compiler_models import CompilationResult, CompilationStatus, TransactionData
-from .vocabulary import IntentType
+from almanak.framework.intents import compiler_constants
+from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
+from almanak.framework.utils.log_formatters import format_token_amount
 
 if TYPE_CHECKING:
-    from .vocabulary import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
+    from almanak.framework.intents.vocabulary import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
@@ -34,23 +33,6 @@ MAX_UINT256 = compiler_constants.MAX_UINT256
 # Aave V3 PoolDataProvider.getReserveConfigurationData(address) selector.
 # keccak256("getReserveConfigurationData(address)")[:4]
 _AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
-
-
-_JOELEND_DORMANT_MESSAGE = (
-    "Joe Lend (Banker Joe) was wound down by its governance and is no longer "
-    "operational on Avalanche. All on-chain calls revert with 'Error: wind "
-    "down'. The connector has been retired from the Almanak SDK supported-"
-    "protocol surface."
-)
-
-
-def _joelend_dormant_result(intent_id: str) -> CompilationResult:
-    """Short-circuit any joelend lending intent at compile time."""
-    return CompilationResult(
-        status=CompilationStatus.FAILED,
-        error=_JOELEND_DORMANT_MESSAGE,
-        intent_id=intent_id,
-    )
 
 
 class AssetNotCollateralEligibleError(ValueError):
@@ -694,7 +676,7 @@ def _check_lending_borrow_capacity_benqi(
 
     Returns ``(reason, available_in_underlying)`` analogous to the Aave V3 helper.
     """
-    from ..connectors.benqi.adapter import BENQI_COMPTROLLER_ADDRESS
+    from almanak.framework.connectors.benqi.adapter import BENQI_COMPTROLLER_ADDRESS
 
     chain = compiler.chain
     if chain != "avalanche":
@@ -902,139 +884,14 @@ def _validate_curvance_market_tokens(
     return None
 
 
-def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:  # noqa: C901
-    """Compile a BORROW intent into an ActionBundle.
-
-    This method:
-    1. Resolves collateral and borrow token addresses
-    2. Converts amounts to wei
-    3. Builds approve TX for collateral
-    4. Builds supply TX to deposit collateral
-    5. Builds borrow TX to borrow tokens
-
-    Args:
-        compiler: IntentCompiler instance
-        intent: BorrowIntent to compile
-
-    Returns:
-        CompilationResult with borrow ActionBundle
-    """
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-
-    try:
-        protocol_lower = intent.protocol.lower()
-
-        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
-        # otherwise a (joelend, solana) intent would route to Kamino instead of
-        # failing with the deprecation message (VIB-3960).
-        if protocol_lower == "joelend":
-            return _joelend_dormant_result(intent.intent_id)
-
-        # Solana lending path (Kamino / Jupiter Lend)
-        if protocol_lower == "jupiter_lend":
-            return _compile_borrow_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'kamino' is only available on Solana chains.",
-                )
-            return _compile_borrow_kamino(compiler, intent)
-        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
-            return _compile_borrow_kamino(compiler, intent)
-
-        # Resolve shared tokens and collateral amount for EVM protocols
-        collateral_token = compiler._resolve_token(intent.collateral_token)
-        borrow_token = compiler._resolve_token(intent.borrow_token)
-
-        if collateral_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown collateral token: {intent.collateral_token}",
-                intent_id=intent.intent_id,
-            )
-        if borrow_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown borrow token: {intent.borrow_token}",
-                intent_id=intent.intent_id,
-            )
-
-        if intent.collateral_amount == "all":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="collateral_amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                intent_id=intent.intent_id,
-            )
-        collateral_amount_decimal: Decimal = intent.collateral_amount  # type: ignore[assignment]
-
-        if protocol_lower in ("morpho", "morpho_blue"):
-            return _compile_borrow_morpho_blue(
-                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
-            )
-        if protocol_lower == "curvance":
-            return _compile_borrow_curvance(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-        if protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            return _compile_borrow_aave_compatible(
-                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
-            )
-        if protocol_lower == "spark":
-            return _compile_borrow_spark(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-        if protocol_lower == "compound_v3":
-            return _compile_borrow_compound_v3(
-                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
-            )
-        if protocol_lower == "benqi":
-            return _compile_borrow_benqi(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-        # joelend handled at the top of the function (VIB-3960 dormancy guard).
-        if protocol_lower == "euler_v2":
-            return _compile_borrow_euler_v2(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-        if protocol_lower == "silo_v2":
-            return _compile_borrow_silo_v2(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
-            intent_id=intent.intent_id,
-        )
-
-    except Exception as e:
-        logger.exception(f"Failed to compile BORROW intent: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-
-    return result
-
-
-def _compile_borrow_jupiter_lend(compiler, intent: BorrowIntent) -> CompilationResult:
-    """Compile BORROW for Jupiter Lend (Solana only)."""
-    if not compiler._is_solana_chain():
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error="Protocol 'jupiter_lend' is only available on Solana chains.",
-        )
-    return compiler._compile_jupiter_lend_borrow(intent)
-
-
-def _compile_borrow_kamino(compiler, intent: BorrowIntent) -> CompilationResult:
-    """Compile BORROW for Kamino (Solana) and the Solana-fallback path.
-
-    Handles the original branch that matched ``protocol_lower == "kamino"`` or
-    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
-    """
-    protocol_lower = intent.protocol.lower()
-    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for BORROW on Solana. Supported: kamino, jupiter_lend",
-        )
-    return compiler._compile_kamino_borrow(intent)
+# Public pre-flight helper aliases. The implementation keeps the historical
+# private names because tests and older internal imports still patch them.
+resolve_pool_data_provider = _resolve_pool_data_provider
+fetch_reserve_config = _fetch_reserve_config
+check_aave_v3_collateral_eligibility = _check_aave_v3_collateral_eligibility
+check_lending_reserve_active = _check_lending_reserve_active
+check_lending_reserve_borrowable = _check_lending_reserve_borrowable
+check_lending_borrow_capacity_aave_v3 = _check_lending_borrow_capacity_aave_v3
 
 
 def _compile_borrow_morpho_blue(
@@ -1061,7 +918,7 @@ def _compile_borrow_morpho_blue(
         )
 
     # Lazy import to avoid circular import
-    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+    from almanak.framework.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
     # Create Morpho adapter
     morpho_config = MorphoBlueConfig(
@@ -1185,7 +1042,7 @@ def _compile_borrow_curvance(
             intent_id=intent.intent_id,
         )
 
-    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+    from almanak.framework.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
 
     curvance_adapter = CurvanceAdapter(
         CurvanceConfig(
@@ -1304,7 +1161,7 @@ def _compile_borrow_aave_compatible(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for Aave V3 and Aave-compatible forks (Radiant V2)."""
-    from .compiler_adapters import AaveV3Adapter
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
@@ -1356,7 +1213,7 @@ def _compile_borrow_aave_compatible(
         protocol_lower,
     )
     if borrow_disabled_reason is not None:
-        from .intent_errors import LendingBorrowNotEnabledError
+        from almanak.framework.intents.intent_errors import LendingBorrowNotEnabledError
 
         raise LendingBorrowNotEnabledError(
             chain=compiler.chain,
@@ -1401,7 +1258,7 @@ def _compile_borrow_aave_compatible(
             borrow_token.decimals,
         )
         if capacity_reason is not None:
-            from .intent_errors import LendingBorrowExceedsCapacityError
+            from almanak.framework.intents.intent_errors import LendingBorrowExceedsCapacityError
 
             raise LendingBorrowExceedsCapacityError(
                 chain=compiler.chain,
@@ -1546,7 +1403,7 @@ def _compile_borrow_spark(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for Spark (Aave V3 fork with Spark-specific addresses)."""
-    from ..connectors.spark import (
+    from almanak.framework.connectors.spark import (
         SPARK_POOL_ADDRESSES,
         SPARK_VARIABLE_RATE_MODE,
         SparkAdapter,
@@ -1737,7 +1594,7 @@ def _compile_borrow_compound_v3(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for Compound V3."""
-    from ..connectors.compound_v3.adapter import (
+    from almanak.framework.connectors.compound_v3.adapter import (
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
@@ -1916,7 +1773,7 @@ def _compile_borrow_benqi(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for BENQI (Compound V2 fork on Avalanche)."""
-    from ..connectors.benqi.adapter import (
+    from almanak.framework.connectors.benqi.adapter import (
         BENQI_QI_TOKENS,
         BenqiAdapter,
         BenqiConfig,
@@ -2053,7 +1910,7 @@ def _compile_borrow_benqi(
             borrow_token.decimals,
         )
         if capacity_reason is not None:
-            from .intent_errors import LendingBorrowExceedsCapacityError
+            from almanak.framework.intents.intent_errors import LendingBorrowExceedsCapacityError
 
             raise LendingBorrowExceedsCapacityError(
                 chain=compiler.chain,
@@ -2127,25 +1984,6 @@ def _compile_borrow_benqi(
     return result
 
 
-def _compile_borrow_joelend(
-    compiler,
-    intent: BorrowIntent,
-    collateral_token: Any,
-    borrow_token: Any,
-    collateral_amount_decimal: Decimal,
-) -> CompilationResult:
-    """Compile BORROW for Joe Lend — DORMANT.
-
-    The protocol was wound down by governance (VIB-3960). The compiler
-    dispatchers short-circuit ``protocol == "joelend"`` *before* this
-    helper is reachable; this body is defense-in-depth so any future
-    direct call (e.g. test patch, accidental refactor) still produces a
-    clean ``CompilationStatus.FAILED`` instead of an uncaught
-    ``JoeLendDeprecatedError`` from the adapter constructor.
-    """
-    return _joelend_dormant_result(intent.intent_id)
-
-
 def _compile_borrow_euler_v2(
     compiler,
     intent: BorrowIntent,
@@ -2154,7 +1992,7 @@ def _compile_borrow_euler_v2(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for Euler V2 (ERC-4626 vaults + EVC)."""
-    from ..connectors.euler_v2.adapter import (
+    from almanak.framework.connectors.euler_v2.adapter import (
         EulerV2Adapter,
         EulerV2Config,
     )
@@ -2300,7 +2138,7 @@ def _compile_borrow_silo_v2(
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile BORROW for Silo V2 (isolated lending on Avalanche)."""
-    from ..connectors.silo_v2.adapter import (
+    from almanak.framework.connectors.silo_v2.adapter import (
         SILO_V2_MARKETS,
         SiloV2Adapter,
         SiloV2Config,
@@ -2453,154 +2291,6 @@ def _compile_borrow_silo_v2(
     return result
 
 
-def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:  # noqa: C901
-    """Compile a REPAY intent into an ActionBundle.
-
-    This method:
-    1. Resolves repay token address
-    2. Converts amount to wei (or uses MAX_UINT256 for full repay)
-    3. Builds approve TX for repay token
-    4. Builds repay TX
-
-    Args:
-        compiler: IntentCompiler instance
-        intent: RepayIntent to compile
-
-    Returns:
-        CompilationResult with repay ActionBundle
-    """
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-
-    try:
-        protocol_lower = intent.protocol.lower()
-
-        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
-        # otherwise a (joelend, solana) intent would route to Kamino instead of
-        # failing with the deprecation message (VIB-3960).
-        if protocol_lower == "joelend":
-            return _joelend_dormant_result(intent.intent_id)
-
-        # Solana lending path (Kamino / Jupiter Lend)
-        if protocol_lower == "jupiter_lend":
-            return _compile_repay_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'kamino' is only available on Solana chains.",
-                )
-            return _compile_repay_kamino(compiler, intent)
-        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
-            return _compile_repay_kamino(compiler, intent)
-
-        # Resolve shared repay token and amount for EVM protocols.
-        repay_token = compiler._resolve_token(intent.token)
-        if repay_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown repay token: {intent.token}",
-                intent_id=intent.intent_id,
-            )
-
-        initial_warnings: list[str] = []
-        repay_amount_decimal: Decimal | None
-        if intent.repay_full:
-            repay_amount_decimal = None  # Will use shares-based repay for Morpho
-            amount_description = "full debt"
-            initial_warnings.append("Repaying full debt - ensure sufficient balance to cover interest")
-        elif intent.amount == "all":
-            # amount="all" was not resolved by the amount resolver — fall back to repay_full
-            logger.info(
-                "amount='all' reached compiler unresolved for %s repay — using repay_full path",
-                intent.protocol,
-            )
-            repay_amount_decimal = None
-            intent = intent.model_copy(update={"repay_full": True})
-            amount_description = "full debt"
-            initial_warnings.append("Repaying full debt (amount='all' fallback)")
-        else:
-            repay_amount_decimal = intent.amount  # type: ignore[assignment]
-            amount_description = str(repay_amount_decimal)
-
-        if protocol_lower in ("morpho", "morpho_blue"):
-            return _compile_repay_morpho_blue(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower == "curvance":
-            return _compile_repay_curvance(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            return _compile_repay_aave_compatible(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower == "spark":
-            return _compile_repay_spark(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower == "compound_v3":
-            return _compile_repay_compound_v3(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower == "benqi":
-            return _compile_repay_benqi(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        # joelend handled at the top of the function (VIB-3960 dormancy guard).
-        if protocol_lower == "euler_v2":
-            return _compile_repay_euler_v2(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-        if protocol_lower == "silo_v2":
-            return _compile_repay_silo_v2(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
-
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
-            intent_id=intent.intent_id,
-        )
-
-    except Exception as e:
-        logger.exception(f"Failed to compile REPAY intent: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-
-    return result
-
-
-def _compile_repay_jupiter_lend(compiler, intent: RepayIntent) -> CompilationResult:
-    """Compile REPAY for Jupiter Lend (Solana only)."""
-    if not compiler._is_solana_chain():
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error="Protocol 'jupiter_lend' is only available on Solana chains.",
-        )
-    return compiler._compile_jupiter_lend_repay(intent)
-
-
-def _compile_repay_kamino(compiler, intent: RepayIntent) -> CompilationResult:
-    """Compile REPAY for Kamino (Solana) and the Solana-fallback path.
-
-    Handles the original branch that matched ``protocol_lower == "kamino"`` or
-    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
-    """
-    protocol_lower = intent.protocol.lower()
-    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for REPAY on Solana. Supported: kamino, jupiter_lend",
-        )
-    return compiler._compile_kamino_repay(intent)
-
-
 def _compile_repay_morpho_blue(
     compiler,
     intent: RepayIntent,
@@ -2625,7 +2315,7 @@ def _compile_repay_morpho_blue(
         )
 
     # Lazy import to avoid circular import
-    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+    from almanak.framework.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
     # Use _get_chain_rpc_url() (not compiler.rpc_url) so Anvil fork URL is detected via
     # ANVIL_{CHAIN}_PORT env var when running on a fork. compiler.rpc_url is always None
@@ -2727,7 +2417,7 @@ def _compile_repay_curvance(
             intent_id=intent.intent_id,
         )
 
-    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+    from almanak.framework.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
 
     curvance_adapter = CurvanceAdapter(
         CurvanceConfig(
@@ -2820,7 +2510,7 @@ def _compile_repay_aave_compatible(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for Aave-compatible protocols (Aave V3, Radiant V2)."""
-    from .compiler_adapters import AaveV3Adapter
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
@@ -2942,7 +2632,7 @@ def _compile_repay_spark(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for Spark (Aave V3 fork with Spark-specific addresses)."""
-    from ..connectors.spark import (
+    from almanak.framework.connectors.spark import (
         SPARK_POOL_ADDRESSES,
         SPARK_VARIABLE_RATE_MODE,
         SparkAdapter,
@@ -3146,7 +2836,7 @@ def _compile_repay_compound_v3(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for Compound V3."""
-    from ..connectors.compound_v3.adapter import (
+    from almanak.framework.connectors.compound_v3.adapter import (
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
@@ -3286,7 +2976,7 @@ def _compile_repay_benqi(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for BENQI (Compound V2 fork on Avalanche)."""
-    from ..connectors.benqi.adapter import (
+    from almanak.framework.connectors.benqi.adapter import (
         BENQI_QI_TOKENS,
         BenqiAdapter,
         BenqiConfig,
@@ -3339,7 +3029,7 @@ def _compile_repay_benqi(
         transactions.extend(approve_txs)
     elif not repay_market.is_native and intent.repay_full:
         # For repay_full, approve MAX_UINT256
-        from ..connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
+        from almanak.framework.connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
 
         approve_txs = compiler._build_approve_tx(
             repay_token.address,
@@ -3405,26 +3095,6 @@ def _compile_repay_benqi(
     return result
 
 
-def _compile_repay_joelend(
-    compiler,
-    intent: RepayIntent,
-    repay_token: Any,
-    repay_amount_decimal: Decimal | None,
-    amount_description: str,
-    initial_warnings: list[str],
-) -> CompilationResult:
-    """Compile REPAY for Joe Lend — DORMANT.
-
-    The protocol was wound down by governance (VIB-3960). The compiler
-    dispatchers short-circuit ``protocol == "joelend"`` *before* this
-    helper is reachable; this body is defense-in-depth so any future
-    direct call (e.g. test patch, accidental refactor) still produces a
-    clean ``CompilationStatus.FAILED`` instead of an uncaught
-    ``JoeLendDeprecatedError`` from the adapter constructor.
-    """
-    return _joelend_dormant_result(intent.intent_id)
-
-
 def _compile_repay_euler_v2(
     compiler,
     intent: RepayIntent,
@@ -3434,10 +3104,10 @@ def _compile_repay_euler_v2(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for Euler V2 (ERC-4626 vaults + EVC)."""
-    from ..connectors.euler_v2.adapter import (
+    from almanak.framework.connectors.euler_v2.adapter import (
         MAX_UINT256 as EULER_MAX_UINT256,
     )
-    from ..connectors.euler_v2.adapter import (
+    from almanak.framework.connectors.euler_v2.adapter import (
         EulerV2Adapter,
         EulerV2Config,
     )
@@ -3557,10 +3227,10 @@ def _compile_repay_silo_v2(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile REPAY for Silo V2 (Avalanche)."""
-    from ..connectors.silo_v2.adapter import (
+    from almanak.framework.connectors.silo_v2.adapter import (
         MAX_UINT256 as SILO_MAX_UINT256,
     )
-    from ..connectors.silo_v2.adapter import (
+    from almanak.framework.connectors.silo_v2.adapter import (
         SILO_V2_MARKETS,
         SiloV2Adapter,
         SiloV2Config,
@@ -3681,129 +3351,6 @@ def _compile_repay_silo_v2(
     return result
 
 
-def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:  # noqa: C901
-    """Compile a SUPPLY intent into an ActionBundle.
-
-    This method:
-    1. Resolves token address
-    2. Converts amount to wei
-    3. Builds approve TX for supply token
-    4. Builds supply TX to deposit tokens
-
-    Args:
-        compiler: IntentCompiler instance
-        intent: SupplyIntent to compile
-
-    Returns:
-        CompilationResult with supply ActionBundle
-    """
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-
-    try:
-        protocol_lower = intent.protocol.lower()
-
-        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
-        # otherwise a (joelend, solana) intent would route to Kamino instead of
-        # failing with the deprecation message (VIB-3960).
-        if protocol_lower == "joelend":
-            return _joelend_dormant_result(intent.intent_id)
-
-        # Solana lending path (Kamino / Jupiter Lend)
-        if protocol_lower == "jupiter_lend":
-            return _compile_supply_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'kamino' is only available on Solana chains.",
-                )
-            return _compile_supply_kamino(compiler, intent)
-        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
-            return _compile_supply_kamino(compiler, intent)
-
-        # Resolve shared supply token and amount for EVM protocols.
-        supply_token = compiler._resolve_token(intent.token)
-        if supply_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {intent.token}",
-                intent_id=intent.intent_id,
-            )
-
-        if intent.amount == "all":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    "amount='all' for supply must be resolved to a wallet balance before compilation. "
-                    "This should be done by the strategy runner or teardown manager."
-                ),
-                intent_id=intent.intent_id,
-            )
-        amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
-
-        if protocol_lower in ("morpho", "morpho_blue"):
-            return _compile_supply_morpho_blue(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "curvance":
-            return _compile_supply_curvance(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            return _compile_supply_aave_compatible(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "spark":
-            return _compile_supply_spark(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "compound_v3":
-            return _compile_supply_compound_v3(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "benqi":
-            return _compile_supply_benqi(compiler, intent, supply_token, amount_decimal)
-        # joelend handled at the top of the function (VIB-3960 dormancy guard).
-        if protocol_lower == "euler_v2":
-            return _compile_supply_euler_v2(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "silo_v2":
-            return _compile_supply_silo_v2(compiler, intent, supply_token, amount_decimal)
-
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
-            intent_id=intent.intent_id,
-        )
-
-    except Exception as e:
-        logger.exception(f"Failed to compile SUPPLY intent: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-
-    return result
-
-
-def _compile_supply_jupiter_lend(compiler, intent: SupplyIntent) -> CompilationResult:
-    """Compile SUPPLY for Jupiter Lend (Solana only)."""
-    if not compiler._is_solana_chain():
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error="Protocol 'jupiter_lend' is only available on Solana chains.",
-        )
-    return compiler._compile_jupiter_lend_supply(intent)
-
-
-def _compile_supply_kamino(compiler, intent: SupplyIntent) -> CompilationResult:
-    """Compile SUPPLY for Kamino (Solana) and the Solana-fallback path.
-
-    Handles the original branch that matched ``protocol_lower == "kamino"`` or
-    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
-    """
-    protocol_lower = intent.protocol.lower()
-    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for SUPPLY on Solana. Supported: kamino, jupiter_lend",
-        )
-    return compiler._compile_kamino_supply(intent)
-
-
 def _compile_supply_morpho_blue(
     compiler,
     intent: SupplyIntent,
@@ -3827,7 +3374,7 @@ def _compile_supply_morpho_blue(
         )
 
     # Lazy import to avoid circular import
-    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+    from almanak.framework.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
     # Create Morpho adapter
     morpho_config = MorphoBlueConfig(
@@ -3932,7 +3479,7 @@ def _compile_supply_curvance(
             intent_id=intent.intent_id,
         )
 
-    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+    from almanak.framework.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
 
     curvance_adapter = CurvanceAdapter(
         CurvanceConfig(
@@ -4028,7 +3575,7 @@ def _compile_supply_aave_compatible(
     amount_decimal: Decimal,
 ) -> CompilationResult:
     """Compile SUPPLY for Aave-compatible protocols (Aave V3, Radiant V2)."""
-    from .compiler_adapters import AaveV3Adapter
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
@@ -4222,7 +3769,7 @@ def _compile_supply_spark(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    from ..connectors.spark import (
+    from almanak.framework.connectors.spark import (
         SPARK_POOL_ADDRESSES,
         SparkAdapter,
         SparkConfig,
@@ -4366,7 +3913,7 @@ def _compile_supply_compound_v3(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    from ..connectors.compound_v3.adapter import (
+    from almanak.framework.connectors.compound_v3.adapter import (
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
@@ -4506,7 +4053,7 @@ def _compile_supply_benqi(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    from ..connectors.benqi.adapter import (
+    from almanak.framework.connectors.benqi.adapter import (
         BENQI_QI_TOKENS,
         BenqiAdapter,
         BenqiConfig,
@@ -4626,24 +4173,6 @@ def _compile_supply_benqi(
     return result
 
 
-def _compile_supply_joelend(
-    compiler,
-    intent: SupplyIntent,
-    supply_token: Any,
-    amount_decimal: Decimal,
-) -> CompilationResult:
-    """Compile SUPPLY for Joe Lend — DORMANT.
-
-    The protocol was wound down by governance (VIB-3960). The compiler
-    dispatchers short-circuit ``protocol == "joelend"`` *before* this
-    helper is reachable; this body is defense-in-depth so any future
-    direct call (e.g. test patch, accidental refactor) still produces a
-    clean ``CompilationStatus.FAILED`` instead of an uncaught
-    ``JoeLendDeprecatedError`` from the adapter constructor.
-    """
-    return _joelend_dormant_result(intent.intent_id)
-
-
 def _compile_supply_euler_v2(
     compiler,
     intent: SupplyIntent,
@@ -4658,7 +4187,7 @@ def _compile_supply_euler_v2(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    from ..connectors.euler_v2.adapter import (
+    from almanak.framework.connectors.euler_v2.adapter import (
         EulerV2Adapter,
         EulerV2Config,
     )
@@ -4760,7 +4289,7 @@ def _compile_supply_silo_v2(
     transactions: list[TransactionData] = []
     warnings: list[str] = []
 
-    from ..connectors.silo_v2.adapter import (
+    from almanak.framework.connectors.silo_v2.adapter import (
         SILO_V2_MARKETS,
         SiloV2Adapter,
         SiloV2Config,
@@ -4856,148 +4385,6 @@ def _compile_supply_silo_v2(
     return result
 
 
-def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:  # noqa: C901
-    """Compile a WITHDRAW intent into an ActionBundle.
-
-    Thin dispatcher: resolves shared EVM state (withdraw token, amount, initial
-    warnings), then delegates to the per-protocol helper. Solana helpers receive
-    only ``(compiler, intent)`` and do their own chain check.
-
-    Args:
-        compiler: IntentCompiler instance
-        intent: WithdrawIntent to compile
-
-    Returns:
-        CompilationResult with withdraw ActionBundle
-    """
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-
-    try:
-        protocol_lower = intent.protocol.lower()
-
-        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
-        # otherwise a (joelend, solana) intent would route to Kamino instead of
-        # failing with the deprecation message (VIB-3960).
-        if protocol_lower == "joelend":
-            return _joelend_dormant_result(intent.intent_id)
-
-        # Solana lending path (Kamino / Jupiter Lend)
-        if protocol_lower == "jupiter_lend":
-            return _compile_withdraw_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'kamino' is only available on Solana chains.",
-                )
-            return _compile_withdraw_kamino(compiler, intent)
-        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
-            return _compile_withdraw_kamino(compiler, intent)
-
-        # Resolve shared withdraw token and amount for EVM protocols.
-        withdraw_token = compiler._resolve_token(intent.token)
-        if withdraw_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {intent.token}",
-                intent_id=intent.intent_id,
-            )
-
-        initial_warnings: list[str] = []
-        withdraw_amount_decimal: Decimal | None
-        if intent.withdraw_all:
-            withdraw_amount_decimal = None  # Will use withdraw_all flag
-            initial_warnings.append("Withdrawing all available balance")
-        elif intent.amount == "all":
-            # amount="all" was not resolved by the amount resolver (no RPC, no reader, etc.)
-            # Fall back to withdraw_all=True - let the adapter handle it.
-            logger.info(
-                "amount='all' reached compiler unresolved for %s - using withdraw_all path",
-                intent.protocol,
-            )
-            withdraw_amount_decimal = None
-            intent = intent.model_copy(update={"withdraw_all": True})
-            initial_warnings.append("Withdrawing all available balance (amount='all' fallback)")
-        else:
-            withdraw_amount_decimal = intent.amount  # type: ignore[assignment]
-
-        if protocol_lower in ("morpho", "morpho_blue"):
-            return _compile_withdraw_morpho_blue(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-        elif protocol_lower == "curvance":
-            return _compile_withdraw_curvance(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-        elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            return _compile_withdraw_aave_compatible(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-        elif protocol_lower == "spark":
-            return _compile_withdraw_spark(compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings)
-        elif protocol_lower == "pendle":
-            return _compile_withdraw_pendle(compiler, intent, initial_warnings)
-        elif protocol_lower == "compound_v3":
-            return _compile_withdraw_compound_v3(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-        elif protocol_lower == "benqi":
-            return _compile_withdraw_benqi(compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings)
-        # joelend handled at the top of the function (VIB-3960 dormancy guard).
-        elif protocol_lower == "euler_v2":
-            return _compile_withdraw_euler_v2(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-        elif protocol_lower == "silo_v2":
-            return _compile_withdraw_silo_v2(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
-
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, euler_v2, silo_v2",
-            intent_id=intent.intent_id,
-        )
-
-    except Exception as e:
-        logger.exception(f"Failed to compile WITHDRAW intent: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-
-    return result
-
-
-def _compile_withdraw_jupiter_lend(compiler, intent: WithdrawIntent) -> CompilationResult:
-    """Compile WITHDRAW for Jupiter Lend (Solana only)."""
-    if not compiler._is_solana_chain():
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error="Protocol 'jupiter_lend' is only available on Solana chains.",
-        )
-    return compiler._compile_jupiter_lend_withdraw(intent)
-
-
-def _compile_withdraw_kamino(compiler, intent: WithdrawIntent) -> CompilationResult:
-    """Compile WITHDRAW for Kamino (Solana) and the Solana-fallback path.
-
-    Handles the original branch that matched ``protocol_lower == "kamino"`` or
-    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
-    """
-    protocol_lower = intent.protocol.lower()
-    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for WITHDRAW on Solana. Supported: kamino, jupiter_lend",
-        )
-    return compiler._compile_kamino_withdraw(intent)
-
-
 def _compile_withdraw_morpho_blue(
     compiler,
     intent: WithdrawIntent,
@@ -5021,7 +4408,7 @@ def _compile_withdraw_morpho_blue(
         )
 
     # Lazy import to avoid circular import
-    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+    from almanak.framework.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
     # Resolve RPC URL with compiler's chain-aware fallback logic
     # (explicit rpc_url -> managed Anvil fork -> configured provider)
@@ -5128,7 +4515,7 @@ def _compile_withdraw_curvance(
             intent_id=intent.intent_id,
         )
 
-    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+    from almanak.framework.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
 
     curvance_adapter = CurvanceAdapter(
         CurvanceConfig(
@@ -5235,7 +4622,7 @@ def _compile_withdraw_aave_compatible(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for Aave-compatible protocols (Aave V3, Radiant V2)."""
-    from .compiler_adapters import AaveV3Adapter
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
@@ -5327,7 +4714,7 @@ def _compile_withdraw_spark(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for Spark (Aave V3 fork with Spark-specific addresses)."""
-    from ..connectors.spark import (
+    from almanak.framework.connectors.spark import (
         SPARK_POOL_ADDRESSES,
         SparkAdapter,
         SparkConfig,
@@ -5432,38 +4819,6 @@ def _compile_withdraw_spark(
     return result
 
 
-def _compile_withdraw_pendle(
-    compiler,
-    intent: WithdrawIntent,
-    initial_warnings: list[str],
-) -> CompilationResult:
-    """Compile WITHDRAW for Pendle (redeem from PT/YT).
-
-    Delegates entirely to the connector-owned Pendle compiler.
-    Unique to withdraw: Pendle has no supply/borrow/repay counterpart here.
-
-    ``initial_warnings`` carries dispatcher-level warnings (e.g. the
-    ``withdraw_all=True`` and ``amount='all'`` fallback notices) and is merged
-    into the returned ``CompilationResult.warnings`` so callers see them.
-    """
-    from ..connectors.compiler_registry import get_compiler as get_connector_compiler
-
-    connector_compiler = get_connector_compiler("pendle")
-    if connector_compiler is None:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error="Connector compiler for protocol 'pendle' is not registered.",
-        )
-    result = connector_compiler.compile(
-        compiler._build_compiler_context("pendle", connector_compiler),
-        intent,
-    )
-    if initial_warnings:
-        result.warnings = [*initial_warnings, *result.warnings]
-    return result
-
-
 def _compile_withdraw_compound_v3(
     compiler,
     intent: WithdrawIntent,
@@ -5472,7 +4827,7 @@ def _compile_withdraw_compound_v3(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for Compound V3 (base asset or collateral)."""
-    from ..connectors.compound_v3.adapter import (
+    from almanak.framework.connectors.compound_v3.adapter import (
         COMPOUND_V3_COMET_ADDRESSES,
         CompoundV3Adapter,
         CompoundV3Config,
@@ -5637,7 +4992,7 @@ def _compile_withdraw_benqi(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for BENQI (Compound V2 fork on Avalanche)."""
-    from ..connectors.benqi.adapter import (
+    from almanak.framework.connectors.benqi.adapter import (
         BENQI_QI_TOKENS,
         BenqiAdapter,
         BenqiConfig,
@@ -5731,25 +5086,6 @@ def _compile_withdraw_benqi(
     return result
 
 
-def _compile_withdraw_joelend(
-    compiler,
-    intent: WithdrawIntent,
-    withdraw_token: Any,
-    withdraw_amount_decimal: Decimal | None,
-    initial_warnings: list[str],
-) -> CompilationResult:
-    """Compile WITHDRAW for Joe Lend — DORMANT.
-
-    The protocol was wound down by governance (VIB-3960). The compiler
-    dispatchers short-circuit ``protocol == "joelend"`` *before* this
-    helper is reachable; this body is defense-in-depth so any future
-    direct call (e.g. test patch, accidental refactor) still produces a
-    clean ``CompilationStatus.FAILED`` instead of an uncaught
-    ``JoeLendDeprecatedError`` from the adapter constructor.
-    """
-    return _joelend_dormant_result(intent.intent_id)
-
-
 def _compile_withdraw_euler_v2(
     compiler,
     intent: WithdrawIntent,
@@ -5758,7 +5094,7 @@ def _compile_withdraw_euler_v2(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for Euler V2 (ERC-4626 vaults)."""
-    from ..connectors.euler_v2.adapter import (
+    from almanak.framework.connectors.euler_v2.adapter import (
         EulerV2Adapter,
         EulerV2Config,
     )
@@ -5854,7 +5190,7 @@ def _compile_withdraw_silo_v2(
     initial_warnings: list[str],
 ) -> CompilationResult:
     """Compile WITHDRAW for Silo V2 (isolated markets on Avalanche)."""
-    from ..connectors.silo_v2.adapter import (
+    from almanak.framework.connectors.silo_v2.adapter import (
         SILO_V2_MARKETS,
         SiloV2Adapter,
         SiloV2Config,

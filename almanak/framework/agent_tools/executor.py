@@ -1344,7 +1344,7 @@ class ToolExecutor:
 
         if tool_name == "withdraw_lending":
             # The WithdrawIntent compiler already falls back to the withdraw_all
-            # path when amount=="all" (see compiler_lending.py). We set the flag
+            # path when amount=="all" (see connectors/base/lending/aave_helpers.py). We set the flag
             # explicitly here only to match repay_lending's intent shape (which
             # uses repay_full) so response-enrichment and strategy-author code
             # reading the intent see a consistent "full close" signal.

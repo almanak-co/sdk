@@ -61,6 +61,8 @@ register_connector(
     name="jupiter_lend",
     intents=(
         IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.REPAY,
         IntentType.WITHDRAW,
     ),
     chains=("solana",),
