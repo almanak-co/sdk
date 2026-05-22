@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from almanak.framework.accounting.lending_nav import compute_lending_nav
+
 from .data_quality import DataQualitySection
 from .lending_report import LendingSection
 from .lp_report import LPSection
@@ -19,6 +21,18 @@ def _m(value: Decimal | None, width: int = 8) -> str:
         return _MISSING
     sign = "-" if value < 0 else " "
     return f"{sign}${abs(value):>{width},.2f}"
+
+
+def _m_signed(value: Decimal | None, width: int = 8) -> str:
+    """Format a Decimal with an explicit '+' for positive values.
+
+    Used for unrealized carry fields where the sign is meaningful.
+    Returns ``_MISSING`` when value is None.
+    """
+    if value is None:
+        return _MISSING
+    sign = "-" if value < 0 else "+"
+    return f"{sign}${abs(value):>{width},.6f}"
 
 
 def _pct(value: Decimal | None, decimals: int = 2) -> str:
@@ -64,10 +78,20 @@ def render_lp_section(section: LPSection) -> str:
     return "\n".join(lines)
 
 
-def render_lending_section(section: LendingSection) -> str:
+def render_lending_section(section: LendingSection, snapshot: object = None) -> str:
+    """Render the lending positions section as a text block.
+
+    Args:
+        section: Per-position lending summaries built by ``build_lending_report``.
+        snapshot: Optional ``PortfolioSnapshot`` used to compute the net carry
+            footer via ``compute_lending_nav``.  When None (or when the snapshot
+            contains no lending positions with unrealized carry), the footer is
+            suppressed.
+    """
     if section.is_empty:
         return ""
     lines: list[str] = ["", "Lending Positions", _LINE]
+    any_unrealized = False
     for pos in section.positions:
         status = "CLOSED" if pos.is_closed else "OPEN"
         lines.append(f"  {pos.asset} [{pos.protocol} / {pos.chain}] [{status}]")
@@ -83,11 +107,27 @@ def render_lending_section(section: LendingSection) -> str:
         if pos.borrow_apr_pct is not None:
             lines.append(f"    Borrow APR: {_pct(pos.borrow_apr_pct)}")
         lines.append(f"    Gas:        {_m(-pos.total_gas_usd)}")
+        # W1-6 (T3b, VIB-4781): realized interest from REPAY/WITHDRAW
+        # events.  Use _m_signed to surface sub-cent values — the prior
+        # _m formatter rounded to 2 decimals so a real $0.000634 USDC
+        # supply yield rendered as "$0.00" and looked like nothing.
         if pos.total_interest_delta_usd != 0:
-            lines.append(f"    Interest:   {_m(pos.total_interest_delta_usd)}")
+            lines.append(f"    Realized interest: {_m_signed(pos.total_interest_delta_usd)}")
+        # W1-2 (VIB-4777): unrealized carry from snapshot.
+        if pos.unrealized_pnl_usd is not None:
+            lines.append(f"    Unrealized carry: {_m_signed(pos.unrealized_pnl_usd)}")
+            any_unrealized = True
         if pos.deleverage_count:
             lines.append(f"    Deleverages: {pos.deleverage_count}")
         lines.append("")
+
+    # W1-2 (VIB-4777): net lending carry footer — only when at least one
+    # position has snapshot-sourced unrealized carry data.
+    if any_unrealized:
+        nav = compute_lending_nav(snapshot)  # type: ignore[arg-type]
+        lines.append(f"  Net lending value:   {_m(nav.net_lending_value_usd)}")
+        lines.append(f"  Net unrealized:      {_m_signed(nav.net_unrealized_carry_usd)}")
+
     return "\n".join(lines)
 
 

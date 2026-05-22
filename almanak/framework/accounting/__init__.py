@@ -6,6 +6,7 @@ Hosted Postgres persistence is added after metrics-database migration (IMPL-3).
 """
 
 from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+from almanak.framework.accounting.lending_nav import LendingNAVSummary, compute_lending_nav
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     AccountingIdentity,
@@ -21,6 +22,8 @@ from almanak.framework.accounting.writer import AccountingWriter
 
 __all__ = [
     "build_lending_accounting_event",
+    "LendingNAVSummary",
+    "compute_lending_nav",
     "AccountingConfidence",
     "AccountingIdentity",
     "AccountingWriter",

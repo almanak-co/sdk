@@ -271,11 +271,13 @@ class TestRenderLendingSection:
 
     def test_interest_block_only_when_nonzero(self):
         out_zero = render_lending_section(LendingSection(positions=[_lend_pos()]))
-        assert "Interest:" not in out_zero
+        assert "Realized interest:" not in out_zero
         out_pos = render_lending_section(
             LendingSection(positions=[_lend_pos(total_interest_delta_usd=Decimal("12.34"))])
         )
-        assert "Interest:" in out_pos
+        # W1-6 (T3b, VIB-4789) renamed "Interest:" → "Realized interest:" and
+        # switched to _m_signed (6 decimals) so sub-cent values stay visible.
+        assert "Realized interest:" in out_pos
 
     def test_deleverage_count_only_when_nonzero(self):
         out_zero = render_lending_section(LendingSection(positions=[_lend_pos()]))

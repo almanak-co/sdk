@@ -72,6 +72,23 @@ from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy d
 logger = logging.getLogger(__name__)
 
 
+# Lazy import to avoid circular-dependency issues at module load time.
+# _check_decimal_unit_soft_fail is called only inside build_position_event_from_intent.
+def _decimal_unit_soft_fail(event: "PositionEvent") -> None:  # noqa: F821
+    """Run the W1-5 decimal-unit soft-fail guard over the LP fee fields."""
+    from almanak.framework.accounting.decimal_guards import _check_decimal_unit_soft_fail
+
+    payload = {
+        "fees_token0": event.fees_token0,
+        "fees_token1": event.fees_token1,
+    }
+    _check_decimal_unit_soft_fail(
+        payload,
+        event_id=event.id,
+        event_type=event.event_type,
+    )
+
+
 class PositionEventType(StrEnum):
     """Types of position lifecycle events."""
 
@@ -1124,7 +1141,15 @@ def build_position_event_from_intent(
         _apply_lp_close_columns(event, ctx, recent_open_events, price_oracle)
 
     # θ — final guard: drop events that never acquired a position_id.
-    return event if event.position_id else None
+    if not event.position_id:
+        return None
+
+    # ν — W1-5 decimal-unit soft-fail guard (VIB-4780).  Runs after all
+    # enrichment phases so fees_token0/1 are fully populated.  Soft-fail
+    # only: logs a WARNING, never raises.
+    _decimal_unit_soft_fail(event)
+
+    return event
 
 
 def _apply_lp_close_columns(

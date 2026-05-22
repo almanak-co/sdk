@@ -188,16 +188,32 @@ def _resolve_symbol(token: str, chain: str = "") -> str:
 
 
 def _amount_in_usd(entry: Any) -> Decimal | None:
-    """Best-effort USD notional for a swap ledger entry.
+    """Best-effort USD notional for a **SWAP** ledger entry.
 
-    Heuristic: if either leg resolves to a known stablecoin (symbol-form or
-    address-form, via ``TokenResolver``), use that leg's amount as the USD
-    notional. Returns ``None`` when neither leg is a stablecoin (the
-    slippage contribution is then skipped, as per the ticket spec).
+    Scoped to SWAP rows only (VIB-4778 / W1-3).  LP_OPEN / LP_CLOSE ledger
+    rows carry raw-wei amounts in ``amount_in`` / ``amount_out`` — applying
+    the stablecoin heuristic to those rows produces multi-million-dollar
+    notionals and corrupts ``avg_trade_size_usd``.  Returning ``None`` for
+    non-SWAP rows causes the caller to skip the row, which is correct because
+    swap notional is meaningless for an LP provisioning operation anyway.
+
+    Heuristic for SWAP rows: if either leg resolves to a known stablecoin
+    (symbol-form or address-form, via ``TokenResolver``), use that leg's
+    amount as the USD notional. Returns ``None`` when neither leg is a
+    stablecoin (the slippage contribution is then skipped, as per the ticket
+    spec).
 
     VIB-3204 will add an explicit ``amount_in_usd`` column — this heuristic
     is the interim path.
     """
+    # W1-3: only meaningful for SWAP ledger rows.  Any other intent type
+    # (LP_OPEN, LP_CLOSE, SUPPLY, BORROW, etc.) carries amounts that are NOT
+    # human-form USD-like values, so we must not apply the stablecoin
+    # heuristic to them.
+    intent_type = (getattr(entry, "intent_type", "") or "").upper()
+    if intent_type != "SWAP":
+        return None
+
     chain = getattr(entry, "chain", "") or ""
     t_in = _resolve_symbol(getattr(entry, "token_in", "") or "", chain)
     t_out = _resolve_symbol(getattr(entry, "token_out", "") or "", chain)
@@ -580,6 +596,34 @@ def render_text(breakdown: PnLBreakdown) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _emit_json_output(
+    breakdown: PnLBreakdown,
+    acct_data: Any,
+    lp_section: Any,
+    lending_section: Any,
+    pendle_section: Any,
+    dq_section: Any,
+) -> None:
+    """Serialise the strat-pnl payload to JSON and ``click.echo`` it.
+
+    Extracted from ``strat_pnl`` to keep that function under the CRAP
+    threshold after W1-2 / W1-3 / W1-6 read-side additions.  Each
+    ``if not section.is_empty`` branch lives here rather than inflating
+    the CLI entry point's cyclomatic complexity.
+    """
+    out: dict[str, Any] = breakdown.to_json_dict()
+    out["strategy_classes"] = sorted(str(c) for c in acct_data.strategy_classes)
+    if not lp_section.is_empty:
+        out["lp"] = lp_section_to_dict(lp_section)
+    if not lending_section.is_empty:
+        out["lending"] = lending_section_to_dict(lending_section)
+    if not pendle_section.is_empty:
+        out["pendle"] = pendle_section_to_dict(pendle_section)
+    if not dq_section.is_empty:
+        out["data_quality"] = data_quality_to_dict(dq_section)
+    click.echo(json.dumps(out, indent=2))
+
+
 @click.command("pnl")
 @click.option(
     "--strategy-id",
@@ -735,17 +779,7 @@ def strat_pnl(  # noqa: C901
     dq_section = build_data_quality(acct_data)
 
     if as_json:
-        out: dict[str, Any] = breakdown.to_json_dict()
-        out["strategy_classes"] = sorted(str(c) for c in acct_data.strategy_classes)
-        if not lp_section.is_empty:
-            out["lp"] = lp_section_to_dict(lp_section)
-        if not lending_section.is_empty:
-            out["lending"] = lending_section_to_dict(lending_section)
-        if not pendle_section.is_empty:
-            out["pendle"] = pendle_section_to_dict(pendle_section)
-        if not dq_section.is_empty:
-            out["data_quality"] = data_quality_to_dict(dq_section)
-        click.echo(json.dumps(out, indent=2))
+        _emit_json_output(breakdown, acct_data, lp_section, lending_section, pendle_section, dq_section)
         return
 
     # Text output
@@ -759,7 +793,7 @@ def strat_pnl(  # noqa: C901
             None,
             [
                 render_lp_section(lp_section),
-                render_lending_section(lending_section),
+                render_lending_section(lending_section, snapshot=acct_data.snapshot),
                 render_pendle_section(pendle_section),
                 render_data_quality_section(dq_section),
             ],

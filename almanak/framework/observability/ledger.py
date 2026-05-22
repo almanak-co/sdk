@@ -837,7 +837,7 @@ def build_ledger_entry(
     pre_state_json = _safe_json(pre_state)
     post_state_json = _safe_json(post_state)
 
-    return LedgerEntry(
+    entry = LedgerEntry(
         cycle_id=cycle_id,
         strategy_id=strategy_id,
         intent_type=intent_type,
@@ -859,6 +859,19 @@ def build_ledger_entry(
         pre_state_json=pre_state_json,
         post_state_json=post_state_json,
     )
+
+    # W1-5 decimal-unit soft-fail guard (VIB-4780).  Runs after the entry is
+    # fully constructed so amount_in/amount_out are resolved.  Soft-fail only:
+    # logs a WARNING, never raises, never mutates the entry.
+    from almanak.framework.accounting.decimal_guards import _check_decimal_unit_soft_fail
+
+    _check_decimal_unit_soft_fail(
+        {"amount_in": entry.amount_in, "amount_out": entry.amount_out},
+        event_id=entry.id,
+        event_type=entry.intent_type,
+    )
+
+    return entry
 
 
 def serialize_extracted_data(extracted_data: dict[str, Any]) -> str:
