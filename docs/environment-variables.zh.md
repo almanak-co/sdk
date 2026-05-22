@@ -84,6 +84,58 @@
 
 ---
 
+## 网关身份验证与安全
+
+托管（Almanak Infra）部署的关键依赖项。每个变量在网关启动时读取一次，更改需要重启。
+
+| 变量 | 描述 |
+|----------|-------------|
+| `ALMANAK_GATEWAY_AUTH_TOKEN` | gRPC 身份验证的共享密钥令牌。设置后，客户端必须在元数据中提供此令牌才能访问服务。**托管部署上必须设置。** |
+| `ALMANAK_GATEWAY_ALLOW_INSECURE` | 设置为 `true` 时，允许网关在未设置 `ALMANAK_GATEWAY_AUTH_TOKEN` 的情况下启动。默认 `false`（网关拒绝启动）。**仅限本地开发** — 切勿在托管部署上设置。 |
+| `ALMANAK_GATEWAY_OPERATOR_TOKEN` | `DashboardService` 上变更类 RPC（`PreviewReconcile`、`ApplyReconcile`、`RefreshRegistryFromChain`）所需的二次因子令牌（VIB-4493 第一阶段）。调用方必须在 `x-operator-token` 元数据头中发送相同的值，同时还要带上常规的身份验证令牌。未设置（默认）时，这些处理程序回退到仅 auth-token 验证 — 对单用户 / 本地部署是安全的。 |
+
+!!! danger "未设置这些变量的托管部署不安全"
+    在托管网关上省略 `ALMANAK_GATEWAY_AUTH_TOKEN`（或启用 `ALMANAK_GATEWAY_ALLOW_INSECURE=true`）会将每个 gRPC 服务暴露给未经身份验证的调用方 — 包括对交易进行签名和提交的 `ExecutionService`。请将两者都视为生产环境的密钥。
+
+---
+
+## 手动价格覆盖
+
+针对真实预言机源无法定价的代币（如新兴链上的长尾代币）的最后兜底方案。
+
+| 变量 | 描述 |
+|----------|-------------|
+| `ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES` | 启用 `ManualPriceOverrideSource` 回退源。默认 `false`。默认关闭，因为设置错误的环境变量可能将错误价格输入到滑点 / 拆仓决策中。 |
+| `ALMANAK_PRICE_OVERRIDE_<TOKEN>` | 每个代币的 USD 覆盖价格。仅在所有真实预言机源都未能为该代币定价时才会查阅。示例：`ALMANAK_PRICE_OVERRIDE_W0G=0.012`。 |
+
+两者都需要设置：启用标志打开数据源；每个代币的变量提供价格。
+
+---
+
+## Tenderly 模拟
+
+当模拟器设置为 `"tenderly"`（或自动选择）时，由 `SimulationService.SimulateBundle` 使用。三个变量必须同时设置 — 任何一个为空都会禁用 Tenderly 并在可用时回退到 Alchemy 模拟。
+
+| 变量 | 描述 |
+|----------|-------------|
+| `ALMANAK_GATEWAY_TENDERLY_ACCOUNT_SLUG` | Tenderly 账户标识（仪表板 URL 中的 `<account>` 段）。 |
+| `ALMANAK_GATEWAY_TENDERLY_PROJECT_SLUG` | 账户中的 Tenderly 项目标识。 |
+| `ALMANAK_GATEWAY_TENDERLY_ACCESS_KEY` | 具有模拟权限的 Tenderly 访问密钥（[账户设置 → 访问密钥](https://dashboard.tenderly.co/account/authorization)）。 |
+
+---
+
+## 投资组合数据源（多提供商）
+
+配置网关的投资组合估值源。由 `IntegrationService.GetWalletPortfolio` / `GetWalletPositions` 用于跨链聚合余额和 DeFi 持仓。
+
+| 变量 | 描述 |
+|----------|-------------|
+| `ALMANAK_GATEWAY_PORTFOLIO_API_KEY` | 单提供商 API 密钥（旧版单提供商路径）。 |
+| `ALMANAK_GATEWAY_PORTFOLIO_API_PROVIDER` | 单提供商名称。默认 `zerion`。 |
+| `ALMANAK_GATEWAY_PORTFOLIO_PROVIDERS` | 多提供商覆盖。按优先顺序以逗号分隔的提供商名称（如 `zerion,moralis`）。设置后，优先于单提供商密钥。每个提供商从 `{NAME}_API_KEY` 读取自己的 API 密钥（如 `ZERION_API_KEY`、`MORALIS_API_KEY`）。 |
+
+---
+
 ## Safe 钱包
 
 用于通过 Gnosis Safe 多签执行的策略。

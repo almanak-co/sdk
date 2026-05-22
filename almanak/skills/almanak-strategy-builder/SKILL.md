@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.15.0"
+  version: "2.16.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -101,7 +101,7 @@ name = "my-strategy"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "almanak>=2.4.0",
+    "almanak>=2.15.0",
 ]
 
 [tool.almanak.run]
@@ -1303,11 +1303,24 @@ results.plot()  # Matplotlib equity curve
 
 ```bash
 almanak strat new                     # Interactive scaffolding (creates pyproject.toml, .venv/, uv.lock)
-almanak strat new -t mean_reversion -n my_rsi -c arbitrum  # Non-interactive
+almanak strat new -t ta_swap -n my_rsi -c arbitrum  # Non-interactive
 almanak strat demo                    # Browse and copy a working demo strategy
 ```
 
-**Templates:** `blank`, `dynamic_lp`, `mean_reversion`, `bollinger`, `basis_trade`, `lending_loop`, `copy_trader`
+**Templates:**
+
+| Template | Description |
+|----------|-------------|
+| `blank` | Minimal scaffold for custom implementations |
+| `ta_swap` | Technical-analysis swap strategy (RSI, Bollinger Bands, or combined signals) |
+| `dynamic_lp` | Price-based LP range management with rebalancing |
+| `lending_loop` | Supply/borrow leverage loop with state machine and health monitoring |
+| `basis_trade` | Spot+perp delta-neutral funding-rate arbitrage |
+| `vault_yield` | ERC-4626 vault deposit/redeem yield strategy |
+| `copy_trader` | Monitor leader wallets and replicate trades |
+| `perps` | Perpetual futures with take-profit / stop-loss |
+| `multi_step` | Atomic multi-step operations using `IntentSequence` (e.g., LP rebalancing) |
+| `staking` | Liquid staking with optional pre-swap |
 
 Each scaffolded strategy is a self-contained Python project. After scaffolding, `uv sync` runs
 automatically to create `.venv/` and `uv.lock`. Add dependencies with `uv add <package>`.
