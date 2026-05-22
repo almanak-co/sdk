@@ -735,7 +735,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.collateral_token} to Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "supply_collateral",
                             "token": self.collateral_token,
@@ -757,7 +757,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self.borrow_token} from Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "borrow",
                             "token": self.borrow_token,
@@ -793,7 +793,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Withdrew {self.collateral_token} from Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "withdraw_collateral",
                             "token": self.collateral_token,
@@ -837,7 +837,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Repaid {self.borrow_token} to Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "repay",
                             "token": self.borrow_token,
@@ -874,7 +874,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
                 description=f"Swapped {swap_from_token} to {swap_to_token}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "swap",
                     "from_token": swap_from_token,
@@ -934,7 +934,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"State: {old_state.upper()} -> {new_state.upper()}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "old_state": old_state,
                     "new_state": new_state,
@@ -1119,7 +1119,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

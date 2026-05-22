@@ -65,7 +65,7 @@ def _make_runner() -> StrategyRunner:
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0xabc"
     strategy.deployment_id = "dep-1"
@@ -309,7 +309,7 @@ class TestWriteOutboxEntryAPEPassthrough:
         original_cause = RuntimeError("gRPC UNAVAILABLE: connection refused")
         original_ape = AccountingPersistenceError(
             write_kind=AccountingWriteKind.OUTBOX,
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             cause=original_cause,
         )
 
@@ -319,8 +319,7 @@ class TestWriteOutboxEntryAPEPassthrough:
         with pytest.raises(AccountingPersistenceError) as exc_info:
             await write_outbox_entry(
                 state_manager,
-                deployment_id="dep-1",
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 cycle_id="cycle-1",
                 ledger_entry_id="ledger-abc",
                 intent_type="SWAP",

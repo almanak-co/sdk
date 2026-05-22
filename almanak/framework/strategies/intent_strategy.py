@@ -272,7 +272,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         # State persistence (set by runner via set_state_manager)
         self._state_manager: Any | None = None
-        self._strategy_id: str = ""
+        self._deployment_id: str = ""
         self._state_version: int = 0
         self._pending_save: Any | None = None
 
@@ -422,17 +422,17 @@ class IntentStrategy(StrategyBase[ConfigT]):
     # State Persistence
     # =========================================================================
 
-    def set_state_manager(self, state_manager: Any, strategy_id: str) -> None:
+    def set_state_manager(self, state_manager: Any, deployment_id: str) -> None:
         """Set the state manager for persistence.
 
         Called by the runner to inject the state manager.
 
         Args:
             state_manager: StateManager instance
-            strategy_id: Unique ID for this strategy instance
+            deployment_id: Unique ID for this strategy instance
         """
         self._state_manager = state_manager
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
 
     def get_persistent_state(self) -> dict[str, Any]:
         """Get strategy state to persist.
@@ -456,12 +456,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         pass
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def save_state(self) -> None:
         """Save current strategy state to persistence.
 
         Called by runner after each iteration.
         """
-        if not self._state_manager or not self._strategy_id:
+        if not self._state_manager or not self._deployment_id:
             return
 
         state = self.get_persistent_state() or {}
@@ -489,7 +490,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             version = getattr(self, "_state_version", 0) + 1
 
             state_data = StateData(
-                strategy_id=self._strategy_id,
+                deployment_id=self.deployment_id,
                 version=version,
                 state=state,
             )
@@ -508,7 +509,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             # Update version for next save
             self._state_version = version
 
-            logger.debug(f"Saved state for {self._strategy_id}: {list(state.keys())}")
+            logger.debug(f"Saved state for {self._deployment_id}: {list(state.keys())}")
         except Exception as e:
             logger.warning(f"Failed to save state: {e}")
 
@@ -563,6 +564,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             if isinstance(tracker_data, dict):
                 tracker.load_persistent_dict(tracker_data)
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def load_state(self) -> bool:
         """Load strategy state from persistence.
 
@@ -571,7 +573,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Returns:
             True if state was found and loaded, False otherwise
         """
-        if not self._state_manager or not self._strategy_id:
+        if not self._state_manager or not self._deployment_id:
             return False
 
         try:
@@ -583,7 +585,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 return False
             except RuntimeError:
                 # No running loop - create one and run
-                state_data = asyncio.run(self._state_manager.load_state(self._strategy_id))
+                state_data = asyncio.run(self._state_manager.load_state(self._deployment_id))
 
             if state_data and state_data.state:
                 user_state, framework_state = self._split_framework_state(state_data.state)
@@ -595,13 +597,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 state_summary = {
                     k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
                 }
-                logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
+                logger.info(f"Loaded state for {self._deployment_id}: {state_summary}")
                 return True
             return False
         except Exception as e:
             # StateNotFoundError is expected for fresh starts
             if "not found" in str(e).lower():
-                logger.debug(f"No existing state for {self._strategy_id}")
+                logger.debug(f"No existing state for {self._deployment_id}")
             else:
                 logger.warning(f"Failed to load state: {e}")
             return False
@@ -612,10 +614,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called by the CLI runner inside its async setup so that state is always
         restored correctly, regardless of whether a loop is already running.
         """
-        if not self._state_manager or not self._strategy_id:
+        if not self._state_manager or not self._deployment_id:
             return False
         try:
-            state_data = await self._state_manager.load_state(self._strategy_id)
+            state_data = await self._state_manager.load_state(self._deployment_id)
             if state_data and state_data.state:
                 user_state, framework_state = self._split_framework_state(state_data.state)
                 self._restore_framework_state(framework_state)
@@ -624,12 +626,12 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 state_summary = {
                     k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
                 }
-                logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
+                logger.info(f"Loaded state for {self._deployment_id}: {state_summary}")
                 return True
             return False
         except Exception as e:
             if "not found" in str(e).lower():
-                logger.debug(f"No existing state for {self._strategy_id}")
+                logger.debug(f"No existing state for {self._deployment_id}")
             else:
                 logger.warning(f"Failed to load state: {e}")
             return False
@@ -747,6 +749,12 @@ class IntentStrategy(StrategyBase[ConfigT]):
         this directly — the runner manages it transparently.
         """
         return self._lp_position_tracker
+
+    def _require_deployment_id(self, operation: str) -> str:
+        deployment_id = (self._deployment_id or "").strip()
+        if not deployment_id:
+            raise RuntimeError(f"{operation} requires a resolved deployment_id")
+        return deployment_id
 
     def valuate(self, market: MarketSnapshot) -> Decimal:
         """Calculate the total portfolio value in USD for vault settlement.
@@ -1307,7 +1315,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
                 return PortfolioSnapshot(
                     timestamp=datetime.now(UTC),
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     total_value_usd=cex_balance,
                     available_cash_usd=cex_balance,
                     value_confidence=ValueConfidence.ESTIMATED,
@@ -1324,7 +1332,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 logger.warning(f"Failed to create market snapshot for portfolio: {e}")
                 return PortfolioSnapshot(
                     timestamp=datetime.now(UTC),
-                    strategy_id=self._strategy_id or self.STRATEGY_NAME,
+                    deployment_id=self.deployment_id,
                     total_value_usd=Decimal("0"),
                     available_cash_usd=Decimal("0"),
                     value_confidence=ValueConfidence.UNAVAILABLE,
@@ -1392,7 +1400,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
             return PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
-                strategy_id=self._strategy_id or self.STRATEGY_NAME,
+                deployment_id=self.deployment_id,
                 total_value_usd=position_value + wallet_value,
                 available_cash_usd=wallet_value,
                 value_confidence=ValueConfidence.ESTIMATED if positions_unavailable else ValueConfidence.HIGH,
@@ -1407,7 +1415,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             logger.warning(f"Failed to compute portfolio snapshot: {e}")
             return PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
-                strategy_id=self._strategy_id or self.STRATEGY_NAME,
+                deployment_id=self.deployment_id,
                 total_value_usd=Decimal("0"),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.UNAVAILABLE,
@@ -1603,7 +1611,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         positions need to be closed.
 
         For strategies with no positions, use StatelessStrategy as your base
-        class, or return TeardownPositionSummary.empty(self.strategy_id).
+        class, or return TeardownPositionSummary.empty(self.deployment_id).
 
         Returns:
             TeardownPositionSummary with all current positions
@@ -1626,7 +1634,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     ))
 
                 return TeardownPositionSummary(
-                    strategy_id=self.STRATEGY_NAME,
+                    deployment_id=self.deployment_id,
                     timestamp=datetime.now(timezone.utc),
                     positions=positions,
                 )
@@ -1784,16 +1792,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
         from almanak.framework.deployment import is_hosted
         from almanak.framework.local_paths import LocalPathError
 
+        deployment_id = self._require_deployment_id("_check_teardown_request")
         try:
             from almanak.framework.teardown import get_teardown_state_manager_for_runtime
 
             manager = get_teardown_state_manager_for_runtime(gateway_client=getattr(self, "_gateway_client", None))
-            strategy_id = self._strategy_id or self.STRATEGY_NAME
 
-            request = manager.get_active_request(strategy_id)
+            request = manager.get_active_request(deployment_id)
             if request:
                 logger.info(
-                    f"Found active teardown request for {strategy_id}: "
+                    f"Found active teardown request for {deployment_id}: "
                     f"mode={request.mode.value}, status={request.status.value}"
                 )
             return request
@@ -1818,10 +1826,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
             # Emit a grep-able structured log line and return None so the
             # runner keeps making risk-reducing progress.
             logger.error(
-                "teardown.check_request_failed: strategy_id=%s strategy_class=%s error=%s — "
+                "teardown.check_request_failed: deployment_id=%s strategy_class=%s error=%s — "
                 "teardown signal channel is degraded; runner continuing without "
                 "teardown polling this iteration",
-                getattr(self, "_strategy_id", "<unset>") or self.STRATEGY_NAME,
+                deployment_id,
                 self.__class__.__name__,
                 e,
             )
@@ -1862,13 +1870,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
         from almanak.framework.deployment import is_hosted
         from almanak.framework.local_paths import LocalPathError
 
+        deployment_id = self._require_deployment_id("acknowledge_teardown_request")
         try:
             from almanak.framework.teardown import get_teardown_state_manager_for_runtime
 
             manager = get_teardown_state_manager_for_runtime(gateway_client=getattr(self, "_gateway_client", None))
-            strategy_id = self._strategy_id or self.STRATEGY_NAME
 
-            request = manager.acknowledge_request(strategy_id)
+            request = manager.acknowledge_request(deployment_id)
             return request is not None
 
         except LocalPathError as e:
@@ -1881,9 +1889,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
             if is_hosted():
                 raise
             logger.error(
-                "teardown.ack_request_failed: strategy_id=%s strategy_class=%s error=%s — "
+                "teardown.ack_request_failed: deployment_id=%s strategy_class=%s error=%s — "
                 "teardown signal channel is degraded; ack skipped this iteration",
-                getattr(self, "_strategy_id", "<unset>") or self.STRATEGY_NAME,
+                deployment_id,
                 self.__class__.__name__,
                 e,
             )

@@ -58,7 +58,7 @@ def _make_executor(
         gw,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
     )
 
 
@@ -200,20 +200,20 @@ class TestMockExecutionService:
 class TestMockStateService:
     def test_save_and_load_state(self):
         gw = MockGatewayClient()
-        save_req = type("R", (), {"strategy_id": "test", "data": b'{"key":"value"}',
+        save_req = type("R", (), {"deployment_id": "test", "data": b'{"key":"value"}',
                                   "expected_version": 0, "schema_version": 1})()
         save_resp = gw.state.SaveState(save_req)
         assert save_resp.success is True
         assert save_resp.new_version == 1
 
-        load_req = type("R", (), {"strategy_id": "test"})()
+        load_req = type("R", (), {"deployment_id": "test"})()
         load_resp = gw.state.LoadState(load_req)
         assert load_resp.data == b'{"key":"value"}'
         assert load_resp.version == 1
 
     def test_load_missing_state_raises(self):
         gw = MockGatewayClient()
-        load_req = type("R", (), {"strategy_id": "nonexistent"})()
+        load_req = type("R", (), {"deployment_id": "nonexistent"})()
         with pytest.raises(Exception, match="state not found"):
             gw.state.LoadState(load_req)
 

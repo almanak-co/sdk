@@ -68,7 +68,7 @@ class MockStrategy:
         self._decide_count = 0
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "mock_strategy"
 
     def decide(self, market: Any) -> MockIntent | None:
@@ -469,7 +469,7 @@ class TestPnLBacktester:
 
         assert isinstance(result, BacktestResult)
         assert result.engine == BacktestEngine.PNL
-        assert result.strategy_id == "mock_strategy"
+        assert result.deployment_id == "mock_strategy"
         assert result.success
         assert result.error is None
         # No trades should have been made
@@ -788,7 +788,7 @@ class TestBacktesterIntegration:
         # Verify result structure
         assert result.success
         assert result.engine == BacktestEngine.PNL
-        assert result.strategy_id == "mock_strategy"
+        assert result.deployment_id == "mock_strategy"
         assert len(result.equity_curve) == 25  # 24 hours + initial
         assert result.initial_capital_usd == Decimal("100000")
 

@@ -224,7 +224,7 @@ class CompoundPaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Supplied {self.supply_amount} {self.supply_token} to Compound V3",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                 )
             )
 
@@ -238,7 +238,7 @@ class CompoundPaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Withdrew {self.supply_token} from Compound V3",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "withdraw", "token": self.supply_token},
                 )
             )
@@ -292,7 +292,7 @@ class CompoundPaperTradeStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

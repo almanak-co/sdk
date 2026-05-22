@@ -119,7 +119,7 @@ def get_user_account_data(web3: Web3, user: str) -> dict:
 
 def _execution_context(wallet: str) -> ExecutionContext:
     return ExecutionContext(
-        strategy_id="layer5-aave-v3-lending",
+        deployment_id="layer5-aave-v3-lending",
         chain=CHAIN_NAME,
         wallet_address=wallet,
         protocol=PROTOCOL,
@@ -173,7 +173,6 @@ def _payload(row: dict) -> dict:
 def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
     """Identity sextuple per epic VIB-4591 decision #5 (no agent_id)."""
     assert row["deployment_id"] == "layer5-intent-test"
-    assert row["strategy_id"] == "layer5-intent-test"
     assert row["cycle_id"] == "layer5-cycle"
     assert row["execution_mode"] == "paper"
     assert row["event_type"] == event_type

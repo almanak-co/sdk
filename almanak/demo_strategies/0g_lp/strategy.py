@@ -174,7 +174,7 @@ class ZeroGLPStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_0g_lp"),
+            deployment_id=getattr(self, "deployment_id", "demo_0g_lp"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -25,7 +25,7 @@ class TestLedgerSQLitePersistence:
         entry = LedgerEntry(
             id="entry-1",
             cycle_id="cycle-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             timestamp=datetime(2026, 4, 5, 12, 0, 0, tzinfo=UTC),
             intent_type="SWAP",
             token_in="USDC",
@@ -58,7 +58,7 @@ class TestLedgerSQLitePersistence:
                 LedgerEntry(
                     id=f"entry-{i}",
                     cycle_id=f"cycle-{i}",
-                    strategy_id="strat-1",
+                    deployment_id="strat-1",
                     intent_type=intent_type,
                 )
             )
@@ -72,13 +72,13 @@ class TestLedgerSQLitePersistence:
     async def test_query_with_since_filter(self, sqlite_store):
         old = LedgerEntry(
             id="old",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             timestamp=datetime(2026, 4, 1, tzinfo=UTC),
             intent_type="SWAP",
         )
         new = LedgerEntry(
             id="new",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             timestamp=datetime(2026, 4, 5, tzinfo=UTC),
             intent_type="SWAP",
         )
@@ -93,18 +93,18 @@ class TestLedgerSQLitePersistence:
     async def test_query_respects_limit(self, sqlite_store):
         for i in range(10):
             await sqlite_store.save_ledger_entry(
-                LedgerEntry(id=f"e-{i}", strategy_id="strat-1", intent_type="SWAP")
+                LedgerEntry(id=f"e-{i}", deployment_id="strat-1", intent_type="SWAP")
             )
 
         entries = await sqlite_store.get_ledger_entries("strat-1", limit=3)
         assert len(entries) == 3
 
-    async def test_query_different_strategy_ids_isolated(self, sqlite_store):
+    async def test_query_different_deployment_ids_isolated(self, sqlite_store):
         await sqlite_store.save_ledger_entry(
-            LedgerEntry(id="a", strategy_id="strat-a", intent_type="SWAP")
+            LedgerEntry(id="a", deployment_id="strat-a", intent_type="SWAP")
         )
         await sqlite_store.save_ledger_entry(
-            LedgerEntry(id="b", strategy_id="strat-b", intent_type="BORROW")
+            LedgerEntry(id="b", deployment_id="strat-b", intent_type="BORROW")
         )
 
         a_entries = await sqlite_store.get_ledger_entries("strat-a")

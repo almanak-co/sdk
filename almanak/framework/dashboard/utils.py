@@ -205,7 +205,7 @@ def format_pnl_display(value: Decimal, is_stale: bool = False) -> str:
 
 
 def maybe_auto_select_strategy(strategies: list) -> None:
-    """Auto-select the sole RUNNING strategy if no strategy_id query param is set.
+    """Auto-select the sole RUNNING strategy if no deployment_id query param is set.
 
     Imported by detail, timeline, config, and teardown pages to avoid duplicating
     the same three-line pattern across four files.  Mutates st.query_params and
@@ -213,11 +213,11 @@ def maybe_auto_select_strategy(strategies: list) -> None:
     """
     import streamlit as st
 
-    if st.query_params.get("strategy_id"):
+    if st.query_params.get("deployment_id"):
         return
     running = [s for s in strategies if s.status == StrategyStatus.RUNNING]
     if len(running) == 1:
-        st.query_params["strategy_id"] = running[0].id
+        st.query_params["deployment_id"] = running[0].id
         st.rerun()
 
 

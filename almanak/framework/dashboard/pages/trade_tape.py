@@ -237,7 +237,7 @@ def _format_human_amount(amount: Any) -> str:
     return f"{d:.4g}"
 
 
-def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
+def render_trade_tape(deployment_id: str, *, limit: int = 50) -> None:
     """Render the trade-tape tab for a strategy."""
     from almanak.framework.dashboard.data_source import (
         GatewayConnectionError,
@@ -245,7 +245,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
     )
 
     try:
-        response = get_trade_tape(strategy_id, limit=limit)
+        response = get_trade_tape(deployment_id, limit=limit)
     except GatewayConnectionError:
         st.error("Gateway unavailable — cannot load trade tape.")
         return
@@ -270,7 +270,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
             "Action",
             intent_types,
             default=intent_types,
-            key=f"tape_intents_{strategy_id}",
+            key=f"tape_intents_{deployment_id}",
         )
     with col2:
         # VIB-4046 — approvals are noise for the operator-facing read of
@@ -280,7 +280,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
         show_approvals = st.toggle(
             "Show approvals",
             value=False,
-            key=f"tape_show_approvals_{strategy_id}",
+            key=f"tape_show_approvals_{deployment_id}",
             help=(
                 "When off, ERC-20 approve sub-txs are hidden from the per-intent "
                 "expander and the count badge shows e.g. '1 of 3 (2 approvals hidden)'. "
@@ -300,7 +300,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
     # source, position id) so a single CSV download replaces a manual
     # SQL pull from sqlite. Only the currently-filtered rows are
     # exported so the operator can scope the file before downloading.
-    _render_csv_export(rows, strategy_id)
+    _render_csv_export(rows, deployment_id)
 
     # Group by date for scannability
     last_date = None
@@ -317,7 +317,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
         _render_tape_row(row, show_approvals=show_approvals)
 
 
-def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
+def _render_csv_export(rows: list[TradeTapeRow], deployment_id: str) -> None:
     """Render a single download button for the filtered tape.
 
     VIB-3928 — original ask was a one-row-per-intent dump.
@@ -429,13 +429,13 @@ def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
             )
 
     csv_bytes = buf.getvalue().encode("utf-8")
-    fname = f"trade_tape_{strategy_id[:32]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    fname = f"trade_tape_{deployment_id[:32]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     st.download_button(
         label=f"⬇️ Export {sub_tx_count} sub-tx row(s) from {len(rows)} intent(s) as CSV",
         data=csv_bytes,
         file_name=fname,
         mime="text/csv",
-        key=f"tape_csv_{strategy_id}",
+        key=f"tape_csv_{deployment_id}",
         help=(
             "Trade-tape export: one row per on-chain sub-tx, joined back to "
             "the parent intent via parent_intent_id. Always full (approvals "

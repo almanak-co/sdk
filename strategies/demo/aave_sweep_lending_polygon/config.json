@@ -1,5 +1,5 @@
 {
-    "strategy_id": "demo_aave_sweep_lending_polygon",
+    "deployment_id": "demo_aave_sweep_lending_polygon",
     "strategy_name": "demo_aave_sweep_lending_polygon",
     "description": "Aave V3 lending strategy for parameter sweep backtesting on Polygon",
     "supply_token": "WETH",

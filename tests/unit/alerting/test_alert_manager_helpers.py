@@ -39,9 +39,9 @@ from almanak.framework.models.stuck_reason import StuckReason
 # ---------------------------------------------------------------------------
 
 
-def _card(strategy_id: str = "s-1", severity: Severity = Severity.HIGH) -> OperatorCard:
+def _card(deployment_id: str = "s-1", severity: Severity = Severity.HIGH) -> OperatorCard:
     return OperatorCard(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
         event_type=EventType.ERROR,
         reason=StuckReason.RPC_FAILURE,

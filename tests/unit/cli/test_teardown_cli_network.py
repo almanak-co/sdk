@@ -118,13 +118,13 @@ class TestGatewayClientPassedToCompiler:
 
         # Minimal strategy that reports no open positions so teardown exits cleanly
         class FakeStrategy:
-            strategy_id = "test-strategy"
+            deployment_id = "test-strategy"
             chain = "arbitrum"
 
             def get_open_positions(self):
                 from almanak.framework.teardown import TeardownSummary
 
-                return TeardownSummary(strategy_id="test-strategy", chain="arbitrum", positions=[])
+                return TeardownSummary(deployment_id="test-strategy", chain="arbitrum", positions=[])
 
             def generate_teardown_intents(self, mode):
                 return []

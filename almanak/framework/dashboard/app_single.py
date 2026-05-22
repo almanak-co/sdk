@@ -1,7 +1,7 @@
 """Hosted-parity single-strategy dashboard entrypoint (Problem A1).
 
 This entrypoint mirrors how the hosted platform launches a dashboard for a
-single strategy: it connects to one gateway, scopes to one ``strategy_id``,
+single strategy: it connects to one gateway, scopes to one ``deployment_id``,
 loads that strategy's ``dashboard/ui.py`` (when present), and renders it
 through the same ``render_custom_dashboard_safe(...)`` path the hosted image
 uses.
@@ -17,7 +17,7 @@ dashboard silently invalidates the whole reason this entrypoint exists.
 
 The launcher (``run_helpers._start_dashboard_background``) injects:
 
-- ``ALMANAK_DASHBOARD_STRATEGY_ID`` — resolved deployment_id to scope to
+- ``ALMANAK_DASHBOARD_DEPLOYMENT_ID`` — resolved deployment_id to scope to
 - ``ALMANAK_DASHBOARD_WORKING_DIR`` — strategy folder containing ``config.json``
   and (optionally) ``dashboard/ui.py``
 - ``GATEWAY_HOST`` / ``GATEWAY_PORT`` / ``ALMANAK_GATEWAY_AUTH_TOKEN`` —
@@ -49,12 +49,12 @@ logger = logging.getLogger(__name__)
 PAGE_TITLE = "Almanak Strategy Dashboard"
 PAGE_ICON = "📊"
 
-ENV_STRATEGY_ID = "ALMANAK_DASHBOARD_STRATEGY_ID"
+ENV_DEPLOYMENT_ID = "ALMANAK_DASHBOARD_DEPLOYMENT_ID"
 ENV_WORKING_DIR = "ALMANAK_DASHBOARD_WORKING_DIR"
 # Optional — when set, the dashboard prefers this serialised runtime
 # config over re-reading ``working_dir/config.json``. Set by the launcher
 # to forward the post-bootstrap config (covers --config pointing outside
-# working_dir, copy-trading runtime overrides, and the resolved strategy_id
+# working_dir, copy-trading runtime overrides, and the resolved deployment_id
 # field). Falls back to config.json on missing / malformed JSON so the
 # subprocess never crashes on env shape regressions.
 ENV_STRATEGY_CONFIG = "ALMANAK_DASHBOARD_STRATEGY_CONFIG"
@@ -73,7 +73,7 @@ def _load_strategy_config(working_dir: Path) -> dict:
     1. ``ALMANAK_DASHBOARD_STRATEGY_CONFIG`` (JSON-serialised runtime
        config from the launcher) — preferred because it reflects
        ``--config`` flag, runtime overrides (copy-trading flags), and
-       the resolved ``strategy_id`` field as the running strategy sees
+       the resolved ``deployment_id`` field as the running strategy sees
        them.
     2. ``working_dir/config.json`` (file on disk) — fallback for the
        case where the env var is missing (someone launched the
@@ -113,7 +113,7 @@ def _load_strategy_config(working_dir: Path) -> dict:
         return {}
 
 
-def _connect_gateway_fail_closed(strategy_id: str) -> DashboardAPIClient | None:
+def _connect_gateway_fail_closed(deployment_id: str) -> DashboardAPIClient | None:
     """Build a real gateway-backed API client, or return ``None`` on failure.
 
     Returns ``None`` when the gateway cannot be reached OR is unhealthy.
@@ -146,7 +146,7 @@ def _connect_gateway_fail_closed(strategy_id: str) -> DashboardAPIClient | None:
     try:
         gateway.connect()
     except GatewayConnectionError as e:
-        logger.warning("Gateway connection / health-check failed for %s: %s", strategy_id, e)
+        logger.warning("Gateway connection / health-check failed for %s: %s", deployment_id, e)
         return None
     except Exception:
         # Broaden beyond GatewayConnectionError for any unexpected
@@ -154,19 +154,19 @@ def _connect_gateway_fail_closed(strategy_id: str) -> DashboardAPIClient | None:
         # gRPC channel surprises). Fail-closed is the safer outcome
         # for any connect-side error — operators see "Gateway
         # unreachable" instead of a stack trace or silent mock.
-        logger.exception("Unexpected error connecting to gateway for %s", strategy_id)
+        logger.exception("Unexpected error connecting to gateway for %s", deployment_id)
         return None
 
     if not gateway.is_connected:
         return None
 
-    return create_api_client(gateway, strategy_id)
+    return create_api_client(gateway, deployment_id)
 
 
-def _render_gateway_unreachable_error(strategy_id: str) -> None:
+def _render_gateway_unreachable_error(deployment_id: str) -> None:
     st.error("Gateway unreachable")
     st.markdown(
-        f"The hosted-parity dashboard for `{strategy_id}` requires a live gateway "
+        f"The hosted-parity dashboard for `{deployment_id}` requires a live gateway "
         "connection. None is available.\n\n"
         "**The dashboard will not render mock data** — a mock-fed dashboard "
         "silently invalidates validation of hosted parity (the whole reason "
@@ -179,7 +179,7 @@ def _render_gateway_unreachable_error(strategy_id: str) -> None:
     )
 
 
-def _render_missing_ui_fallback(working_dir: Path, strategy_id: str) -> None:
+def _render_missing_ui_fallback(working_dir: Path, deployment_id: str) -> None:
     """Render the same hosted fallback shape used when a strategy has no custom ui.py.
 
     The hosted image renders a generic operator shell pointing at the strategy
@@ -187,7 +187,7 @@ def _render_missing_ui_fallback(working_dir: Path, strategy_id: str) -> None:
     point is to not crash, and to make the "no dashboard authored" state
     obvious so it can be fixed.
     """
-    st.warning(f"No custom dashboard for `{strategy_id}`")
+    st.warning(f"No custom dashboard for `{deployment_id}`")
     st.markdown(
         f"No `dashboard/ui.py` was found under `{working_dir}`.\n\n"
         "Hosted-parity mode renders the strategy's own dashboard module. "
@@ -200,7 +200,7 @@ def _render_missing_context_error() -> None:
     st.error("Missing strategy context")
     st.markdown(
         "This entrypoint must be launched by `uv run almanak strat run --dashboard`. "
-        f"It requires `{ENV_STRATEGY_ID}` and `{ENV_WORKING_DIR}` to be set "
+        f"It requires `{ENV_DEPLOYMENT_ID}` and `{ENV_WORKING_DIR}` to be set "
         "in the environment. To browse all strategies, use `uv run almanak strat run "
         "--dashboard --dashboard-mode=command-center`."
     )
@@ -214,28 +214,28 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
 
-    strategy_id = _read_env_required(ENV_STRATEGY_ID)
+    deployment_id = _read_env_required(ENV_DEPLOYMENT_ID)
     working_dir_raw = _read_env_required(ENV_WORKING_DIR)
-    if not strategy_id or not working_dir_raw:
+    if not deployment_id or not working_dir_raw:
         _render_missing_context_error()
         return
 
     working_dir = Path(working_dir_raw).expanduser().resolve()
     strategy_config = _load_strategy_config(working_dir)
 
-    st.caption(f"Strategy: `{strategy_id}` · Source: `{working_dir}`")
+    st.caption(f"Strategy: `{deployment_id}` · Source: `{working_dir}`")
 
     # Connect first so a missing-ui fallback can still talk to the gateway
     # if/when we add a generic fallback view later.
-    api_client = _connect_gateway_fail_closed(strategy_id)
+    api_client = _connect_gateway_fail_closed(deployment_id)
     if api_client is None:
-        _render_gateway_unreachable_error(strategy_id)
+        _render_gateway_unreachable_error(deployment_id)
         return
 
     dashboard_dir = working_dir / "dashboard"
     ui_path = dashboard_dir / "ui.py"
     if not ui_path.is_file():
-        _render_missing_ui_fallback(working_dir, strategy_id)
+        _render_missing_ui_fallback(working_dir, deployment_id)
         return
 
     try:
@@ -249,11 +249,11 @@ def main() -> None:
         return
 
     # Display name first so the resolution order is readable: explicit
-    # display name → strategy_id → working_dir folder name. ``display_name``
+    # display name → deployment_id → working_dir folder name. ``display_name``
     # then falls back to ``strategy_name`` so an unnamed strategy still
     # gets a sensible tab title (working_dir folder name).
     display_name = strategy_config.get("strategy_display_name")
-    strategy_name = strategy_config.get("strategy_id") or display_name or working_dir.name
+    strategy_name = strategy_config.get("deployment_id") or display_name or working_dir.name
     display_name = display_name or strategy_name
 
     dashboard_info = CustomDashboardInfo(
@@ -269,7 +269,7 @@ def main() -> None:
     # exact behaviour this entrypoint exists to prevent.
     render_custom_dashboard_safe(
         dashboard_info=dashboard_info,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_config=strategy_config,
         api_client=api_client,
         session_state=dict(st.session_state),

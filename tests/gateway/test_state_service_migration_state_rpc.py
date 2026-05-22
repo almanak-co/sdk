@@ -742,7 +742,6 @@ def _make_ledger() -> LedgerEntry:
     return LedgerEntry(
         id="11111111-1111-1111-1111-111111111111",
         cycle_id="cyc-1",
-        strategy_id="TestStrategy:vib4208",
         deployment_id=_DEPLOYMENT_ID,
         execution_mode="paper",
         timestamp=datetime(2026, 5, 11, tzinfo=UTC),
@@ -803,8 +802,6 @@ class TestSaveLedgerAndRegistry:
     @pytest.mark.asyncio
     async def test_collision_class_propagates(self, state_service, mock_context):
         """RegistryAutoCollisionError surfaces with the right error_class."""
-        from almanak.framework.accounting.commit import RegistryRow as _RR
-        from almanak.framework.observability.ledger import LedgerEntry as _LE
 
         sm = MagicMock()
         sm.save_ledger_and_registry = AsyncMock(
@@ -820,7 +817,6 @@ class TestSaveLedgerAndRegistry:
         req = gateway_pb2.SaveLedgerAndRegistryRequest(
             id="22222222-2222-2222-2222-222222222222",
             cycle_id="cyc-2",
-            strategy_id="s",
             deployment_id=_DEPLOYMENT_ID,
             execution_mode="paper",
             timestamp=int(datetime(2026, 5, 11, tzinfo=UTC).timestamp()),
@@ -864,7 +860,6 @@ class TestSaveLedgerAndRegistry:
         req = gateway_pb2.SaveLedgerAndRegistryRequest(
             id="33333333-3333-3333-3333-333333333333",
             cycle_id="cyc-3",
-            strategy_id="TestStrategy:vib4208",
             deployment_id=_DEPLOYMENT_ID,
             execution_mode="paper",
             timestamp=int(datetime(2026, 5, 11, tzinfo=UTC).timestamp()),
@@ -930,7 +925,6 @@ class TestSaveLedgerAndRegistry:
         req = gateway_pb2.SaveLedgerAndRegistryRequest(
             id="55555555-5555-5555-5555-555555555555",
             cycle_id="cyc-5",
-            strategy_id="s",
             deployment_id=_DEPLOYMENT_ID,
             execution_mode="paper",
             timestamp=int(datetime(2026, 5, 12, tzinfo=UTC).timestamp()),

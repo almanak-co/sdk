@@ -332,7 +332,7 @@ class MantleMntAccumulator(IntentStrategy):
             pass
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "mantle_mnt_accumulator"),
+            deployment_id=getattr(self, "deployment_id", "mantle_mnt_accumulator"),
             timestamp=datetime.now(UTC),
             positions=[
                 PositionInfo(

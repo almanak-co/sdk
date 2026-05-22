@@ -227,7 +227,7 @@ class _StubStrategy:
 
             def get_open_positions(self):
                 from almanak.framework.teardown.models import TeardownPositionSummary
-                return TeardownPositionSummary.empty(self._strategy_id or "test")
+                return TeardownPositionSummary.empty(self._deployment_id or "test")
 
             def generate_teardown_intents(self, mode=None, market=None):
                 return []
@@ -351,7 +351,7 @@ class TestRateMonitorIntegration:
 
             def get_open_positions(self):
                 from almanak.framework.teardown.models import TeardownPositionSummary
-                return TeardownPositionSummary.empty(self._strategy_id or "test")
+                return TeardownPositionSummary.empty(self._deployment_id or "test")
 
             def generate_teardown_intents(self, mode=None, market=None):
                 return []
@@ -383,7 +383,7 @@ class TestRateMonitorIntegration:
 
             def get_open_positions(self):
                 from almanak.framework.teardown.models import TeardownPositionSummary
-                return TeardownPositionSummary.empty(self._strategy_id or "test")
+                return TeardownPositionSummary.empty(self._deployment_id or "test")
 
             def generate_teardown_intents(self, mode=None, market=None):
                 return []

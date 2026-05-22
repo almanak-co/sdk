@@ -22,7 +22,7 @@ from almanak.framework.dashboard.models import (
 class TestStrategyFromPmDict:
     def test_basic_conversion(self):
         entry = {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "name": "My Strategy",
             "status": "RUNNING",
             "chain": "arbitrum",
@@ -39,18 +39,18 @@ class TestStrategyFromPmDict:
         assert strategy.pnl_24h_usd == Decimal("50")
 
     def test_unknown_status_defaults_to_inactive(self):
-        entry = {"strategy_id": "s1", "status": "WEIRD"}
+        entry = {"deployment_id": "s1", "status": "WEIRD"}
         strategy = strategy_from_pm_dict(entry)
         assert strategy.status == StrategyStatus.INACTIVE
 
     def test_missing_status_defaults_to_inactive(self):
-        entry = {"strategy_id": "s1"}
+        entry = {"deployment_id": "s1"}
         strategy = strategy_from_pm_dict(entry)
         assert strategy.status == StrategyStatus.INACTIVE
 
     def test_timestamp_from_iso_string(self):
         entry = {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "last_action_at": "2026-04-05T12:00:00+00:00",
         }
         strategy = strategy_from_pm_dict(entry)
@@ -59,7 +59,7 @@ class TestStrategyFromPmDict:
 
     def test_timestamp_from_unix(self):
         entry = {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "last_action_at": 1775304000,  # ~2026-04-05
         }
         strategy = strategy_from_pm_dict(entry)
@@ -75,7 +75,7 @@ class TestStrategyFromPmDict:
 
     def test_multi_chain_flag(self):
         entry = {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "is_multi_chain": True,
             "chains": ["arbitrum", "base"],
         }
@@ -89,12 +89,12 @@ class TestStrategyFromPmDict:
         assert strategy.id == "fallback-id"
 
     def test_name_field_fallback(self):
-        entry = {"strategy_id": "s1", "strategy_name": "Fallback Name"}
+        entry = {"deployment_id": "s1", "strategy_name": "Fallback Name"}
         strategy = strategy_from_pm_dict(entry)
         assert strategy.name == "Fallback Name"
 
     def test_value_confidence_passed_through(self):
-        entry = {"strategy_id": "s1", "value_confidence": "STALE"}
+        entry = {"deployment_id": "s1", "value_confidence": "STALE"}
         strategy = strategy_from_pm_dict(entry)
         assert strategy.value_confidence == "STALE"
 

@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "arbitrum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-compound-univ3-arb"
+    strat._deployment_id = "test-compound-univ3-arb"
     strat.STRATEGY_NAME = "compound_v3_uniswap_v3_teardown_arbitrum"
 
     # Config values

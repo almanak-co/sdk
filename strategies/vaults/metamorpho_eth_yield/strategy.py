@@ -274,7 +274,7 @@ class MetaMorphoEthYield(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -39,7 +39,7 @@ Examples:
             config=PaperTraderConfig(
                 chain="arbitrum",
                 rpc_url="https://arb-mainnet.g.alchemy.com/v2/...",
-                strategy_id="my_strategy",
+                deployment_id="my_strategy",
             ),
         )
 
@@ -52,7 +52,7 @@ Examples:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb-mainnet.g.alchemy.com/v2/...",
-            strategy_id="production_ready",
+            deployment_id="production_ready",
             price_source="auto",  # Chainlink -> TWAP -> CoinGecko fallback
             strict_price_mode=True,  # Fail if no real price available
         )
@@ -461,7 +461,7 @@ class PaperTradeableStrategy(Protocol):
     """Protocol defining the interface for strategies that can be paper traded.
 
     Strategies must implement:
-    - strategy_id: Unique identifier for the strategy
+    - deployment_id: Unique identifier for the strategy
     - decide(market): Method that returns an intent based on market data
     - compile_intent(intent): Method to compile intent to ActionBundle
 
@@ -472,7 +472,7 @@ class PaperTradeableStrategy(Protocol):
     """
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         """Return the unique identifier for this strategy."""
         ...
 
@@ -889,7 +889,7 @@ class PaperTrader:
         if strategy is None or market is None:
             return None
 
-        # PortfolioValuer requires StrategyLike (strategy_id, chain, _get_tracked_tokens)
+        # PortfolioValuer requires StrategyLike (deployment_id, chain, _get_tracked_tokens)
         from almanak.framework.valuation.portfolio_valuer import StrategyLike
 
         if not isinstance(strategy, StrategyLike):
@@ -964,7 +964,7 @@ class PaperTrader:
 
         lifecycle_label = self.config.fork_lifecycle.value
         logger.info(
-            f"[{self._backtest_id}] Starting paper trading session for {strategy.strategy_id} "
+            f"[{self._backtest_id}] Starting paper trading session for {strategy.deployment_id} "
             f"(duration={effective_duration}s, interval={self.config.tick_interval_seconds}s, "
             f"fork_lifecycle={lifecycle_label})"
         )
@@ -972,7 +972,7 @@ class PaperTrader:
         self._emit_event(
             PaperTradeEventType.SESSION_STARTED,
             {
-                "strategy_id": strategy.strategy_id,
+                "deployment_id": strategy.deployment_id,
                 "duration_seconds": effective_duration,
                 "tick_interval_seconds": self.config.tick_interval_seconds,
             },
@@ -998,7 +998,7 @@ class PaperTrader:
         self._emit_event(
             PaperTradeEventType.SESSION_ENDED,
             {
-                "strategy_id": strategy.strategy_id,
+                "deployment_id": strategy.deployment_id,
                 "tick_count": self._tick_count,
                 "trade_count": len(self._trades),
                 "error": error,
@@ -1015,7 +1015,7 @@ class PaperTrader:
             config_dict["error_summary"] = error_summary
 
         logger.info(
-            f"[{self._backtest_id}] Paper trading completed for {strategy.strategy_id}: "
+            f"[{self._backtest_id}] Paper trading completed for {strategy.deployment_id}: "
             f"ticks={self._tick_count}, trades={len(self._trades)}, "
             f"PnL=${metrics.net_pnl_usd:,.2f}"
         )
@@ -1025,7 +1025,7 @@ class PaperTrader:
 
         return _engine_helpers.assemble_backtest_result(
             trader=self,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             run_started_at=run_started_at,
             run_ended_at=run_ended_at,
             metrics=metrics,
@@ -1175,14 +1175,14 @@ class PaperTrader:
         session_start = _engine_helpers.init_run_loop_state(self, strategy)
 
         logger.info(
-            f"[{self._backtest_id}] Starting paper trading loop for {strategy.strategy_id} "
+            f"[{self._backtest_id}] Starting paper trading loop for {strategy.deployment_id} "
             f"(max_ticks={effective_max_ticks}, interval={self.config.tick_interval_seconds}s)"
         )
 
         self._emit_event(
             PaperTradeEventType.SESSION_STARTED,
             {
-                "strategy_id": strategy.strategy_id,
+                "deployment_id": strategy.deployment_id,
                 "max_ticks": effective_max_ticks,
                 "tick_interval_seconds": self.config.tick_interval_seconds,
             },
@@ -1211,7 +1211,7 @@ class PaperTrader:
         self._emit_event(
             PaperTradeEventType.SESSION_ENDED,
             {
-                "strategy_id": strategy.strategy_id,
+                "deployment_id": strategy.deployment_id,
                 "tick_count": self._tick_count,
                 "trade_count": len(self._trades),
                 "error_count": len(self._errors),
@@ -1230,7 +1230,7 @@ class PaperTrader:
 
         # Create summary (using cached values from before cleanup)
         summary = PaperTradingSummary(
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             start_time=session_start,
             duration=duration,
             total_trades=len(self._trades) + len(self._errors),
@@ -1249,7 +1249,7 @@ class PaperTrader:
         )
 
         logger.info(
-            f"[{self._backtest_id}] Paper trading loop completed for {strategy.strategy_id}: "
+            f"[{self._backtest_id}] Paper trading loop completed for {strategy.deployment_id}: "
             f"ticks={self._tick_count}, trades={len(self._trades)}, "
             f"errors={len(self._errors)}"
         )
@@ -1742,7 +1742,7 @@ class PaperTrader:
             balances_before = await self._snapshot_balances(wallet_address, intent=intent)
 
             context = ExecutionContext(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 chain=self.config.chain,
                 wallet_address=self._orchestrator.signer.address,
                 simulation_enabled=True,  # Always simulate on fork

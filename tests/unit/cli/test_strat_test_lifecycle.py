@@ -51,7 +51,7 @@ def _make_runner(*results: IterationResult) -> MagicMock:
 def _make_strategy() -> MagicMock:
     s = MagicMock(
         spec=[
-            "strategy_id",
+            "deployment_id",
             "STRATEGY_NAME",
             "chain",
             "force_action",
@@ -60,7 +60,7 @@ def _make_strategy() -> MagicMock:
             "flush_pending_saves",
         ]
     )
-    s.strategy_id = "TestStrategy:abc"
+    s.deployment_id = "TestStrategy:abc"
     s.STRATEGY_NAME = "TestStrategy"
     s.chain = "ethereum"
     s.force_action = ""
@@ -75,7 +75,7 @@ def _noop_cleanup() -> AsyncMock:
 
 
 def _result(status: IterationStatus, error: str | None = None) -> IterationResult:
-    return IterationResult(status=status, strategy_id="TestStrategy:abc", error=error)
+    return IterationResult(status=status, deployment_id="TestStrategy:abc", error=error)
 
 
 def test_teardown_only_succeeds(capsys, monkeypatch):

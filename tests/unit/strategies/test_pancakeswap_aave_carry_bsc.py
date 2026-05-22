@@ -43,7 +43,7 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
     with patch.object(PancakeswapAaveCarryBscStrategy, "__init__", lambda self, *a, **kw: None):
         strategy = PancakeswapAaveCarryBscStrategy.__new__(PancakeswapAaveCarryBscStrategy)
 
-    strategy._strategy_id = "test-pancakeswap-aave-bsc"
+    strategy._deployment_id = "test-pancakeswap-aave-bsc"
     strategy._chain = "bsc"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
     strategy._config = default_config

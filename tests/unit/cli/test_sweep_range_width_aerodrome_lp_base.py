@@ -68,11 +68,11 @@ def _make_backtest_result(
     drawdown: str = "3.0",
     win_rate: str = "0.55",
     trades: int = 12,
-    strategy_id: str = "demo_aerodrome_sweep_lp",
+    deployment_id: str = "demo_aerodrome_sweep_lp",
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         start_time=datetime(2024, 10, 1, tzinfo=UTC),
         end_time=datetime(2024, 12, 1, tzinfo=UTC),
         trades=[],
@@ -223,7 +223,7 @@ class TestRangeWidthSweepExecution:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "demo_aerodrome_sweep_lp"
+            deployment_id = "demo_aerodrome_sweep_lp"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -264,7 +264,7 @@ class TestRangeWidthSweepExecution:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "demo_aerodrome_sweep_lp"
+            deployment_id = "demo_aerodrome_sweep_lp"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -305,7 +305,7 @@ class TestRangeWidthSweepExecution:
         """Verify SweepResult metrics are correctly extracted."""
 
         class SimpleStrategy:
-            strategy_id = "lp_range_test"
+            deployment_id = "lp_range_test"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

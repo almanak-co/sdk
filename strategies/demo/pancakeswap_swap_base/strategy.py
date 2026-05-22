@@ -144,7 +144,7 @@ class PancakeSwapV3SwapBaseStrategy(IntentStrategy):
         """No persistent positions -- swap-only strategy."""
         from almanak.framework.teardown import TeardownPositionSummary
 
-        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+        return TeardownPositionSummary.empty(self.deployment_id or self.STRATEGY_NAME)
 
     def generate_teardown_intents(self, mode=None, market=None):
         """No teardown needed for swap-only strategy."""

@@ -89,7 +89,7 @@ def _write_swap_only_strategy_files(tmp_path) -> tuple[str, str]:
             {
                 "chain": "arbitrum",
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "swap_only_strategy",
+                "deployment_id": "swap_only_strategy",
             }
         )
     )
@@ -119,7 +119,7 @@ class _SwapOnlyHoldStrategy:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "swap_only_strategy"
+        self.deployment_id = "swap_only_strategy"
         self.generate_teardown_called = False
 
     def get_open_positions(self):
@@ -170,7 +170,7 @@ def test_no_open_positions_exits_zero(
 
     assert result.exit_code == 0, result.output
     assert _NO_OP_LOG_PHRASE in result.output
-    # The canonical phrase must include the strategy id so QA logs are greppable.
+    # The canonical phrase must include the deployment id so QA logs are greppable.
     assert "swap_only_strategy" in result.output
     # The CLI must short-circuit BEFORE invoking the manager — no need to
     # generate teardown intents when there are no positions.
@@ -223,7 +223,7 @@ class _StrategyWithPositionAndEmptyIntents:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "strategy_with_position_no_intents"
+        self.deployment_id = "strategy_with_position_no_intents"
         _LastInstanceTracker.last = self
 
     async def pause(self) -> None:
@@ -315,7 +315,7 @@ class _StrategyWithZeroBalanceSwap:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "strategy_zero_balance_swap"
+        self.deployment_id = "strategy_zero_balance_swap"
         _LastInstanceTracker.last = self
 
     async def pause(self) -> None:
@@ -423,7 +423,7 @@ class _StrategyThatRaisesOnIntents:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "strategy_that_raises"
+        self.deployment_id = "strategy_that_raises"
         _LastInstanceTracker.last = self
 
     async def pause(self) -> None:
@@ -512,7 +512,7 @@ def test_teardown_manager_empty_result_is_success_with_zero_intents() -> None:
 
     mgr = TeardownManager()
     result = mgr._empty_result(
-        strategy_id="swap_only_strategy",
+        deployment_id="swap_only_strategy",
         mode="graceful",
         started_at=datetime.now(UTC),
     )

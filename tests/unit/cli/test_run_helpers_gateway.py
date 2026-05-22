@@ -983,11 +983,12 @@ class TestWireTokenResolver:
 
 
 def _make_state_db(path: Path) -> None:
+    # strategy_state keys on the canonical deployment_id column (blueprint 29).
     with sqlite3.connect(str(path)) as conn:
         conn.execute(
             """
             CREATE TABLE strategy_state (
-                strategy_id TEXT PRIMARY KEY,
+                deployment_id TEXT PRIMARY KEY,
                 version INTEGER,
                 state_data TEXT
             )
@@ -1013,7 +1014,7 @@ class TestDetectStateResume:
         _make_state_db(db)
         with sqlite3.connect(str(db)) as conn:
             conn.execute(
-                "INSERT INTO strategy_state (strategy_id, version, state_data) VALUES (?, ?, ?)",
+                "INSERT INTO strategy_state (deployment_id, version, state_data) VALUES (?, ?, ?)",
                 ("strat-1", 3, json.dumps({"last_trade": "2024-01-01", "position_id": 42})),
             )
         info = run_helpers._detect_state_resume(db, "strat-1")
@@ -1026,7 +1027,7 @@ class TestDetectStateResume:
         _make_state_db(db)
         with sqlite3.connect(str(db)) as conn:
             conn.execute(
-                "INSERT INTO strategy_state (strategy_id, version, state_data) VALUES (?, ?, ?)",
+                "INSERT INTO strategy_state (deployment_id, version, state_data) VALUES (?, ?, ?)",
                 ("strat-1", 1, ""),
             )
         info = run_helpers._detect_state_resume(db, "strat-1")
@@ -1039,7 +1040,7 @@ class TestDetectStateResume:
         _make_state_db(db)
         with sqlite3.connect(str(db)) as conn:
             conn.execute(
-                "INSERT INTO strategy_state (strategy_id, version, state_data) VALUES (?, ?, ?)",
+                "INSERT INTO strategy_state (deployment_id, version, state_data) VALUES (?, ?, ?)",
                 ("strat-1", 7, "not-valid-json"),
             )
         info = run_helpers._detect_state_resume(db, "strat-1")
@@ -1067,7 +1068,11 @@ def _install_identity_fakes(
     deployment_id: str,
     run_id: str = "run-xyz",
 ) -> list[dict[str, Any]]:
-    """Stub out the identity resolver + run_id generator."""
+    """Stub out the identity resolver + run_id generator.
+
+    VIB-4722: ``resolve_deployment_id`` now takes only ``wallet_address`` and
+    ``chain`` (no ``strategy_name``, no ``cli_id``).
+    """
     from almanak.framework.runner import identity as identity_mod
 
     captured: list[dict[str, Any]] = []
@@ -1084,7 +1089,7 @@ def _install_identity_fakes(
 class TestResolveIdentity:
     def test_single_chain_uses_config_chain(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
-        captured = _install_identity_fakes(monkeypatch, deployment_id="name:hash")
+        captured = _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         info = run_helpers._resolve_identity(
             strategy_config=strategy_config,
@@ -1092,19 +1097,18 @@ class TestResolveIdentity:
             multi_chain=False,
             strategy_chains=[],
             config_display_name="my_strat",
-            cli_id_override=None,
             gateway_network="mainnet",
         )
-        assert info.deployment_id == "name:hash"
+        assert info.deployment_id == "deployment:hash"
         assert info.run_id == "run-xyz"
-        assert strategy_config["strategy_id"] == "name:hash"
+        assert strategy_config["deployment_id"] == "deployment:hash"
         assert strategy_config["run_id"] == "run-xyz"
         assert captured[0]["chain"] == "arbitrum"
         assert captured[0]["wallet_address"] == "0xabc"
 
     def test_multi_chain_hashes_all_chains(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
-        captured = _install_identity_fakes(monkeypatch, deployment_id="name:multi")
+        captured = _install_identity_fakes(monkeypatch, deployment_id="deployment:multi")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         run_helpers._resolve_identity(
             strategy_config=strategy_config,
@@ -1112,15 +1116,17 @@ class TestResolveIdentity:
             multi_chain=True,
             strategy_chains=["base", "Arbitrum", "optimism"],
             config_display_name="my_strat",
-            cli_id_override=None,
             gateway_network="mainnet",
         )
         # Chains are lowercased and sorted before joining.
         assert captured[0]["chain"] == "arbitrum,base,optimism"
 
-    def test_cli_override_takes_precedence(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_no_cli_id_kwarg_passed_to_resolver(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """VIB-4722 removed --id: the resolver gets only wallet + chain."""
         monkeypatch.chdir(tmp_path)
-        captured = _install_identity_fakes(monkeypatch, deployment_id="cli-override")
+        captured = _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         run_helpers._resolve_identity(
             strategy_config=strategy_config,
@@ -1128,22 +1134,23 @@ class TestResolveIdentity:
             multi_chain=False,
             strategy_chains=[],
             config_display_name="my_strat",
-            cli_id_override="user-requested-id",
             gateway_network="mainnet",
         )
-        assert captured[0]["cli_id"] == "user-requested-id"
+        assert set(captured[0].keys()) == {"wallet_address", "chain"}
 
     def test_fresh_mainnet_deletes_only_current_strategy_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
-        # Create a state DB with one row for the target strategy and one for another.
+        _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
+        # Create a state DB with one row for the target deployment and one for another.
         db_path = tmp_path / "almanak_state.db"
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute("CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)")
-            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}"))
-            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}"))
+            conn.execute(
+                "CREATE TABLE strategy_state (deployment_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
+            )
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("deployment:hash", 1, "{}"))
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("deployment:other", 1, "{}"))
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         runner = CliRunner()
@@ -1154,21 +1161,22 @@ class TestResolveIdentity:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
         with sqlite3.connect(str(db_path)) as conn:
-            rows = conn.execute("SELECT strategy_id FROM strategy_state").fetchall()
-        assert [r[0] for r in rows] == ["other-strat"]
+            rows = conn.execute("SELECT deployment_id FROM strategy_state").fetchall()
+        assert [r[0] for r in rows] == ["deployment:other"]
 
     def test_fresh_anvil_deletes_all_rows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
+        _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
         db_path = tmp_path / "almanak_state.db"
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute("CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)")
-            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}"))
-            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}"))
+            conn.execute(
+                "CREATE TABLE strategy_state (deployment_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
+            )
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("deployment:hash", 1, "{}"))
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("deployment:other", 1, "{}"))
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         runner = CliRunner()
@@ -1179,16 +1187,15 @@ class TestResolveIdentity:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="anvil",
             )
         with sqlite3.connect(str(db_path)) as conn:
-            rows = conn.execute("SELECT strategy_id FROM strategy_state").fetchall()
+            rows = conn.execute("SELECT deployment_id FROM strategy_state").fetchall()
         assert rows == []
 
     def test_fresh_without_state_db_emits_message(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
+        _install_identity_fakes(monkeypatch, deployment_id="deployment:hash")
         monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "missing.db"))
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         runner = CliRunner()
@@ -1199,162 +1206,20 @@ class TestResolveIdentity:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
             out_stream.seek(0)
             output = out_stream.read().decode()
         assert "No existing state to clear (--fresh flag)" in output
 
-    def test_backfill_migrates_when_deployment_id_differs(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
-
-        # Fake SQLiteStore that reports migrated rows.
-        migrations: list[tuple[str, str]] = []
-
-        class _FakeStore:
-            def __init__(self, config: Any) -> None:
-                self.config = config
-
-            async def backfill_deployment_id(self, old: str, new: str) -> int:
-                migrations.append((old, new))
-                return 4
-
-            async def close(self) -> None:
-                return None
-
-        from almanak.framework.state.backends import sqlite as sqlite_backend
-
-        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _FakeStore)
-        monkeypatch.setattr(sqlite_backend, "SQLiteConfig", lambda db_path: {"db_path": db_path})
-
-        db_path = tmp_path / "almanak_state.db"
-        db_path.write_text("")  # just needs to exist
-        monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
-
-        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
-        runner = CliRunner()
-        with runner.isolation() as (out_stream, _err):
-            info = run_helpers._resolve_identity(
-                strategy_config=strategy_config,
-                fresh=False,
-                multi_chain=False,
-                strategy_chains=[],
-                config_display_name="strat-1",
-                cli_id_override=None,
-                gateway_network="mainnet",
-            )
-            out_stream.seek(0)
-            output = out_stream.read().decode()
-        assert migrations == [("strat-1", "strat-1:hash")]
-        assert info.migrated is True
-        assert "Migrated 4 rows from 'strat-1' to 'strat-1:hash'" in output
-
-    def test_backfill_exception_is_swallowed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
-
-        class _BrokenStore:
-            def __init__(self, config: Any) -> None:
-                raise RuntimeError("simulated backfill failure")
-
-        from almanak.framework.state.backends import sqlite as sqlite_backend
-
-        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _BrokenStore)
-        monkeypatch.setattr(sqlite_backend, "SQLiteConfig", lambda db_path: {"db_path": db_path})
-
-        db_path = tmp_path / "almanak_state.db"
-        db_path.write_text("")
-        monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
-
-        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
-        runner = CliRunner()
-        with runner.isolation():
-            info = run_helpers._resolve_identity(
-                strategy_config=strategy_config,
-                fresh=False,
-                multi_chain=False,
-                strategy_chains=[],
-                config_display_name="strat-1",
-                cli_id_override=None,
-                gateway_network="mainnet",
-            )
-        # Startup proceeds even though backfill crashed.
-        assert info.migrated is False
-        assert info.deployment_id == "strat-1:hash"
-
-    def test_backfill_skipped_when_names_match(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """If deployment_id already equals display name, no backfill runs."""
-        monkeypatch.chdir(tmp_path)
-        # deployment_id equals config_display_name to skip backfill.
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1")
-
-        from almanak.framework.state.backends import sqlite as sqlite_backend
-
-        class _Tripwire:
-            def __init__(self, config: Any) -> None:
-                raise AssertionError("backfill should not have been called")
-
-        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _Tripwire)
-
-        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
-        info = run_helpers._resolve_identity(
-            strategy_config=strategy_config,
-            fresh=False,
-            multi_chain=False,
-            strategy_chains=[],
-            config_display_name="strat-1",
-            cli_id_override=None,
-            gateway_network="mainnet",
-        )
-        assert info.migrated is False
-
-    def test_hosted_mode_skips_sqlite_backfill(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Hosted mode (AGENT_ID set) keeps state in Postgres — the
-        bare-name → deployment_id SQLite backfill must not even attempt to
-        resolve a local DB path. Calling local_db_path in hosted mode raises
-        LocalPathError by design (see local_paths._ensure_local), so any
-        unguarded call here would crash the entire deploy at startup.
-        Regression guard for VIB-3879 (rc8 stage deploy crash)."""
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("AGENT_ID", "test-agent-id")
-        # deployment_id intentionally differs from display_name so we hit the
-        # backfill branch — without the is_local() guard this would raise.
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
-
-        from almanak.framework.state.backends import sqlite as sqlite_backend
-
-        class _Tripwire:
-            def __init__(self, config: Any) -> None:
-                raise AssertionError("hosted mode must not construct SQLiteStore for backfill")
-
-        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _Tripwire)
-
-        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
-        info = run_helpers._resolve_identity(
-            strategy_config=strategy_config,
-            fresh=False,
-            multi_chain=False,
-            strategy_chains=[],
-            config_display_name="strat-1",
-            cli_id_override=None,
-            gateway_network="mainnet",
-        )
-        # Identity still resolves; backfill skipped; nothing crashed.
-        assert info.deployment_id == "strat-1:hash"
-        assert info.migrated is False
-
     def test_hosted_mode_rejects_fresh_flag(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """--fresh is a SQLite-only operation. In hosted mode there is no
         local DB to clear; the platform recreates the agent if a clean state
-        is required. Surface this as a clear ClickException rather than
-        letting local_db_path raise LocalPathError mid-flight."""
+        is required. Surface this as a clear ClickException."""
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("AGENT_ID", "test-agent-id")
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "platform-agent-id")
+        _install_identity_fakes(monkeypatch, deployment_id="platform-agent-id")
 
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         with pytest.raises(click.ClickException) as exc_info:
@@ -1364,7 +1229,6 @@ class TestResolveIdentity:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
         assert "--fresh is not supported in hosted mode" in exc_info.value.message
@@ -1377,7 +1241,7 @@ class TestResolveIdentity:
 
 class TestIdentityInfoShape:
     def test_identity_info_is_frozen(self) -> None:
-        info = IdentityInfo(deployment_id="d", run_id="r", strategy_name="s", migrated=False)
+        info = IdentityInfo(deployment_id="d", run_id="r", strategy_name="s")
         with pytest.raises(Exception):
             info.deployment_id = "changed"  # type: ignore[misc]
 

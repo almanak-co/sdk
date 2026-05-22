@@ -26,7 +26,7 @@ Example:
         cooldown_seconds=3600,
     )
 
-    breaker = CircuitBreaker(strategy_id="my_strategy", config=config)
+    breaker = CircuitBreaker(deployment_id="my_strategy", config=config)
 
     # Check before execution
     result = breaker.check()
@@ -241,16 +241,16 @@ class CircuitBreaker:
 
     def __init__(
         self,
-        strategy_id: str,
+        deployment_id: str,
         config: CircuitBreakerConfig | None = None,
     ) -> None:
         """Initialize the circuit breaker.
 
         Args:
-            strategy_id: Unique identifier for the strategy
+            deployment_id: Unique identifier for the strategy
             config: Configuration options (uses defaults if not provided)
         """
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self.config = config or CircuitBreakerConfig()
 
         # State
@@ -288,7 +288,7 @@ class CircuitBreaker:
 
         logger.info(
             "CircuitBreaker initialized for strategy=%s, config=%s",
-            strategy_id,
+            deployment_id,
             self.config.to_dict(),
         )
 
@@ -386,7 +386,7 @@ class CircuitBreaker:
                 self._half_open_successes += 1
                 logger.info(
                     "CircuitBreaker %s: half-open success %d/%d",
-                    self.strategy_id,
+                    self.deployment_id,
                     self._half_open_successes,
                     self.config.half_open_success_threshold,
                 )
@@ -394,7 +394,7 @@ class CircuitBreaker:
                 if self._half_open_successes >= self.config.half_open_success_threshold:
                     self._close()
 
-            logger.debug("CircuitBreaker %s: success recorded", self.strategy_id)
+            logger.debug("CircuitBreaker %s: success recorded", self.deployment_id)
 
     def record_failure(
         self,
@@ -445,7 +445,7 @@ class CircuitBreaker:
             action_threshold = self.config.max_consecutive_failures
             logger.warning(
                 "CircuitBreaker %s: failure kind=%s action=%d/%d data=%d/%d - %s",
-                self.strategy_id,
+                self.deployment_id,
                 resolved_kind.value,
                 self._consecutive_action_failures,
                 action_threshold,
@@ -543,7 +543,7 @@ class CircuitBreaker:
 
             logger.warning(
                 "CircuitBreaker %s: manually PAUSED by %s (reason: %s, previous_state: %s)",
-                self.strategy_id,
+                self.deployment_id,
                 operator,
                 reason,
                 previous_state.value,
@@ -564,14 +564,14 @@ class CircuitBreaker:
             if self._state != CircuitBreakerState.PAUSED:
                 logger.warning(
                     "CircuitBreaker %s: resume called but state is %s (not PAUSED)",
-                    self.strategy_id,
+                    self.deployment_id,
                     self._state.value,
                 )
                 return False
 
             logger.info(
                 "CircuitBreaker %s: RESUMED by %s (was paused by %s: %s)",
-                self.strategy_id,
+                self.deployment_id,
                 operator_key,
                 self._paused_by,
                 self._pause_reason,
@@ -593,7 +593,7 @@ class CircuitBreaker:
         with self._lock:
             logger.warning(
                 "CircuitBreaker %s: RESET - all state cleared",
-                self.strategy_id,
+                self.deployment_id,
             )
 
             self._state = CircuitBreakerState.CLOSED
@@ -621,7 +621,7 @@ class CircuitBreaker:
         """
         with self._lock:
             return {
-                "strategy_id": self.strategy_id,
+                "deployment_id": self.deployment_id,
                 "state": self._state.value,
                 "consecutive_failures": self._consecutive_failures,
                 "consecutive_action_failures": self._consecutive_action_failures,
@@ -655,7 +655,7 @@ class CircuitBreaker:
 
         logger.error(
             "CircuitBreaker %s: TRIPPED - reason=%s, consecutive_failures=%d, cumulative_loss=$%s, previous_state=%s",
-            self.strategy_id,
+            self.deployment_id,
             reason.value,
             self._consecutive_failures,
             self._get_cumulative_loss(),
@@ -669,7 +669,7 @@ class CircuitBreaker:
 
         logger.info(
             "CircuitBreaker %s: transitioning to HALF_OPEN after cooldown",
-            self.strategy_id,
+            self.deployment_id,
         )
 
     def _close(self) -> None:
@@ -688,7 +688,7 @@ class CircuitBreaker:
 
         logger.info(
             "CircuitBreaker %s: CLOSED - normal operation resumed",
-            self.strategy_id,
+            self.deployment_id,
         )
 
     def _get_cumulative_loss(self) -> Decimal:
@@ -745,37 +745,37 @@ class CircuitBreakerRegistry:
 
     def get_or_create(
         self,
-        strategy_id: str,
+        deployment_id: str,
         config: CircuitBreakerConfig | None = None,
     ) -> CircuitBreaker:
         """Get existing or create new circuit breaker for a strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             config: Optional custom configuration (uses default if not provided)
 
         Returns:
             CircuitBreaker for the strategy
         """
         with self._lock:
-            if strategy_id not in self._breakers:
-                self._breakers[strategy_id] = CircuitBreaker(
-                    strategy_id=strategy_id,
+            if deployment_id not in self._breakers:
+                self._breakers[deployment_id] = CircuitBreaker(
+                    deployment_id=deployment_id,
                     config=config or self._default_config,
                 )
-            return self._breakers[strategy_id]
+            return self._breakers[deployment_id]
 
-    def get(self, strategy_id: str) -> CircuitBreaker | None:
+    def get(self, deployment_id: str) -> CircuitBreaker | None:
         """Get circuit breaker for a strategy if it exists.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
 
         Returns:
             CircuitBreaker or None if not found
         """
         with self._lock:
-            return self._breakers.get(strategy_id)
+            return self._breakers.get(deployment_id)
 
     def pause_all(self, reason: str, operator: str) -> int:
         """Pause all circuit breakers globally.
@@ -858,21 +858,21 @@ class CircuitBreakerRegistry:
         """Get status of all circuit breakers.
 
         Returns:
-            Dictionary mapping strategy IDs to their status
+            Dictionary mapping deployment IDs to their status
         """
         with self._lock:
-            return {strategy_id: breaker.get_status() for strategy_id, breaker in self._breakers.items()}
+            return {deployment_id: breaker.get_status() for deployment_id, breaker in self._breakers.items()}
 
     def get_tripped(self) -> list[str]:
-        """Get list of strategy IDs with tripped/paused circuit breakers.
+        """Get list of deployment IDs with tripped/paused circuit breakers.
 
         Returns:
-            List of strategy IDs not in CLOSED state
+            List of deployment IDs not in CLOSED state
         """
         with self._lock:
             return [
-                strategy_id
-                for strategy_id, breaker in self._breakers.items()
+                deployment_id
+                for deployment_id, breaker in self._breakers.items()
                 if breaker.state != CircuitBreakerState.CLOSED
             ]
 

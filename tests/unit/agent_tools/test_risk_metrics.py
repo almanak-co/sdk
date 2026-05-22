@@ -473,7 +473,7 @@ class TestExecuteGetRiskMetrics:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
         )
 
     def _mock_balances(self, mock_gateway, balance_usd: str):

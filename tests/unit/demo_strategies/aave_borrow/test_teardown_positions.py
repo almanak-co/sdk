@@ -10,7 +10,7 @@ def _make_strategy(*, with_gateway: bool = False) -> AaveBorrowStrategy:
     with patch.object(AaveBorrowStrategy, "__init__", lambda self, *args, **kwargs: None):
         strategy = AaveBorrowStrategy.__new__(AaveBorrowStrategy)
 
-    strategy._strategy_id = "test-aave-borrow"
+    strategy._deployment_id = "test-aave-borrow"
     strategy._chain = "arbitrum"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
     strategy.collateral_token = "WETH"
@@ -34,7 +34,7 @@ def test_get_open_positions_falls_back_to_internal_state_without_gateway() -> No
     strategy = _make_strategy(with_gateway=False)
     summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == strategy.STRATEGY_NAME
+    assert summary.deployment_id == strategy.STRATEGY_NAME
     assert len(summary.positions) == 2
     assert {p.position_type.value for p in summary.positions} == {"SUPPLY", "BORROW"}
 

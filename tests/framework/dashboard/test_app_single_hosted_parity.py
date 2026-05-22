@@ -9,7 +9,7 @@ The entrypoint's contract:
    "Gateway unreachable" error via `st.error(...)` and does NOT call
    `render_custom_dashboard_safe(...)`. Substituting a mock client would
    silently invalidate the whole reason this entrypoint exists.
-3. Without `ALMANAK_DASHBOARD_STRATEGY_ID` / `ALMANAK_DASHBOARD_WORKING_DIR`
+3. Without `ALMANAK_DASHBOARD_DEPLOYMENT_ID` / `ALMANAK_DASHBOARD_WORKING_DIR`
    it surfaces a clear "Missing strategy context" error (not a crash).
 
 The tests stub Streamlit's render surface so the entrypoint can be driven
@@ -96,7 +96,7 @@ def stub_streamlit(monkeypatch) -> _StubStreamlit:
 def strategy_dir(tmp_path: Path) -> Path:
     """A minimal strategy folder with config.json and dashboard/ui.py."""
     config = {
-        "strategy_id": "TestStrat:abc123",
+        "deployment_id": "TestStrat:abc123",
         "strategy_display_name": "TestStrat:abc123",
         "chain": "arbitrum",
     }
@@ -107,19 +107,19 @@ def strategy_dir(tmp_path: Path) -> Path:
     # executes. Keeping it valid python avoids surprises if the stubbing
     # regresses.
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
         "    return None\n"
     )
     return tmp_path
 
 
-def _set_context(monkeypatch, strategy_id: str, working_dir: Path) -> None:
-    monkeypatch.setenv("ALMANAK_DASHBOARD_STRATEGY_ID", strategy_id)
+def _set_context(monkeypatch, deployment_id: str, working_dir: Path) -> None:
+    monkeypatch.setenv("ALMANAK_DASHBOARD_DEPLOYMENT_ID", deployment_id)
     monkeypatch.setenv("ALMANAK_DASHBOARD_WORKING_DIR", str(working_dir))
 
 
 def test_missing_context_fails_loudly(stub_streamlit, monkeypatch) -> None:
-    monkeypatch.delenv("ALMANAK_DASHBOARD_STRATEGY_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_DASHBOARD_DEPLOYMENT_ID", raising=False)
     monkeypatch.delenv("ALMANAK_DASHBOARD_WORKING_DIR", raising=False)
 
     app_single.main()
@@ -159,7 +159,7 @@ def test_real_api_client_passed_to_renderer(stub_streamlit, monkeypatch, strateg
     assert isinstance(captured["api_client"], DashboardAPIClient), (
         f"expected DashboardAPIClient, got {type(captured['api_client']).__name__}"
     )
-    assert captured["strategy_id"] == "TestStrat:abc123"
+    assert captured["deployment_id"] == "TestStrat:abc123"
     # strategy_config came from config.json, not an empty dict
     assert captured["strategy_config"].get("chain") == "arbitrum"
 
@@ -201,7 +201,7 @@ def test_missing_ui_renders_fallback_without_crashing(stub_streamlit, monkeypatc
     """A strategy folder without dashboard/ui.py must render the fallback
     shell, not crash. (Mirrors the hosted-image behaviour for a strategy
     deployed without a custom dashboard.)"""
-    (tmp_path / "config.json").write_text(json.dumps({"strategy_id": "Foo:1"}))
+    (tmp_path / "config.json").write_text(json.dumps({"deployment_id": "Foo:1"}))
     # No dashboard/ui.py written.
 
     _set_context(monkeypatch, "Foo:1", tmp_path)
@@ -308,7 +308,7 @@ def test_connect_gateway_fail_closed_returns_real_client_on_success(monkeypatch)
     result = app_single._connect_gateway_fail_closed("any-strategy")
 
     assert isinstance(result, DashboardAPIClient)
-    assert result.strategy_id == "any-strategy"
+    assert result.deployment_id == "any-strategy"
 
 
 def _install_launch_stubs(monkeypatch) -> tuple[list[list[str]], list[dict[str, str]]]:
@@ -348,7 +348,7 @@ def _install_launch_stubs(monkeypatch) -> tuple[list[list[str]], list[dict[str, 
 
 def test_launcher_chooses_app_single_for_hosted_parity(monkeypatch, tmp_path) -> None:
     """When run_helpers launches with mode='hosted-parity', the subprocess
-    command points at app_single.py and the env carries the strategy_id +
+    command points at app_single.py and the env carries the deployment_id +
     working_dir overrides."""
     from almanak.framework.cli import run_helpers
 
@@ -360,7 +360,7 @@ def test_launcher_chooses_app_single_for_hosted_parity(monkeypatch, tmp_path) ->
         gateway_port=50051,
         auth_token="tok",
         mode="hosted-parity",
-        strategy_id="MyStrat:42",
+        deployment_id="MyStrat:42",
         strategy_working_dir=str(tmp_path),
     )
 
@@ -369,7 +369,7 @@ def test_launcher_chooses_app_single_for_hosted_parity(monkeypatch, tmp_path) ->
     cmd = captured_cmd[0]
     assert any(arg.endswith("app_single.py") for arg in cmd), cmd
     env = captured_env[0]
-    assert env.get("ALMANAK_DASHBOARD_STRATEGY_ID") == "MyStrat:42"
+    assert env.get("ALMANAK_DASHBOARD_DEPLOYMENT_ID") == "MyStrat:42"
     assert env.get("ALMANAK_DASHBOARD_WORKING_DIR") == str(tmp_path.resolve())
     assert env.get("ALMANAK_GATEWAY_AUTH_TOKEN") == "tok"
     # The launcher MUST also strip the legacy unprefixed GATEWAY_AUTH_TOKEN
@@ -398,12 +398,12 @@ def test_launcher_chooses_app_for_command_center(monkeypatch) -> None:
         arg.endswith("app_single.py") for arg in cmd
     ), cmd
     env = captured_env[0]
-    assert "ALMANAK_DASHBOARD_STRATEGY_ID" not in env
+    assert "ALMANAK_DASHBOARD_DEPLOYMENT_ID" not in env
     assert "ALMANAK_DASHBOARD_WORKING_DIR" not in env
 
 
 def test_launcher_falls_back_to_cc_when_hosted_parity_missing_context(monkeypatch) -> None:
-    """Defensive: hosted-parity without strategy_id falls back to Command
+    """Defensive: hosted-parity without deployment_id falls back to Command
     Center rather than launching an unconfigurable app_single.py."""
     from almanak.framework.cli import run_helpers
 
@@ -415,7 +415,7 @@ def test_launcher_falls_back_to_cc_when_hosted_parity_missing_context(monkeypatc
         gateway_port=50051,
         auth_token=None,
         mode="hosted-parity",
-        strategy_id=None,
+        deployment_id=None,
         strategy_working_dir=None,
     )
 
@@ -437,7 +437,7 @@ def test_launcher_forwards_runtime_strategy_config_to_env(monkeypatch, tmp_path)
     captured_cmd, captured_env = _install_launch_stubs(monkeypatch)
 
     resolved_config = {
-        "strategy_id": "MyStrat:42",
+        "deployment_id": "MyStrat:42",
         "chain": "arbitrum",
         "copy_trading": {"mode": "shadow", "strict": True},
         "param_overridden_by_cli": "live-value",
@@ -448,7 +448,7 @@ def test_launcher_forwards_runtime_strategy_config_to_env(monkeypatch, tmp_path)
         gateway_port=50051,
         auth_token="tok",
         mode="hosted-parity",
-        strategy_id="MyStrat:42",
+        deployment_id="MyStrat:42",
         strategy_working_dir=str(tmp_path),
         strategy_config=resolved_config,
     )
@@ -477,7 +477,7 @@ def test_launcher_skips_config_env_var_when_strategy_config_is_none(monkeypatch,
         gateway_port=50051,
         auth_token="tok",
         mode="hosted-parity",
-        strategy_id="MyStrat:42",
+        deployment_id="MyStrat:42",
         strategy_working_dir=str(tmp_path),
         strategy_config=None,
     )
@@ -493,17 +493,17 @@ def test_app_single_prefers_env_config_over_file_config(monkeypatch, tmp_path, s
     config.json AND set the env var to fresh values; assert the dashboard
     renders with the fresh values."""
     # Write a STALE config.json (old chain, no copy_trading)
-    stale_config = {"strategy_id": "MyStrat:42", "chain": "ethereum"}
+    stale_config = {"deployment_id": "MyStrat:42", "chain": "ethereum"}
     (tmp_path / "config.json").write_text(json.dumps(stale_config))
     dashboard_dir = tmp_path / "dashboard"
     dashboard_dir.mkdir()
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
         "    return None\n"
     )
     _set_context(monkeypatch, "MyStrat:42", tmp_path)
 
-    fresh_config = {"strategy_id": "MyStrat:42", "chain": "arbitrum", "copy_trading": {"mode": "shadow"}}
+    fresh_config = {"deployment_id": "MyStrat:42", "chain": "arbitrum", "copy_trading": {"mode": "shadow"}}
     monkeypatch.setenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", json.dumps(fresh_config))
 
     fake_gateway = _FakeGateway(connected=False)
@@ -534,12 +534,12 @@ def test_app_single_falls_back_to_file_config_on_missing_env(monkeypatch, tmp_pa
     """When ``ALMANAK_DASHBOARD_STRATEGY_CONFIG`` is missing, app_single
     falls back to reading working_dir/config.json (preserves behavior for
     operators who launch app_single manually outside the runner)."""
-    file_config = {"strategy_id": "MyStrat:42", "chain": "ethereum"}
+    file_config = {"deployment_id": "MyStrat:42", "chain": "ethereum"}
     (tmp_path / "config.json").write_text(json.dumps(file_config))
     dashboard_dir = tmp_path / "dashboard"
     dashboard_dir.mkdir()
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
         "    return None\n"
     )
     _set_context(monkeypatch, "MyStrat:42", tmp_path)

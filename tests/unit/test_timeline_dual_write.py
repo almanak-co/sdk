@@ -62,7 +62,7 @@ class TestDualWriteBehavior:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.STRATEGY_STARTED,
             description="Test event",
-            strategy_id="test_strategy:abc123",
+            deployment_id="test_strategy:abc123",
         )
 
         add_event(event)
@@ -87,7 +87,7 @@ class TestDualWriteBehavior:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.SWAP,
             description="Swapped 100 USDC for ETH",
-            strategy_id="test_dual:xyz789",
+            deployment_id="test_dual:xyz789",
             chain="arbitrum",
             tx_hash="0xabc123",
             details={"amount": "100"},
@@ -105,7 +105,7 @@ class TestDualWriteBehavior:
         # Verify the RPC request has correct fields
         call_args = mock_observe.RecordTimelineEvent.call_args
         request = call_args[0][0]  # First positional arg
-        assert request.strategy_id == "test_dual:xyz789"
+        assert request.deployment_id == "test_dual:xyz789"
         assert request.event_type == "SWAP"
         assert request.description == "Swapped 100 USDC for ETH"
         assert request.tx_hash == "0xabc123"
@@ -124,7 +124,7 @@ class TestDualWriteBehavior:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.ERROR_OCCURRED,
             description="Something failed",
-            strategy_id="test_fail:err001",
+            deployment_id="test_fail:err001",
         )
 
         # Should not raise despite gateway failure
@@ -146,7 +146,7 @@ class TestDualWriteBehavior:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.STRATEGY_STOPPED,
             description="Strategy stopped",
-            strategy_id="test_none:stop01",
+            deployment_id="test_none:stop01",
             # tx_hash, chain, details left as None/empty
         )
 
@@ -172,7 +172,7 @@ class TestDualWriteBehavior:
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.CUSTOM,
                 description=f"Event {i}",
-                strategy_id="test_multi:batch01",
+                deployment_id="test_multi:batch01",
             )
             add_event(event)
 

@@ -389,13 +389,13 @@ class TestPortfolioValuerLPRepricing:
         from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "ethereum"
         strategy._get_tracked_tokens.return_value = tracked_tokens or ["ETH", "USDC"]
 
         if positions is not None:
             summary = TeardownPositionSummary(
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 timestamp=None,
                 positions=positions,
             )

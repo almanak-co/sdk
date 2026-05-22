@@ -185,7 +185,7 @@ class TestHealthTelemetry:
         from almanak.framework.backtesting.paper.background import PaperTraderState
 
         state = PaperTraderState(
-            strategy_id="test",
+            deployment_id="test",
             session_start=datetime(2026, 3, 26, tzinfo=UTC),
             last_save=datetime(2026, 3, 26, 1, 0, tzinfo=UTC),
             tick_count=0,
@@ -209,7 +209,7 @@ class TestHealthTelemetry:
 
         now = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
         state = PaperTraderState(
-            strategy_id="test",
+            deployment_id="test",
             session_start=datetime(2026, 3, 26, tzinfo=UTC),
             last_save=now,
             tick_count=100,
@@ -240,7 +240,7 @@ class TestHealthTelemetry:
 
         now = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
         state = PaperTraderState(
-            strategy_id="test",
+            deployment_id="test",
             session_start=datetime(2026, 3, 26, tzinfo=UTC),
             last_save=now,
             tick_count=50,
@@ -272,7 +272,7 @@ class TestHealthTelemetry:
         from almanak.framework.backtesting.paper.background import PaperTraderState
 
         old_data = {
-            "strategy_id": "old_strat",
+            "deployment_id": "old_strat",
             "session_start": "2026-03-20T00:00:00+00:00",
             "last_save": "2026-03-20T01:00:00+00:00",
             "tick_count": 200,
@@ -299,7 +299,7 @@ class TestHealthTelemetry:
         from almanak.framework.backtesting.paper.background import PaperTraderState
 
         state = PaperTraderState(
-            strategy_id="test",
+            deployment_id="test",
             session_start=datetime(2026, 3, 26, tzinfo=UTC),
             last_save=datetime(2026, 3, 26, 1, 0, tzinfo=UTC),
             tick_count=10,

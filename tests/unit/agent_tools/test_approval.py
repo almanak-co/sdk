@@ -665,7 +665,7 @@ class TestToolExecutorApprovalFlow:
                 cooldown_seconds=0,
             ),
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             approval_config=approval_config,
             approval_notifier=approval_notifier,
         )

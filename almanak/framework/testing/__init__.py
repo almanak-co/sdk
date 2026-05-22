@@ -8,7 +8,7 @@ A/B Testing Usage:
     from almanak.framework.testing import ABTest, ABTestConfig, ABTestManager
 
     # Create an A/B test manager
-    manager = ABTestManager(strategy_id="my_strategy")
+    manager = ABTestManager(deployment_id="my_strategy")
 
     # Create a new A/B test
     result = manager.create_ab_test(

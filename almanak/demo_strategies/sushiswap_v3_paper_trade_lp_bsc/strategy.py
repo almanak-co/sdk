@@ -231,7 +231,7 @@ class SushiSwapV3PaperTradeLPBSCStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Opened SushiSwap V3 LP in {self.pool} (BSC)",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_open", "pool": self.pool, "position_id": self._position_id},
                 )
             )
@@ -246,7 +246,7 @@ class SushiSwapV3PaperTradeLPBSCStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Closed SushiSwap V3 LP in {self.pool} (BSC)",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_close", "pool": self.pool},
                 )
             )
@@ -296,7 +296,7 @@ class SushiSwapV3PaperTradeLPBSCStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

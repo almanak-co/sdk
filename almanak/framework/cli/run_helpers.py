@@ -40,6 +40,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _require_strategy_deployment_id(strategy_instance: Any, *, operation: str) -> str:
+    deployment_id = (getattr(strategy_instance, "deployment_id", "") or "").strip()
+    if not deployment_id:
+        raise RuntimeError(f"{operation} requires a resolved deployment_id")
+    return deployment_id
+
+
 # ContextVar plumb for the test-only signing-key fallback (#2100). Set by
 # `almanak strat test` (in `almanak/cli/cli.py`) around its `ctx.invoke` call
 # so the framework runtime can pick up the Anvil-default key without:
@@ -483,7 +490,7 @@ def _discover_and_load_config(
 def _print_startup_banner(
     *,
     strategy_name: str,
-    strategy_id: str,
+    deployment_id: str,
     run_id: str,
     is_resume: bool,
     existing_state_info: dict[str, Any] | None,
@@ -512,7 +519,7 @@ def _print_startup_banner(
     click.echo("ALMANAK STRATEGY RUNNER")
     click.echo("=" * 60)
     click.echo(f"Strategy: {strategy_name}")
-    click.echo(f"Deployment ID: {strategy_id}")
+    click.echo(f"Deployment ID: {deployment_id}")
     click.echo(f"Run ID: {run_id}")
     # Resume detection in hosted mode lives in the gateway against Postgres,
     # not in the runner CLI — the runner has no SQLite to inspect. Avoid
@@ -579,11 +586,10 @@ def _wire_token_resolver(gateway_client: Any) -> None:
 def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
     """Detect whether a deployment has prior state (RESUME vs FRESH START).
 
-    Quick SQLite read of `strategy_state` filtered by
-    `strategy_id = deployment_id`. All errors (missing DB file, corrupt
-    schema, connection failure, JSON-parse errors) are swallowed and logged
-    at DEBUG — the caller treats them as "no resume", identical to the
-    prior inline behavior.
+    Quick SQLite read of `strategy_state` filtered by its single canonical
+    identity column `deployment_id` (blueprint 29 §3). All errors (missing
+    DB file, corrupt schema, connection failure, JSON-parse errors) are
+    swallowed and logged at DEBUG — the caller treats them as "no resume".
 
     Returns:
         ResumeInfo with is_resume=True if a matching row was found.
@@ -597,7 +603,7 @@ def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
         conn = sqlite3.connect(str(state_db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            "SELECT strategy_id, version, state_data FROM strategy_state WHERE strategy_id = ?",
+            "SELECT deployment_id, version, state_data FROM strategy_state WHERE deployment_id = ?",
             (deployment_id,),
         )
         row = cursor.fetchone()
@@ -615,72 +621,59 @@ def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
         return ResumeInfo(is_resume=False, version=None, state_keys=[])
 
 
-# Tables with a strategy_id column cleared by --fresh.
-_FRESH_STRATEGY_ID_TABLES = [
+# Tables keyed on the canonical `deployment_id` column, cleared by --fresh.
+_FRESH_DEPLOYMENT_ID_TABLES = [
     "strategy_state",
     "teardown_requests",
     "portfolio_snapshots",
     "portfolio_metrics",
     "transaction_ledger",
+    "position_events",
     "accounting_events",
     "accounting_outbox",
+    "position_state_snapshots",
+    "clob_orders",
+    "position_registry",
+    "migration_state",
 ]
 
 
-def _fresh_clear_state(conn: Any, strategy_id: str, is_anvil: bool) -> int:
+def _fresh_clear_state(conn: Any, deployment_id: str, is_anvil: bool) -> int:  # noqa: C901
     """Delete all state rows for a strategy (or all strategies on Anvil).
 
-    position_events is keyed only by deployment_id.  On mainnet we first collect
-    the relevant deployment_ids from accounting_events (which carries both keys),
-    then delete in a single IN-clause query for efficiency.
+    VIB-4722 renamed deployment-scoped SQLite identity columns to
+    ``deployment_id``. This helper clears only by that canonical identity; old
+    local DB files must run migrations before their rows are in scope.
 
     Returns the total number of rows deleted.
     """
     import sqlite3
 
+    def _columns(table: str) -> set[str]:
+        try:
+            return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
+        except sqlite3.OperationalError:
+            return set()
+
     total = 0
     with conn:
         if is_anvil:
-            for table in [*_FRESH_STRATEGY_ID_TABLES, "position_events"]:
+            for table in _FRESH_DEPLOYMENT_ID_TABLES:
                 try:
                     total += conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608
                 except sqlite3.OperationalError:
                     pass
         else:
-            # Collect deployment_ids from both accounting_events and accounting_outbox
-            # before wiping either table.  accounting_outbox rows that haven't been
-            # drained yet won't appear in accounting_events, so querying only the
-            # latter would miss the associated position_events rows.
-            dep_id_set: set[str] = set()
-            for table in ("accounting_events", "accounting_outbox"):
-                try:
-                    rows = conn.execute(
-                        f"SELECT DISTINCT deployment_id FROM {table} WHERE strategy_id = ?",  # noqa: S608
-                        (strategy_id,),
-                    ).fetchall()
-                    dep_id_set.update(r[0] for r in rows if r[0])
-                except sqlite3.OperationalError:
-                    pass
-            dep_ids = list(dep_id_set)
-
-            for table in _FRESH_STRATEGY_ID_TABLES:
-                try:
-                    total += conn.execute(
-                        f"DELETE FROM {table} WHERE strategy_id = ?",  # noqa: S608
-                        (strategy_id,),
-                    ).rowcount
-                except sqlite3.OperationalError:
-                    pass
-
-            if dep_ids:
-                placeholders = ",".join("?" * len(dep_ids))
-                try:
-                    total += conn.execute(
-                        f"DELETE FROM position_events WHERE deployment_id IN ({placeholders})",  # noqa: S608
-                        dep_ids,
-                    ).rowcount
-                except sqlite3.OperationalError:
-                    pass
+            for table in _FRESH_DEPLOYMENT_ID_TABLES:
+                columns = _columns(table)
+                if "deployment_id" in columns:
+                    try:
+                        total += conn.execute(
+                            f"DELETE FROM {table} WHERE deployment_id = ?",  # noqa: S608
+                            (deployment_id,),
+                        ).rowcount
+                    except sqlite3.OperationalError:
+                        pass
     return total
 
 
@@ -691,97 +684,57 @@ def _resolve_identity(
     multi_chain: bool,
     strategy_chains: list[str],
     config_display_name: str,
-    cli_id_override: str | None,
     gateway_network: str,
 ) -> IdentityInfo:
-    """Resolve deployment_id/run_id, backfill old state rows, and handle `--fresh`.
+    """Resolve deployment_id/run_id and handle `--fresh`.
 
     This helper:
         1. Computes `identity_chain` (the strategy's chain or a
            comma-separated sorted multi-chain signature).
-        2. Resolves `deployment_id` via `resolve_deployment_id()`.
+        2. Resolves `deployment_id` via `resolve_deployment_id()` — hosted
+           ⇒ `ALMANAK_DEPLOYMENT_ID`; local ⇒ `deployment:{sha256(...)}`
+           (blueprint 29 §2). There is no `--id` flag and no bare-name
+           fallback: a local run with no resolvable wallet + chain raises a
+           fatal boot error.
         3. Generates an ephemeral `run_id`.
         4. Writes both into `strategy_config` (mutated in place, matching
            the original inlined behavior).
-        5. If the deployment_id differs from the config's display name, runs
-           `SQLiteStore.backfill_deployment_id` to migrate old rows. A
-           failure inside the backfill is logged at DEBUG and swallowed —
-           startup must not crash if the migration can't run.
-        6. If `fresh=True`, deletes `strategy_state` (and `teardown_requests`
+        5. If `fresh=True`, deletes `strategy_state` (and `teardown_requests`
            if present) rows. On Anvil, scope is ALL rows (VIB-2573). On
-           mainnet, scope is just the current strategy_id.
+           mainnet, scope is just the current deployment_id.
 
     Args:
-        strategy_config: strategy config dict. MUTATED: strategy_id and
+        strategy_config: strategy config dict. MUTATED: deployment_id and
             run_id are written in, matching the original code.
         fresh: True if `--fresh` was passed.
         multi_chain: True if the strategy runs on multiple chains.
         strategy_chains: chains the strategy is configured for (only used
             when multi_chain=True).
-        config_display_name: the human-facing strategy name (pre-normalized
-            before the ":" suffix is stripped).
-        cli_id_override: explicit `--id <override>` value, or None.
+        config_display_name: the human-facing strategy name (used only for
+            the IdentityInfo snapshot; NOT an input to the id hash).
         gateway_network: "anvil" triggers anvil-scope fresh deletion.
 
     Returns:
-        IdentityInfo snapshotting (deployment_id, run_id, strategy_name,
-        migrated).
+        IdentityInfo snapshotting (deployment_id, run_id, strategy_name).
     """
     from almanak.framework.runner.identity import generate_run_id, resolve_deployment_id
 
-    # Resolve deployment_id now that wallet + chain are known (VIB-2764).
+    # Resolve deployment_id now that wallet + chain are known
+    # (resolution runs AFTER _apply_strategy_config_wallet — blueprint 29 §2.2).
     # For multi-chain strategies, hash all chains so different chain combinations
     # produce distinct deployment_ids (e.g., [arbitrum,base] vs [arbitrum,optimism]).
     identity_chain = str(strategy_config.get("chain", ""))
     if multi_chain and strategy_chains:
         identity_chain = ",".join(sorted(str(c).lower() for c in strategy_chains))
     deployment_id = resolve_deployment_id(
-        strategy_name=config_display_name,
         wallet_address=strategy_config.get("wallet_address", ""),
         chain=identity_chain,
-        cli_id=cli_id_override,
     )
-    strategy_config["strategy_id"] = deployment_id
+    strategy_config["deployment_id"] = deployment_id
     run_id = generate_run_id()
     strategy_config["run_id"] = run_id
 
-    # Backfill: migrate data from bare strategy name to deployment_id (VIB-2767).
-    # Uses the centralized SQLiteStore.backfill_deployment_id helper so that ALL
-    # tables (including timeline_events) are migrated consistently with _db_lock.
-    #
-    # Hosted mode keeps state in Postgres and the gateway has always written
-    # under the resolved agent_id — there is no bare-name → deployment_id
-    # SQLite migration to run, and local_db_path would raise LocalPathError
-    # by design (see local_paths._ensure_local).
     from almanak.framework.deployment import is_local
-
-    migrated = False
-    if deployment_id != config_display_name and is_local():
-        # VIB-3761: canonical local-DB resolver.
-        from almanak.framework.local_paths import local_db_path
-
-        state_db_path = local_db_path()
-        if state_db_path.exists():
-            try:
-                import asyncio as _asyncio_backfill
-
-                from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
-
-                backfill_config = SQLiteConfig(db_path=str(state_db_path))
-                backfill_store = SQLiteStore(backfill_config)
-                loop = _asyncio_backfill.new_event_loop()
-                try:
-                    total_migrated = loop.run_until_complete(
-                        backfill_store.backfill_deployment_id(config_display_name, deployment_id)
-                    )
-                    if total_migrated > 0:
-                        migrated = True
-                        click.echo(f"Migrated {total_migrated} rows from '{config_display_name}' to '{deployment_id}'")
-                finally:
-                    loop.run_until_complete(backfill_store.close())
-                    loop.close()
-            except Exception as e:
-                logger.debug("Backfill migration skipped: %s", e)
 
     # Handle --fresh flag: clear state to prevent cross-strategy contamination.
     # VIB-2573: On Anvil, clear ALL strategy state (not just current strategy)
@@ -790,10 +743,10 @@ def _resolve_identity(
     #
     # --fresh is a SQLite-only operation. Hosted mode has no local DB to clear;
     # the platform recreates the agent if a clean state is required.
-    strategy_id = strategy_config["strategy_id"]
+    deployment_id = strategy_config["deployment_id"]
     if fresh and not is_local():
         raise click.ClickException(
-            "--fresh is not supported in hosted mode (AGENT_ID set). "
+            "--fresh is not supported in hosted mode (ALMANAK_IS_HOSTED set). "
             "Hosted state lives in Postgres; recreate the agent to start clean."
         )
     if fresh:
@@ -805,8 +758,8 @@ def _resolve_identity(
                 import sqlite3
 
                 is_anvil = gateway_network == "anvil"
-                total_deleted = _fresh_clear_state(sqlite3.connect(str(state_db_path)), strategy_id, is_anvil)
-                scope = "all strategies" if is_anvil else f"strategy '{strategy_id}'"
+                total_deleted = _fresh_clear_state(sqlite3.connect(str(state_db_path)), deployment_id, is_anvil)
+                scope = "all strategies" if is_anvil else f"strategy '{deployment_id}'"
                 if total_deleted > 0:
                     click.secho(
                         f"Cleared all state for {scope} (--fresh flag)",
@@ -825,7 +778,6 @@ def _resolve_identity(
         deployment_id=deployment_id,
         run_id=run_id,
         strategy_name=config_display_name,
-        migrated=migrated,
     )
 
 
@@ -1578,7 +1530,7 @@ def _instantiate_strategy(  # noqa: C901
                         type_hints = get_type_hints(config_class)
                         converted_config: dict[str, Any] = {}
                         # Track fields that are NOT in the dataclass (excluding runtime + framework meta-keys)
-                        runtime_fields = {"strategy_id", "chain", "wallet_address"}
+                        runtime_fields = {"deployment_id", "chain", "wallet_address"}
                         # Meta-keys consumed by the CLI/framework, not by strategy config classes
                         framework_meta_keys = {"anvil_funding", "strategy_display_name"}
                         unknown_fields = []
@@ -1597,7 +1549,7 @@ def _instantiate_strategy(  # noqa: C901
                                 unknown_fields.append(k)
 
                         # Use dataclass config, filtering out unknown fields
-                        # (runtime fields like strategy_id/chain are handled separately)
+                        # (runtime fields like deployment_id/chain are handled separately)
                         if unknown_fields:
                             logger.debug(
                                 f"Config class {config_class.__name__} ignoring unknown fields: {unknown_fields}"
@@ -2684,7 +2636,7 @@ def _maybe_auto_deploy_vault(
     execution_orchestrator: Any,
     state_manager: Any,
     strategy_instance: Any,
-    strategy_id: str,
+    deployment_id: str,
 ) -> Any:
     """Return a VaultLifecycleManager or None, auto-deploying on Anvil if placeholder.
 
@@ -2742,11 +2694,11 @@ def _maybe_auto_deploy_vault(
     try:
         import asyncio as _asyncio
 
-        _raw_state_data = _asyncio.run(state_manager.load_state(strategy_id))
+        _raw_state_data = _asyncio.run(state_manager.load_state(deployment_id))
         if _raw_state_data and _raw_state_data.state:
             initial_vault_state = _raw_state_data.state.get(VAULT_STATE_KEY)
     except Exception as _e:  # noqa: BLE001
-        logger.debug("Could not load persisted state for vault init (strategy_id=%s): %s", strategy_id, _e)
+        logger.debug("Could not load persisted state for vault init (deployment_id=%s): %s", deployment_id, _e)
         # No persisted state — VaultLifecycleManager uses defaults
     # Fallback: also check in-memory strategy state (for StrategyBase subclasses)
     if initial_vault_state is None:
@@ -2772,7 +2724,7 @@ def _maybe_auto_deploy_vault(
         vault_sdk=vault_sdk,
         vault_adapter=vault_adapter,
         execution_orchestrator=execution_orchestrator,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         initial_vault_state=initial_vault_state,
         persistence_callback=_persist_vault_state,
     )
@@ -2804,7 +2756,7 @@ def _build_runner(
     *,
     interval: int,
     effective_dry_run: bool,
-    strategy_id: str,
+    deployment_id: str,
     components: ComponentBundle,
     vault_lifecycle: Any,
 ) -> Any:
@@ -2832,7 +2784,7 @@ def _build_runner(
     )
 
     # Create safety components for fail-closed execution
-    circuit_breaker = CircuitBreaker(strategy_id=strategy_id)
+    circuit_breaker = CircuitBreaker(deployment_id=deployment_id)
     stuck_detector = StuckDetector()
     operator_card_generator = OperatorCardGenerator()
     emergency_manager = EmergencyManager()
@@ -2871,7 +2823,7 @@ def _build_components(
     chain_wallets: dict[str, str],
     interval: int,
     effective_dry_run: bool,
-    strategy_id: str,
+    deployment_id: str,
     normalized_copy_mode: str | None,
     copy_replay_file: str | None,
     copy_shadow: bool,
@@ -2951,7 +2903,7 @@ def _build_components(
         # State loading is deferred to the async setup phase (run_once_with_cleanup /
         # run_loop_with_cleanup) so that load_state_async() can be awaited properly.
         if hasattr(strategy_instance, "set_state_manager"):
-            strategy_instance.set_state_manager(state_manager, strategy_id)
+            strategy_instance.set_state_manager(state_manager, deployment_id)
 
         # Vault auto-deploy MUST happen before runner construction so that the
         # StrategyRunner sees the patched vault_address when it initializes.
@@ -2965,13 +2917,13 @@ def _build_components(
             execution_orchestrator=components.execution_orchestrator,
             state_manager=state_manager,
             strategy_instance=strategy_instance,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
         )
 
         _build_runner(
             interval=interval,
             effective_dry_run=effective_dry_run,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             components=components,
             vault_lifecycle=vault_lifecycle,
         )
@@ -3009,7 +2961,7 @@ def _build_dashboard_subprocess_env(
     gateway_port: int,
     auth_token: str | None,
     mode: str,
-    strategy_id: str | None,
+    deployment_id: str | None,
     strategy_working_dir: str | None,
     strategy_config: dict[str, Any] | None,
 ) -> dict[str, str]:
@@ -3017,7 +2969,7 @@ def _build_dashboard_subprocess_env(
 
     Encapsulates gateway-connection forwarding (host/port/auth-token,
     plus the stale-``GATEWAY_AUTH_TOKEN`` strip from VIB-520) AND the
-    hosted-parity scoping channel (strategy_id, working_dir, and the
+    hosted-parity scoping channel (deployment_id, working_dir, and the
     optional pre-resolved runtime config). Extracted out of
     ``_start_dashboard_background`` so that function stays under the
     CRAP complexity cap as additional env channels are added.
@@ -3033,17 +2985,17 @@ def _build_dashboard_subprocess_env(
     if auth_token:
         overrides["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
 
-    if mode == "hosted-parity" and strategy_id and strategy_working_dir:
+    if mode == "hosted-parity" and deployment_id and strategy_working_dir:
         # Tell app_single.py which strategy to scope to and where to find
         # its ``dashboard/ui.py`` and ``config.json``. The dashboard reads
         # these from os.environ; do NOT rely on cwd because Streamlit's
         # child cwd is not the strategy's working dir.
-        overrides["ALMANAK_DASHBOARD_STRATEGY_ID"] = strategy_id
+        overrides["ALMANAK_DASHBOARD_DEPLOYMENT_ID"] = deployment_id
         overrides["ALMANAK_DASHBOARD_WORKING_DIR"] = str(Path(strategy_working_dir).resolve())
         # Forward the RESOLVED + MUTATED runtime config (post-bootstrap)
         # so the dashboard sees the same values the running strategy sees
         # — covers ``--config`` pointing outside working_dir AND copy-
-        # trading / chain runtime overrides AND the resolved strategy_id
+        # trading / chain runtime overrides AND the resolved deployment_id
         # field. Without this, app_single re-reads working_dir/config.json
         # and renders stale values (Codex P2 on PR #2372).
         if strategy_config is not None:
@@ -3077,7 +3029,7 @@ def _start_dashboard_background(
     gateway_port: int = 50051,
     auth_token: str | None = None,
     mode: str = "command-center",
-    strategy_id: str | None = None,
+    deployment_id: str | None = None,
     strategy_working_dir: str | None = None,
     strategy_config: dict[str, Any] | None = None,
 ) -> Any:
@@ -3106,8 +3058,8 @@ def _start_dashboard_background(
         mode: ``"hosted-parity"`` (single-strategy, mirrors hosted image —
             ``app_single.py``) or ``"command-center"`` (multi-strategy
             navigation — ``app.py``). Hosted-parity requires
-            ``strategy_id`` and ``strategy_working_dir``.
-        strategy_id: Resolved deployment_id the dashboard scopes to. Required
+            ``deployment_id`` and ``strategy_working_dir``.
+        deployment_id: Resolved deployment_id the dashboard scopes to. Required
             for ``mode == "hosted-parity"``; ignored otherwise.
         strategy_working_dir: Strategy folder containing ``config.json`` and
             (optionally) ``dashboard/ui.py``. Required for
@@ -3115,7 +3067,7 @@ def _start_dashboard_background(
         strategy_config: Resolved + mutated runtime strategy config dict
             (post ``_load_strategy_bootstrap`` / ``_prepare_runtime_bootstrap``,
             so it reflects ``--config`` overrides AND copy-trading flags AND
-            the resolved ``strategy_id``). Serialized to JSON and exported
+            the resolved ``deployment_id``). Serialized to JSON and exported
             as ``ALMANAK_DASHBOARD_STRATEGY_CONFIG``. The dashboard prefers
             this over re-reading ``working_dir/config.json`` so custom
             dashboards see the same config the running strategy sees
@@ -3161,9 +3113,9 @@ def _start_dashboard_background(
     project_root = Path(__file__).parent.parent.parent.parent
     dashboard_dir = project_root / "almanak" / "framework" / "dashboard"
     if mode == "hosted-parity":
-        if not strategy_id or not strategy_working_dir:
+        if not deployment_id or not strategy_working_dir:
             click.echo(
-                "Error: hosted-parity dashboard requires strategy_id and "
+                "Error: hosted-parity dashboard requires deployment_id and "
                 "strategy_working_dir; falling back to Command Center.",
                 err=True,
             )
@@ -3185,7 +3137,7 @@ def _start_dashboard_background(
         gateway_port=gateway_port,
         auth_token=auth_token,
         mode=mode,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_working_dir=strategy_working_dir,
         strategy_config=strategy_config,
     )
@@ -3278,7 +3230,7 @@ def _handle_standalone_dashboard(
         return False
 
     # Standalone dashboard (no strategy directory) always opens Command
-    # Center — hosted-parity scoping requires a strategy id/dir context
+    # Center — hosted-parity scoping requires a deployment id/dir context
     # that doesn't exist here. If the operator explicitly passed
     # ``--dashboard-mode=hosted-parity``, surface a one-line warning so
     # they know their flag was overridden rather than silently ignored
@@ -3351,14 +3303,14 @@ def _maybe_start_dashboard_process(
     gateway_port: int,
     auth_token: str | None,
     mode: str = "command-center",
-    strategy_id: str | None = None,
+    deployment_id: str | None = None,
     strategy_working_dir: str | None = None,
     strategy_config: dict[str, Any] | None = None,
 ) -> Any:
     """Start the dashboard sidecar when requested, registering cleanup.
 
     See ``_start_dashboard_background`` for the meaning of ``mode``,
-    ``strategy_id``, ``strategy_working_dir``, and ``strategy_config``
+    ``deployment_id``, ``strategy_working_dir``, and ``strategy_config``
     — they're forwarded verbatim and only consulted when
     ``mode == "hosted-parity"``.
     """
@@ -3373,7 +3325,7 @@ def _maybe_start_dashboard_process(
         gateway_port=gateway_port,
         auth_token=auth_token,
         mode=mode,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_working_dir=strategy_working_dir,
         strategy_config=strategy_config,
     )
@@ -3424,7 +3376,7 @@ def _load_strategy_bootstrap(
         strategy_config=strategy_config,
         multi_chain=multi_chain,
     )
-    config_display_name = _normalize_strategy_display_name(raw_name=strategy_config.get("strategy_id", strategy_name))
+    config_display_name = _normalize_strategy_display_name(raw_name=strategy_config.get("deployment_id", strategy_name))
     strategy_config["strategy_display_name"] = config_display_name
 
     return StrategyBootstrap(
@@ -3529,7 +3481,6 @@ def _prepare_runtime_bootstrap(
     no_gateway: bool,
     network: str | None,
     gateway_client: Any,
-    provided_instance_id: str | None,
     gateway_network: str,
     fresh: bool,
 ) -> RuntimeBootstrap:
@@ -3559,7 +3510,6 @@ def _prepare_runtime_bootstrap(
         multi_chain=strategy_bootstrap.multi_chain,
         strategy_chains=strategy_bootstrap.strategy_chains,
         config_display_name=strategy_bootstrap.config_display_name,
-        cli_id_override=provided_instance_id,
         gateway_network=gateway_network,
     )
     return RuntimeBootstrap(
@@ -3567,14 +3517,14 @@ def _prepare_runtime_bootstrap(
         resolved_network=resolved_network,
         runtime_config=runtime_config,
         chain_wallets=chain_wallets,
-        strategy_id=strategy_bootstrap.strategy_config["strategy_id"],
+        deployment_id=strategy_bootstrap.strategy_config["deployment_id"],
         run_id=identity_info.run_id,
     )
 
 
 def _load_resume_state(
     *,
-    strategy_id: str,
+    deployment_id: str,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Load local SQLite resume metadata when the deployment mode is local."""
     from almanak.framework.deployment import is_local
@@ -3584,7 +3534,7 @@ def _load_resume_state(
         return False, None
 
     state_db_path = _local_db_path()
-    resume_info = _detect_state_resume(state_db_path, strategy_id)
+    resume_info = _detect_state_resume(state_db_path, deployment_id)
     if not resume_info.is_resume:
         return False, None
 
@@ -3638,7 +3588,7 @@ def _build_components_or_exit(
     chain_wallets: Any,
     interval: int,
     effective_dry_run: bool,
-    strategy_id: str,
+    deployment_id: str,
     normalized_copy_mode: str | None,
     copy_replay_file: str | None,
     copy_shadow: bool,
@@ -3661,7 +3611,7 @@ def _build_components_or_exit(
             chain_wallets=chain_wallets,
             interval=interval,
             effective_dry_run=effective_dry_run,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             normalized_copy_mode=normalized_copy_mode,
             copy_replay_file=copy_replay_file,
             copy_shadow=copy_shadow,
@@ -3795,7 +3745,7 @@ def _run_once(  # noqa: C901
             activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
             if activity_provider is not None:
                 try:
-                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    ct_state = await state_manager.load_state(strategy_instance.deployment_id)
                     if ct_state is not None and "copy_trading_state" in ct_state.state:
                         activity_provider.set_state(ct_state.state["copy_trading_state"])
                 except Exception as e:
@@ -3815,7 +3765,10 @@ def _run_once(  # noqa: C901
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,
-                strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME,
+                _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="reconstruct_lending_basis_store",
+                ),
             )
 
             # VIB-4086 — same cross-process restart hole for the
@@ -3841,7 +3794,10 @@ def _run_once(  # noqa: C901
             result = await capture_snapshot_with_accounting(
                 runner=runner,
                 strategy=strategy_instance,
-                strategy_id=strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME,
+                deployment_id=_require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="capture_snapshot_with_accounting",
+                ),
                 result=result,
                 iteration_start_monotonic=iteration_start_monotonic,
             )
@@ -3858,11 +3814,14 @@ def _run_once(  # noqa: C901
                 from almanak.framework.teardown import get_teardown_state_manager
                 from almanak.framework.teardown.models import TeardownMode, TeardownRequest
 
-                strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
+                deployment_id = _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="teardown_after",
+                )
                 manager = get_teardown_state_manager()
                 manager.create_request(
                     TeardownRequest(
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         mode=TeardownMode.SOFT,
                         reason="--teardown-after flag (CI cleanup)",
                         requested_by="cli",
@@ -3876,12 +3835,12 @@ def _run_once(  # noqa: C901
             # Persist copy trading cursor state
             if activity_provider is not None:
                 try:
-                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    ct_state = await state_manager.load_state(strategy_instance.deployment_id)
                     if ct_state is None:
                         from almanak.framework.state.state_manager import StateData
 
                         ct_state = StateData(
-                            strategy_id=strategy_instance.strategy_id,
+                            deployment_id=strategy_instance.deployment_id,
                             version=0,
                             state={},
                         )
@@ -3904,7 +3863,7 @@ def _run_once(  # noqa: C901
             # calling teardown when setup itself failed (pairing invariant).
             try:
                 if gateway_integration_ready:
-                    runner.teardown_gateway_integration(strategy_instance.strategy_id)
+                    runner.teardown_gateway_integration(strategy_instance.deployment_id)
             finally:
                 await cleanup_fn()
 
@@ -4033,7 +3992,7 @@ def _run_test_lifecycle(  # noqa: C901
             activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
             if activity_provider is not None:
                 try:
-                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    ct_state = await state_manager.load_state(strategy_instance.deployment_id)
                     if ct_state is not None and "copy_trading_state" in ct_state.state:
                         activity_provider.set_state(ct_state.state["copy_trading_state"])
                 except Exception as e:
@@ -4051,7 +4010,10 @@ def _run_test_lifecycle(  # noqa: C901
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,
-                getattr(strategy_instance, "strategy_id", "") or getattr(strategy_instance, "STRATEGY_NAME", "") or "",
+                _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="reconstruct_lending_basis_store",
+                ),
             )
 
             # VIB-4086 — symmetric cache hydration for the test-lifecycle
@@ -4061,6 +4023,10 @@ def _run_test_lifecycle(  # noqa: C901
             # Single predicate: an action passes iff status is SUCCESS or HOLD.
             # Used identically by per-step failure_logs, fail-fast, and the final
             # summary so the three never disagree.
+            deployment_id = _require_strategy_deployment_id(
+                strategy_instance,
+                operation="strat_test_lifecycle",
+            )
             action_pass_statuses = (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value)
             for action in actions:
                 strategy_instance.force_action = action
@@ -4085,7 +4051,7 @@ def _run_test_lifecycle(  # noqa: C901
                     result = await capture_snapshot_with_accounting(
                         runner=runner,
                         strategy=strategy_instance,
-                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                        deployment_id=deployment_id,
                         result=result,
                         iteration_start_monotonic=iteration_start_monotonic,
                     )
@@ -4099,7 +4065,7 @@ def _run_test_lifecycle(  # noqa: C901
                     synthetic = IterationResult(
                         status=IterationStatus.STRATEGY_ERROR,
                         error=f"run_iteration raised: {exc!r}",
-                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                        deployment_id=deployment_id,
                     )
                     action_results.append(
                         {
@@ -4131,7 +4097,10 @@ def _run_test_lifecycle(  # noqa: C901
                 from almanak.framework.teardown.models import TeardownMode, TeardownRequest
 
                 strategy_instance.force_action = ""
-                strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
+                deployment_id = _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="strat_test_teardown",
+                )
                 if not json_output:
                     click.echo("\n→ teardown")
                 # Capture log cursor BEFORE create_request so a state-manager
@@ -4141,7 +4110,7 @@ def _run_test_lifecycle(  # noqa: C901
                 try:
                     get_teardown_state_manager().create_request(
                         TeardownRequest(
-                            strategy_id=strategy_id,
+                            deployment_id=deployment_id,
                             mode=TeardownMode.SOFT,
                             reason="strat test --teardown",
                             requested_by="cli",
@@ -4161,7 +4130,7 @@ def _run_test_lifecycle(  # noqa: C901
                     td_result = await capture_snapshot_with_accounting(
                         runner=runner,
                         strategy=strategy_instance,
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         result=td_result,
                         iteration_start_monotonic=td_iteration_start,
                     )
@@ -4175,7 +4144,7 @@ def _run_test_lifecycle(  # noqa: C901
                     synthetic = IterationResult(
                         status=IterationStatus.STRATEGY_ERROR,
                         error=f"run_iteration raised: {exc!r}",
-                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                        deployment_id=deployment_id,
                     )
                     teardown_result_dict = {
                         "action": "teardown",
@@ -4198,12 +4167,12 @@ def _run_test_lifecycle(  # noqa: C901
             # Persist copy trading cursor state (mirrors _run_once).
             if activity_provider is not None:
                 try:
-                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    ct_state = await state_manager.load_state(strategy_instance.deployment_id)
                     if ct_state is None:
                         from almanak.framework.state.state_manager import StateData
 
                         ct_state = StateData(
-                            strategy_id=strategy_instance.strategy_id,
+                            deployment_id=strategy_instance.deployment_id,
                             version=0,
                             state={},
                         )
@@ -4222,7 +4191,7 @@ def _run_test_lifecycle(  # noqa: C901
         finally:
             try:
                 if gateway_integration_ready:
-                    runner.teardown_gateway_integration(strategy_instance.strategy_id)
+                    runner.teardown_gateway_integration(strategy_instance.deployment_id)
             finally:
                 await cleanup_fn()
 
@@ -4290,7 +4259,10 @@ def _run_test_lifecycle(  # noqa: C901
         if teardown_result_dict is not None:
             steps.append(teardown_result_dict)
         payload = {
-            "strategy_id": getattr(strategy_instance, "strategy_id", None) or strategy_instance.STRATEGY_NAME,
+            "deployment_id": _require_strategy_deployment_id(
+                strategy_instance,
+                operation="strat_test_json_output",
+            ),
             "summary": {
                 "all_passed": all_passed,
                 "steps_run": len(steps),

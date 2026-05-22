@@ -86,7 +86,7 @@ def _make_result(
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo_uniswap_rsi_sweep",
+        deployment_id="demo_uniswap_rsi_sweep",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 2, 1, tzinfo=UTC),
         trades=[],
@@ -222,7 +222,7 @@ class TestVIB1701SweepExecution:
         captured_configs: list[dict] = []
 
         class ConfigTracker:
-            strategy_id = "demo_uniswap_rsi_sweep"
+            deployment_id = "demo_uniswap_rsi_sweep"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -253,7 +253,7 @@ class TestVIB1701SweepExecution:
         """Verify $500 and $1000 trade sizes work (larger than typical $3-10)."""
 
         class SimpleStrategy:
-            strategy_id = "demo_uniswap_rsi_sweep"
+            deployment_id = "demo_uniswap_rsi_sweep"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

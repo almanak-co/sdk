@@ -238,7 +238,7 @@ class AeroTrendFollowerStrategy(IntentStrategy[AeroTrendFollowerConfig]):
                             timestamp=datetime.now(UTC),
                             event_type=TimelineEventType.STATE_CHANGE,
                             description="Bullish EMA crossover - opening LP position",
-                            strategy_id=self.strategy_id,
+                            deployment_id=self.deployment_id,
                             details={
                                 "trigger": "ema_crossover",
                                 "trend": "bullish",
@@ -258,7 +258,7 @@ class AeroTrendFollowerStrategy(IntentStrategy[AeroTrendFollowerConfig]):
                             timestamp=datetime.now(UTC),
                             event_type=TimelineEventType.STATE_CHANGE,
                             description="Bearish EMA crossover - closing LP position",
-                            strategy_id=self.strategy_id,
+                            deployment_id=self.deployment_id,
                             details={
                                 "trigger": "ema_crossover",
                                 "trend": "bearish",
@@ -317,7 +317,7 @@ class AeroTrendFollowerStrategy(IntentStrategy[AeroTrendFollowerConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"Aerodrome LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "trend": self._last_trend},
                 )
             )
@@ -331,7 +331,7 @@ class AeroTrendFollowerStrategy(IntentStrategy[AeroTrendFollowerConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"Aerodrome LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "trend": self._last_trend},
                 )
             )
@@ -388,7 +388,7 @@ class AeroTrendFollowerStrategy(IntentStrategy[AeroTrendFollowerConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

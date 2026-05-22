@@ -191,7 +191,7 @@ class AeroStableFarmerStrategy(IntentStrategy[AeroStableFarmerConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.STATE_CHANGE,
                     description="Opening new Aerodrome stable LP position",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "opening_new_position", "pool": self.pool, "stable": self.stable},
                 )
             )
@@ -245,7 +245,7 @@ class AeroStableFarmerStrategy(IntentStrategy[AeroStableFarmerConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"Aerodrome stable LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "stable": self.stable},
                 )
             )
@@ -259,7 +259,7 @@ class AeroStableFarmerStrategy(IntentStrategy[AeroStableFarmerConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"Aerodrome stable LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool},
                 )
             )
@@ -314,7 +314,7 @@ class AeroStableFarmerStrategy(IntentStrategy[AeroStableFarmerConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

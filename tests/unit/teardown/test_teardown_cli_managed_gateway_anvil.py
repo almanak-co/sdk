@@ -58,7 +58,7 @@ class _SwapOnlyStrategy:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "vib_3819_probe"
+        self.deployment_id = "vib_3819_probe"
 
     def get_open_positions(self):
         from types import SimpleNamespace
@@ -84,7 +84,7 @@ def _write_strategy_files(tmp_path) -> tuple[str, str]:
             {
                 "chain": "base",
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "vib_3819_probe",
+                "deployment_id": "vib_3819_probe",
                 "anvil_funding": {"WETH": 1, "USDC": 1000, "ETH": 1},
             }
         )
@@ -186,7 +186,7 @@ def _write_multi_chain_strategy_files(tmp_path) -> tuple[str, str]:
                 "chain": "base",
                 "chains": ["base", "arbitrum"],
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "vib_3819_multichain_probe",
+                "deployment_id": "vib_3819_multichain_probe",
                 "anvil_funding": {"WETH": 1, "USDC": 1000},
             }
         )
@@ -267,7 +267,7 @@ def _write_solana_strategy_files(tmp_path) -> tuple[str, str]:
             {
                 "chain": "solana",
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "vib_3819_solana_probe",
+                "deployment_id": "vib_3819_solana_probe",
             }
         )
     )

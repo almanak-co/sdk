@@ -141,7 +141,7 @@ class PortfolioSnapshot:
     """
 
     timestamp: datetime
-    strategy_id: str
+    deployment_id: str
 
     # Core values
     total_value_usd: Decimal
@@ -180,10 +180,6 @@ class PortfolioSnapshot:
     iteration_number: int = 0
     snapshot_metadata: dict[str, Any] = field(default_factory=dict)
 
-    # Phase 4 accounting identity (VIB-2835/2837/2839) — mirrors PortfolioMetrics.
-    # Stamped by the runner before persistence (VIB-4099). Required for cycle_id
-    # correlation across transaction_ledger / portfolio_metrics / portfolio_snapshots.
-    deployment_id: str = ""
     cycle_id: str = ""
     execution_mode: str = ""  # "live" | "paper" | "dry_run" | "backtest"
 
@@ -212,7 +208,7 @@ class PortfolioSnapshot:
         """Serialize to dictionary for JSON storage."""
         data: dict[str, Any] = {
             "timestamp": self.timestamp.isoformat(),
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "total_value_usd": str(self.total_value_usd),
             "available_cash_usd": str(self.available_cash_usd),
             "deployed_capital_usd": str(self.deployed_capital_usd),
@@ -233,8 +229,6 @@ class PortfolioSnapshot:
             "token_prices": self.token_prices,
             "chain": self.chain,
             "iteration_number": self.iteration_number,
-            # Phase 4 identity (VIB-4091)
-            "deployment_id": self.deployment_id,
             "cycle_id": self.cycle_id,
             "execution_mode": self.execution_mode,
         }
@@ -319,7 +313,7 @@ class PortfolioSnapshot:
 
         return cls(
             timestamp=datetime.fromisoformat(data["timestamp"]),
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             total_value_usd=Decimal(data["total_value_usd"]),
             available_cash_usd=Decimal(data["available_cash_usd"]),
             deployed_capital_usd=Decimal(data.get("deployed_capital_usd", "0")),
@@ -332,8 +326,6 @@ class PortfolioSnapshot:
             chain=data.get("chain", ""),
             iteration_number=data.get("iteration_number", 0),
             snapshot_metadata=data.get("snapshot_metadata", {}),
-            # Phase 4 identity (VIB-4091) — defensive `""` defaults for legacy rows.
-            deployment_id=data.get("deployment_id", ""),
             cycle_id=data.get("cycle_id", ""),
             execution_mode=data.get("execution_mode", ""),
         )
@@ -362,7 +354,7 @@ class PortfolioMetrics:
     across restarts to enable accurate cumulative PnL calculation.
     """
 
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
 
     # Current value from latest snapshot
@@ -380,8 +372,6 @@ class PortfolioMetrics:
     positions_json: str = "[]"  # JSON-encoded position details
     cycle_id: str | None = None  # Current execution cycle
 
-    # Phase 4: canonical identity and execution mode (VIB-2835/2837)
-    deployment_id: str = ""  # Canonical deployment key (wallet+chain hash or --id)
     execution_mode: str = ""  # "live", "paper", "dry_run", "backtest"
     is_complete: bool = True  # Whether all expected records for this cycle were committed
 
@@ -415,7 +405,7 @@ class PortfolioMetrics:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for storage."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat(),
             "total_value_usd": str(self.total_value_usd),
             "initial_value_usd": str(self.initial_value_usd),
@@ -424,7 +414,6 @@ class PortfolioMetrics:
             "gas_spent_usd": str(self.gas_spent_usd),
             "positions_json": self.positions_json,
             "cycle_id": self.cycle_id,
-            "deployment_id": self.deployment_id,
             "execution_mode": self.execution_mode,
             "is_complete": self.is_complete,
         }
@@ -433,7 +422,7 @@ class PortfolioMetrics:
     def from_dict(cls, data: dict[str, Any]) -> "PortfolioMetrics":
         """Deserialize from dictionary."""
         return cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             timestamp=datetime.fromisoformat(data["timestamp"]),
             total_value_usd=Decimal(data["total_value_usd"]),
             initial_value_usd=Decimal(data["initial_value_usd"]),
@@ -442,7 +431,6 @@ class PortfolioMetrics:
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
             positions_json=data.get("positions_json", "[]"),
             cycle_id=data.get("cycle_id"),
-            deployment_id=data.get("deployment_id", ""),
             execution_mode=data.get("execution_mode", ""),
             is_complete=data.get("is_complete", True),
         )

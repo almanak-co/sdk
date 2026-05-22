@@ -26,7 +26,7 @@ class TestGetInitialBalances:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             initial_tokens={
                 "wstETH": Decimal("1.0"),
                 "USDC": Decimal("100"),
@@ -45,7 +45,7 @@ class TestGetInitialBalances:
         config = PaperTraderConfig(
             chain="ethereum",
             rpc_url="https://eth.example.com",
-            strategy_id="test",
+            deployment_id="test",
             initial_tokens={
                 "0xf951E335afb289353dc249e82926178EaC7DEd78": Decimal("0.01"),
             },
@@ -59,7 +59,7 @@ class TestGetInitialBalances:
         config = PaperTraderConfig(
             chain="ethereum",
             rpc_url="https://eth.example.com",
-            strategy_id="test",
+            deployment_id="test",
             initial_eth=Decimal("5"),
             initial_tokens={"wstETH": Decimal("1.0")},
         )
@@ -265,7 +265,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             bootstrap={
                 "arbitrum": {"USDC": Decimal("100"), "WETH": Decimal("1")},
                 "ethereum": {"USDT": Decimal("50")},
@@ -282,7 +282,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             initial_tokens={"USDC": Decimal("500")},
             bootstrap={
                 "arbitrum": {"USDC": Decimal("100"), "WETH": Decimal("1")},
@@ -298,7 +298,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             initial_tokens={"USDC": Decimal("100")},
             bootstrap={},
         )
@@ -310,7 +310,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             bootstrap={
                 "ethereum": {"USDT": Decimal("50")},
             },
@@ -323,7 +323,7 @@ class TestBootstrapConfig:
             PaperTraderConfig(
                 chain="arbitrum",
                 rpc_url="https://arb.example.com",
-                strategy_id="test",
+                deployment_id="test",
                 bootstrap={"arbitrum": {"USDC": Decimal("-100")}},
             )
 
@@ -332,7 +332,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example.com",
-            strategy_id="test",
+            deployment_id="test",
             bootstrap={
                 "arbitrum": {"USDC": Decimal("100"), "wstETH": Decimal("1.5")},
                 "ethereum": {"USDT": Decimal("50")},
@@ -346,8 +346,8 @@ class TestBootstrapConfig:
         restored = PaperTraderConfig.from_dict({
             "chain": "arbitrum",
             "rpc_url": "https://arb.example.com",
-            "strategy_id": "test",
-            **{k: v for k, v in data.items() if k not in ("chain", "rpc_url", "strategy_id", "chain_id", "max_duration_seconds", "fork_rpc_url", "allow_hardcoded_fallback")},
+            "deployment_id": "test",
+            **{k: v for k, v in data.items() if k not in ("chain", "rpc_url", "deployment_id", "chain_id", "max_duration_seconds", "fork_rpc_url", "allow_hardcoded_fallback")},
         })
         assert restored.bootstrap["arbitrum"]["USDC"] == Decimal("100")
         assert restored.bootstrap["ethereum"]["USDT"] == Decimal("50")
@@ -356,7 +356,7 @@ class TestBootstrapConfig:
         config = PaperTraderConfig(
             chain="ethereum",
             rpc_url="https://eth.example.com",
-            strategy_id="test",
+            deployment_id="test",
             bootstrap={
                 "ethereum": {"wstETH": Decimal("1"), "swETH": Decimal("0.5")},
             },

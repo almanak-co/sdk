@@ -63,9 +63,9 @@ def _make_runner(
     )
 
 
-def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
+def _make_strategy(deployment_id: str = "test-strategy") -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -79,14 +79,14 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
 def _make_state(strategy: MagicMock) -> RunIterationState:
     return RunIterationState(
         strategy=strategy,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         start_time=datetime.now(UTC),
     )
 
 
-def _tripped_breaker(strategy_id: str = "test-strategy") -> CircuitBreaker:
+def _tripped_breaker(deployment_id: str = "test-strategy") -> CircuitBreaker:
     breaker = CircuitBreaker(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         config=CircuitBreakerConfig(
             max_consecutive_failures=3,
             max_cumulative_loss_usd=Decimal("1000"),
@@ -122,7 +122,7 @@ class TestMultiChainStuckResumeBeforeCircuitBreaker:
 
         resume_result = IterationResult(
             status=IterationStatus.SUCCESS,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
         )
 
@@ -143,7 +143,7 @@ class TestMultiChainStuckResumeBeforeCircuitBreaker:
     async def test_paused_breaker_does_not_block_multi_chain_stuck_resume(self) -> None:
         """PAUSED breaker + multi-chain + stuck state -> resume, NOT CB_OPEN."""
         breaker = CircuitBreaker(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             config=CircuitBreakerConfig(
                 max_consecutive_failures=3,
                 max_cumulative_loss_usd=Decimal("1000"),
@@ -159,7 +159,7 @@ class TestMultiChainStuckResumeBeforeCircuitBreaker:
 
         resume_result = IterationResult(
             status=IterationStatus.SUCCESS,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
         )
 
@@ -215,7 +215,7 @@ class TestMultiChainStuckResumeBeforeCircuitBreaker:
 
         resume_result = IterationResult(
             status=IterationStatus.SUCCESS,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
         )
         resume_mock = AsyncMock(return_value=resume_result)

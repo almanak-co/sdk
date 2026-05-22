@@ -43,13 +43,13 @@ class CooldownTracker:
 
     last_alert_time: dict[str, datetime] = field(default_factory=dict)
 
-    def get_rule_key(self, strategy_id: str, condition: AlertCondition) -> str:
+    def get_rule_key(self, deployment_id: str, condition: AlertCondition) -> str:
         """Generate a unique key for a rule instance."""
-        return f"{strategy_id}:{condition.value}"
+        return f"{deployment_id}:{condition.value}"
 
     def is_on_cooldown(
         self,
-        strategy_id: str,
+        deployment_id: str,
         condition: AlertCondition,
         cooldown_seconds: int,
         current_time: datetime | None = None,
@@ -57,7 +57,7 @@ class CooldownTracker:
         """Check if an alert is currently on cooldown.
 
         Args:
-            strategy_id: The strategy that triggered the alert
+            deployment_id: The strategy that triggered the alert
             condition: The alert condition
             cooldown_seconds: The cooldown duration in seconds
             current_time: Current time (defaults to now)
@@ -68,7 +68,7 @@ class CooldownTracker:
         if current_time is None:
             current_time = datetime.now(UTC)
 
-        key = self.get_rule_key(strategy_id, condition)
+        key = self.get_rule_key(deployment_id, condition)
         last_time = self.last_alert_time.get(key)
 
         if last_time is None:
@@ -79,40 +79,40 @@ class CooldownTracker:
 
     def record_alert(
         self,
-        strategy_id: str,
+        deployment_id: str,
         condition: AlertCondition,
         sent_time: datetime | None = None,
     ) -> None:
         """Record that an alert was sent.
 
         Args:
-            strategy_id: The strategy that triggered the alert
+            deployment_id: The strategy that triggered the alert
             condition: The alert condition
             sent_time: When the alert was sent (defaults to now)
         """
         if sent_time is None:
             sent_time = datetime.now(UTC)
 
-        key = self.get_rule_key(strategy_id, condition)
+        key = self.get_rule_key(deployment_id, condition)
         self.last_alert_time[key] = sent_time
 
-    def clear_cooldown(self, strategy_id: str, condition: AlertCondition) -> None:
+    def clear_cooldown(self, deployment_id: str, condition: AlertCondition) -> None:
         """Clear the cooldown for a specific rule.
 
         Args:
-            strategy_id: The strategy
+            deployment_id: The strategy
             condition: The alert condition
         """
-        key = self.get_rule_key(strategy_id, condition)
+        key = self.get_rule_key(deployment_id, condition)
         self.last_alert_time.pop(key, None)
 
-    def clear_all_for_strategy(self, strategy_id: str) -> None:
+    def clear_all_for_strategy(self, deployment_id: str) -> None:
         """Clear all cooldowns for a strategy.
 
         Args:
-            strategy_id: The strategy to clear cooldowns for
+            deployment_id: The strategy to clear cooldowns for
         """
-        prefix = f"{strategy_id}:"
+        prefix = f"{deployment_id}:"
         keys_to_remove = [k for k in self.last_alert_time if k.startswith(prefix)]
         for key in keys_to_remove:
             del self.last_alert_time[key]
@@ -255,14 +255,14 @@ class AlertManager:
     def _should_send_alert(
         self,
         rule: AlertRule,
-        strategy_id: str,
+        deployment_id: str,
         severity: Severity,
     ) -> tuple[bool, str | None]:
         """Determine if an alert should be sent based on rules and cooldown.
 
         Args:
             rule: The alert rule being evaluated
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             severity: The alert severity
 
         Returns:
@@ -279,7 +279,7 @@ class AlertManager:
 
         # Check cooldown
         if self.cooldown_tracker.is_on_cooldown(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             condition=rule.condition,
             cooldown_seconds=rule.cooldown_seconds,
         ):
@@ -287,6 +287,7 @@ class AlertManager:
 
         return True, None
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_telegram_message(
         self,
         card: OperatorCard,
@@ -317,7 +318,7 @@ class AlertManager:
         lines = [
             f"{emoji} <b>{card.severity.value} Alert</b>",
             "",
-            f"<b>Strategy:</b> {card.strategy_id}",
+            f"<b>Strategy:</b> {card.deployment_id}",
             f"<b>Status:</b> {card.event_type.value}",
             f"<b>Reason:</b> {card.reason.value.replace('_', ' ').title()}",
         ]
@@ -347,7 +348,7 @@ class AlertManager:
 
         # Add dashboard link
         if self.config.dashboard_base_url:
-            dashboard_link = f"{self.config.dashboard_base_url}/strategy/{card.strategy_id}"
+            dashboard_link = f"{self.config.dashboard_base_url}/strategy/{card.deployment_id}"
             lines.append("")
             lines.append(f'\ud83d\udcca <a href="{dashboard_link}">View in Dashboard</a>')
 
@@ -383,31 +384,31 @@ class AlertManager:
         # Phase 1: global-disabled short-circuit.
         if not self.config.enabled:
             result.skipped_reason = "Alerting is globally disabled"
-            logger.info(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
+            logger.info(f"Alert skipped for {card.deployment_id}: {result.skipped_reason}")
             return result
 
         # Phase 1: rule matching.
         matching_rules = self._find_matching_rules(card, metric_values)
         if not matching_rules:
             result.skipped_reason = "No matching alert rules"
-            logger.debug(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
+            logger.debug(f"Alert skipped for {card.deployment_id}: {result.skipped_reason}")
             return result
 
         # Phase 2: suppression gates (quiet hours + cooldown).
         channels_to_send = collect_channels_to_send(self, matching_rules, card)
         if not channels_to_send:
             result.skipped_reason = "All matching rules on cooldown or quiet hours"
-            logger.info(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
+            logger.info(f"Alert skipped for {card.deployment_id}: {result.skipped_reason}")
             return result
 
         # Phase 3: per-channel fan-out.
         await dispatch_to_channels(self, channels_to_send, card, result)
 
         # Phase 4: persist cooldown for rules whose channels succeeded.
-        record_cooldowns_for_sent_rules(self.cooldown_tracker, matching_rules, result, card.strategy_id)
+        record_cooldowns_for_sent_rules(self.cooldown_tracker, matching_rules, result, card.deployment_id)
 
         # Phase 5: finalize success bit + summary log.
-        return finalize_result(result, card.strategy_id)
+        return finalize_result(result, card.deployment_id)
 
     def send_alert_sync(
         self,
@@ -425,6 +426,7 @@ class AlertManager:
         """
         return asyncio.run(self.send_alert(card, metric_values))
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_direct_telegram_alert(
         self,
         card: OperatorCard,
@@ -446,7 +448,7 @@ class AlertManager:
         current_time = self._get_current_time()
         if not self.config.should_send_alert(card.severity, current_time):
             result.skipped_reason = f"Quiet hours active (severity={card.severity.value})"
-            logger.info(f"Direct alert skipped for {card.strategy_id}: {result.skipped_reason}")
+            logger.info(f"Direct alert skipped for {card.deployment_id}: {result.skipped_reason}")
             return result
 
         if not self._telegram_channel:
@@ -462,17 +464,17 @@ class AlertManager:
                 result.success = True
                 result.channels_sent.append(AlertChannel.TELEGRAM)
                 logger.info(
-                    f"Direct Telegram alert sent for {card.strategy_id} "
+                    f"Direct Telegram alert sent for {card.deployment_id} "
                     f"(severity={card.severity.value}, message_id={send_result.message_id})"
                 )
             else:
                 result.channels_failed.append(AlertChannel.TELEGRAM)
                 result.errors[AlertChannel.TELEGRAM] = send_result.error or "Unknown error"
-                logger.error(f"Direct Telegram alert failed for {card.strategy_id}: {send_result.error}")
+                logger.error(f"Direct Telegram alert failed for {card.deployment_id}: {send_result.error}")
         except Exception as e:
             result.channels_failed.append(AlertChannel.TELEGRAM)
             result.errors[AlertChannel.TELEGRAM] = str(e)
-            logger.exception(f"Exception sending direct Telegram alert for {card.strategy_id}: {e}")
+            logger.exception(f"Exception sending direct Telegram alert for {card.deployment_id}: {e}")
 
         return result
 
@@ -490,6 +492,7 @@ class AlertManager:
         """
         return asyncio.run(self.send_direct_telegram_alert(card))
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_direct_slack_alert(
         self,
         card: OperatorCard,
@@ -514,7 +517,7 @@ class AlertManager:
         current_time = self._get_current_time()
         if not self.config.should_send_alert(card.severity, current_time):
             result.skipped_reason = f"Quiet hours active (severity={card.severity.value})"
-            logger.info(f"Direct Slack alert skipped for {card.strategy_id}: {result.skipped_reason}")
+            logger.info(f"Direct Slack alert skipped for {card.deployment_id}: {result.skipped_reason}")
             return result
 
         if not self._slack_channel:
@@ -533,16 +536,16 @@ class AlertManager:
                 if send_result.thread_ts:
                     thread_info = f", thread_ts={send_result.thread_ts}"
                 logger.info(
-                    f"Direct Slack alert sent for {card.strategy_id} (severity={card.severity.value}{thread_info})"
+                    f"Direct Slack alert sent for {card.deployment_id} (severity={card.severity.value}{thread_info})"
                 )
             else:
                 result.channels_failed.append(AlertChannel.SLACK)
                 result.errors[AlertChannel.SLACK] = send_result.error or "Unknown error"
-                logger.error(f"Direct Slack alert failed for {card.strategy_id}: {send_result.error}")
+                logger.error(f"Direct Slack alert failed for {card.deployment_id}: {send_result.error}")
         except Exception as e:
             result.channels_failed.append(AlertChannel.SLACK)
             result.errors[AlertChannel.SLACK] = str(e)
-            logger.exception(f"Exception sending direct Slack alert for {card.strategy_id}: {e}")
+            logger.exception(f"Exception sending direct Slack alert for {card.deployment_id}: {e}")
 
         return result
 
@@ -562,45 +565,45 @@ class AlertManager:
         """
         return asyncio.run(self.send_direct_slack_alert(card, thread_ts=thread_ts))
 
-    def set_slack_thread(self, strategy_id: str, thread_ts: str) -> None:
+    def set_slack_thread(self, deployment_id: str, thread_ts: str) -> None:
         """Set the Slack thread timestamp for a strategy.
 
         This enables subsequent alerts for this strategy to be
         posted as thread replies.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             thread_ts: The thread timestamp from Slack
         """
         if self._slack_channel:
-            self._slack_channel.set_thread_for_strategy(strategy_id, thread_ts)
+            self._slack_channel.set_thread_for_strategy(deployment_id, thread_ts)
 
-    def clear_slack_thread(self, strategy_id: str) -> None:
+    def clear_slack_thread(self, deployment_id: str) -> None:
         """Clear the Slack thread context for a strategy.
 
         Call this when a strategy issue is resolved to start fresh
         threads for future alerts.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
         """
         if self._slack_channel:
-            self._slack_channel.clear_thread(strategy_id)
+            self._slack_channel.clear_thread(deployment_id)
 
     def clear_cooldown(
         self,
-        strategy_id: str,
+        deployment_id: str,
         condition: AlertCondition | None = None,
     ) -> None:
         """Clear cooldown state for a strategy.
 
         Args:
-            strategy_id: The strategy to clear cooldowns for
+            deployment_id: The strategy to clear cooldowns for
             condition: Optional specific condition to clear (clears all if None)
         """
         if condition:
-            self.cooldown_tracker.clear_cooldown(strategy_id, condition)
-            logger.debug(f"Cleared cooldown for {strategy_id}:{condition.value}")
+            self.cooldown_tracker.clear_cooldown(deployment_id, condition)
+            logger.debug(f"Cleared cooldown for {deployment_id}:{condition.value}")
         else:
-            self.cooldown_tracker.clear_all_for_strategy(strategy_id)
-            logger.debug(f"Cleared all cooldowns for {strategy_id}")
+            self.cooldown_tracker.clear_all_for_strategy(deployment_id)
+            logger.debug(f"Cleared all cooldowns for {deployment_id}")

@@ -5,7 +5,7 @@ Pins the contract for ``create_teardown_state_manager`` and
 
 - No ``database_url`` and local mode → SQLite backend.
 - ``database_url`` set → Postgres plugin loaded via entry point.
-- Hosted (``AGENT_ID`` set) without ``database_url`` → raise loud
+- Hosted (``ALMANAK_IS_HOSTED`` set) without ``database_url`` → raise loud
   ``RuntimeError`` (the April 30 silent-failure guard).
 - ``database_url`` set but the plugin isn't installed → raise loud
   ``RuntimeError``.
@@ -36,14 +36,15 @@ from almanak.framework.teardown import (
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def _local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force local mode by clearing AGENT_ID."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    """Force local mode by clearing the hosted-mode flag."""
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
 
 
 @pytest.fixture
 def _hosted_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force hosted mode by setting AGENT_ID."""
-    monkeypatch.setenv("AGENT_ID", "test-agent-uuid")
+    """Force hosted mode."""
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "test-agent-uuid")
 
 
 # ---------------------------------------------------------------------------

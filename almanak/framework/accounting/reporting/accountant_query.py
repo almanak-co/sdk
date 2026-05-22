@@ -9,7 +9,7 @@ folder's SQLite DB after a real round-trip.
 What lives *here*:
 
 * :func:`accountant_report_from_db` — typed, filtered query over the
-  same SDK-owned accounting tables. Filters by ``strategy_id``,
+  same SDK-owned accounting tables. Filters by ``deployment_id``,
   ``deployment_id``, ``cycle_ids``, ``since`` / ``until`` time window, or
   a tax-period label that resolves to a calendar window. Re-uses the
   cell evaluators from :mod:`accountant_test` so the matrix concept
@@ -112,7 +112,6 @@ class AccountingReportFilter:
     rows". Combine arbitrarily; filters AND together at the SQL layer.
     """
 
-    strategy_id: str | None = None
     deployment_id: str | None = None
     # ``deployment_ids`` accepts a multi-value IN-clause for the
     # multi-deployment fallback path (CodeRabbit round 5, 2026-05-02). When
@@ -148,14 +147,13 @@ class AccountingReportFilter:
 # ─── Query helpers ───────────────────────────────────────────────────────
 
 
-# Per-table list of filter columns. The "core" filters (strategy_id,
+# Per-table list of filter columns. The "core" filters (deployment_id,
 # deployment_id, timestamp window) apply to every table; cycle_ids
 # restricts at the row level the same way. We hold the column list per
-# table because portfolio_metrics has only `strategy_id` (no cycle_id /
+# table because portfolio_metrics has only `deployment_id` (no cycle_id /
 # timestamp on the canonical row).
 _TABLE_FILTER_COLUMNS: dict[str, dict[str, str]] = {
     "transaction_ledger": {
-        "strategy_id": "strategy_id",
         "deployment_id": "deployment_id",
         "cycle_id": "cycle_id",
         "timestamp": "timestamp",
@@ -166,23 +164,19 @@ _TABLE_FILTER_COLUMNS: dict[str, dict[str, str]] = {
         "timestamp": "timestamp",
     },
     "accounting_events": {
-        "strategy_id": "strategy_id",
         "deployment_id": "deployment_id",
         "cycle_id": "cycle_id",
         "timestamp": "timestamp",
     },
     "portfolio_snapshots": {
-        "strategy_id": "strategy_id",
         "deployment_id": "deployment_id",
         "cycle_id": "cycle_id",
         "timestamp": "timestamp",
     },
     "portfolio_metrics": {
-        "strategy_id": "strategy_id",
         "deployment_id": "deployment_id",
     },
     "position_state_snapshots": {
-        "strategy_id": "strategy_id",
         "deployment_id": "deployment_id",
         "cycle_id": "cycle_id",
         "timestamp": "captured_at",
@@ -210,6 +204,7 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cur.fetchall()}
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _filtered_rows(  # noqa: C901
     conn: sqlite3.Connection,
     table: str,
@@ -243,11 +238,6 @@ def _filtered_rows(  # noqa: C901
     # would widen the read past the requested scope and contaminate the
     # cell matrix. Return ``[]`` instead — "no rows match a filter we
     # can't enforce" is the only safe answer.
-    if filt.strategy_id and "strategy_id" in cols:
-        if cols["strategy_id"] not in live_cols:
-            return []
-        where.append(f"{cols['strategy_id']} = ?")
-        params.append(filt.strategy_id)
     if filt.deployment_id and "deployment_id" in cols:
         if cols["deployment_id"] not in live_cols:
             return []
@@ -291,7 +281,7 @@ def _filtered_rows(  # noqa: C901
         if cols["timestamp"] not in live_cols:
             # CodeRabbit (2026-05-02 round 4): caller requested a time
             # window but the live table lacks a timestamp column. Return
-            # [] for symmetry with the strategy_id / deployment_id /
+            # [] for symmetry with the deployment_id / deployment_id /
             # cycle_ids paths above — silently widening to all rows would
             # contaminate tax-period reports on older schemas.
             return []
@@ -325,7 +315,6 @@ def accountant_report_from_db(
     conn_or_path: sqlite3.Connection | str | Path,
     *,
     primitive: Primitive,
-    strategy_id: str | None = None,
     deployment_id: str | None = None,
     cycle_ids: list[str] | tuple[str, ...] | None = None,
     since: datetime | None = None,
@@ -353,12 +342,11 @@ def accountant_report_from_db(
     primitive
         ``"lp"``, ``"looping"``, or ``"perp"`` — selects the
         primitive-specific cells appended to the 15 generic cells.
-    strategy_id, deployment_id, cycle_ids, since, until, tax_period
+    deployment_id, cycle_ids, since, until, tax_period
         Filter dimensions. All optional. ``None`` means "no filter on
         this dimension". ``cycle_ids`` accepts list or tuple.
     """
     filt = AccountingReportFilter(
-        strategy_id=strategy_id,
         deployment_id=deployment_id,
         cycle_ids=tuple(cycle_ids) if cycle_ids is not None else None,
         since=since,
@@ -383,56 +371,7 @@ def accountant_report_from_db(
 
     try:
         ledger = _filtered_rows(conn, "transaction_ledger", filt)
-        # Codex P2 / CodeRabbit (2026-05-02): position_events has no
-        # strategy_id column. A bare strategy_id filter would silently leak
-        # cross-strategy rows on a shared/hosted DB, contaminating LP1/LP3/
-        # G7 cells. When strategy_id is requested but deployment_id is not
-        # supplied directly, derive matching deployment_ids from the
-        # filtered ledger (which DOES carry strategy_id) and use them to
-        # narrow position_events. If the ledger has zero rows for this
-        # strategy in the requested window, return zero position_events
-        # rather than ALL position_events.
-        if filt.strategy_id and not filt.deployment_id:
-            ledger_deployment_ids = sorted(
-                {
-                    str(r.get("deployment_id"))
-                    for r in ledger
-                    if r.get("deployment_id") is not None and str(r.get("deployment_id")) != ""
-                }
-            )
-            if not ledger_deployment_ids:
-                # No ledger rows for this strategy → no position_events to
-                # report on either. Skip the unscoped read entirely.
-                pos_events: list[dict[str, Any]] = []
-            elif len(ledger_deployment_ids) == 1:
-                # Exactly one deployment_id — narrow position_events with it.
-                derived = AccountingReportFilter(
-                    strategy_id=filt.strategy_id,
-                    deployment_id=ledger_deployment_ids[0],
-                    cycle_ids=filt.cycle_ids,
-                    since=filt.since,
-                    until=filt.until,
-                    tax_period=filt.tax_period,
-                )
-                pos_events = _filtered_rows(conn, "position_events", derived)
-            else:
-                # Multiple deployment_ids for the same strategy_id is
-                # legal (re-deploy). CodeRabbit (round 5, 2026-05-02): use
-                # ``deployment_id IN (ledger_deployment_ids)`` directly —
-                # cycle_ids could overlap across deployments and the
-                # cycle_id-only fallback would leak cross-deployment rows.
-                derived = AccountingReportFilter(
-                    strategy_id=filt.strategy_id,
-                    deployment_id=None,
-                    deployment_ids=tuple(ledger_deployment_ids),
-                    cycle_ids=filt.cycle_ids,
-                    since=filt.since,
-                    until=filt.until,
-                    tax_period=filt.tax_period,
-                )
-                pos_events = _filtered_rows(conn, "position_events", derived)
-        else:
-            pos_events = _filtered_rows(conn, "position_events", filt)
+        pos_events = _filtered_rows(conn, "position_events", filt)
         acct_events = _filtered_rows(conn, "accounting_events", filt)
         snapshots = _filtered_rows(conn, "portfolio_snapshots", filt)
         metrics = _filtered_rows(conn, "portfolio_metrics", filt)

@@ -37,7 +37,7 @@ def base_timestamp() -> datetime:
 @pytest.fixture
 def tracker() -> PaperPortfolioTracker:
     """Create a fresh PaperPortfolioTracker."""
-    return PaperPortfolioTracker(strategy_id="test_strategy")
+    return PaperPortfolioTracker(deployment_id="test_strategy")
 
 
 @pytest.fixture
@@ -90,16 +90,16 @@ class TestPaperPortfolioTrackerInit:
     """Tests for tracker initialization."""
 
     def test_tracker_creation(self) -> None:
-        """Test creating a tracker with strategy_id."""
-        tracker = PaperPortfolioTracker(strategy_id="my_strategy")
-        assert tracker.strategy_id == "my_strategy"
+        """Test creating a tracker with deployment_id."""
+        tracker = PaperPortfolioTracker(deployment_id="my_strategy")
+        assert tracker.deployment_id == "my_strategy"
         assert tracker.chain == "arbitrum"  # default
         assert tracker.session_started is None
         assert not tracker.is_session_active()
 
     def test_tracker_with_custom_chain(self) -> None:
         """Test creating a tracker with custom chain."""
-        tracker = PaperPortfolioTracker(strategy_id="test", chain="ethereum")
+        tracker = PaperPortfolioTracker(deployment_id="test", chain="ethereum")
         assert tracker.chain == "ethereum"
 
 
@@ -450,7 +450,7 @@ class TestPaperPortfolioTrackerGetSummary:
         summary = tracker_with_session.get_summary()
 
         assert isinstance(summary, PaperTradingSummary)
-        assert summary.strategy_id == "test_strategy"
+        assert summary.deployment_id == "test_strategy"
         assert summary.total_trades == 0
         assert summary.successful_trades == 0
         assert summary.failed_trades == 0
@@ -666,7 +666,7 @@ class TestPaperPortfolioTrackerSerialization:
 
         data = tracker_with_session.to_dict()
 
-        assert data["strategy_id"] == "test_strategy"
+        assert data["deployment_id"] == "test_strategy"
         assert data["chain"] == "arbitrum"
         assert data["session_started"] is not None
         assert data["initial_balances"] == {"ETH": "10", "USDC": "10000"}
@@ -681,7 +681,7 @@ class TestPaperPortfolioTrackerSerialization:
     def test_from_dict(self, base_timestamp: datetime) -> None:
         """Test deserialization from dict."""
         data = {
-            "strategy_id": "restored_strategy",
+            "deployment_id": "restored_strategy",
             "chain": "ethereum",
             "session_started": base_timestamp.isoformat(),
             "initial_balances": {"ETH": "5", "USDC": "5000"},
@@ -712,7 +712,7 @@ class TestPaperPortfolioTrackerSerialization:
 
         tracker = PaperPortfolioTracker.from_dict(data)
 
-        assert tracker.strategy_id == "restored_strategy"
+        assert tracker.deployment_id == "restored_strategy"
         assert tracker.chain == "ethereum"
         assert tracker.session_started == base_timestamp
         assert tracker.initial_balances == {
@@ -745,7 +745,7 @@ class TestPaperPortfolioTrackerSerialization:
         restored = PaperPortfolioTracker.from_dict(data)
 
         # Verify
-        assert restored.strategy_id == tracker_with_session.strategy_id
+        assert restored.deployment_id == tracker_with_session.deployment_id
         assert restored.chain == tracker_with_session.chain
         assert restored.initial_balances == tracker_with_session.initial_balances
         assert restored.current_balances == tracker_with_session.current_balances

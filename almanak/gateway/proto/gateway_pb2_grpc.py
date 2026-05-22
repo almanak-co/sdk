@@ -7377,8 +7377,8 @@ class PositionServiceServicer(object):
         Idempotency: running Reconcile twice back-to-back with no on-chain
         change is a no-op (ADR §4.1 formal proof).
 
-        Auth: same gateway-auth posture as StateService RPCs (resolve_agent_id
-        on deployment_id). v1 accepts the existing strategy-bound auth token;
+        Auth: same gateway-auth posture as StateService RPCs. v1 accepts the
+        existing strategy-bound auth token;
         a future hardened posture may require an additional "operator" role
         claim — out of scope for T24 (ADR §6 + §8.2).
         """

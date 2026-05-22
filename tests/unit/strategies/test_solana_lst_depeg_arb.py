@@ -23,7 +23,7 @@ def strategy():
         "stop_loss_depeg_pct": 3.0,
     }
     s.state = {}
-    s._strategy_id = "test-lst-depeg"
+    s._deployment_id = "test-lst-depeg"
     return s
 
 
@@ -238,7 +238,7 @@ class TestJitoSOLConfig:
             "stop_loss_depeg_pct": 3.0,
         }
         s.state = {}
-        s._strategy_id = "test-jitosol-depeg"
+        s._deployment_id = "test-jitosol-depeg"
 
         def price_fn(token):
             prices = {"SOL": Decimal("200"), "JitoSOL": Decimal("196")}  # 2% depeg

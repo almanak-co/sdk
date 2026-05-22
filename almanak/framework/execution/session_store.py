@@ -16,7 +16,7 @@ Example:
     # Save a session
     session = ExecutionSession(
         session_id="sess_123",
-        strategy_id="strategy_a",
+        deployment_id="strategy_a",
         intent_id="intent_456",
         phase=ExecutionPhase.PREPARING,
     )
@@ -302,17 +302,17 @@ class ExecutionSessionStore:
         sessions.sort(key=lambda s: s.created_at)
         return sessions
 
-    def get_sessions_by_strategy(self, strategy_id: str) -> list[ExecutionSession]:
+    def get_sessions_by_strategy(self, deployment_id: str) -> list[ExecutionSession]:
         """Get all sessions for a specific strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
 
         Returns:
             List of ExecutionSession objects for the strategy
         """
         all_sessions = self.get_all_sessions()
-        return [s for s in all_sessions if s.strategy_id == strategy_id]
+        return [s for s in all_sessions if s.deployment_id == deployment_id]
 
     def cleanup_old_sessions(
         self,

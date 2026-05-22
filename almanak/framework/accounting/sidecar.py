@@ -1,7 +1,7 @@
 """AccountingSidecarWriter — best-effort per-strategy .jsonl sidecar file.
 
 After each successful intent execution the runner appends one JSON line to
-``~/.almanak/accounting/<strategy_id>.jsonl``.  The dashboard (separate repo)
+``~/.almanak/accounting/<deployment_id>.jsonl``.  The dashboard (separate repo)
 tails this file to gain real-time visibility into SDK execution data without
 touching ``gateway.db`` or ``almanak_state.db``.
 
@@ -61,9 +61,9 @@ def _sidecar_dir() -> Path:
     return home / ".almanak" / "accounting"
 
 
-def _sidecar_path(strategy_id: str) -> Path:
-    """Return the absolute path for *strategy_id*'s sidecar file."""
-    return _sidecar_dir() / f"{strategy_id}.jsonl"
+def _sidecar_path(deployment_id: str) -> Path:
+    """Return the absolute path for *deployment_id*'s sidecar file."""
+    return _sidecar_dir() / f"{deployment_id}.jsonl"
 
 
 def _or_none(value: Any) -> str | None:
@@ -82,7 +82,7 @@ class AccountingSidecarWriter:
         from almanak.framework.accounting.sidecar import AccountingSidecarWriter
 
         AccountingSidecarWriter().append(
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             intent=intent,
             result=result,
             chain=chain,
@@ -95,7 +95,7 @@ class AccountingSidecarWriter:
     def append(
         self,
         *,
-        strategy_id: str,
+        deployment_id: str,
         intent: Any,
         result: Any,
         chain: str,
@@ -105,7 +105,7 @@ class AccountingSidecarWriter:
 
         Parameters
         ----------
-        strategy_id:
+        deployment_id:
             The owning strategy's ID; used to derive the file path.
         intent:
             The executed intent object (duck-typed; see field extraction below).
@@ -124,20 +124,20 @@ class AccountingSidecarWriter:
         """
         try:
             line = self._build_line(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 intent=intent,
                 result=result,
                 chain=chain,
                 price_oracle=price_oracle,
             )
-            path = _sidecar_path(strategy_id)
+            path = _sidecar_path(deployment_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(line, default=str) + "\n")
         except Exception:  # noqa: BLE001
             logger.warning(
                 "AccountingSidecarWriter: failed to write sidecar for strategy=%s",
-                strategy_id,
+                deployment_id,
                 exc_info=True,
             )
 
@@ -148,7 +148,7 @@ class AccountingSidecarWriter:
     @staticmethod
     def _build_line(
         *,
-        strategy_id: str,
+        deployment_id: str,
         intent: Any,
         result: Any,
         chain: str,
@@ -259,5 +259,5 @@ class AccountingSidecarWriter:
             "gas_usd": gas_usd,
             "chain": chain,
             "protocol": protocol,
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
         }

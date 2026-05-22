@@ -143,7 +143,7 @@ def _make_strategy(**config_overrides):
     strategy.state = {}  # Runner sets self.state as a dict
     strategy._position = None
     strategy._entry_volume_h24 = 0.0
-    strategy._strategy_id = "test-strategy-123"
+    strategy._deployment_id = "test-strategy-123"
     strategy._wallet_address = "test_wallet"
     return strategy
 

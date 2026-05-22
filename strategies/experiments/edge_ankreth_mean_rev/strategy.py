@@ -340,7 +340,7 @@ class EdgeAnkrethMeanRevStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "edge_ankreth_mean_rev"),
+            deployment_id=getattr(self, "deployment_id", "edge_ankreth_mean_rev"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

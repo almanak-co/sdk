@@ -14,7 +14,7 @@ config = load_config()  # called once at the relevant framework boot surface
 ```
 
 `load_config()` returns either a `LocalConfig` or a `HostedConfig` depending
-on `is_hosted()` (the `AGENT_ID` single-reader rule). Both share
+on `is_hosted()` (the `ALMANAK_IS_HOSTED` single-reader rule). Both share
 `BaseConfig.gateway` so any code that only needs gateway settings can take
 `BaseConfig` and ignore the discriminator. The currently-wired boot-time
 submodels include `gateway`, `connectors`, `backtest`, `simulation`, `cli`,

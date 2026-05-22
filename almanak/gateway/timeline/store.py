@@ -8,14 +8,12 @@ This is the single source of truth for timeline events. Strategies
 record events via ObserveService.RecordTimelineEvent, and dashboards
 read events via DashboardService.GetTimeline.
 
-Deployed-mode identifier contract:
-    In K8s, the platform injects ``AGENT_ID`` (a UUID) into every container.
-    The SDK strategy runner uses ``strategy.strategy_id`` (e.g.
-    ``"uniswap_rsi:abc123"``).  To keep metrics_db consistent with the
-    lifecycle tables (which already resolve to AGENT_ID), the PostgreSQL
-    backend applies the same ``_resolve_agent_id()`` mapping used by
-    ``PostgresLifecycleStore``.  SQLite / in-memory mode does NOT resolve
-    because ``AGENT_ID`` is not set in local dev.
+Identifier contract (blueprint 29):
+    There is one canonical identity — ``deployment_id`` — resolved once at
+    runner boot. Hosted: the platform deployment id (``ALMANAK_DEPLOYMENT_ID``);
+    local: a wallet+chain hash. The timeline store keys events on whatever
+    ``event.deployment_id`` carries (already the canonical ``deployment_id``);
+    there is no gateway-side identity translation on either backend.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ class TimelineEvent:
     """
 
     event_id: str
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     event_type: str
     description: str
@@ -66,7 +64,7 @@ class TimelineEvent:
         """Convert to dictionary for serialization."""
         d: dict[str, Any] = {
             "event_id": self.event_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "event_type": self.event_type,
             "description": self.description,
@@ -93,7 +91,7 @@ class TimelineEvent:
 
         return cls(
             event_id=data.get("event_id", str(uuid4())),
-            strategy_id=data.get("strategy_id", ""),
+            deployment_id=data.get("deployment_id", ""),
             timestamp=timestamp,
             event_type=data.get("event_type", "CUSTOM"),
             description=data.get("description", ""),
@@ -130,7 +128,7 @@ class TimelineStore:
         # Add event
         event = TimelineEvent(
             event_id=str(uuid4()),
-            strategy_id="my-strategy",
+            deployment_id="my-strategy",
             timestamp=datetime.now(UTC),
             event_type="TRADE",
             description="Swapped 100 USDC for ETH",
@@ -196,26 +194,6 @@ class TimelineStore:
                 "PostgreSQL" if self._uses_postgres else f"SQLite ({self._db_path})" if self._db_path else "memory"
             )
             logger.info(f"TimelineStore initialized (backend={backend})")
-
-    # =========================================================================
-    # Deployed-mode identifier resolution
-    # =========================================================================
-
-    @staticmethod
-    def _resolve_agent_id(strategy_id: str) -> str:
-        """Map SDK strategy_id to platform AGENT_ID in deployed mode.
-
-        Same contract as ``PostgresLifecycleStore._resolve_agent_id()``:
-        when the ``AGENT_ID`` env var is set (K8s pods), all metrics_db
-        keys use that value so lifecycle, state, and timeline tables are
-        consistent.  In local dev (no env var), passthrough.
-
-        Delegates env-var reading to `framework.deployment.agent_id()` —
-        `AGENT_ID` is the single deployment-mode signal across the SDK.
-        """
-        from almanak.framework.deployment import agent_id
-
-        return agent_id() or strategy_id
 
     # =========================================================================
     # PostgreSQL backend (deployed mode)
@@ -337,15 +315,15 @@ class TimelineStore:
     def _load_from_postgres(self) -> None:
         """Load events from PostgreSQL into the in-memory cache.
 
-        Events in PostgreSQL are keyed by the resolved agent_id (platform
-        AGENT_ID in deployed mode).  The cache is keyed the same way so
-        callers that resolve before lookup will find their data.
+        Events are keyed by the canonical ``deployment_id`` (blueprint 29);
+        the cache is keyed the same way so callers find their data with no
+        identity translation.
         """
         try:
             events = self._pg_submit(self._async_load_events())
             for event in events:
-                # Cache key = agent_id from PostgreSQL (already resolved)
-                self._cache[event.strategy_id].append(event)
+                # Cache key = deployment_id from PostgreSQL (canonical id)
+                self._cache[event.deployment_id].append(event)
             if events:
                 logger.info(f"Loaded {len(events)} timeline events from PostgreSQL")
         except Exception:
@@ -367,7 +345,7 @@ class TimelineStore:
         async with self._pg_pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT event_id, agent_id, timestamp, event_type,
+                SELECT event_id, deployment_id, timestamp, event_type,
                        description, tx_hash, chain, details_json,
                        COALESCE(cycle_id, '') as cycle_id,
                        COALESCE(phase, '') as phase
@@ -391,7 +369,7 @@ class TimelineStore:
                 events.append(
                     TimelineEvent(
                         event_id=row["event_id"],
-                        strategy_id=row["agent_id"],
+                        deployment_id=row["deployment_id"],
                         timestamp=row["timestamp"],
                         event_type=row["event_type"],
                         description=row["description"] or "",
@@ -408,7 +386,7 @@ class TimelineStore:
             return events
 
     def _persist_event_postgres(self, event: TimelineEvent, resolved_id: str) -> None:
-        """Persist event to PostgreSQL under the resolved agent_id."""
+        """Persist event to PostgreSQL under the canonical deployment_id."""
         try:
             self._pg_submit(self._async_persist_event(event, resolved_id))
         except Exception:
@@ -422,7 +400,7 @@ class TimelineStore:
                 await conn.execute(
                     """
                     INSERT INTO timeline_events
-                        (event_id, agent_id, timestamp, event_type, description,
+                        (event_id, deployment_id, timestamp, event_type, description,
                          tx_hash, chain, details_json, cycle_id, phase,
                          related_ledger_entry_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -452,7 +430,7 @@ class TimelineStore:
                 await conn.execute(
                     """
                     INSERT INTO timeline_events
-                        (event_id, agent_id, timestamp, event_type, description,
+                        (event_id, deployment_id, timestamp, event_type, description,
                          tx_hash, chain, details_json, cycle_id, phase)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (event_id) DO UPDATE SET
@@ -477,7 +455,7 @@ class TimelineStore:
                 )
 
     def _clear_events_postgres(self, resolved_id: str | None) -> None:
-        """Clear events from PostgreSQL using the resolved agent_id."""
+        """Clear events from PostgreSQL using the canonical deployment_id."""
         try:
             self._pg_submit(self._async_clear_events(resolved_id))
         except Exception:
@@ -488,7 +466,7 @@ class TimelineStore:
         async with self._pg_pool.acquire() as conn:
             if resolved_id is not None:
                 await conn.execute(
-                    "DELETE FROM timeline_events WHERE agent_id = $1",
+                    "DELETE FROM timeline_events WHERE deployment_id = $1",
                     resolved_id,
                 )
             else:
@@ -509,7 +487,7 @@ class TimelineStore:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS timeline_events (
                     event_id TEXT PRIMARY KEY,
-                    strategy_id TEXT NOT NULL,
+                    deployment_id TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     description TEXT,
@@ -522,6 +500,12 @@ class TimelineStore:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Migration (VIB-4722): rename strategy_id -> deployment_id on
+            # existing local DBs to match the unified identity column.
+            try:
+                conn.execute("ALTER TABLE timeline_events RENAME COLUMN strategy_id TO deployment_id")
+            except sqlite3.OperationalError:
+                pass  # Already renamed (or fresh DB created with deployment_id)
             # Migrate: add cycle_id and phase columns if not present (existing DBs)
             try:
                 conn.execute("ALTER TABLE timeline_events ADD COLUMN cycle_id TEXT DEFAULT ''")
@@ -538,8 +522,8 @@ class TimelineStore:
                 pass  # Column already exists
 
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_timeline_strategy_id
-                ON timeline_events(strategy_id)
+                CREATE INDEX IF NOT EXISTS idx_timeline_deployment_id
+                ON timeline_events(deployment_id)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_timestamp
@@ -565,7 +549,7 @@ class TimelineStore:
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
-                SELECT event_id, strategy_id, timestamp, event_type,
+                SELECT event_id, deployment_id, timestamp, event_type,
                        description, tx_hash, chain, details_json,
                        cycle_id, phase, related_ledger_entry_id
                 FROM timeline_events
@@ -582,7 +566,7 @@ class TimelineStore:
 
                 event = TimelineEvent(
                     event_id=row["event_id"],
-                    strategy_id=row["strategy_id"],
+                    deployment_id=row["deployment_id"],
                     timestamp=datetime.fromisoformat(row["timestamp"]),
                     event_type=row["event_type"],
                     description=row["description"] or "",
@@ -593,7 +577,7 @@ class TimelineStore:
                     phase=row["phase"] or "",
                     related_ledger_entry_id=row["related_ledger_entry_id"] or "",
                 )
-                self._cache[event.strategy_id].append(event)
+                self._cache[event.deployment_id].append(event)
 
             total_events = sum(len(events) for events in self._cache.values())
             if total_events > 0:
@@ -610,14 +594,14 @@ class TimelineStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO timeline_events
-                (event_id, strategy_id, timestamp, event_type, description,
+                (event_id, deployment_id, timestamp, event_type, description,
                  tx_hash, chain, details_json, cycle_id, phase,
                  related_ledger_entry_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
-                    event.strategy_id,
+                    event.deployment_id,
                     event.timestamp.isoformat(),
                     event.event_type,
                     event.description,
@@ -644,8 +628,9 @@ class TimelineStore:
         if not self._initialized:
             self.initialize()
 
-        # Resolve the cache/DB key: AGENT_ID in deployed mode, passthrough locally
-        cache_key = self._resolve_agent_id(event.strategy_id) if self._uses_postgres else event.strategy_id
+        # One identity (blueprint 29): event.deployment_id is the canonical
+        # deployment_id resolved at runner boot — used directly as the key.
+        cache_key = event.deployment_id
 
         with self._lock:
             # Add to cache under resolved key
@@ -660,11 +645,11 @@ class TimelineStore:
             elif self._db_path:
                 self._persist_event_sqlite(event)
 
-        logger.debug(f"Added timeline event: {event.event_type} for {event.strategy_id}")
+        logger.debug(f"Added timeline event: {event.event_type} for {event.deployment_id}")
 
     def get_events(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int = 50,
         event_type: str | None = None,
         since: datetime | None = None,
@@ -673,8 +658,8 @@ class TimelineStore:
         """Get timeline events for a strategy.
 
         Args:
-            strategy_id: Strategy identifier (SDK strategy_id; resolved
-                to AGENT_ID automatically in deployed mode)
+            deployment_id: The canonical deployment_id (blueprint 29 — no
+                gateway-side identity translation).
             limit: Maximum number of events to return
             event_type: Optional filter by event type
             since: Optional filter for events after this timestamp
@@ -689,7 +674,7 @@ class TimelineStore:
         if not self._initialized:
             self.initialize()
 
-        cache_key = self._resolve_agent_id(strategy_id) if self._uses_postgres else strategy_id
+        cache_key = deployment_id
 
         with self._lock:
             events = self._cache.get(cache_key, [])
@@ -733,11 +718,11 @@ class TimelineStore:
 
             return all_events[:limit]
 
-    def get_strategy_ids(self) -> list[str]:
-        """Get all strategy IDs that have timeline events.
+    def get_deployment_ids(self) -> list[str]:
+        """Get all deployment IDs that have timeline events.
 
         Returns:
-            List of strategy IDs
+            List of deployment IDs
         """
         if not self._initialized:
             self.initialize()
@@ -745,31 +730,27 @@ class TimelineStore:
         with self._lock:
             return list(self._cache.keys())
 
-    def clear_events(self, strategy_id: str | None = None) -> None:
+    def clear_events(self, deployment_id: str | None = None) -> None:
         """Clear events from the store.
 
         Args:
-            strategy_id: If provided, only clear events for this strategy.
+            deployment_id: If provided, only clear events for this strategy.
                         If None, clear all events.
         """
-        resolved_id = (
-            self._resolve_agent_id(strategy_id) if strategy_id is not None and self._uses_postgres else strategy_id
-        )
-
         with self._lock:
-            if resolved_id is not None:
-                self._cache.pop(resolved_id, None)
+            if deployment_id is not None:
+                self._cache.pop(deployment_id, None)
             else:
                 self._cache.clear()
 
             if self._uses_postgres:
-                self._clear_events_postgres(resolved_id)
+                self._clear_events_postgres(deployment_id)
             elif self._db_path:
                 with sqlite3.connect(str(self._db_path)) as conn:
-                    if strategy_id is not None:
+                    if deployment_id is not None:
                         conn.execute(
-                            "DELETE FROM timeline_events WHERE strategy_id = ?",
-                            (strategy_id,),
+                            "DELETE FROM timeline_events WHERE deployment_id = ?",
+                            (deployment_id,),
                         )
                     else:
                         conn.execute("DELETE FROM timeline_events")

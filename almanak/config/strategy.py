@@ -16,7 +16,7 @@ Schema discipline:
   configs both validate.
 * All fields are optional. The framework's existing fallbacks
   (decorator metadata for ``chain``, derived wallet, generated
-  ``strategy_id``) keep working.
+  ``deployment_id``) keep working.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ class StrategyConfig(BaseModel):
     # Identity — framework auto-fills from wallet derivation / decorator name
     # if absent.
     wallet_address: str | None = None
-    strategy_id: str | None = None
+    deployment_id: str | None = None
     strategy_display_name: str | None = None
 
     # Pool / market shape (optional; per-strategy interpretation).

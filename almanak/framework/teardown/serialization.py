@@ -40,7 +40,7 @@ def _parse_datetime(value: str | None) -> datetime | None:
 def _teardown_state_to_dict(state: TeardownState) -> dict[str, Any]:
     return {
         "teardown_id": state.teardown_id,
-        "strategy_id": state.strategy_id,
+        "deployment_id": state.deployment_id,
         "mode": state.mode.value,
         "status": state.status.value,
         "total_intents": state.total_intents,
@@ -82,7 +82,7 @@ def _teardown_state_from_dict(data: dict[str, Any]) -> TeardownState:
 
     return TeardownState(
         teardown_id=data["teardown_id"],
-        strategy_id=data["strategy_id"],
+        deployment_id=data["deployment_id"],
         mode=TeardownMode(data["mode"]),
         status=TeardownStatus(data["status"]),
         total_intents=int(data.get("total_intents", 0)),

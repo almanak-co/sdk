@@ -21,7 +21,7 @@ from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
 def _make_snapshot(total_value_usd: Decimal, available_cash_usd: Decimal) -> PortfolioSnapshot:
     return PortfolioSnapshot(
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         total_value_usd=total_value_usd,
         available_cash_usd=available_cash_usd,
@@ -90,7 +90,6 @@ class TestMetricsFallbackUpdatePath:
             available_cash_usd=Decimal("1050"),
         )
         existing = PortfolioMetrics(
-            strategy_id="test-strategy",
             timestamp=datetime(2025, 12, 31, tzinfo=UTC),
             total_value_usd=Decimal("950"),
             initial_value_usd=Decimal("1000"),
@@ -115,7 +114,6 @@ class TestMetricsFallbackUpdatePath:
             available_cash_usd=Decimal("50"),
         )
         existing = PortfolioMetrics(
-            strategy_id="test-strategy",
             timestamp=datetime(2025, 12, 31, tzinfo=UTC),
             total_value_usd=Decimal("1000"),
             initial_value_usd=Decimal("1000"),

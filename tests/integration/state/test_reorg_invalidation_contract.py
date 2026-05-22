@@ -93,7 +93,6 @@ def _ledger(*, id_: str, intent_type: str = "LP_OPEN", tx_hash: str = "0xtx") ->
     return LedgerEntry(
         id=id_,
         cycle_id="reorg-cycle",
-        strategy_id="reorg-test",
         deployment_id=_DEPLOYMENT,
         execution_mode="live",
         timestamp=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),

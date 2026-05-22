@@ -157,7 +157,6 @@ ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
 class AccountingIdentity:
     id: str
     deployment_id: str
-    strategy_id: str
     cycle_id: str
     execution_mode: str
     timestamp: datetime

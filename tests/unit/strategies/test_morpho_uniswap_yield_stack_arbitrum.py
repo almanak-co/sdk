@@ -25,7 +25,7 @@ def strategy():
     strat.config = {}
     strat._chain = "arbitrum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-morpho-univ3-arb"
+    strat._deployment_id = "test-morpho-univ3-arb"
     strat.collateral_token = "WETH"
     strat.collateral_amount = Decimal("0.05")
     strat.borrow_token = "USDC"

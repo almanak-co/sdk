@@ -1,5 +1,5 @@
 {
-    "strategy_id": "lagoon_vault_template",
+    "deployment_id": "lagoon_vault_template",
     "strategy_name": "lagoon_vault_template",
     "description": "Template: Lagoon ERC-7540 vault-wrapped momentum strategy on Base using Aerodrome swaps. Requires a deployed Lagoon vault -- see README.",
     "trade_size_usd": 500,

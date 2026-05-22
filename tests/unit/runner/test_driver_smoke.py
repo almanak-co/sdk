@@ -61,7 +61,7 @@ def _make_runner(*, dry_run: bool = False, max_retries: int = 2) -> StrategyRunn
 
 def _make_strategy(*, intent=None) -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "driver-test-strategy"
+    strategy.deployment_id = "driver-test-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890AbcdEF1234567890aBcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -424,7 +424,7 @@ class TestBridgeWaitingResume:
         # Resume progress says step 0 was completed
         resume = ExecutionProgress(
             execution_id="eid",
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             intents_hash="h",
             total_steps=2,
         )

@@ -386,7 +386,7 @@ class EnsoRSIStrategy(IntentStrategy):
             logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_enso_rsi"),
+            deployment_id=getattr(self, "deployment_id", "demo_enso_rsi"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -59,7 +59,7 @@ def _make_runner(
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     return strategy
@@ -92,19 +92,19 @@ def _make_state(
         orchestrator=orchestrator,
         start_time=datetime.now(UTC),
         resume_progress=resume_progress,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         first_intent=intents[0] if intents else None,
     )
 
 
 def _make_progress(
-    strategy_id: str = "test-strategy",
+    deployment_id: str = "test-strategy",
     *,
     total_steps: int = 1,
 ) -> ExecutionProgress:
     return ExecutionProgress(
         execution_id="abcd",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         intents_hash="hash",
         total_steps=total_steps,
     )
@@ -620,7 +620,7 @@ class TestBridgeWaitFinalizeExtended:
         runner = _make_runner()
         runner._save_execution_progress = AsyncMock()
         strategy = MagicMock(spec=[])  # no on_intent_executed, save_state etc.
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1111"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
@@ -662,7 +662,7 @@ class TestBridgeWaitBuildFailedResult:
         runner._save_execution_progress = AsyncMock()
         # Use a valid checksum wallet so Web3BalanceProvider construction succeeds
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890AbcdEF1234567890aBcdef12345678"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"), chain="arbitrum")
@@ -693,7 +693,7 @@ class TestBridgeWaitBuildFailedResult:
         # Use a checksummed wallet address so Web3BalanceProvider construction does not
         # raise during the diagnostic path.
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890AbcdEF1234567890aBcdef12345678"
 

@@ -5,11 +5,11 @@ enabling operators to safely close all positions with position-aware loss caps,
 escalating slippage, and full safety guarantees.
 
 Endpoints:
-- GET  /{strategy_id}/close/preview - Preview what closing will do
-- POST /{strategy_id}/close - Start closing the strategy
-- GET  /{strategy_id}/close/status - Get current status
-- POST /{strategy_id}/close/cancel - Cancel an in-progress close
-- POST /{strategy_id}/close/approve-escalation - Approve higher slippage
+- GET  /{deployment_id}/close/preview - Preview what closing will do
+- POST /{deployment_id}/close - Start closing the strategy
+- GET  /{deployment_id}/close/status - Get current status
+- POST /{deployment_id}/close/cancel - Cancel an in-progress close
+- POST /{deployment_id}/close/approve-escalation - Approve higher slippage
 """
 
 import json
@@ -55,11 +55,11 @@ class StrategyRegistryProtocol(Protocol):
     of mock data.
     """
 
-    def get_strategy(self, strategy_id: str) -> Optional["IntentStrategy"]:
+    def get_strategy(self, deployment_id: str) -> Optional["IntentStrategy"]:
         """Get a strategy by ID.
 
         Args:
-            strategy_id: The strategy identifier
+            deployment_id: The deployment identifier
 
         Returns:
             IntentStrategy instance if found, None otherwise
@@ -67,10 +67,10 @@ class StrategyRegistryProtocol(Protocol):
         ...
 
     def list_strategies(self) -> list[str]:
-        """List all registered strategy IDs.
+        """List all registered deployment IDs.
 
         Returns:
-            List of strategy IDs
+            List of deployment IDs
         """
         ...
 
@@ -86,21 +86,21 @@ class InMemoryStrategyRegistry:
 
     def register(self, strategy: "IntentStrategy") -> None:
         """Register a strategy instance."""
-        self._strategies[strategy.strategy_id] = strategy
-        logger.info(f"Registered strategy: {strategy.strategy_id}")
+        self._strategies[strategy.deployment_id] = strategy
+        logger.info(f"Registered strategy: {strategy.deployment_id}")
 
-    def unregister(self, strategy_id: str) -> None:
+    def unregister(self, deployment_id: str) -> None:
         """Unregister a strategy by ID."""
-        if strategy_id in self._strategies:
-            del self._strategies[strategy_id]
-            logger.info(f"Unregistered strategy: {strategy_id}")
+        if deployment_id in self._strategies:
+            del self._strategies[deployment_id]
+            logger.info(f"Unregistered strategy: {deployment_id}")
 
-    def get_strategy(self, strategy_id: str) -> Optional["IntentStrategy"]:
+    def get_strategy(self, deployment_id: str) -> Optional["IntentStrategy"]:
         """Get a strategy by ID."""
-        return self._strategies.get(strategy_id)
+        return self._strategies.get(deployment_id)
 
     def list_strategies(self) -> list[str]:
-        """List all registered strategy IDs."""
+        """List all registered deployment IDs."""
         return list(self._strategies.keys())
 
 
@@ -140,7 +140,7 @@ class CloseRequest(BaseModel):
 class ClosePreviewResponse(BaseModel):
     """Preview of what closing will do."""
 
-    strategy_id: str
+    deployment_id: str
     strategy_name: str
     mode: str
 
@@ -172,7 +172,7 @@ class CloseStartedResponse(BaseModel):
     """Response after starting close."""
 
     teardown_id: str
-    strategy_id: str
+    deployment_id: str
     mode: str
     status: str  # "cancel_window", "executing", etc.
 
@@ -188,7 +188,7 @@ class CloseStatusResponse(BaseModel):
     """Current status of close operation."""
 
     teardown_id: str
-    strategy_id: str
+    deployment_id: str
     status: str  # "cancel_window", "executing", "paused", "completed", "failed"
 
     # Progress
@@ -210,7 +210,7 @@ class CancelResponse(BaseModel):
 
     success: bool
     message: str
-    strategy_id: str
+    deployment_id: str
     was_in_cancel_window: bool
 
 
@@ -252,15 +252,15 @@ class TeardownState:
         self.active_teardowns: dict[str, dict[str, Any]] = {}
         self.manager = TeardownManager()
 
-    def get_teardown(self, strategy_id: str) -> dict[str, Any] | None:
-        return self.active_teardowns.get(strategy_id)
+    def get_teardown(self, deployment_id: str) -> dict[str, Any] | None:
+        return self.active_teardowns.get(deployment_id)
 
-    def set_teardown(self, strategy_id: str, state: dict[str, Any]) -> None:
-        self.active_teardowns[strategy_id] = state
+    def set_teardown(self, deployment_id: str, state: dict[str, Any]) -> None:
+        self.active_teardowns[deployment_id] = state
 
-    def remove_teardown(self, strategy_id: str) -> None:
-        if strategy_id in self.active_teardowns:
-            del self.active_teardowns[strategy_id]
+    def remove_teardown(self, deployment_id: str) -> None:
+        if deployment_id in self.active_teardowns:
+            del self.active_teardowns[deployment_id]
 
 
 _teardown_state = TeardownState()
@@ -282,7 +282,8 @@ def _get_teardown_adapter() -> TeardownStateAdapter:
     return _teardown_adapter
 
 
-def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+def _get_strategy_data(deployment_id: str) -> dict[str, Any]:
     """Get strategy data from registry or raise 404.
 
     Uses the configured strategy registry to look up real strategy
@@ -290,7 +291,7 @@ def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
     registry is configured or strategy is not found.
 
     Args:
-        strategy_id: The strategy to look up
+        deployment_id: The strategy to look up
 
     Returns:
         Dictionary with strategy metadata and positions
@@ -308,19 +309,19 @@ def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
             detail="Strategy registry not configured. Cannot query strategy data.",
         )
 
-    strategy = _strategy_registry.get_strategy(strategy_id)
+    strategy = _strategy_registry.get_strategy(deployment_id)
     if strategy is None:
         available = _strategy_registry.list_strategies()
         raise HTTPException(
             status_code=404,
-            detail=f"Strategy {strategy_id} not found. Available: {available}",
+            detail=f"Strategy {deployment_id} not found. Available: {available}",
         )
 
     # Get real position data from the strategy
     try:
         position_summary = strategy.get_open_positions()
     except Exception as e:
-        logger.exception(f"Failed to get positions from strategy {strategy_id}")
+        logger.exception(f"Failed to get positions from strategy {deployment_id}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to query positions from strategy: {e}",
@@ -347,8 +348,8 @@ def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
         positions.append(pos_dict)
 
     return {
-        "strategy_id": strategy_id,
-        "name": getattr(strategy, "name", strategy_id),
+        "deployment_id": deployment_id,
+        "name": getattr(strategy, "name", deployment_id),
         "chain": getattr(strategy, "chain", "unknown"),
         "protocol": getattr(strategy, "protocol", "unknown"),
         "positions": positions,
@@ -375,7 +376,7 @@ def _build_position_summary(strategy: dict[str, Any]) -> TeardownPositionSummary
         )
 
     return TeardownPositionSummary(
-        strategy_id=strategy["strategy_id"],
+        deployment_id=strategy["deployment_id"],
         timestamp=datetime.now(UTC),
         positions=positions,
     )
@@ -427,9 +428,9 @@ def _generate_warnings(strategy: dict, mode: str) -> list[str]:
 router = APIRouter(prefix="/api/strategies", tags=["teardown"])
 
 
-@router.get("/{strategy_id}/close/preview")
+@router.get("/{deployment_id}/close/preview")
 async def preview_close(
-    strategy_id: str,
+    deployment_id: str,
     mode: str = "graceful",
     api_key: str = Depends(verify_api_key),
 ) -> ClosePreviewResponse:
@@ -439,7 +440,7 @@ async def preview_close(
     and what they can expect to receive.
 
     Args:
-        strategy_id: The strategy to preview closing
+        deployment_id: The strategy to preview closing
         mode: "graceful" or "emergency"
         api_key: Authenticated API key
 
@@ -449,7 +450,7 @@ async def preview_close(
     if mode not in ("graceful", "emergency"):
         raise HTTPException(status_code=400, detail="Mode must be 'graceful' or 'emergency'")
 
-    strategy = _get_strategy_data(strategy_id)
+    strategy = _get_strategy_data(deployment_id)
     summary = _build_position_summary(strategy)
 
     # Calculate protection values
@@ -475,7 +476,7 @@ async def preview_close(
     warnings = _generate_warnings(strategy, mode)
 
     return ClosePreviewResponse(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_name=strategy["name"],
         mode=mode,
         current_value_usd=total_value,
@@ -499,9 +500,9 @@ async def preview_close(
     )
 
 
-@router.post("/{strategy_id}/close")
+@router.post("/{deployment_id}/close")
 async def start_close(
-    strategy_id: str,
+    deployment_id: str,
     request: CloseRequest,
     api_key: str = Depends(verify_api_key),
 ) -> CloseStartedResponse:
@@ -511,21 +512,21 @@ async def start_close(
     Returns immediately with status and cancel deadline.
 
     Args:
-        strategy_id: The strategy to close
+        deployment_id: The strategy to close
         request: Close request with mode selection
         api_key: Authenticated API key
 
     Returns:
         CloseStartedResponse with teardown ID and cancel window info
     """
-    strategy = _get_strategy_data(strategy_id)
+    strategy = _get_strategy_data(deployment_id)
 
     # Check if already tearing down
-    existing = _teardown_state.get_teardown(strategy_id)
+    existing = _teardown_state.get_teardown(deployment_id)
     if existing and existing["status"] not in ("completed", "failed", "cancelled"):
         raise HTTPException(
             status_code=400,
-            detail=f"Strategy {strategy_id} already has an active teardown (status: {existing['status']})",
+            detail=f"Strategy {deployment_id} already has an active teardown (status: {existing['status']})",
         )
 
     # Generate teardown ID
@@ -542,7 +543,7 @@ async def start_close(
     # Store teardown state
     teardown_state = {
         "teardown_id": teardown_id,
-        "strategy_id": strategy_id,
+        "deployment_id": deployment_id,
         "mode": request.mode,
         "status": "cancel_window",
         "started_at": datetime.now(UTC).isoformat(),
@@ -551,14 +552,14 @@ async def start_close(
         "recovered_usd": 0,
         "steps": [],
     }
-    _teardown_state.set_teardown(strategy_id, teardown_state)
+    _teardown_state.set_teardown(deployment_id, teardown_state)
 
     # Persist teardown request in shared teardown state so StrategyRunner can pick it up.
     try:
         teardown_manager = get_teardown_state_manager()
         internal_mode = TeardownMode.SOFT if request.mode == "graceful" else TeardownMode.HARD
         persisted_request = TeardownRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=internal_mode,
             reason=f"Dashboard requested {request.mode} teardown",
             requested_by="dashboard_api",
@@ -567,16 +568,16 @@ async def start_close(
         )
         teardown_manager.create_request(persisted_request)
     except Exception as e:
-        logger.exception(f"Failed to persist teardown request for {strategy_id}")
-        _teardown_state.remove_teardown(strategy_id)
+        logger.exception(f"Failed to persist teardown request for {deployment_id}")
+        _teardown_state.remove_teardown(deployment_id)
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to persist teardown request for strategy {strategy_id}",
+            detail=f"Failed to persist teardown request for strategy {deployment_id}",
         ) from e
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="TEARDOWN_STARTED",
         details={
             "teardown_id": teardown_id,
@@ -591,7 +592,7 @@ async def start_close(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.OPERATOR_ACTION_EXECUTED,
         description=f"Teardown initiated: {request.mode} mode",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=strategy.get("chain", "unknown"),
         details={
             "teardown_id": teardown_id,
@@ -603,7 +604,7 @@ async def start_close(
 
     return CloseStartedResponse(
         teardown_id=teardown_id,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         mode=request.mode,
         status="cancel_window",
         cancel_until=cancel_until.isoformat(),
@@ -612,9 +613,9 @@ async def start_close(
     )
 
 
-@router.get("/{strategy_id}/close/status")
+@router.get("/{deployment_id}/close/status")
 async def close_status(
-    strategy_id: str,
+    deployment_id: str,
     api_key: str = Depends(verify_api_key),
 ) -> CloseStatusResponse:
     """Get current status of close operation.
@@ -622,17 +623,17 @@ async def close_status(
     Returns progress, current step, and any approval requests.
 
     Args:
-        strategy_id: The strategy being closed
+        deployment_id: The strategy being closed
         api_key: Authenticated API key
 
     Returns:
         CloseStatusResponse with current teardown status
     """
-    teardown = _teardown_state.get_teardown(strategy_id)
+    teardown = _teardown_state.get_teardown(deployment_id)
     if not teardown:
         raise HTTPException(
             status_code=404,
-            detail=f"No active teardown for strategy {strategy_id}",
+            detail=f"No active teardown for strategy {deployment_id}",
         )
 
     # Check if cancel window has expired
@@ -640,16 +641,16 @@ async def close_status(
         cancel_until = datetime.fromisoformat(teardown["cancel_until"].replace("Z", "+00:00"))
         if datetime.now(UTC) >= cancel_until:
             teardown["status"] = "executing"
-            _teardown_state.set_teardown(strategy_id, teardown)
+            _teardown_state.set_teardown(deployment_id, teardown)
             try:
                 teardown_manager = get_teardown_state_manager()
-                teardown_manager.mark_started(strategy_id)
+                teardown_manager.mark_started(deployment_id)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to mark persisted teardown as started for {strategy_id}: {e}")
+                logger.warning(f"Failed to mark persisted teardown as started for {deployment_id}: {e}")
 
     return CloseStatusResponse(
         teardown_id=teardown["teardown_id"],
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         status=teardown["status"],
         percent_complete=teardown.get("percent_complete", 0),
         recovered_usd=teardown.get("recovered_usd", 0),
@@ -659,9 +660,9 @@ async def close_status(
     )
 
 
-@router.post("/{strategy_id}/close/cancel")
+@router.post("/{deployment_id}/close/cancel")
 async def cancel_close(
-    strategy_id: str,
+    deployment_id: str,
     api_key: str = Depends(verify_api_key),
 ) -> CancelResponse:
     """Cancel an in-progress close.
@@ -670,17 +671,17 @@ async def cancel_close(
     - Emergency mode: Only within 10-second cancel window
 
     Args:
-        strategy_id: The strategy to cancel teardown for
+        deployment_id: The strategy to cancel teardown for
         api_key: Authenticated API key
 
     Returns:
         CancelResponse with success status
     """
-    teardown = _teardown_state.get_teardown(strategy_id)
+    teardown = _teardown_state.get_teardown(deployment_id)
     if not teardown:
         raise HTTPException(
             status_code=404,
-            detail=f"No active teardown for strategy {strategy_id}",
+            detail=f"No active teardown for strategy {deployment_id}",
         )
 
     status = teardown["status"]
@@ -705,12 +706,12 @@ async def cancel_close(
 
     # Cancel the teardown
     teardown["status"] = "cancelled"
-    _teardown_state.set_teardown(strategy_id, teardown)
+    _teardown_state.set_teardown(deployment_id, teardown)
     try:
         teardown_manager = get_teardown_state_manager()
-        teardown_manager.mark_cancelled(strategy_id)
+        teardown_manager.mark_cancelled(deployment_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to mark persisted teardown as cancelled for {strategy_id}: {e}")
+        logger.warning(f"Failed to mark persisted teardown as cancelled for {deployment_id}: {e}")
 
     # If the runner is waiting on an approval response in the SQLite channel,
     # write a cancel response so its poll loop wakes up immediately rather than
@@ -718,15 +719,15 @@ async def cancel_close(
     try:
         adapter = _get_teardown_adapter()
         adapter.write_approval_response_by_strategy(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             response_json=json.dumps({"approved": False, "action": "cancel"}),
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to write SQLite cancel response for {strategy_id}: {e}")
+        logger.warning(f"Failed to write SQLite cancel response for {deployment_id}: {e}")
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="TEARDOWN_CANCELLED",
         details={
             "teardown_id": teardown["teardown_id"],
@@ -737,15 +738,16 @@ async def cancel_close(
 
     return CancelResponse(
         success=True,
-        message=f"Teardown cancelled for strategy {strategy_id}",
-        strategy_id=strategy_id,
+        message=f"Teardown cancelled for strategy {deployment_id}",
+        deployment_id=deployment_id,
         was_in_cancel_window=was_in_window,
     )
 
 
-@router.post("/{strategy_id}/close/approve-escalation")
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+@router.post("/{deployment_id}/close/approve-escalation")
 async def approve_escalation(
-    strategy_id: str,
+    deployment_id: str,
     request: EscalationApprovalRequest,
     api_key: str = Depends(verify_api_key),
 ) -> ApprovalResponseModel:
@@ -755,7 +757,7 @@ async def approve_escalation(
     Operator can approve, wait and retry, or cancel.
 
     Args:
-        strategy_id: The strategy being torn down
+        deployment_id: The strategy being torn down
         request: Approval request with action
         api_key: Authenticated API key
 
@@ -766,13 +768,13 @@ async def approve_escalation(
     # both runner-initiated teardowns (which never populate _teardown_state)
     # and API-initiated teardowns (which populate both).
     adapter = _get_teardown_adapter()
-    pending_sqlite = adapter.get_latest_pending_approval(strategy_id)
-    in_memory_teardown = _teardown_state.get_teardown(strategy_id)
+    pending_sqlite = adapter.get_latest_pending_approval(deployment_id)
+    in_memory_teardown = _teardown_state.get_teardown(deployment_id)
 
     if pending_sqlite is None and in_memory_teardown is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No active teardown for strategy {strategy_id}",
+            detail=f"No active teardown for strategy {deployment_id}",
         )
 
     # If in-memory state exists, validate it's in the right state for approval.
@@ -816,7 +818,7 @@ async def approve_escalation(
         else:  # cancel
             in_memory_teardown["status"] = "cancelled"
             in_memory_teardown["approval_needed"] = None
-        _teardown_state.set_teardown(strategy_id, in_memory_teardown)
+        _teardown_state.set_teardown(deployment_id, in_memory_teardown)
         teardown_id_for_audit = in_memory_teardown["teardown_id"]
     else:
         teardown_id_for_audit = pending_sqlite["teardown_id"] if pending_sqlite else None
@@ -824,7 +826,7 @@ async def approve_escalation(
     # Write to the SQLite channel so a runner waiting on the approval wakes up.
     # This is the path that was broken before — runner's poll loop reads here.
     sqlite_updated = adapter.write_approval_response_by_strategy(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         response_json=json.dumps(response_payload),
     )
     if not sqlite_updated and in_memory_teardown is None:
@@ -838,7 +840,7 @@ async def approve_escalation(
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="TEARDOWN_ESCALATION_RESPONSE",
         details={
             "teardown_id": teardown_id_for_audit,

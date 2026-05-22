@@ -55,7 +55,7 @@ def _create_strategy(config):
     strat.config = {}
     strat._chain = config["chain"]
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = f"test-{config['strategy_name']}"
+    strat._deployment_id = f"test-{config['strategy_name']}"
     strat.trade_size_usd = Decimal("100")
     strat.max_slippage_pct = 1.0
     strat.base_token = config["base_token"]

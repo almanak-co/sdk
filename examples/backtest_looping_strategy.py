@@ -224,7 +224,7 @@ class LoopingYieldStrategy:
         self._min_health_factor_seen = Decimal("999")
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "looping_yield_demo"
 
     def _calculate_health_factor(self, collateral_usd: Decimal, borrowed_usd: Decimal) -> Decimal:

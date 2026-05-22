@@ -38,7 +38,7 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": ledger_entry_id,
         "deployment_id": "dep-1",
-        "strategy_id": "strat-1",
+        "deployment_id": "strat-1",
         "cycle_id": "cycle-1",
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -64,7 +64,7 @@ def _make_ledger_row(
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
-        "strategy_id": "strat-1",
+        "deployment_id": "strat-1",
         "deployment_id": "dep-1",
         "cycle_id": "cycle-1",
         "execution_mode": "live",
@@ -266,8 +266,7 @@ async def test_write_outbox_entry_returns_id() -> None:
 
     outbox_id = await write_outbox_entry(
         store,
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cycle-1",
         ledger_entry_id="ledger-1",
         intent_type="SUPPLY",
@@ -283,8 +282,7 @@ async def test_write_outbox_entry_returns_id() -> None:
 async def test_write_outbox_entry_no_state_manager() -> None:
     outbox_id = await write_outbox_entry(
         None,
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cycle-1",
         ledger_entry_id="ledger-1",
         intent_type="SUPPLY",
@@ -301,8 +299,7 @@ async def test_write_outbox_entry_store_exception_returns_none() -> None:
 
     outbox_id = await write_outbox_entry(
         store,
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cycle-1",
         ledger_entry_id="ledger-1",
         intent_type="SUPPLY",
@@ -376,7 +373,7 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
     strategy = MagicMock()
     strategy.deployment_id = "dep-1"
     strategy._wallet_activity_provider = None
-    strategy_id = "strat-1"
+    deployment_id = "strat-1"
 
     runner = MagicMock()
     runner.config.enable_state_persistence = True
@@ -426,7 +423,7 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
     runner._terminal_lifecycle_error_message = None
 
     with patch("almanak.framework.runner._run_loop_helpers.add_event"):
-        await initialize_run_loop(runner, strategy, strategy_id, interval=60)
+        await initialize_run_loop(runner, strategy, deployment_id, interval=60)
 
     processor.drain_pending.assert_awaited_once()
 
@@ -440,7 +437,7 @@ async def test_initialize_run_loop_drain_pending_raises_in_live_mode() -> None:
     strategy = MagicMock()
     strategy.deployment_id = "dep-1"
     strategy._wallet_activity_provider = None
-    strategy_id = "strat-1"
+    deployment_id = "strat-1"
 
     runner = MagicMock()
     runner.config.enable_state_persistence = True
@@ -476,4 +473,4 @@ async def test_initialize_run_loop_drain_pending_raises_in_live_mode() -> None:
 
     with patch("almanak.framework.runner._run_loop_helpers.add_event"):
         with pytest.raises(RuntimeError, match=r"AccountingProcessor\.drain_pending failed"):
-            await initialize_run_loop(runner, strategy, strategy_id, interval=60)
+            await initialize_run_loop(runner, strategy, deployment_id, interval=60)

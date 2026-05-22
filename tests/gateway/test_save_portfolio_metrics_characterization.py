@@ -4,7 +4,7 @@ These tests pin the current observable behaviour of the RPC BEFORE the phase-
 helper extraction that follows. They document the full validation / persistence
 matrix so that the refactor must preserve every branch byte-for-byte:
 
-- Strategy ID validation (missing / whitespace / invalid characters).
+- Deployment ID validation (missing / whitespace / invalid characters).
 - Decimal parsing of the 4 currency fields (``initial_value_usd``, ``deposits_usd``,
   ``withdrawals_usd``, ``gas_spent_usd``) and rejection of malformed strings.
 - ``initial_timestamp`` handling: negative (rejected), zero (defaults to
@@ -77,20 +77,18 @@ def context() -> MagicMock:
 
 def _make_request(
     *,
-    strategy_id: str = "strat-1",
     initial_value_usd: str = "10000",
     initial_timestamp: int = 1712000000,
     deposits_usd: str = "500",
     withdrawals_usd: str = "100",
     gas_spent_usd: str = "25",
-    deployment_id: str = "",
+    deployment_id: str = "my-deploy",
     cycle_id: str = "",
     execution_mode: str = "",
     is_complete: bool = False,
 ) -> gateway_pb2.SaveMetricsRequest:
     """Build a SaveMetricsRequest with sensible defaults."""
     return gateway_pb2.SaveMetricsRequest(
-        strategy_id=strategy_id,
         initial_value_usd=initial_value_usd,
         initial_timestamp=initial_timestamp,
         deposits_usd=deposits_usd,
@@ -111,20 +109,20 @@ def _install_warm_backend(service: StateServiceServicer, warm: MagicMock | None)
 
 
 # ---------------------------------------------------------------------------
-# 1. Strategy ID validation
+# 1. Deployment ID validation
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("strategy_id", ["", "   "])
+@pytest.mark.parametrize("deployment_id", ["", "   "])
 @pytest.mark.asyncio
-async def test_missing_strategy_id_returns_invalid_argument(service, context, strategy_id):
-    """Empty / whitespace-only strategy_id trips the earliest guard.
+async def test_missing_deployment_id_returns_invalid_argument(service, context, deployment_id):
+    """Empty / whitespace-only deployment_id trips the earliest guard.
 
     Pins: ``INVALID_ARGUMENT`` + ``success=False`` + ``set_details`` wording
-    contains the ``strategy_id`` field identifier produced by ``ValidationError``.
+    contains the ``deployment_id`` field identifier produced by ``ValidationError``.
     """
     _install_warm_backend(service, None)  # should never be reached
-    request = _make_request(strategy_id=strategy_id)
+    request = _make_request(deployment_id=deployment_id)
 
     response = await service.SavePortfolioMetrics(request, context)
 
@@ -132,15 +130,15 @@ async def test_missing_strategy_id_returns_invalid_argument(service, context, st
         context,
         response,
         expected_status=grpc.StatusCode.INVALID_ARGUMENT,
-        error_substring="strategy_id",
+        error_substring="deployment_id",
     )
 
 
 @pytest.mark.asyncio
-async def test_invalid_strategy_id_format_returns_invalid_argument(service, context):
-    """Strategy IDs with disallowed characters (e.g. spaces) are rejected."""
+async def test_invalid_deployment_id_format_returns_invalid_argument(service, context):
+    """Deployment IDs with disallowed characters (e.g. spaces) are rejected."""
     _install_warm_backend(service, None)
-    request = _make_request(strategy_id="has spaces!")
+    request = _make_request(deployment_id="has spaces!")
 
     response = await service.SavePortfolioMetrics(request, context)
 
@@ -190,7 +188,7 @@ async def test_empty_decimal_strings_coerced_to_zero(service, context):
     warm = AsyncMock()
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
     _install_warm_backend(service, warm)
-    request = gateway_pb2.SaveMetricsRequest(strategy_id="zeros")
+    request = gateway_pb2.SaveMetricsRequest(deployment_id="zeros")
 
     response = await service.SavePortfolioMetrics(request, context)
 
@@ -283,13 +281,18 @@ async def test_out_of_range_timestamp_rejected(service, context):
 async def test_postgres_branch_success(service, context):
     """When the pg pool is present, the RPC issues the UPSERT and returns success.
 
-    Pins: exactly one ``_snapshot_fetchrow`` call with the agent_id /
+    Pins: exactly one ``_snapshot_fetchrow`` call with the deployment_id /
     timestamp / metric fields passed positionally in the documented order,
     plus the VIB-3933 finding-#1 fields ``total_value_usd`` and
     ``positions_json`` resolved from the latest snapshot.
+
+    VIB-4721/4722: ``portfolio_metrics`` has a single identity column,
+    ``deployment_id`` (the legacy ``deployment_id`` column was DROPPED) — it is
+    bound the validated wire id with no separate ``request.deployment_id``
+    arg and no identity translation.
     """
     service._snapshot_pool = MagicMock()  # truthy => PostgreSQL branch
-    service._snapshot_fetchrow = AsyncMock(return_value={"agent_id": "strat-pg"})
+    service._snapshot_fetchrow = AsyncMock(return_value={"deployment_id": "strat-pg"})
 
     # VIB-3933 finding #1: PG path now reads latest snapshot for total_value_usd
     # before issuing the UPSERT (parity with SQLite). Provide a warm backend
@@ -301,7 +304,6 @@ async def test_postgres_branch_success(service, context):
     _install_warm_backend(service, warm)
 
     request = _make_request(
-        strategy_id="strat-pg",
         initial_value_usd="10000.50",
         initial_timestamp=1712000000,
         deposits_usd="500",
@@ -319,27 +321,27 @@ async def test_postgres_branch_success(service, context):
     assert response.error == ""
     assert_set_code_not_called(context)
     service._snapshot_fetchrow.assert_awaited_once()
-    # Positional args after the query string: agent_id, initial_value_usd,
-    # timestamp, deposits, withdrawals, gas, deployment_id, cycle_id, mode,
-    # is_complete, now, total_value_usd, positions_json.
+    # Positional args after the query string (VIB-4721/4722 — no separate
+    # deployment_id / request.deployment_id arg): deployment_id, initial_value_usd,
+    # timestamp, deposits, withdrawals, gas, cycle_id, mode, is_complete,
+    # now, total_value_usd, positions_json.
     args = service._snapshot_fetchrow.call_args.args
-    assert args[1] == "strat-pg"
+    assert args[1] == "depl-1"  # deployment_id column (validated wire id)
     assert args[2] == "10000.50"
     assert isinstance(args[3], datetime) and args[3].tzinfo is not None
     assert args[4] == "500"
     assert args[5] == "100"
     assert args[6] == "25"
-    assert args[7] == "depl-1"
-    assert args[8] == "cyc-1"
-    assert args[9] == "live"
-    assert args[10] is True
-    assert isinstance(args[11], datetime) and args[11].tzinfo is not None
+    assert args[7] == "cyc-1"
+    assert args[8] == "live"
+    assert args[9] is True
+    assert isinstance(args[10], datetime) and args[10].tzinfo is not None
     # VIB-3933 finding #1: snapshot's total_value_usd carried into the row.
-    assert args[12] == "12345.67"
+    assert args[11] == "12345.67"
     # positions_json defaults to "[]" — proto carries no positions and SQLite
     # path also writes "[]" via PortfolioMetrics dataclass default.
-    assert args[13] == "[]"
-    warm.get_latest_snapshot.assert_awaited_once_with("strat-pg")
+    assert args[12] == "[]"
+    warm.get_latest_snapshot.assert_awaited_once_with("depl-1")
 
 
 @pytest.mark.asyncio
@@ -381,16 +383,14 @@ async def test_sqlite_success_with_latest_snapshot_total_value(service, context)
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
     _install_warm_backend(service, warm)
 
-    response = await service.SavePortfolioMetrics(
-        _make_request(strategy_id="strat-sqlite"), context
-    )
+    response = await service.SavePortfolioMetrics(_make_request(deployment_id="strat-sqlite"), context)
 
     assert response.success is True
     assert response.error == ""
     assert_set_code_not_called(context)
 
     saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args[0][0]
-    assert saved.strategy_id == "strat-sqlite"
+    assert saved.deployment_id == "strat-sqlite"
     assert saved.total_value_usd == Decimal("9999.99")
     assert saved.initial_value_usd == Decimal("10000")
     assert saved.deposits_usd == Decimal("500")

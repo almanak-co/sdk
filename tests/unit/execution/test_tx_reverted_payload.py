@@ -60,7 +60,7 @@ def orchestrator() -> ExecutionOrchestrator:
 def _make_state(orchestrator: ExecutionOrchestrator) -> ExecutionPipelineState:
     bundle = ActionBundle(intent_type="SWAP", transactions=[], metadata={})
     context = ExecutionContext(
-        strategy_id="test",
+        deployment_id="test",
         intent_id="test-intent",
         chain="arbitrum",
         wallet_address=orchestrator.signer.address,

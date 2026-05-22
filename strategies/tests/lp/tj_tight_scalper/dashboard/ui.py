@@ -18,7 +18,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -32,7 +32,7 @@ def render_custom_dashboard(
     - Rebalance history using TimelineEvent model
     """
     st.title("TJ Tight-Range Scalper Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -49,7 +49,7 @@ def render_custom_dashboard(
     bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token_x}/{token_y} (bin step: {bin_step})")
 
     # Metrics row
@@ -125,16 +125,16 @@ def render_custom_dashboard(
 
     # Fees estimate section
     st.subheader("Fee Metrics")
-    _render_fee_metrics(api_client, strategy_id)
+    _render_fee_metrics(api_client, deployment_id)
 
     st.divider()
 
     # Rebalance history section
     st.subheader("Rebalance History")
-    _render_rebalance_history(api_client, strategy_id)
+    _render_rebalance_history(api_client, deployment_id)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_price_range_chart(
@@ -180,13 +180,13 @@ def _render_bin_distribution(num_bins: int, bin_step: int) -> None:
     st.caption(f"Liquidity distributed across {num_bins} bins with bin step of {bin_step} basis points")
 
 
-def _render_fee_metrics(api_client: Any, strategy_id: str) -> None:
+def _render_fee_metrics(api_client: Any, deployment_id: str) -> None:
     """Render fee metrics from timeline events."""
     # Get LP events to estimate fees
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=100)
+            events = api_client.get_timeline(deployment_id, limit=100)
         except Exception:
             pass
 
@@ -224,12 +224,12 @@ def _render_fee_metrics(api_client: Any, strategy_id: str) -> None:
     )
 
 
-def _render_rebalance_history(api_client: Any, strategy_id: str) -> None:
+def _render_rebalance_history(api_client: Any, deployment_id: str) -> None:
     """Render rebalance history using TimelineEvent data."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=50)
+            events = api_client.get_timeline(deployment_id, limit=50)
         except Exception:
             pass
 

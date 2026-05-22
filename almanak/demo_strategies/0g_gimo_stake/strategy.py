@@ -162,10 +162,10 @@ class ZeroGGimoStakeStrategy(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         if not self._staked or self._staked_amount <= 0:
-            return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+            return TeardownPositionSummary.empty(self.deployment_id or self.STRATEGY_NAME)
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id or self.STRATEGY_NAME,
+            deployment_id=self.deployment_id or self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=[
                 PositionInfo(

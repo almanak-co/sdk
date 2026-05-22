@@ -12,7 +12,7 @@ def _create_strategy() -> SushiSwapLPStrategy:
     with patch.object(SushiSwapLPStrategy, "__init__", lambda self, *args, **kwargs: None):
         strategy = SushiSwapLPStrategy.__new__(SushiSwapLPStrategy)
 
-    strategy._strategy_id = "test-sushiswap-lp"
+    strategy._deployment_id = "test-sushiswap-lp"
     strategy._chain = "arbitrum"
     strategy.pool = "WETH/USDC/3000"
     strategy.fee_tier = 3000
@@ -34,7 +34,7 @@ def test_get_open_positions_returns_valid_summary_without_position() -> None:
 
     summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-sushiswap-lp"
+    assert summary.deployment_id == "test-sushiswap-lp"
     assert len(summary.positions) == 0
     assert summary.total_value_usd == Decimal("0")
 
@@ -51,7 +51,7 @@ def test_get_open_positions_returns_valid_summary_with_position() -> None:
     with patch.object(SushiSwapLPStrategy, "create_market_snapshot", return_value=snapshot):
         summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-sushiswap-lp"
+    assert summary.deployment_id == "test-sushiswap-lp"
     assert len(summary.positions) == 1
     pos = summary.positions[0]
     assert pos.protocol == "sushiswap_v3"

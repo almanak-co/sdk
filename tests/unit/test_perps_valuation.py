@@ -827,7 +827,7 @@ class TestAuditFixes:
 
                 # Mock strategy for the value() call
                 strategy = MagicMock()
-                strategy.strategy_id = "test"
+                strategy.deployment_id = "test"
                 strategy.chain = "arbitrum"
                 strategy._get_tracked_tokens.return_value = []
 

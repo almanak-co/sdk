@@ -1,7 +1,7 @@
 """Unit tests for AccountingSidecarWriter (VIB-3454).
 
 Covers:
-- Path resolution: sidecar lands in ~/.almanak/accounting/<strategy_id>.jsonl
+- Path resolution: sidecar lands in ~/.almanak/accounting/<deployment_id>.jsonl
 - ALMANAK_ACCOUNTING_DIR env var overrides the sidecar directory path
 - Parent directories are created when they don't exist
 - Appended line is valid JSON with the correct schema fields
@@ -127,7 +127,7 @@ def test_sidecar_path_resolves_under_home() -> None:
     assert path == Path.home() / ".almanak" / "accounting" / "my_strategy.jsonl"
 
 
-def test_sidecar_path_uses_strategy_id_as_stem() -> None:
+def test_sidecar_path_uses_deployment_id_as_stem() -> None:
     path = _sidecar_path("arb_lp_v2")
     assert path.stem == "arb_lp_v2"
     assert path.suffix == ".jsonl"
@@ -147,7 +147,7 @@ def test_almanak_accounting_dir_env_override(
     writer = AccountingSidecarWriter()
     custom_dir.mkdir(parents=True, exist_ok=True)
     writer.append(
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         intent=_swap_intent(),
         result=_execution_result(),
         chain="arbitrum",
@@ -164,7 +164,7 @@ def test_append_creates_file_with_valid_json(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="strat1",
+            deployment_id="strat1",
             intent=_swap_intent(),
             result=_execution_result(),
             chain="arbitrum",
@@ -174,7 +174,7 @@ def test_append_creates_file_with_valid_json(tmp_path: Path) -> None:
     assert sidecar.exists()
     line = json.loads(sidecar.read_text().strip())
 
-    assert line["strategy_id"] == "strat1"
+    assert line["deployment_id"] == "strat1"
     assert line["intent_type"] == "SWAP"
     assert line["chain"] == "arbitrum"
     assert line["tx_hash"] == "0xabc123"
@@ -192,13 +192,13 @@ def test_append_two_lines_both_appear(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="strat2",
+            deployment_id="strat2",
             intent=_swap_intent(),
             result=_execution_result(tx_hash="0xfirst"),
             chain="base",
         )
         writer.append(
-            strategy_id="strat2",
+            deployment_id="strat2",
             intent=_swap_intent(from_token="WETH", to_token="USDC"),
             result=_execution_result(tx_hash="0xsecond"),
             chain="base",
@@ -216,7 +216,7 @@ def test_append_creates_parent_dirs_if_missing(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=deep_dir):
         writer.append(
-            strategy_id="s",
+            deployment_id="s",
             intent=_swap_intent(),
             result=_execution_result(),
             chain="optimism",
@@ -234,7 +234,7 @@ def test_append_null_fields_when_result_is_none(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="s_null",
+            deployment_id="s_null",
             intent=_swap_intent(),
             result=None,
             chain="ethereum",
@@ -254,7 +254,7 @@ def test_append_no_swap_amounts_uses_intent_fallback(tmp_path: Path) -> None:
     result = _execution_result(with_swap_amounts=False)
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="s_fallback",
+            deployment_id="s_fallback",
             intent=_swap_intent(from_token="DAI", amount_usd=Decimal("50")),
             result=result,
             chain="polygon",
@@ -270,7 +270,7 @@ def test_append_position_id_populated(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="s_pos",
+            deployment_id="s_pos",
             intent=_swap_intent(),
             result=_execution_result(position_id="0xdeadbeef"),
             chain="arbitrum",
@@ -293,7 +293,7 @@ def test_append_swallows_io_error_and_logs_warning(tmp_path: Path, caplog: pytes
             with caplog.at_level(logging.WARNING, logger="almanak.framework.accounting.sidecar"):
                 # Must not raise
                 writer.append(
-                    strategy_id="s_err",
+                    deployment_id="s_err",
                     intent=_swap_intent(),
                     result=_execution_result(),
                     chain="arbitrum",
@@ -308,7 +308,7 @@ def test_append_timestamp_is_iso8601(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
-            strategy_id="s_ts",
+            deployment_id="s_ts",
             intent=_swap_intent(),
             result=_execution_result(),
             chain="arbitrum",

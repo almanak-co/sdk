@@ -1,8 +1,7 @@
 {
-  "_comment": "Expected `transaction_ledger` row for the LP_CLOSE. Same deployment_id and strategy_id as LP_OPEN — same strategy. Different cycle_id (close happens on the teardown cycle).",
+  "_comment": "Expected `transaction_ledger` row for the LP_CLOSE. Same deployment_id and deployment_id as LP_OPEN — same strategy. Different cycle_id (close happens on the teardown cycle).",
   "id": "00000000-0000-0000-0000-000000004195",
   "cycle_id": "vib-4194-lp-close-cycle",
-  "strategy_id": "UniswapLPStrategy:12c53b4b6c31",
   "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
   "execution_mode": "live",
   "timestamp": "2026-05-04T20:21:23.968000+00:00",

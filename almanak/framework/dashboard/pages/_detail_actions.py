@@ -22,14 +22,14 @@ from almanak.framework.dashboard.models import Strategy, StrategyStatus
 from almanak.framework.dashboard.pages.detail import call_strategy_action
 
 
-def _action_result_key(strategy_id: str) -> str:
+def _action_result_key(deployment_id: str) -> str:
     """Session-state key for the pending action result banner."""
-    return f"action_result_{strategy_id}"
+    return f"action_result_{deployment_id}"
 
 
-def _gas_dialog_key(strategy_id: str) -> str:
+def _gas_dialog_key(deployment_id: str) -> str:
     """Session-state key for the gas-bump dialog visibility flag."""
-    return f"show_gas_dialog_{strategy_id}"
+    return f"show_gas_dialog_{deployment_id}"
 
 
 def render_action_row(strategy: Strategy, health: SystemHealth) -> None:
@@ -97,20 +97,20 @@ def render_action_row(strategy: Strategy, health: SystemHealth) -> None:
         # Close Strategy button - preview always available, execution requires CLI.
         if st.button("\U0001f6aa Close Strategy", use_container_width=True, type="secondary"):
             st.query_params["page"] = "teardown"
-            st.query_params["strategy_id"] = strategy.id
+            st.query_params["deployment_id"] = strategy.id
             st.rerun()
 
 
-def handle_action_result(strategy_id: str) -> None:
+def handle_action_result(deployment_id: str) -> None:
     """Render the success / error banner for the last operator action.
 
     The result is popped after rendering so it displays exactly once,
     matching the prior inline behaviour.
 
     Args:
-        strategy_id: The strategy identifier whose result to render.
+        deployment_id: The deployment identifier whose result to render.
     """
-    action_result_key = _action_result_key(strategy_id)
+    action_result_key = _action_result_key(deployment_id)
     if action_result_key not in st.session_state:
         return
 
@@ -127,17 +127,17 @@ def handle_action_result(strategy_id: str) -> None:
     del st.session_state[action_result_key]
 
 
-def render_gas_bump_dialog(strategy_id: str) -> None:
+def render_gas_bump_dialog(deployment_id: str) -> None:
     """Render the gas-bump dialog (if toggled open) and handle submit/cancel.
 
     Args:
-        strategy_id: The strategy the bump applies to.
+        deployment_id: The strategy the bump applies to.
     """
-    gas_dialog_key = _gas_dialog_key(strategy_id)
+    gas_dialog_key = _gas_dialog_key(deployment_id)
     if not st.session_state.get(gas_dialog_key):
         return
 
-    action_result_key = _action_result_key(strategy_id)
+    action_result_key = _action_result_key(deployment_id)
 
     st.markdown("---")
     st.markdown("#### Bump Gas Price")
@@ -151,16 +151,16 @@ def render_gas_bump_dialog(strategy_id: str) -> None:
             max_value=1000.0,
             value=1.0,
             step=0.1,
-            key=f"gas_price_input_{strategy_id}",
+            key=f"gas_price_input_{deployment_id}",
         )
     with col2:
-        if st.button("Submit", key=f"submit_gas_{strategy_id}"):
+        if st.button("Submit", key=f"submit_gas_{deployment_id}"):
             with st.spinner("Bumping gas price..."):
-                result = call_strategy_action(strategy_id, "bump-gas", {"gas_price_gwei": new_gas_price})
+                result = call_strategy_action(deployment_id, "bump-gas", {"gas_price_gwei": new_gas_price})
             st.session_state[action_result_key] = result
             st.session_state[gas_dialog_key] = False
             st.rerun()
     with col3:
-        if st.button("Cancel", key=f"cancel_gas_{strategy_id}"):
+        if st.button("Cancel", key=f"cancel_gas_{deployment_id}"):
             st.session_state[gas_dialog_key] = False
             st.rerun()

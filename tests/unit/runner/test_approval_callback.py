@@ -50,7 +50,7 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
 def _make_request(expires_in: timedelta | None = timedelta(seconds=2)) -> ApprovalRequest:
     return ApprovalRequest(
         teardown_id="td_1",
-        strategy_id="strat_1",
+        deployment_id="strat_1",
         current_level=EscalationLevel.LEVEL_3,
         current_slippage=Decimal("0.05"),
         estimated_loss_usd=Decimal("50"),
@@ -347,7 +347,7 @@ class TestCreateRequestPreservesResponse:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json=json.dumps({"attempt": 1}),
             expires_at=expires,
@@ -363,7 +363,7 @@ class TestCreateRequestPreservesResponse:
         # Runner restarts and re-emits the same request. Must NOT clobber.
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json=json.dumps({"attempt": 2}),
             expires_at=expires,
@@ -380,7 +380,7 @@ class TestCreateRequestPreservesResponse:
         expires_old = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json=json.dumps({"attempt": 1}),
             expires_at=expires_old,
@@ -388,7 +388,7 @@ class TestCreateRequestPreservesResponse:
         expires_new = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json=json.dumps({"attempt": 2}),
             expires_at=expires_new,
@@ -465,15 +465,15 @@ class TestTimeoutClearsApprovalRow:
         # approval request is created.
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_4,
             request_json=json.dumps({"level": "LEVEL_4"}),
             expires_at=(datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         )
 
-        # Operator approves via the API (strategy_id-based lookup).
+        # Operator approves via the API (deployment_id-based lookup).
         ok = adapter.write_approval_response_by_strategy(
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             response_json=json.dumps({"approved": True, "action": "approve"}),
         )
 

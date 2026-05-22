@@ -242,8 +242,8 @@ class MockHoldStrategy:
     Used for testing provider fallback without any trading complexity.
     """
 
-    def __init__(self, strategy_id: str = "test_provider_fallback"):
-        self.strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "test_provider_fallback"):
+        self.deployment_id = deployment_id
 
     def decide(self, market: MarketState) -> HoldIntent:
         """Always return HoldIntent - no trading."""

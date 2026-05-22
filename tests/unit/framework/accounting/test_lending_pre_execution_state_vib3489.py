@@ -179,8 +179,7 @@ class TestAaveBeforeStatePopulatedFromPreExecutionRead:
         event = build_lending_accounting_event(
             intent=intent,
             result=_make_result({"supply_amount": 1_000 * 10**6}),
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain=_CHAIN,
@@ -244,8 +243,7 @@ class TestAaveBeforeStateNoneWhenReadFails:
         event = build_lending_accounting_event(
             intent=intent,
             result=_make_result({"supply_amount": 1_000 * 10**6}),
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain=_CHAIN,
@@ -361,8 +359,7 @@ class TestMorphoBeforeStatePopulatedOnBorrow:
         event = build_lending_accounting_event(
             intent=intent,
             result=_make_result({"borrow_amount": 100_000_000}),  # 100 USDC
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain=_CHAIN,
@@ -439,8 +436,7 @@ class TestBeforeAfterDeltaComputable:
         event = build_lending_accounting_event(
             intent=intent,
             result=_make_result({"supply_amount": 1_000 * 10**6}),
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain=_CHAIN,
@@ -481,8 +477,7 @@ class TestBeforeAfterDeltaComputable:
         event = build_lending_accounting_event(
             intent=intent,
             result=_make_result({"supply_amount": 1_000 * 10**6}),
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain=_CHAIN,

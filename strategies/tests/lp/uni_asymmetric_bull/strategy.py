@@ -265,7 +265,7 @@ class UniAsymmetricBullStrategy(IntentStrategy[UniAsymmetricBullConfig]):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.STATE_CHANGE,
                         description="Price moved >5% from position center",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "trigger": "price_deviation",
                             "current_price": str(current_price),
@@ -314,7 +314,7 @@ class UniAsymmetricBullStrategy(IntentStrategy[UniAsymmetricBullConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description="Opening asymmetric bullish LP position",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "opening_new_position",
                     "current_price": str(current_price),
@@ -379,7 +379,7 @@ class UniAsymmetricBullStrategy(IntentStrategy[UniAsymmetricBullConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"Uniswap V3 asymmetric LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "upside_pct": str(self.upside_pct),
@@ -398,7 +398,7 @@ class UniAsymmetricBullStrategy(IntentStrategy[UniAsymmetricBullConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"Uniswap V3 asymmetric LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                     },
@@ -469,7 +469,7 @@ class UniAsymmetricBullStrategy(IntentStrategy[UniAsymmetricBullConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

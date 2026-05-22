@@ -68,7 +68,6 @@ def _make_intent(intent_type_value: str = "SWAP") -> SimpleNamespace:
 
 def _make_strategy() -> SimpleNamespace:
     return SimpleNamespace(
-        strategy_id="strat-1",
         deployment_id="dep-1",
         chain="arbitrum",
         wallet_address="0xWALLET",
@@ -90,7 +89,7 @@ def _make_state(*, total_intents: int) -> TeardownState:
     now = datetime.now(UTC)
     return TeardownState(
         teardown_id="td-uuid-7",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=total_intents,
@@ -110,7 +109,7 @@ def _make_position_summary() -> TeardownPositionSummary:
         value_usd=Decimal("4.0"),
     )
     return TeardownPositionSummary(
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         timestamp=datetime.now(UTC),
         positions=[pos],
         total_value_usd=Decimal("4.0"),
@@ -173,7 +172,7 @@ def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None)
         # with the real ``commit_teardown_intent``.
         commit_calls.append(
             {
-                "strategy_id": strategy.strategy_id,
+                "deployment_id": strategy.deployment_id,
                 "intent_type": intent.intent_type.value,
                 "tx_hash": execution_result.transaction_results[0].tx_hash,
                 "bundle_metadata": bundle_metadata,
@@ -291,7 +290,6 @@ async def test_t12_degraded_commit_does_not_halt_unwind(
 
     degraded_record = DeferredWrite.now(
         kind="ledger",
-        strategy_id="strat-1",
         deployment_id="dep-1",
         cycle_id="teardown-td-uuid-7",
         intent_type="LP_CLOSE",

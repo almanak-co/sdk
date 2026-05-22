@@ -50,8 +50,7 @@ def _identity(tx: str) -> AccountingIdentity:
 
     return AccountingIdentity(
         id="ev-1",
-        deployment_id="d",
-        strategy_id="s",
+        deployment_id="s",
         cycle_id="c",
         execution_mode="paper",
         timestamp=datetime.now(UTC),
@@ -98,8 +97,7 @@ class TestV4PoolAddressShape:
         event = LPAccountingEvent(
             identity=AccountingIdentity(
                 id="ev-v3",
-                deployment_id="d",
-                strategy_id="s",
+                deployment_id="s",
                 cycle_id="c",
                 execution_mode="paper",
                 timestamp=__import__("datetime").datetime.now(__import__("datetime").UTC),
@@ -305,8 +303,7 @@ def test_v4_lp_accounting_aligns_tokens_to_canonical_currency_order(monkeypatch)
     event = build_lp_accounting_event(
         intent=_MockIntent(),
         result=_MockResult(),
-        deployment_id="d",
-        strategy_id="s",
+        deployment_id="s",
         cycle_id="c",
         execution_mode="paper",
         chain="arbitrum",

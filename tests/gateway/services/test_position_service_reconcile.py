@@ -24,7 +24,6 @@ import pytest_asyncio
 from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.primitives.types import AccountingCategory, Primitive
-from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.state_manager import (
     SQLiteConfigLight,
     StateManager,
@@ -175,7 +174,6 @@ async def test_reconcile_stranded_diff_no_writes(mock_rpc_servicer_empty_wallet,
     ledger = LedgerEntry(
         id="seed-1",
         cycle_id="cycle-1",
-        strategy_id="TestStrat:abc",
         deployment_id="TestStrat:abc",
         execution_mode="live",
         timestamp=datetime.now(UTC),

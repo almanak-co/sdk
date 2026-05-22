@@ -36,7 +36,7 @@ def executor(mock_gateway):
         mock_gateway,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
     )
 
 
@@ -427,7 +427,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         compile_result = await first.execute(
@@ -446,7 +446,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         result = await second.execute(
@@ -492,7 +492,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address=wallet,
-            strategy_id="t",
+            deployment_id="t",
             bundle_cache=shared_cache,
         )
         compile_result = await executor.execute(
@@ -555,7 +555,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address=wallet_a,
-            strategy_id="strat-a",
+            deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         compile_result = await compiler.execute(
@@ -568,7 +568,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address=wallet_b,
-            strategy_id="strat-a",
+            deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         result = await attacker.execute(
@@ -582,7 +582,7 @@ class TestActionToolDispatch:
 
     @pytest.mark.asyncio
     async def test_execute_compiled_bundle_rejects_wrong_strategy(self, mock_gateway, tmp_path):
-        """VIB-2996 P1: same wallet but different strategy_id must also reject."""
+        """VIB-2996 P1: same wallet but different deployment_id must also reject."""
         from almanak.framework.agent_tools.bundle_cache import BundleCache
         from almanak.framework.agent_tools.executor import ToolExecutor
 
@@ -611,7 +611,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address=wallet,
-            strategy_id="strat-a",
+            deployment_id="strat-a",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         compile_result = await compiler.execute(
@@ -623,7 +623,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address=wallet,
-            strategy_id="strat-b",
+            deployment_id="strat-b",
             bundle_cache=BundleCache(cache_dir=cache_dir),
         )
         result = await attacker.execute(
@@ -665,7 +665,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             bundle_cache=BundleCache(cache_dir=cache_dir, default_ttl_seconds=1),
         )
         compile_result = await executor.execute(
@@ -727,7 +727,7 @@ class TestActionToolDispatch:
             mock_gateway,
             policy=tight_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
         )
 
         # Compile a bundle with a large swap
@@ -1211,7 +1211,7 @@ class TestSimulationPolicyEnforcement:
             require_simulation_before_execution=True,
         )
         executor = ToolExecutor(
-            mock_gateway, policy=policy, wallet_address="0x1234", strategy_id="test"
+            mock_gateway, policy=policy, wallet_address="0x1234", deployment_id="test"
         )
 
         # Compile a bundle
@@ -1373,7 +1373,7 @@ class TestAlertingIntegration:
         executor = ToolExecutor(
             mock_gateway, policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test",
+            deployment_id="test",
             alert_manager=mock_alert,
         )
 
@@ -1553,7 +1553,7 @@ class TestSafeAddressValidation:
             mock_gateway,
             policy=policy,
             wallet_address="0x1111111111111111111111111111111111111111",
-            strategy_id="test",
+            deployment_id="test",
             safe_addresses={"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
         )
 
@@ -1585,7 +1585,7 @@ class TestSafeAddressValidation:
             mock_gateway,
             policy=policy,
             wallet_address="0x1111111111111111111111111111111111111111",
-            strategy_id="test",
+            deployment_id="test",
             safe_addresses=set(),  # empty set = deny all overrides
         )
 
@@ -1618,7 +1618,7 @@ class TestSafeAddressValidation:
             mock_gateway,
             policy=policy,
             wallet_address="0x1111111111111111111111111111111111111111",
-            strategy_id="test",
+            deployment_id="test",
             safe_addresses={safe_addr},
         )
 
@@ -1665,7 +1665,7 @@ class TestSafeAddressValidation:
             mock_gateway,
             policy=policy,
             wallet_address=own_wallet,
-            strategy_id="test",
+            deployment_id="test",
             safe_addresses={"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
         )
 
@@ -1712,7 +1712,7 @@ class TestSafeAddressValidation:
             mock_gateway,
             policy=policy,
             wallet_address="0x1111111111111111111111111111111111111111",
-            strategy_id="test",
+            deployment_id="test",
             safe_addresses={safe_addr_checksummed},
         )
 
@@ -2255,7 +2255,7 @@ class TestListReadCommands:
             mock_gateway,
             policy=AgentPolicy(allowed_chains={"arbitrum"}, max_tool_calls_per_minute=100, cooldown_seconds=0),
             wallet_address="",
-            strategy_id="test",
+            deployment_id="test",
         )
         resp = await executor.execute("list_lp_positions", {"chain": "arbitrum"})
         assert resp.status == "error"
@@ -2296,7 +2296,7 @@ class TestListReadCommands:
                 require_rebalance_check=False,
             ),
             wallet_address="0xabc0000000000000000000000000000000000000",
-            strategy_id="test",
+            deployment_id="test",
         )
         resp = await executor.execute("list_lp_positions", {"chain": "sonic"})
         assert resp.status == "error"

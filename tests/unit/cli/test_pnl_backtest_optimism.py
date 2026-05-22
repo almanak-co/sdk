@@ -61,7 +61,7 @@ def _make_backtest_result(
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="incubating_uniswap_rsi_optimism",
+        deployment_id="incubating_uniswap_rsi_optimism",
         start_time=datetime(2024, 10, 1, tzinfo=UTC),
         end_time=datetime(2024, 12, 1, tzinfo=UTC),
         trades=[],
@@ -106,7 +106,7 @@ class TestPnLBacktestOptimismSweepExecution:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "incubating_uniswap_rsi_optimism"
+            deployment_id = "incubating_uniswap_rsi_optimism"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -149,7 +149,7 @@ class TestPnLBacktestOptimismSweepExecution:
         """Verify metrics extraction works for Optimism backtest."""
 
         class SimpleStrategy:
-            strategy_id = "optimism_test"
+            deployment_id = "optimism_test"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

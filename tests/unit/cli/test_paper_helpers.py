@@ -155,7 +155,7 @@ class TestPaperResumeHelpers:
             new_max_ticks=42,
             tick_interval=30,
         )
-        assert cfg.strategy_id == "my_strat"
+        assert cfg.deployment_id == "my_strat"
         assert cfg.tick_interval_seconds == 30
         assert cfg.max_ticks == 42
         assert cfg.initial_eth == Decimal("12.5")
@@ -168,7 +168,7 @@ class TestPaperResumeHelpers:
         saved = {
             "chain": "ethereum",  # overridden below
             "rpc_url": "***masked***",  # overridden below
-            "strategy_id": "old",  # overridden below
+            "deployment_id": "old",  # overridden below
             "anvil_port": 8546,
             "reset_fork_every_tick": False,
             "initial_eth": "5",
@@ -194,7 +194,7 @@ class TestPaperResumeHelpers:
         )
 
         # Resume overrides applied
-        assert cfg.strategy_id == "resumed"
+        assert cfg.deployment_id == "resumed"
         assert cfg.chain == "arbitrum"
         assert cfg.rpc_url == "https://x"
         assert cfg.tick_interval_seconds == 15
@@ -233,7 +233,7 @@ class TestPaperStatusHelpers:
 
         sessions = [
             {
-                "strategy_id": "s1",
+                "deployment_id": "s1",
                 "status": "stopped",
                 "pid": "N/A",
                 "start_time": "2026-01-01T00:00:00",
@@ -270,7 +270,7 @@ class TestPaperStatusHelpers:
         bg = BackgroundStatus(
             is_running=True,
             pid=4242,
-            strategy_id="s1",
+            deployment_id="s1",
             session_start=datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC),
             tick_count=10,
             trade_count=3,

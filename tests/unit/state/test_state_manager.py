@@ -136,7 +136,7 @@ class TestStateManagerConfiguration:
 
         # Save and load state
         state = StateData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             version=1,
             state={"key": "value"},
         )
@@ -160,17 +160,17 @@ class TestStateManagerCRUD:
     async def test_save_and_load_state(self, state_manager):
         """Test basic save and load operations."""
         state = StateData(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             version=1,
             state={"position": 100, "balance": "1000.50"},
         )
 
         saved = await state_manager.save_state(state)
-        assert saved.strategy_id == "strat-1"
+        assert saved.deployment_id == "strat-1"
         assert saved.version >= 1
 
         loaded = await state_manager.load_state("strat-1")
-        assert loaded.strategy_id == "strat-1"
+        assert loaded.deployment_id == "strat-1"
         assert loaded.state["position"] == 100
         assert loaded.state["balance"] == "1000.50"
 
@@ -179,7 +179,7 @@ class TestStateManagerCRUD:
         """Test updating existing state."""
         # Create initial state
         state = StateData(
-            strategy_id="strat-2",
+            deployment_id="strat-2",
             version=1,
             state={"count": 1},
         )
@@ -200,7 +200,7 @@ class TestStateManagerCRUD:
     async def test_delete_state(self, state_manager):
         """Test deleting state."""
         state = StateData(
-            strategy_id="strat-delete",
+            deployment_id="strat-delete",
             version=1,
             state={"to_delete": True},
         )
@@ -224,7 +224,7 @@ class TestStateManagerCRUD:
         with pytest.raises(StateNotFoundError) as exc_info:
             await state_manager.load_state("non-existent")
 
-        assert exc_info.value.strategy_id == "non-existent"
+        assert exc_info.value.deployment_id == "non-existent"
 
     @pytest.mark.asyncio
     async def test_multiple_strategies(self, state_manager):
@@ -232,17 +232,17 @@ class TestStateManagerCRUD:
         strategies = ["strat-a", "strat-b", "strat-c"]
 
         # Create states for all strategies
-        for idx, strategy_id in enumerate(strategies):
+        for idx, deployment_id in enumerate(strategies):
             state = StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=1,
                 state={"index": idx},
             )
             await state_manager.save_state(state)
 
         # Verify each strategy has correct state
-        for idx, strategy_id in enumerate(strategies):
-            loaded = await state_manager.load_state(strategy_id)
+        for idx, deployment_id in enumerate(strategies):
+            loaded = await state_manager.load_state(deployment_id)
             assert loaded.state["index"] == idx
 
 
@@ -258,7 +258,7 @@ class TestStateManagerCAS:
     async def test_cas_success(self, state_manager):
         """Test successful CAS update."""
         state = StateData(
-            strategy_id="cas-test",
+            deployment_id="cas-test",
             version=1,
             state={"value": "initial"},
         )
@@ -276,7 +276,7 @@ class TestStateManagerCAS:
     async def test_cas_conflict(self, state_manager):
         """Test CAS update with version mismatch raises error."""
         state = StateData(
-            strategy_id="cas-conflict",
+            deployment_id="cas-conflict",
             version=1,
             state={"value": "initial"},
         )
@@ -293,7 +293,7 @@ class TestStateManagerCAS:
         with pytest.raises(StateConflictError) as exc_info:
             await state_manager.save_state(state, expected_version=1)
 
-        assert exc_info.value.strategy_id == "cas-conflict"
+        assert exc_info.value.deployment_id == "cas-conflict"
         assert exc_info.value.expected_version == 1
 
 
@@ -309,7 +309,7 @@ class TestTieredStorage:
     async def test_hot_cache_on_save(self, state_manager):
         """Test that saves populate HOT cache."""
         state = StateData(
-            strategy_id="hot-test",
+            deployment_id="hot-test",
             version=1,
             state={"cached": True},
         )
@@ -323,7 +323,7 @@ class TestTieredStorage:
     async def test_warm_fallback_on_cache_miss(self, state_manager):
         """Test that WARM tier is used on cache miss."""
         state = StateData(
-            strategy_id="warm-fallback",
+            deployment_id="warm-fallback",
             version=1,
             state={"fallback": True},
         )
@@ -341,7 +341,7 @@ class TestTieredStorage:
     async def test_warm_populates_hot_on_load(self, state_manager):
         """Test that loading from WARM populates HOT cache."""
         state = StateData(
-            strategy_id="populate-hot",
+            deployment_id="populate-hot",
             version=1,
             state={"populate": True},
         )
@@ -362,11 +362,11 @@ class TestTieredStorage:
     async def test_invalidate_hot_cache(self, state_manager):
         """Test HOT cache invalidation."""
         states = ["inv-1", "inv-2", "inv-3"]
-        for strategy_id in states:
+        for deployment_id in states:
             state = StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=1,
-                state={"id": strategy_id},
+                state={"id": deployment_id},
             )
             await state_manager.save_state(state)
 
@@ -403,7 +403,7 @@ class TestHotCacheMutationGuard:
         """HotCache.get() must return a deep copy, not the cached reference."""
         cache = HotCache()
         original = StateData(
-            strategy_id="copy-get",
+            deployment_id="copy-get",
             version=1,
             state={"counter": 1, "nested": {"k": "v"}},
         )
@@ -425,7 +425,7 @@ class TestHotCacheMutationGuard:
         """HotCache.set() must deep-copy so later caller mutation is isolated."""
         cache = HotCache()
         state = StateData(
-            strategy_id="copy-set",
+            deployment_id="copy-set",
             version=1,
             state={"counter": 1, "nested": {"k": "v"}},
         )
@@ -451,7 +451,7 @@ class TestHotCacheMutationGuard:
         durably-committed value.
         """
         initial = StateData(
-            strategy_id="cas-hot",
+            deployment_id="cas-hot",
             version=1,
             state={"v": 1},
         )
@@ -478,7 +478,7 @@ class TestHotCacheMutationGuard:
         import time as _time
 
         cache = HotCache(ttl_seconds=1)
-        first = StateData(strategy_id="ttl-x", version=1, state={"v": 1})
+        first = StateData(deployment_id="ttl-x", version=1, state={"v": 1})
         cache.set(first)
 
         # Sleep past TTL, then first.get() evicts the expired entry.
@@ -488,7 +488,7 @@ class TestHotCacheMutationGuard:
         # Mutating the original after expiry must not resurrect stale state.
         first.state["v"] = 999
 
-        replacement = StateData(strategy_id="ttl-x", version=2, state={"v": 42})
+        replacement = StateData(deployment_id="ttl-x", version=2, state={"v": 42})
         cache.set(replacement)
 
         # Caller mutating the replacement after set() also must not leak.
@@ -502,9 +502,9 @@ class TestHotCacheMutationGuard:
     def test_hotcache_eviction_does_not_cross_talk(self) -> None:
         """Evicting the oldest entry must not expose its reference elsewhere."""
         cache = HotCache(max_size=2)
-        a = StateData(strategy_id="a", version=1, state={"who": "a"})
-        b = StateData(strategy_id="b", version=1, state={"who": "b"})
-        c = StateData(strategy_id="c", version=1, state={"who": "c"})
+        a = StateData(deployment_id="a", version=1, state={"who": "a"})
+        b = StateData(deployment_id="b", version=1, state={"who": "b"})
+        c = StateData(deployment_id="c", version=1, state={"who": "c"})
 
         # Ensure strictly monotonic timestamps so eviction is deterministic.
         import time as _time
@@ -548,7 +548,7 @@ class TestStartupLoading:
 
         for i in range(3):
             state = StateData(
-                strategy_id=f"startup-{i}",
+                deployment_id=f"startup-{i}",
                 version=1,
                 state={"index": i},
             )
@@ -586,7 +586,7 @@ class TestMetrics:
     async def test_metrics_recorded(self, state_manager):
         """Test that metrics are recorded for operations."""
         state = StateData(
-            strategy_id="metrics-test",
+            deployment_id="metrics-test",
             version=1,
             state={"metric": True},
         )
@@ -608,7 +608,7 @@ class TestMetrics:
     async def test_metrics_summary(self, state_manager):
         """Test metrics summary generation."""
         state = StateData(
-            strategy_id="summary-test",
+            deployment_id="summary-test",
             version=1,
             state={"summary": True},
         )
@@ -639,7 +639,7 @@ class TestDataIntegrity:
     async def test_checksum_verification(self, state_manager):
         """Test that checksums are calculated and stored."""
         state = StateData(
-            strategy_id="checksum-test",
+            deployment_id="checksum-test",
             version=1,
             state={"data": "important"},
         )
@@ -670,7 +670,7 @@ class TestDataIntegrity:
         }
 
         state = StateData(
-            strategy_id="complex-state",
+            deployment_id="complex-state",
             version=1,
             state=complex_state,
         )
@@ -696,7 +696,7 @@ class TestDataIntegrity:
         await manager1.initialize()
 
         state = StateData(
-            strategy_id="persist-test",
+            deployment_id="persist-test",
             version=1,
             state={"persist": "value"},
         )

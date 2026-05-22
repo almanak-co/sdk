@@ -270,7 +270,7 @@ class AaveBorrowStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.STATE_CHANGE,
                     description="State: IDLE -> Supplying collateral",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"old_state": "idle", "new_state": "supplying"},
                 )
             )
@@ -286,7 +286,7 @@ class AaveBorrowStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.STATE_CHANGE,
                     description="State: SUPPLIED -> Borrowing",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"old_state": "supplied", "new_state": "borrowing"},
                 )
             )
@@ -405,7 +405,7 @@ class AaveBorrowStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.collateral_amount} {self.collateral_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "supply",
                             "token": self.collateral_token,
@@ -423,7 +423,7 @@ class AaveBorrowStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self.borrow_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "borrow", "token": self.borrow_token},
                     )
                 )
@@ -434,7 +434,7 @@ class AaveBorrowStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Repaid {self.borrow_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "repay", "token": self.borrow_token},
                     )
                 )
@@ -445,7 +445,7 @@ class AaveBorrowStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Withdrew {self.collateral_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "withdraw", "token": self.collateral_token},
                     )
                 )
@@ -694,7 +694,7 @@ class AaveBorrowStrategy(IntentStrategy):
                     # On-chain query succeeded -- return its result even if empty
                     # (empty means wallet has no Aave positions, which is authoritative)
                     return TeardownPositionSummary(
-                        strategy_id=self.STRATEGY_NAME,
+                        deployment_id=self.STRATEGY_NAME,
                         timestamp=datetime.now(UTC),
                         positions=onchain_positions,
                     )
@@ -745,7 +745,7 @@ class AaveBorrowStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

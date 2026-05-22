@@ -17,7 +17,7 @@ from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
 def _make_snapshot(total_value_usd: str, available_cash_usd: str) -> MagicMock:
     snap = MagicMock()
-    snap.strategy_id = "test-strategy"
+    snap.deployment_id = "test-strategy"
     snap.timestamp = MagicMock()
     snap.total_value_usd = Decimal(total_value_usd)
     snap.available_cash_usd = Decimal(available_cash_usd)
@@ -62,7 +62,7 @@ class TestPortfolioBaselineFallback:
             metrics = await _build_metrics_for_snapshot(
                 runner=runner,
                 snapshot=snapshot,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
             )
 
         assert metrics is not None
@@ -81,7 +81,7 @@ class TestPortfolioBaselineFallback:
             metrics = await _build_metrics_for_snapshot(
                 runner=runner,
                 snapshot=snapshot,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
             )
 
         assert metrics is not None
@@ -109,7 +109,7 @@ class TestPortfolioBaselineFallback:
             metrics = await _build_metrics_for_snapshot(
                 runner=runner,
                 snapshot=snapshot,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
             )
 
         assert metrics is not None
@@ -139,7 +139,7 @@ class TestPortfolioBaselineFallback:
             metrics = await _build_metrics_for_snapshot(
                 runner=runner,
                 snapshot=snapshot,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
             )
 
         # initial_value_usd must stay at the original baseline, not be re-set

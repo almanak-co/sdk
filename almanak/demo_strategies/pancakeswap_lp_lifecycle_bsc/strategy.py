@@ -192,7 +192,7 @@ class PancakeSwapV3LPLifecycleBSCStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self._strategy_id or "pancakeswap_lp_lifecycle_bsc",
+            deployment_id=self.deployment_id or "pancakeswap_lp_lifecycle_bsc",
             timestamp=datetime.now(UTC),
             positions=positions,
         )

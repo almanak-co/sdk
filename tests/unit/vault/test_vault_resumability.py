@@ -49,7 +49,7 @@ def _make_execution_result(success: bool = True, error: str | None = None):
 
 def _make_manager(
     vault_config: VaultConfig | None = None,
-    strategy_id: str = "test-strategy-1",
+    deployment_id: str = "test-strategy-1",
     initial_vault_state: dict | None = None,
     vault_state: VaultState | None = None,
 ) -> VaultLifecycleManager:
@@ -70,7 +70,7 @@ def _make_manager(
         vault_sdk=sdk,
         vault_adapter=adapter,
         execution_orchestrator=orchestrator,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         initial_vault_state=initial_vault_state,
     )
 

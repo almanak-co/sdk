@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 def call_teardown_api(
-    strategy_id: str, endpoint: str, method: str = "GET", payload: dict | None = None
+    deployment_id: str, endpoint: str, method: str = "GET", payload: dict | None = None
 ) -> dict[str, Any]:
     """Call a teardown API endpoint.
 
     Args:
-        strategy_id: The strategy ID
+        deployment_id: The deployment ID
         endpoint: API endpoint (preview, close, status, cancel)
         method: HTTP method (GET or POST)
         payload: Optional request payload
@@ -39,7 +39,7 @@ def call_teardown_api(
     Returns:
         API response as dict
     """
-    url = f"{API_BASE_URL}/api/strategies/{strategy_id}/close"
+    url = f"{API_BASE_URL}/api/strategies/{deployment_id}/close"
     if endpoint and endpoint != "close":
         url = f"{url}/{endpoint}"
 
@@ -66,10 +66,10 @@ def call_teardown_api(
         return {"success": False, "error": str(e)}
 
 
-def _get_strategy_by_id(strategies: list[Strategy], strategy_id: str) -> Strategy | None:
+def _get_strategy_by_id(strategies: list[Strategy], deployment_id: str) -> Strategy | None:
     """Get strategy by ID."""
     for s in strategies:
-        if s.id == strategy_id:
+        if s.id == deployment_id:
             return s
     return None
 
@@ -681,7 +681,7 @@ def _render_completed(strategy: Strategy) -> None:
     with col2:
         if st.button("View Timeline", use_container_width=True):
             st.query_params["page"] = "timeline"
-            st.query_params["strategy_id"] = strategy.id
+            st.query_params["deployment_id"] = strategy.id
 
 
 def _render_cancelled(strategy: Strategy) -> None:
@@ -834,9 +834,9 @@ def _render_asset_policy_selection(strategy: Strategy) -> None:
 
 def page(strategies: list[Strategy]) -> None:  # noqa: C901
     """Main teardown page router."""
-    strategy_id = st.query_params.get("strategy_id")
+    deployment_id = st.query_params.get("deployment_id")
 
-    if not strategy_id:
+    if not deployment_id:
         maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to initiate teardown.")
         st.markdown("### Or select a strategy here:")
@@ -849,7 +849,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 key="teardown_strategy_selector",
             )
             if st.button("Start Teardown", use_container_width=True):
-                st.query_params["strategy_id"] = strategies[selected_idx].id
+                st.query_params["deployment_id"] = strategies[selected_idx].id
                 st.rerun()
         else:
             st.warning("No strategies found. Make sure you have strategies running or check your state database.")
@@ -857,9 +857,9 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 st.query_params["page"] = "overview"
         return
 
-    strategy = _get_strategy_by_id(strategies, strategy_id)
+    strategy = _get_strategy_by_id(strategies, deployment_id)
     if not strategy:
-        st.error(f"Strategy not found: {strategy_id}")
+        st.error(f"Strategy not found: {deployment_id}")
         if st.button("← Back to Overview"):
             st.query_params["page"] = "overview"
         return

@@ -2,7 +2,7 @@
 
 This module provides structured audit logging for all gateway operations:
 - Request/response logging with timestamps and latency
-- Strategy ID tracking for multi-tenant debugging
+- Deployment ID tracking for multi-tenant debugging
 - JSON format for easy parsing and analysis
 - Configurable log levels
 
@@ -89,7 +89,7 @@ class AuditRecord:
     timestamp: str
     service: str
     method: str
-    strategy_id: str | None
+    deployment_id: str | None
     latency_ms: float
     success: bool
     error_type: str | None = None
@@ -104,7 +104,7 @@ class AuditRecord:
             "timestamp": self.timestamp,
             "service": self.service,
             "method": self.method,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "latency_ms": round(self.latency_ms, 3),
             "success": self.success,
             "error_type": self.error_type,
@@ -132,20 +132,20 @@ def _parse_method_name(full_method: str) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
-def _extract_strategy_id(request: Any) -> str | None:
-    """Extract strategy_id from request if present.
+def _extract_deployment_id(request: Any) -> str | None:
+    """Extract deployment_id from request if present.
 
     Args:
         request: gRPC request object
 
     Returns:
-        Strategy ID or None
+        Deployment ID or None
     """
     # Try common field names
-    if hasattr(request, "strategy_id"):
-        return request.strategy_id or None
-    if hasattr(request, "strategyId"):
-        return request.strategyId or None
+    if hasattr(request, "deployment_id"):
+        return request.deployment_id or None
+    if hasattr(request, "deploymentId"):
+        return request.deploymentId or None
     return None
 
 
@@ -164,7 +164,7 @@ def _summarize_request(request: Any, max_fields: int = 5) -> dict:
     summary = {}
     important_fields = [
         "chain",
-        "strategy_id",
+        "deployment_id",
         "method",
         "symbol",
         "token_id",
@@ -318,7 +318,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             timestamp = datetime.now(UTC).isoformat()
-            strategy_id = _extract_strategy_id(request)
+            deployment_id = _extract_deployment_id(request)
             request_summary = _summarize_request(request)
 
             error_type = None
@@ -342,7 +342,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
                     timestamp=timestamp,
                     service=service,
                     method=method,
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     latency_ms=latency_ms,
                     success=success,
                     error_type=error_type,
@@ -365,7 +365,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             timestamp = datetime.now(UTC).isoformat()
-            strategy_id = _extract_strategy_id(request)
+            deployment_id = _extract_deployment_id(request)
             request_summary = _summarize_request(request)
 
             error_type = None
@@ -387,7 +387,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
                     timestamp=timestamp,
                     service=service,
                     method=method,
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     latency_ms=latency_ms,
                     success=success,
                     error_type=error_type,
@@ -432,7 +432,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
                     timestamp=timestamp,
                     service=service,
                     method=method,
-                    strategy_id=None,  # Can't extract from stream
+                    deployment_id=None,  # Can't extract from stream
                     latency_ms=latency_ms,
                     success=success,
                     error_type=error_type,
@@ -475,7 +475,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
                     timestamp=timestamp,
                     service=service,
                     method=method,
-                    strategy_id=None,
+                    deployment_id=None,
                     latency_ms=latency_ms,
                     success=success,
                     error_type=error_type,

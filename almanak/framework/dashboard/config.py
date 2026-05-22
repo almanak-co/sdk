@@ -158,6 +158,7 @@ class SystemHealth:
         return self.features.get(feature, False)
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _check_health_via_gateway(health: SystemHealth) -> SystemHealth:
     """Fall back to gateway instance registry to determine system health.
 
@@ -174,7 +175,7 @@ def _check_health_via_gateway(health: SystemHealth) -> SystemHealth:
         strategies = client.list_strategies()
         running = [s for s in strategies if s.status == "RUNNING"]
         health.runners_active = len(running)
-        health.running_strategies = [s.strategy_id for s in running]
+        health.running_strategies = [s.deployment_id for s in running]
 
         has_runners = len(running) > 0
         health.api_available = True
@@ -208,6 +209,7 @@ def _check_health_via_gateway(health: SystemHealth) -> SystemHealth:
     return health
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def check_system_health() -> SystemHealth:
     """Check overall system health by calling the health API.
 
@@ -237,7 +239,7 @@ def check_system_health() -> SystemHealth:
             health.api_available = True
             health.api_status = data.get("status", "healthy")
             health.runners_active = data.get("runners_active", 0)
-            health.running_strategies = [s.get("strategy_id", "") for s in data.get("running_strategies", [])]
+            health.running_strategies = [s.get("deployment_id", "") for s in data.get("running_strategies", [])]
             health.features = data.get(
                 "features",
                 {
@@ -271,18 +273,18 @@ def check_system_health() -> SystemHealth:
     return health
 
 
-def check_strategy_health(strategy_id: str) -> dict[str, Any]:
+def check_strategy_health(deployment_id: str) -> dict[str, Any]:
     """Check health for a specific strategy.
 
     Args:
-        strategy_id: The strategy to check
+        deployment_id: The strategy to check
 
     Returns:
         Dict with running status and available features
     """
     try:
         response = requests.get(
-            f"{API_BASE_URL}/api/health/strategies/{strategy_id}",
+            f"{API_BASE_URL}/api/health/strategies/{deployment_id}",
             timeout=2,
         )
         if response.status_code == 200:
@@ -293,7 +295,7 @@ def check_strategy_health(strategy_id: str) -> dict[str, Any]:
     # Default response when API unavailable
     return {
         "running": False,
-        "strategy_id": strategy_id,
+        "deployment_id": deployment_id,
         "features": {
             "pause_resume": False,
             "bump_gas": False,

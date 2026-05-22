@@ -1,107 +1,119 @@
-"""Tests for the deployment_id resolver (VIB-2764).
+"""Tests for the deployment_id resolver (blueprint 29, VIB-4722).
 
 Validates:
-- Deterministic deployment_id from (wallet, chain, strategy_name)
-- CLI override (--id) takes precedence
-- Bare name fallback when wallet/chain unavailable
+- Hosted: deployment_id is ALMANAK_DEPLOYMENT_ID verbatim; blank ⇒ FatalBootError
+- Local: deterministic deployment:{sha256(wallet:chain)[:12]} (class name NOT hashed)
+- Local with no wallet/chain ⇒ FatalBootError (no bare-name fallback, no --id)
 - run_id is always unique
 """
 
+import hashlib
+
+import pytest
+
+from almanak.framework.deployment import FatalBootError
 from almanak.framework.runner.identity import generate_run_id, resolve_deployment_id
 
 
-class TestResolveDeploymentId:
-    """Test deployment_id resolution with three-tier identity model."""
+def _local_env(monkeypatch):
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
 
-    def test_deterministic_hash(self):
-        """Same (wallet, chain, name) always produces the same deployment_id."""
-        id1 = resolve_deployment_id(
-            strategy_name="AaveYield",
-            wallet_address="0xAbC123",
-            chain="arbitrum",
-        )
-        id2 = resolve_deployment_id(
-            strategy_name="AaveYield",
-            wallet_address="0xAbC123",
-            chain="arbitrum",
-        )
+
+class TestResolveDeploymentIdLocal:
+    """Local mode: deployment_id is a pure function of (wallet, chain)."""
+
+    def test_deterministic_hash(self, monkeypatch):
+        """Same (wallet, chain) always produces the same deployment_id."""
+        _local_env(monkeypatch)
+        id1 = resolve_deployment_id(wallet_address="0xAbC123", chain="arbitrum")
+        id2 = resolve_deployment_id(wallet_address="0xAbC123", chain="arbitrum")
         assert id1 == id2
-        assert id1.startswith("AaveYield:")
+        assert id1.startswith("deployment:")
         assert len(id1.split(":")[1]) == 12
 
-    def test_case_insensitive_wallet_and_chain(self):
+    def test_hash_matches_blueprint_formula(self, monkeypatch):
+        """deployment_id == deployment:{sha256(wallet:chain)[:12]}, lowercased."""
+        _local_env(monkeypatch)
+        result = resolve_deployment_id(wallet_address="0xAbC123", chain="Arbitrum")
+        key = "0xabc123:arbitrum"
+        expected = f"deployment:{hashlib.sha256(key.encode()).hexdigest()[:12]}"
+        assert result == expected
+
+    def test_case_insensitive_wallet_and_chain(self, monkeypatch):
         """Wallet address and chain are lowercased before hashing."""
-        id1 = resolve_deployment_id(
-            strategy_name="MyStrat",
-            wallet_address="0xABCDEF",
-            chain="Arbitrum",
-        )
-        id2 = resolve_deployment_id(
-            strategy_name="MyStrat",
-            wallet_address="0xabcdef",
-            chain="arbitrum",
-        )
+        _local_env(monkeypatch)
+        id1 = resolve_deployment_id(wallet_address="0xABCDEF", chain="Arbitrum")
+        id2 = resolve_deployment_id(wallet_address="0xabcdef", chain="arbitrum")
         assert id1 == id2
 
-    def test_different_wallets_different_ids(self):
-        id1 = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xAAA",
-            chain="arbitrum",
-        )
-        id2 = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xBBB",
-            chain="arbitrum",
-        )
+    def test_different_wallets_different_ids(self, monkeypatch):
+        _local_env(monkeypatch)
+        id1 = resolve_deployment_id(wallet_address="0xAAA", chain="arbitrum")
+        id2 = resolve_deployment_id(wallet_address="0xBBB", chain="arbitrum")
         assert id1 != id2
 
-    def test_different_chains_different_ids(self):
-        id1 = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xAAA",
-            chain="arbitrum",
-        )
-        id2 = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xAAA",
-            chain="base",
-        )
+    def test_different_chains_different_ids(self, monkeypatch):
+        _local_env(monkeypatch)
+        id1 = resolve_deployment_id(wallet_address="0xAAA", chain="arbitrum")
+        id2 = resolve_deployment_id(wallet_address="0xAAA", chain="base")
         assert id1 != id2
 
-    def test_cli_override_with_colon(self):
-        """User-supplied --id with colon is used as-is."""
-        result = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xAAA",
-            chain="arbitrum",
-            cli_id="MyStrat:custom123",
-        )
-        assert result == "MyStrat:custom123"
+    def test_no_wallet_raises_fatal(self, monkeypatch):
+        """No wallet ⇒ FatalBootError (no bare-name fallback)."""
+        _local_env(monkeypatch)
+        with pytest.raises(FatalBootError):
+            resolve_deployment_id(chain="arbitrum")
 
-    def test_cli_override_without_colon(self):
-        """User-supplied --id without colon gets strategy_name prefix."""
-        result = resolve_deployment_id(
-            strategy_name="Strat",
-            wallet_address="0xAAA",
-            chain="arbitrum",
-            cli_id="custom123",
-        )
-        assert result == "Strat:custom123"
+    def test_empty_wallet_raises_fatal(self, monkeypatch):
+        """Empty wallet ⇒ FatalBootError."""
+        _local_env(monkeypatch)
+        with pytest.raises(FatalBootError):
+            resolve_deployment_id(wallet_address="", chain="arbitrum")
 
-    def test_bare_name_fallback(self):
-        """No wallet/chain falls back to bare strategy_name."""
-        result = resolve_deployment_id(strategy_name="MyStrat")
-        assert result == "MyStrat"
+    def test_no_chain_raises_fatal(self, monkeypatch):
+        """No chain ⇒ FatalBootError."""
+        _local_env(monkeypatch)
+        with pytest.raises(FatalBootError):
+            resolve_deployment_id(wallet_address="0xAAA", chain="")
 
-    def test_empty_wallet_fallback(self):
-        """Empty wallet address falls back to bare name."""
-        result = resolve_deployment_id(
-            strategy_name="MyStrat",
-            wallet_address="",
-            chain="arbitrum",
-        )
-        assert result == "MyStrat"
+    def test_stray_deployment_id_ignored_in_local(self, monkeypatch):
+        """A stray ALMANAK_DEPLOYMENT_ID does not flip a local run to hosted."""
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "platform-uuid-9999")
+        result = resolve_deployment_id(wallet_address="0xAAA", chain="arbitrum")
+        assert result.startswith("deployment:")
+        assert result != "platform-uuid-9999"
+
+
+class TestResolveDeploymentIdHosted:
+    """Hosted mode: deployment_id is ALMANAK_DEPLOYMENT_ID verbatim."""
+
+    def test_hosted_uses_deployment_id_env(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "platform-agent-1234")
+        # wallet/chain are ignored in hosted mode.
+        result = resolve_deployment_id(wallet_address="0xAAA", chain="arbitrum")
+        assert result == "platform-agent-1234"
+
+    def test_hosted_strips_whitespace(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "1")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "  agent-7  ")
+        assert resolve_deployment_id() == "agent-7"
+
+    def test_hosted_blank_id_raises_fatal(self, monkeypatch):
+        """Hosted with a blank ALMANAK_DEPLOYMENT_ID ⇒ FatalBootError."""
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "   ")
+        with pytest.raises(FatalBootError):
+            resolve_deployment_id()
+
+    def test_hosted_unset_id_raises_fatal(self, monkeypatch):
+        """Hosted with ALMANAK_DEPLOYMENT_ID unset ⇒ FatalBootError."""
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "yes")
+        monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
+        with pytest.raises(FatalBootError):
+            resolve_deployment_id()
 
 
 class TestGenerateRunId:

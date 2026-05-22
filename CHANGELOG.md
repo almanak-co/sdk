@@ -1042,7 +1042,7 @@ source-of-truth.
 - 8 new demo strategies: Morpho Blue paper trade (#578), Aave V3 PnL lending (#577), RSI+MACD confluence LP (#576), PancakeSwap V3 LP lifecycle (#575), Balancer flash loan arbitrage (#567), Compound V3 paper trade (#568), TraderJoe V2 ATR-adaptive LP (#551), Aerodrome paper trade (#518)
 
 ### Changed
-- Strategy metadata (description, chain, strategy_id) moved from config.json to `@almanak_strategy` decorator; config.json now contains only tunable runtime parameters (#591)
+- Strategy metadata (description, chain, deployment_id) moved from config.json to `@almanak_strategy` decorator; config.json now contains only tunable runtime parameters (#591)
 
 ### Fixed
 - Use ALMANAK_EOA_ADDRESS for safe_zodiac mode instead of derived address (#585)

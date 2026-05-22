@@ -212,7 +212,7 @@ class ActionResponse:
 class StrategyState:
     """Internal state tracking for a strategy."""
 
-    strategy_id: str
+    deployment_id: str
     status: str  # "running", "paused", "stuck"
     chain: str
     protocol: str
@@ -236,11 +236,12 @@ _last_cache_refresh: float = 0.0
 CACHE_REFRESH_INTERVAL = 5.0  # Refresh every 5 seconds
 
 
-def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
     """Load strategy state from SQLite database.
 
     Args:
-        strategy_id: Strategy ID to load
+        deployment_id: Deployment ID to load
 
     Returns:
         StrategyState if found, None otherwise
@@ -262,9 +263,10 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        # Query the strategy state
+        # Query the strategy state by the unified deployment identity.
         cursor.execute(
-            "SELECT strategy_id, state_data, updated_at FROM strategy_state WHERE strategy_id = ?", (strategy_id,)
+            "SELECT deployment_id, state_data, updated_at FROM strategy_state WHERE deployment_id = ?",
+            (deployment_id,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -274,9 +276,6 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
 
         state_json = row["state_data"]
         state_data = json.loads(state_json) if state_json else {}
-
-        # Extract strategy name from ID
-        strategy_id.split(":")[0] if ":" in strategy_id else strategy_id
 
         # Determine status from state
         status = "running"
@@ -327,7 +326,7 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
                 pass
 
         return StrategyState(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             status=status,
             chain=chain,
             protocol=protocol,
@@ -344,14 +343,14 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
         return None
 
 
-def get_strategy_state(strategy_id: str) -> StrategyState:
+def get_strategy_state(deployment_id: str) -> StrategyState:
     """Get the current state of a strategy from database.
 
     Queries the SQLite state database for the strategy's current state.
     Falls back to cached data if database is unavailable.
 
     Args:
-        strategy_id: The strategy ID to look up
+        deployment_id: The deployment ID to look up
 
     Returns:
         The strategy state
@@ -362,18 +361,18 @@ def get_strategy_state(strategy_id: str) -> StrategyState:
     global _last_cache_refresh
 
     # Try to load from database
-    state = _load_strategy_state_from_db(strategy_id)
+    state = _load_strategy_state_from_db(deployment_id)
 
     if state:
         # Update cache
-        _strategy_state_cache[strategy_id] = state
+        _strategy_state_cache[deployment_id] = state
         return state
 
     # Check cache
-    if strategy_id in _strategy_state_cache:
-        return _strategy_state_cache[strategy_id]
+    if deployment_id in _strategy_state_cache:
+        return _strategy_state_cache[deployment_id]
 
-    raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    raise HTTPException(status_code=404, detail=f"Strategy {deployment_id} not found")
 
 
 # Authentication dependency
@@ -416,7 +415,7 @@ async def verify_api_key(
 
 
 def emit_audit_event(
-    strategy_id: str,
+    deployment_id: str,
     action: str,
     details: dict[str, Any],
     api_key: str,
@@ -425,7 +424,7 @@ def emit_audit_event(
     """Emit an audit event for an action.
 
     Args:
-        strategy_id: The strategy ID the action was performed on
+        deployment_id: The deployment ID the action was performed on
         action: The action that was performed
         details: Additional details about the action
         api_key: The API key used for authentication
@@ -435,7 +434,7 @@ def emit_audit_event(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.OPERATOR_ACTION_EXECUTED,
         description=f"Operator action executed: {action}",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=chain,
         details={
             "action": action,
@@ -446,6 +445,7 @@ def emit_audit_event(
     add_event(event)
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def generate_operator_card(
     state: StrategyState,
     event_type: EventType,
@@ -521,7 +521,7 @@ def generate_operator_card(
         )
 
     return OperatorCard(
-        strategy_id=state.strategy_id,
+        deployment_id=state.deployment_id,
         timestamp=datetime.now(UTC),
         event_type=event_type,
         reason=reason,
@@ -538,7 +538,7 @@ def generate_operator_card(
             total_value_usd=state.total_value_usd,
             available_balance_usd=state.total_value_usd * Decimal("0.1"),
         ),
-        risk_description=f"Strategy {state.strategy_id} is currently {state.status}. "
+        risk_description=f"Strategy {state.deployment_id} is currently {state.status}. "
         f"Total value at risk: ${state.total_value_usd:,.2f}",
         suggested_actions=suggested_actions,
         available_actions=available_actions,
@@ -549,9 +549,9 @@ def generate_operator_card(
 router = APIRouter(prefix="/api/strategies", tags=["actions"])
 
 
-@router.post("/{strategy_id}/pause")
+@router.post("/{deployment_id}/pause")
 async def pause_strategy(
-    strategy_id: str,
+    deployment_id: str,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Pause a running strategy.
@@ -560,7 +560,7 @@ async def pause_strategy(
     current positions. The strategy can be resumed later.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         api_key: The authenticated API key (injected by dependency)
 
     Returns:
@@ -569,12 +569,12 @@ async def pause_strategy(
     Raises:
         HTTPException: If strategy not found or already paused
     """
-    state = get_strategy_state(strategy_id)
+    state = get_strategy_state(deployment_id)
 
     if state.status == "paused":
         raise HTTPException(
             status_code=400,
-            detail=f"Strategy {strategy_id} is already paused",
+            detail=f"Strategy {deployment_id} is already paused",
         )
 
     # Update state
@@ -584,7 +584,7 @@ async def pause_strategy(
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="PAUSE",
         details={"previous_status": previous_status},
         api_key=api_key,
@@ -595,7 +595,7 @@ async def pause_strategy(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_PAUSED,
         description=f"Strategy paused by operator (was {previous_status})",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=state.chain,
         details={
             "previous_status": previous_status,
@@ -614,16 +614,16 @@ async def pause_strategy(
 
     response = ActionResponse(
         success=True,
-        message=f"Strategy {strategy_id} has been paused",
+        message=f"Strategy {deployment_id} has been paused",
         operator_card=operator_card.to_dict(),
     )
 
     return response.to_dict()
 
 
-@router.post("/{strategy_id}/resume")
+@router.post("/{deployment_id}/resume")
 async def resume_strategy(
-    strategy_id: str,
+    deployment_id: str,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Resume a paused strategy.
@@ -632,7 +632,7 @@ async def resume_strategy(
     continue from where it left off.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         api_key: The authenticated API key (injected by dependency)
 
     Returns:
@@ -641,12 +641,12 @@ async def resume_strategy(
     Raises:
         HTTPException: If strategy not found or not paused
     """
-    state = get_strategy_state(strategy_id)
+    state = get_strategy_state(deployment_id)
 
     if state.status != "paused":
         raise HTTPException(
             status_code=400,
-            detail=f"Strategy {strategy_id} is not paused (current status: {state.status})",
+            detail=f"Strategy {deployment_id} is not paused (current status: {state.status})",
         )
 
     # Update state
@@ -656,7 +656,7 @@ async def resume_strategy(
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="RESUME",
         details={},
         api_key=api_key,
@@ -667,7 +667,7 @@ async def resume_strategy(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_RESUMED,
         description="Strategy resumed by operator",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=state.chain,
         details={
             "triggered_by": f"api:{api_key[:8]}..." if len(api_key) > 8 else f"api:{api_key}",
@@ -685,16 +685,16 @@ async def resume_strategy(
 
     response = ActionResponse(
         success=True,
-        message=f"Strategy {strategy_id} has been resumed",
+        message=f"Strategy {deployment_id} has been resumed",
         operator_card=operator_card.to_dict(),
     )
 
     return response.to_dict()
 
 
-@router.post("/{strategy_id}/bump-gas")
+@router.post("/{deployment_id}/bump-gas")
 async def bump_gas(
-    strategy_id: str,
+    deployment_id: str,
     request: BumpGasRequest,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -704,7 +704,7 @@ async def bump_gas(
     to speed up confirmation.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         request: The bump gas request containing the new gas price
         api_key: The authenticated API key (injected by dependency)
 
@@ -714,12 +714,12 @@ async def bump_gas(
     Raises:
         HTTPException: If strategy not found, no pending tx, or invalid gas price
     """
-    state = get_strategy_state(strategy_id)
+    state = get_strategy_state(deployment_id)
 
     if not state.pending_tx_hash:
         raise HTTPException(
             status_code=400,
-            detail=f"Strategy {strategy_id} has no pending transaction",
+            detail=f"Strategy {deployment_id} has no pending transaction",
         )
 
     if request.gas_price_gwei <= state.current_gas_price_gwei:
@@ -743,7 +743,7 @@ async def bump_gas(
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="BUMP_GAS",
         details={
             "previous_gas_price_gwei": previous_gas_price,
@@ -763,16 +763,16 @@ async def bump_gas(
 
     response = ActionResponse(
         success=True,
-        message=f"Gas price bumped to {request.gas_price_gwei} Gwei for strategy {strategy_id}",
+        message=f"Gas price bumped to {request.gas_price_gwei} Gwei for strategy {deployment_id}",
         operator_card=operator_card.to_dict(),
     )
 
     return response.to_dict()
 
 
-@router.post("/{strategy_id}/cancel-tx")
+@router.post("/{deployment_id}/cancel-tx")
 async def cancel_transaction(
-    strategy_id: str,
+    deployment_id: str,
     request: CancelTxRequest,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -782,7 +782,7 @@ async def cancel_transaction(
     and effectively cancel the pending transaction.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         request: The cancel request containing the transaction hash
         api_key: The authenticated API key (injected by dependency)
 
@@ -792,12 +792,12 @@ async def cancel_transaction(
     Raises:
         HTTPException: If strategy not found or tx hash doesn't match
     """
-    state = get_strategy_state(strategy_id)
+    state = get_strategy_state(deployment_id)
 
     if not state.pending_tx_hash:
         raise HTTPException(
             status_code=400,
-            detail=f"Strategy {strategy_id} has no pending transaction",
+            detail=f"Strategy {deployment_id} has no pending transaction",
         )
 
     if state.pending_tx_hash != request.tx_hash:
@@ -815,7 +815,7 @@ async def cancel_transaction(
 
     # Emit audit event
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="CANCEL_TX",
         details={
             "cancelled_tx_hash": cancelled_tx_hash,
@@ -833,16 +833,17 @@ async def cancel_transaction(
 
     response = ActionResponse(
         success=True,
-        message=f"Transaction cancelled for strategy {strategy_id}. Strategy is now paused for review.",
+        message=f"Transaction cancelled for strategy {deployment_id}. Strategy is now paused for review.",
         operator_card=operator_card.to_dict(),
     )
 
     return response.to_dict()
 
 
-@router.post("/{strategy_id}/config")
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+@router.post("/{deployment_id}/config")
 async def update_config(
-    strategy_id: str,
+    deployment_id: str,
     request: ConfigUpdateRequest,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -852,7 +853,7 @@ async def update_config(
     applies changes atomically. Changes take effect on the next strategy iteration.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         request: The config update request containing field updates
         api_key: The authenticated API key (injected by dependency)
 
@@ -862,7 +863,7 @@ async def update_config(
     Raises:
         HTTPException: If strategy not found or validation fails
     """
-    state = get_strategy_state(strategy_id)
+    state = get_strategy_state(deployment_id)
 
     if not request.updates:
         raise HTTPException(
@@ -912,7 +913,7 @@ async def update_config(
 
     # Emit audit event for successful config update
     emit_audit_event(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         action="CONFIG_UPDATE",
         details={
             "updated_fields": result.updated_fields,
@@ -927,7 +928,7 @@ async def update_config(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.CONFIG_UPDATED,
         description=f"Configuration updated: {', '.join(result.updated_fields)}",
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=state.chain,
         details={
             "changes": [
@@ -946,7 +947,7 @@ async def update_config(
     # Build response with updated config
     response = ConfigUpdateResponse(
         success=True,
-        message=f"Configuration updated for strategy {strategy_id}: {', '.join(result.updated_fields)}",
+        message=f"Configuration updated for strategy {deployment_id}: {', '.join(result.updated_fields)}",
         updated_config=state.config.to_dict(),
         result=result.to_dict(),
     )

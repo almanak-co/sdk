@@ -312,7 +312,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_traderjoe_crisis_lp"),
+            deployment_id=getattr(self, "deployment_id", "demo_traderjoe_crisis_lp"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -12,7 +12,7 @@ gateway, REST API, or SQLite state DB.
 
 The five scenarios from the plan:
 
-1. No ``strategy_id`` query param: the empty-state branch renders the
+1. No ``deployment_id`` query param: the empty-state branch renders the
    select box so the operator can pick a strategy.
 2. Running LP strategy: ``render_action_row`` emits a ``Pause`` button.
 3. Paused strategy: ``render_action_row`` emits a ``Resume`` button.
@@ -48,8 +48,8 @@ from streamlit.testing.v1 import AppTest
 # ---------------------------------------------------------------------------
 
 
-def _drive_no_strategy_id() -> None:
-    """Scenario 1: no ``strategy_id`` query param -> select-box appears."""
+def _drive_no_deployment_id() -> None:
+    """Scenario 1: no ``deployment_id`` query param -> select-box appears."""
     from decimal import Decimal
 
     import streamlit as st
@@ -58,8 +58,8 @@ def _drive_no_strategy_id() -> None:
     from almanak.framework.dashboard.pages.detail import page
 
     # Empty query params: the empty-state branch should kick in.
-    if "strategy_id" in st.query_params:
-        del st.query_params["strategy_id"]
+    if "deployment_id" in st.query_params:
+        del st.query_params["deployment_id"]
 
     # Two RUNNING strategies: auto-select only fires when exactly one is running,
     # so the empty-state selectbox still renders here.
@@ -105,7 +105,7 @@ def _drive_running_lp() -> None:
     from almanak.framework.dashboard.pages.detail import page
 
     # Select this strategy via the query param.
-    st.query_params["strategy_id"] = "strat-lp"
+    st.query_params["deployment_id"] = "strat-lp"
 
     strategy = Strategy(
         id="strat-lp",
@@ -175,7 +175,7 @@ def _drive_paused() -> None:
     from almanak.framework.dashboard.models import Strategy, StrategyStatus
     from almanak.framework.dashboard.pages.detail import page
 
-    st.query_params["strategy_id"] = "strat-paused"
+    st.query_params["deployment_id"] = "strat-paused"
 
     strategy = Strategy(
         id="strat-paused",
@@ -219,7 +219,7 @@ def _drive_stuck() -> None:
     from almanak.framework.dashboard.models import Strategy, StrategyStatus
     from almanak.framework.dashboard.pages.detail import page
 
-    st.query_params["strategy_id"] = "strat-stuck"
+    st.query_params["deployment_id"] = "strat-stuck"
 
     # StrategyStatus.STUCK is the UI-level projection of the underlying
     # ``consecutive_errors > threshold`` condition. The gateway decides when
@@ -271,7 +271,7 @@ def _drive_paper_mode() -> None:
     )
     from almanak.framework.dashboard.pages.detail import page
 
-    st.query_params["strategy_id"] = "strat-paper"
+    st.query_params["deployment_id"] = "strat-paper"
 
     strategy = Strategy(
         id="strat-paper",
@@ -340,9 +340,9 @@ def _button_labels(at: AppTest) -> list[str]:
     return [b.label for b in at.button]
 
 
-def test_apptest_no_strategy_id_query_param_renders_selectbox() -> None:
-    """Empty ``strategy_id`` query param triggers the select-box empty-state."""
-    at = AppTest.from_function(_drive_no_strategy_id).run(timeout=30)
+def test_apptest_no_deployment_id_query_param_renders_selectbox() -> None:
+    """Empty ``deployment_id`` query param triggers the select-box empty-state."""
+    at = AppTest.from_function(_drive_no_deployment_id).run(timeout=30)
 
     assert not at.exception, f"Unexpected exception: {at.exception}"
     # The helper prompt and the selectbox both render.

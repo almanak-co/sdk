@@ -139,7 +139,7 @@ def _assets_wei(event: MorphoBlueEvent) -> int:
 
 def _execution_context(wallet: str) -> ExecutionContext:
     return ExecutionContext(
-        strategy_id="layer5-morpho-blue-lending",
+        deployment_id="layer5-morpho-blue-lending",
         chain=CHAIN_NAME,
         wallet_address=wallet,
         protocol=PROTOCOL,
@@ -193,7 +193,6 @@ def _payload(row: dict) -> dict:
 def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
     """Identity sextuple per epic VIB-4591 decision #5 (no agent_id)."""
     assert row["deployment_id"] == "layer5-intent-test"
-    assert row["strategy_id"] == "layer5-intent-test"
     assert row["cycle_id"] == "layer5-cycle"
     assert row["execution_mode"] == "paper"
     assert row["event_type"] == event_type

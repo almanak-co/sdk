@@ -1,7 +1,7 @@
 """Tests for SaveAccountingEvent and SavePositionEvent gRPC endpoints (VIB-3449).
 
 Covers:
-- strategy_id / id validation (missing, non-UUID)
+- deployment_id / id validation (missing, non-UUID)
 - timestamp validation (zero/negative)
 - event_type validation (unknown types → INVALID_ARGUMENT)
 - position_type / event_type enum validation for SavePositionEvent
@@ -79,59 +79,58 @@ def ctx() -> MagicMock:
 
 
 def _accounting_request(**overrides) -> gateway_pb2.SaveAccountingEventRequest:
-    defaults = dict(
-        id=_VALID_UUID,
-        strategy_id=_VALID_STRATEGY,
-        deployment_id="deploy-1",
-        cycle_id="cycle-1",
-        execution_mode="paper",
-        timestamp=_VALID_TS,
-        chain="arbitrum",
-        protocol="aave_v3",
-        wallet_address="0xwallet",
-        tx_hash="0xtx",
-        ledger_entry_id=_VALID_UUID,
-        event_type="SUPPLY",
-        position_key="aave-usdc",
-        confidence="HIGH",
-        payload_json=_LENDING_PAYLOAD,
-        schema_version=1,
-    )
+    defaults = {
+        "id": _VALID_UUID,
+        "deployment_id": "deploy-1",
+        "cycle_id": "cycle-1",
+        "execution_mode": "paper",
+        "timestamp": _VALID_TS,
+        "chain": "arbitrum",
+        "protocol": "aave_v3",
+        "wallet_address": "0xwallet",
+        "tx_hash": "0xtx",
+        "ledger_entry_id": _VALID_UUID,
+        "event_type": "SUPPLY",
+        "position_key": "aave-usdc",
+        "confidence": "HIGH",
+        "payload_json": _LENDING_PAYLOAD,
+        "schema_version": 1,
+    }
     defaults.update(overrides)
     return gateway_pb2.SaveAccountingEventRequest(**defaults)
 
 
 def _position_request(**overrides) -> gateway_pb2.SavePositionEventRequest:
-    defaults = dict(
-        id=_VALID_UUID,
-        deployment_id="deploy-1",
-        cycle_id="cycle-1",
-        execution_mode="paper",
-        position_id="pos-1",
-        position_type="LP",
-        event_type="OPEN",
-        timestamp=_VALID_TS,
-        protocol="uniswap_v3",
-        chain="arbitrum",
-        token0="USDC",
-        token1="WETH",
-        amount0="100",
-        amount1="0.05",
-        value_usd="200",
-        liquidity="0",
-        fees_token0="0",
-        fees_token1="0",
-        leverage="1",
-        entry_price="2000",
-        mark_price="2000",
-        unrealized_pnl="0",
-        tx_hash="0xtx",
-        gas_usd="1.50",
-        ledger_entry_id=_VALID_UUID,
-        protocol_fees_usd="0",
-        attribution_json="{}",
-        attribution_version=1,
-    )
+    defaults = {
+        "id": _VALID_UUID,
+        "deployment_id": "deploy-1",
+        "cycle_id": "cycle-1",
+        "execution_mode": "paper",
+        "position_id": "pos-1",
+        "position_type": "LP",
+        "event_type": "OPEN",
+        "timestamp": _VALID_TS,
+        "protocol": "uniswap_v3",
+        "chain": "arbitrum",
+        "token0": "USDC",
+        "token1": "WETH",
+        "amount0": "100",
+        "amount1": "0.05",
+        "value_usd": "200",
+        "liquidity": "0",
+        "fees_token0": "0",
+        "fees_token1": "0",
+        "leverage": "1",
+        "entry_price": "2000",
+        "mark_price": "2000",
+        "unrealized_pnl": "0",
+        "tx_hash": "0xtx",
+        "gas_usd": "1.50",
+        "ledger_entry_id": _VALID_UUID,
+        "protocol_fees_usd": "0",
+        "attribution_json": "{}",
+        "attribution_version": 1,
+    }
     defaults.update(overrides)
     return gateway_pb2.SavePositionEventRequest(**defaults)
 
@@ -143,9 +142,9 @@ def _position_request(**overrides) -> gateway_pb2.SavePositionEventRequest:
 
 class TestSaveAccountingEventValidation:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("strategy_id", ["", "   "])
-    async def test_missing_strategy_id(self, service, ctx, strategy_id):
-        req = _accounting_request(strategy_id=strategy_id)
+    @pytest.mark.parametrize("deployment_id", ["", "   "])
+    async def test_missing_deployment_id(self, service, ctx, deployment_id):
+        req = _accounting_request(deployment_id=deployment_id)
         resp = await service.SaveAccountingEvent(req, ctx)
         assert resp.success is False
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -192,7 +191,8 @@ class TestSaveAccountingEventValidation:
         req = _accounting_request(deployment_id=deployment_id)
         resp = await service.SaveAccountingEvent(req, ctx)
         assert resp.success is False
-        assert "deployment_id is required" in resp.error
+        assert "deployment_id" in resp.error
+        assert "required" in resp.error
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
@@ -498,15 +498,16 @@ class TestSaveAccountingEventPostgresBranch:
     """VIB-3503 Part 2a: hosted-mode SaveAccountingEvent writes to PG.
 
     The PG branch runs when ``_snapshot_pool is not None`` and bypasses
-    the warm backend entirely. SDK sends ``strategy_id`` over the wire;
-    gateway resolves it via ``resolve_agent_id`` and binds to PG column
-    ``agent_id``. UPSERT semantics overwrite on conflict per ticket spec
-    (corrections welcome).
+    the warm backend entirely. VIB-4721/4722: ``accounting_events`` has a
+    single identity column, ``deployment_id`` (the legacy ``deployment_id``
+    column was DROPPED); the gateway writes it directly with no identity
+    translation (blueprint 29 §4-5). UPSERT semantics overwrite on conflict
+    per ticket spec (corrections welcome).
     """
 
     @pytest.mark.asyncio
     async def test_pg_happy_path_pins_column_order(self, pg_service, ctx):
-        """Pins the 16 INSERT positional args at their expected slots so a
+        """Pins the 15 INSERT positional args at their expected slots so a
         future column re-order or insertion is caught at PR review.
         """
         request = _accounting_request()
@@ -518,25 +519,25 @@ class TestSaveAccountingEventPostgresBranch:
         pg_service._snapshot_execute.assert_awaited_once()
 
         args = pg_service._snapshot_execute.call_args.args
-        # args[0] is the SQL string; args[1..16] are positional bindings.
-        assert args[1] == _VALID_UUID                    # id
-        assert args[2] == "deploy-1"                     # deployment_id
-        assert args[3] == _VALID_STRATEGY                # agent_id (no AGENT_ID env → passthrough)
-        assert args[4] == "cycle-1"                      # cycle_id
-        assert args[5] == "paper"                        # execution_mode
-        # args[6] is timestamp (datetime, tz-aware)
+        # args[0] is the SQL string; args[1..15] are positional bindings.
+        assert args[1] == _VALID_UUID  # id
+        assert args[2] == "deploy-1"  # deployment_id
+        assert args[3] == "cycle-1"  # cycle_id
+        assert args[4] == "paper"  # execution_mode
+        # args[5] is timestamp (datetime, tz-aware)
         from datetime import UTC, datetime
-        assert args[6] == datetime.fromtimestamp(_VALID_TS, tz=UTC)
-        assert args[7] == "arbitrum"                     # chain
-        assert args[8] == "aave_v3"                      # protocol
-        assert args[9] == "0xwallet"                     # wallet_address
-        assert args[10] == "SUPPLY"                      # event_type
-        assert args[11] == "aave-usdc"                   # position_key
-        assert args[12] == _VALID_UUID                   # ledger_entry_id
-        assert args[13] == "0xtx"                        # tx_hash
-        assert args[14] == "HIGH"                        # confidence
-        assert args[15] == _LENDING_PAYLOAD.decode("utf-8")  # payload_json string
-        assert args[16] == 1                             # schema_version
+
+        assert args[5] == datetime.fromtimestamp(_VALID_TS, tz=UTC)
+        assert args[6] == "arbitrum"  # chain
+        assert args[7] == "aave_v3"  # protocol
+        assert args[8] == "0xwallet"  # wallet_address
+        assert args[9] == "SUPPLY"  # event_type
+        assert args[10] == "aave-usdc"  # position_key
+        assert args[11] == _VALID_UUID  # ledger_entry_id
+        assert args[12] == "0xtx"  # tx_hash
+        assert args[13] == "HIGH"  # confidence
+        assert args[14] == _LENDING_PAYLOAD.decode("utf-8")  # payload_json string
+        assert args[15] == 1  # schema_version
 
     @pytest.mark.asyncio
     async def test_pg_exception_fails_closed(self, pg_service, ctx):
@@ -555,38 +556,56 @@ class TestSaveAccountingEventPostgresBranch:
 
     @pytest.mark.asyncio
     async def test_pg_upsert_on_conflict_refreshes_all_columns(self, pg_service, ctx):
-        """SQL contains ON CONFLICT DO UPDATE SET refreshing the 15 non-id
+        """SQL contains ON CONFLICT DO UPDATE SET refreshing the 14 non-id
         columns so corrections (e.g. confidence upgrade ESTIMATED → HIGH)
         overwrite the original row per ticket spec.
         """
         await pg_service.SaveAccountingEvent(_accounting_request(), ctx)
 
         import re
+
         sql = pg_service._snapshot_execute.call_args.args[0]
         assert "ON CONFLICT (id) DO UPDATE SET" in sql
+        assert "strategy_id" not in sql
+        assert "agent_id" not in sql
         # Every non-id column must be refreshed from EXCLUDED. Whitespace
         # between the column name and the equals sign is collapsed before
         # matching so cosmetic alignment changes don't break the test.
         normalized = re.sub(r"\s+", " ", sql)
         for col in (
-            "deployment_id", "agent_id", "cycle_id", "execution_mode",
-            "timestamp", "chain", "protocol", "wallet_address",
-            "event_type", "position_key", "ledger_entry_id", "tx_hash",
-            "confidence", "payload_json", "schema_version",
+            "deployment_id",
+            "cycle_id",
+            "execution_mode",
+            "timestamp",
+            "chain",
+            "protocol",
+            "wallet_address",
+            "event_type",
+            "position_key",
+            "ledger_entry_id",
+            "tx_hash",
+            "confidence",
+            "payload_json",
+            "schema_version",
         ):
             assert f"{col} = EXCLUDED.{col}" in normalized, f"Missing SET clause for {col}"
         # Cast preserves binary JSONB storage (load-bearing for the GIN index).
-        assert "$15::jsonb" in sql
+        assert "$14::jsonb" in sql
 
     @pytest.mark.asyncio
-    async def test_pg_resolves_agent_id_from_env(self, pg_service, ctx, monkeypatch):
-        """When ``AGENT_ID`` env var is set, PG column ``agent_id`` receives
-        the platform-injected value, not the wire-sent ``strategy_id``.
-        Mirrors the same translation done by SaveLedgerEntry.
+    async def test_pg_deployment_id_column_gets_wire_id_no_translation(self, pg_service, ctx, monkeypatch):
+        """PG ``deployment_id`` column receives the wire identity verbatim.
+
+        VIB-4721/4722: ``accounting_events`` has a single identity column,
+        ``deployment_id``; the gateway writes the wire ``deployment_id``
+        value the caller passed — no identity translation (blueprint 29
+        §4-5).
         """
-        monkeypatch.setenv("AGENT_ID", "platform-agent-uuid")
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "platform-agent-uuid")
 
         await pg_service.SaveAccountingEvent(_accounting_request(), ctx)
 
         args = pg_service._snapshot_execute.call_args.args
-        assert args[3] == "platform-agent-uuid"  # agent_id slot
+        # No translation — the deployment_id slot gets the wire value.
+        assert args[2] == "deploy-1"

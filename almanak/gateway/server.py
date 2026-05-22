@@ -280,7 +280,7 @@ class GatewayServer:
         binding a real port.
         """
         # Phase 0: deployment-mode invariants (VIB-3760).
-        # AGENT_ID and the gateway's deployment-shape settings must agree.
+        # ALMANAK_IS_HOSTED and the gateway's deployment-shape settings must agree.
         # Runs before everything else so a misconfigured restart fails fast,
         # before we touch storage, ports, or interceptors.
         validate_deployment_invariants(self.settings)
@@ -363,7 +363,7 @@ class GatewayServer:
         await self._announce_initializing(lifecycle_store)
 
     async def _announce_initializing(self, lifecycle_store: Any) -> None:
-        """Write ``INITIALIZING`` to ``agent_state`` for this pod's AGENT_ID.
+        """Write ``INITIALIZING`` to ``agent_state`` for this pod's ALMANAK_IS_HOSTED.
 
         No-op outside hosted mode, and no-op when ``lifecycle_writer`` is
         false — both pods of an agent run this code path, but only the
@@ -381,11 +381,11 @@ class GatewayServer:
         Best-effort: read or write failures are logged and swallowed; the
         SDK runner's later ``RUNNING`` write covers the canonical signal.
         """
-        from almanak.framework.deployment.mode import agent_id, is_hosted
+        from almanak.framework.deployment.mode import deployment_id, is_hosted
 
         if not is_hosted() or not self.settings.lifecycle_writer:
             return
-        aid = agent_id()
+        aid = deployment_id()
         if aid is None:
             return
         try:

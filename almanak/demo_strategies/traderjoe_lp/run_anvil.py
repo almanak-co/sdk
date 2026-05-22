@@ -351,7 +351,7 @@ def run_strategy_via_cli(force_action: str = "open") -> int:
     import tempfile
 
     config = {
-        "strategy_id": "demo_traderjoe_lp",
+        "deployment_id": "demo_traderjoe_lp",
         "strategy_name": "demo_traderjoe_lp",
         "pool": "WAVAX/USDC/20",
         "range_width_pct": 0.10,

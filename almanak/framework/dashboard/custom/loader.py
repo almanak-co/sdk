@@ -105,7 +105,7 @@ def get_dashboard_render_function(
 
     Custom dashboards must implement:
         def render_custom_dashboard(
-            strategy_id: str,
+            deployment_id: str,
             strategy_config: dict,
             api_client: APIClient,
             session_state: dict,
@@ -125,7 +125,7 @@ def get_dashboard_render_function(
         raise DashboardInterfaceError(
             f"Module {module.__name__} does not implement 'render_custom_dashboard' function. "
             "Custom dashboards must define: "
-            "def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state)"
+            "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state)"
         )
 
     render_func = module.render_custom_dashboard

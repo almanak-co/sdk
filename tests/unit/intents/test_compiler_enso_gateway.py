@@ -4,7 +4,7 @@ Verifies the _get_enso_route dispatcher correctly:
 - Routes through gateway gRPC when gateway_client is connected
 - Fails fast when gateway_client is configured but not connected
 - Falls back to direct EnsoClient when no gateway_client (local dev)
-- Fails in deployed mode (AGENT_ID set) without gateway_client
+- Fails in deployed mode without gateway_client
 """
 
 import os
@@ -66,7 +66,7 @@ class TestEnsoGatewayRouting:
         with pytest.raises(RuntimeError, match="not connected"):
             compiler._get_enso_route("0xtoken_in", "0xtoken_out", "1000000", 50)
 
-    @patch.dict(os.environ, {"AGENT_ID": ""}, clear=False)
+    @patch.dict(os.environ, {"ALMANAK_IS_HOSTED": ""}, clear=False)
     def test_no_gateway_local_dev_uses_direct(self):
         """When no gateway_client (local dev), falls back to _get_enso_route_direct."""
         compiler = _make_compiler(gateway_client=None)
@@ -86,13 +86,23 @@ class TestEnsoGatewayRouting:
         assert result["to"] == "0xrouter_direct"
         assert result["gas"] == 200000
         mock_direct.assert_called_once_with(
-            "0xtoken_in", "0xtoken_out", 1000000, 50,
-            chain=None, destination_chain_id=None, receiver=None, refund_receiver=None,
+            "0xtoken_in",
+            "0xtoken_out",
+            1000000,
+            50,
+            chain=None,
+            destination_chain_id=None,
+            receiver=None,
+            refund_receiver=None,
         )
 
-    @patch.dict(os.environ, {"AGENT_ID": "agent-test-123"}, clear=False)
+    @patch.dict(
+        os.environ,
+        {"ALMANAK_IS_HOSTED": "true", "ALMANAK_DEPLOYMENT_ID": "agent-test-123"},
+        clear=False,
+    )
     def test_no_gateway_deployed_mode_raises(self):
-        """When AGENT_ID is set but no gateway_client, raises RuntimeError."""
+        """When hosted mode has no gateway_client, raises RuntimeError."""
         compiler = _make_compiler(gateway_client=None)
 
         with pytest.raises(RuntimeError, match="no gateway client configured"):
@@ -156,7 +166,10 @@ class TestEnsoGatewayRouting:
 
         compiler = _make_compiler(gateway_client=mock_client)
         result = compiler._get_enso_route(
-            "0xtoken_in", "0xtoken_out", "1000000", 50,
+            "0xtoken_in",
+            "0xtoken_out",
+            "1000000",
+            50,
             chain="base",
             destination_chain_id=42161,
             refund_receiver="0xrefund",

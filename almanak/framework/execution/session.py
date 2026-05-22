@@ -4,7 +4,7 @@ This module provides dataclasses to capture execution state for crash recovery,
 enabling the system to resume incomplete executions after a restart.
 
 The ExecutionSession tracks:
-- Session identity (session_id, strategy_id, intent_id)
+- Session identity (session_id, deployment_id, intent_id)
 - Current execution phase (PREPARING, SIGNING, SUBMITTED, CONFIRMING)
 - Transaction states (tx_hash, nonce, status for each transaction)
 - Retry tracking (attempt_number, last_error)
@@ -16,7 +16,7 @@ Example:
     # Create a new session
     session = ExecutionSession(
         session_id="sess_123",
-        strategy_id="strategy_a",
+        deployment_id="strategy_a",
         intent_id="intent_456",
         phase=ExecutionPhase.PREPARING,
     )
@@ -139,7 +139,7 @@ class ExecutionSession:
 
     Attributes:
         session_id: Unique identifier for this execution session
-        strategy_id: ID of the strategy being executed
+        deployment_id: ID of the strategy being executed
         intent_id: ID of the intent being executed
         phase: Current execution phase
         transactions: List of transaction states
@@ -153,7 +153,7 @@ class ExecutionSession:
     """
 
     session_id: str
-    strategy_id: str
+    deployment_id: str
     intent_id: str
     phase: ExecutionPhase = ExecutionPhase.PREPARING
     transactions: list[TransactionState] = field(default_factory=list)
@@ -283,7 +283,7 @@ class ExecutionSession:
         """Convert to dictionary for JSON serialization."""
         return {
             "session_id": self.session_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "intent_id": self.intent_id,
             "phase": self.phase.value,
             "transactions": [tx.to_dict() for tx in self.transactions],
@@ -314,7 +314,7 @@ class ExecutionSession:
 
         return cls(
             session_id=data["session_id"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             intent_id=data["intent_id"],
             phase=ExecutionPhase(data.get("phase", "PREPARING")),
             transactions=transactions,
@@ -346,14 +346,14 @@ class ExecutionSession:
 
 
 def create_session(
-    strategy_id: str,
+    deployment_id: str,
     intent_id: str,
     session_id: str | None = None,
 ) -> ExecutionSession:
     """Create a new execution session.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         intent_id: Intent identifier
         session_id: Optional session ID (generated if not provided)
 
@@ -367,7 +367,7 @@ def create_session(
 
     return ExecutionSession(
         session_id=session_id,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         intent_id=intent_id,
         phase=ExecutionPhase.PREPARING,
     )

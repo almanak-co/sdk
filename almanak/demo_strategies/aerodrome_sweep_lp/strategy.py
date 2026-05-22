@@ -320,7 +320,7 @@ class AerodromeSweepLPStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Opened {self.pool} LP (cycle {self._lp_cycles})",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "action": "lp_open",
                         "pool": self.pool,
@@ -341,7 +341,7 @@ class AerodromeSweepLPStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Closed {self.pool} LP, cooldown {self.reentry_cooldown}t",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "action": "lp_close",
                         "pool": self.pool,
@@ -424,7 +424,7 @@ class AerodromeSweepLPStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

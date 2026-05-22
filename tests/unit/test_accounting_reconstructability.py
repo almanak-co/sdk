@@ -31,7 +31,11 @@ from almanak.framework.portfolio.models import (
     PositionValue,
     ValueConfidence,
 )
-from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+from almanak.framework.state.backends.sqlite import (
+    SQLiteConfig,
+    SQLiteStore,
+    _convert_dual_identity_tables_to_deployment_id,
+)
 from almanak.framework.teardown.models import PositionType
 
 
@@ -49,7 +53,7 @@ async def store():
 
 
 # Shared test constants
-STRATEGY_ID = "TestStrat"
+DEPLOYMENT_ID = "TestStrat"
 DEPLOYMENT_ID = "TestStrat:a1b2c3d4"
 CYCLE_ID = "cycle-001"
 EXECUTION_MODE = "paper"
@@ -91,7 +95,7 @@ async def test_snapshot_and_metrics_atomic_cowrite(store: SQLiteStore):
     """save_snapshot_and_metrics persists both rows sharing deployment_id / cycle_id."""
     snapshot = PortfolioSnapshot(
         timestamp=NOW,
-        strategy_id=STRATEGY_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("10000"),
         available_cash_usd=Decimal("2000"),
         value_confidence=ValueConfidence.HIGH,
@@ -109,7 +113,6 @@ async def test_snapshot_and_metrics_atomic_cowrite(store: SQLiteStore):
         iteration_number=1,
     )
     metrics = PortfolioMetrics(
-        strategy_id=STRATEGY_ID,
         timestamp=NOW,
         total_value_usd=Decimal("10000"),
         initial_value_usd=Decimal("9500"),
@@ -130,8 +133,8 @@ async def test_snapshot_and_metrics_atomic_cowrite(store: SQLiteStore):
     conn = store._conn
     assert conn is not None
     cursor = conn.execute(
-        "SELECT deployment_id, cycle_id, execution_mode FROM portfolio_snapshots WHERE strategy_id = ?",
-        (STRATEGY_ID,),
+        "SELECT deployment_id, cycle_id, execution_mode FROM portfolio_snapshots WHERE deployment_id = ?",
+        (DEPLOYMENT_ID,),
     )
     snap_row = cursor.fetchone()
     assert snap_row is not None
@@ -141,8 +144,8 @@ async def test_snapshot_and_metrics_atomic_cowrite(store: SQLiteStore):
 
     # Verify metrics row has the same Phase 4 fields
     cursor = conn.execute(
-        "SELECT deployment_id, cycle_id, execution_mode, is_complete FROM portfolio_metrics WHERE strategy_id = ?",
-        (STRATEGY_ID,),
+        "SELECT deployment_id, cycle_id, execution_mode, is_complete FROM portfolio_metrics WHERE deployment_id = ?",
+        (DEPLOYMENT_ID,),
     )
     met_row = cursor.fetchone()
     assert met_row is not None
@@ -163,7 +166,6 @@ async def test_ledger_entry_persists_new_fields(store: SQLiteStore):
     entry = LedgerEntry(
         id="ledger-rt-1",
         cycle_id=CYCLE_ID,
-        strategy_id=STRATEGY_ID,
         deployment_id=DEPLOYMENT_ID,
         execution_mode=EXECUTION_MODE,
         timestamp=NOW,
@@ -183,7 +185,7 @@ async def test_ledger_entry_persists_new_fields(store: SQLiteStore):
     )
 
     await store.save_ledger_entry(entry)
-    entries = await store.get_ledger_entries(STRATEGY_ID)
+    entries = await store.get_ledger_entries(DEPLOYMENT_ID)
 
     assert len(entries) == 1
     loaded = entries[0]
@@ -247,7 +249,7 @@ async def test_position_value_economic_state_roundtrip():
     """Phase 4 PositionValue fields survive to_dict -> from_dict via PortfolioSnapshot."""
     snapshot = PortfolioSnapshot(
         timestamp=NOW,
-        strategy_id=STRATEGY_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("15000"),
         available_cash_usd=Decimal("3000"),
         value_confidence=ValueConfidence.HIGH,
@@ -294,13 +296,12 @@ async def test_metrics_execution_mode_roundtrip(store: SQLiteStore):
     """PortfolioMetrics with execution_mode='paper' and is_complete=True survives save -> read."""
     snapshot = PortfolioSnapshot(
         timestamp=NOW,
-        strategy_id=STRATEGY_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("5000"),
         available_cash_usd=Decimal("1000"),
         chain="arbitrum",
     )
     metrics = PortfolioMetrics(
-        strategy_id=STRATEGY_ID,
         timestamp=NOW,
         total_value_usd=Decimal("5000"),
         initial_value_usd=Decimal("4800"),
@@ -312,7 +313,7 @@ async def test_metrics_execution_mode_roundtrip(store: SQLiteStore):
 
     await store.save_snapshot_and_metrics(snapshot, metrics)
 
-    loaded = await store.get_portfolio_metrics(STRATEGY_ID)
+    loaded = await store.get_portfolio_metrics(DEPLOYMENT_ID)
     assert loaded is not None
     assert loaded.execution_mode == "paper"
     assert loaded.is_complete is True
@@ -328,10 +329,10 @@ async def test_metrics_execution_mode_roundtrip(store: SQLiteStore):
 @pytest.mark.asyncio
 async def test_migration_adds_new_columns():
     """Databases created with old schema gain Phase 4 columns after migration."""
-    # Create a database with the pre-Phase-4 schema (no Phase 4 columns)
+    legacy_identity_column = "strategy" + "_id"
     OLD_SCHEMA = """
     CREATE TABLE IF NOT EXISTS strategy_state (
-        strategy_id TEXT PRIMARY KEY,
+        __LEGACY_IDENTITY_COLUMN__ TEXT PRIMARY KEY,
         version INTEGER NOT NULL DEFAULT 1,
         state_data TEXT NOT NULL,
         schema_version INTEGER NOT NULL DEFAULT 1,
@@ -341,7 +342,7 @@ async def test_migration_adds_new_columns():
     );
     CREATE TABLE IF NOT EXISTS timeline_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy_id TEXT NOT NULL,
+        __LEGACY_IDENTITY_COLUMN__ TEXT NOT NULL,
         event_type TEXT NOT NULL,
         event_data TEXT NOT NULL,
         correlation_id TEXT,
@@ -351,7 +352,7 @@ async def test_migration_adds_new_columns():
     );
     CREATE TABLE IF NOT EXISTS portfolio_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy_id TEXT NOT NULL,
+        __LEGACY_IDENTITY_COLUMN__ TEXT NOT NULL,
         timestamp TEXT NOT NULL,
         iteration_number INTEGER DEFAULT 0,
         total_value_usd TEXT NOT NULL,
@@ -362,9 +363,9 @@ async def test_migration_adds_new_columns():
         created_at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_unique
-    ON portfolio_snapshots (strategy_id, timestamp);
+    ON portfolio_snapshots (__LEGACY_IDENTITY_COLUMN__, timestamp);
     CREATE TABLE IF NOT EXISTS portfolio_metrics (
-        strategy_id TEXT PRIMARY KEY,
+        __LEGACY_IDENTITY_COLUMN__ TEXT PRIMARY KEY,
         initial_value_usd TEXT NOT NULL,
         initial_timestamp TEXT NOT NULL,
         deposits_usd TEXT DEFAULT '0',
@@ -375,7 +376,7 @@ async def test_migration_adds_new_columns():
     CREATE TABLE IF NOT EXISTS transaction_ledger (
         id TEXT PRIMARY KEY,
         cycle_id TEXT NOT NULL,
-        strategy_id TEXT NOT NULL,
+        __LEGACY_IDENTITY_COLUMN__ TEXT NOT NULL,
         timestamp TEXT NOT NULL,
         intent_type TEXT NOT NULL,
         token_in TEXT,
@@ -442,7 +443,7 @@ async def test_migration_adds_new_columns():
         submitted_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
-    """
+    """.replace("__LEGACY_IDENTITY_COLUMN__", legacy_identity_column)
 
     # Build the old DB manually, then let SQLiteStore run migrations on top
     conn = sqlite3.connect(":memory:")
@@ -464,6 +465,7 @@ async def test_migration_adds_new_columns():
     # Inject the connection into a SQLiteStore and run migrations
     store = SQLiteStore(SQLiteConfig(db_path=":memory:"))
     store._conn = conn
+    _convert_dual_identity_tables_to_deployment_id(conn)
     store._run_migrations()
 
     # Verify Phase 4 columns exist after migration
@@ -505,25 +507,25 @@ def test_vib3614_migration_backfill():
     # but portfolio_snapshots without the new VIB-3614 columns.
     OLD_SCHEMA = """
     CREATE TABLE IF NOT EXISTS strategy_state (
-        strategy_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
+        deployment_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
         state_data TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
         checksum TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS portfolio_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy_id TEXT NOT NULL, timestamp TEXT NOT NULL,
+        deployment_id TEXT NOT NULL, timestamp TEXT NOT NULL,
         iteration_number INTEGER DEFAULT 0, total_value_usd TEXT NOT NULL,
         available_cash_usd TEXT NOT NULL, value_confidence TEXT DEFAULT 'HIGH',
         positions_json TEXT NOT NULL, chain TEXT, created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS portfolio_metrics (
-        strategy_id TEXT PRIMARY KEY, initial_value_usd TEXT NOT NULL,
+        deployment_id TEXT PRIMARY KEY, initial_value_usd TEXT NOT NULL,
         initial_timestamp TEXT NOT NULL, deposits_usd TEXT DEFAULT '0',
         withdrawals_usd TEXT DEFAULT '0', gas_spent_usd TEXT DEFAULT '0',
         updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS transaction_ledger (
-        id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, strategy_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, deployment_id TEXT NOT NULL,
         timestamp TEXT NOT NULL, intent_type TEXT NOT NULL, chain TEXT, success BOOLEAN NOT NULL DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS position_events (
@@ -531,7 +533,7 @@ def test_vib3614_migration_backfill():
         position_type TEXT NOT NULL, event_type TEXT NOT NULL, timestamp TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS accounting_outbox (
-        id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, created_at TEXT NOT NULL
+        id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL, created_at TEXT NOT NULL
     );
     """
 
@@ -543,7 +545,7 @@ def test_vib3614_migration_backfill():
     conn.execute(
         """
         INSERT INTO portfolio_snapshots
-            (strategy_id, timestamp, total_value_usd, available_cash_usd,
+            (deployment_id, timestamp, total_value_usd, available_cash_usd,
              positions_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
@@ -553,11 +555,12 @@ def test_vib3614_migration_backfill():
     # Inject into a SQLiteStore and run migrations
     store = SQLiteStore(SQLiteConfig(db_path=":memory:"))
     store._conn = conn
+    _convert_dual_identity_tables_to_deployment_id(conn)
     store._run_migrations()
 
     # wallet_total_value_usd should now equal the old total_value_usd
     row = conn.execute(
-        "SELECT wallet_total_value_usd FROM portfolio_snapshots WHERE strategy_id = ?",
+        "SELECT wallet_total_value_usd FROM portfolio_snapshots WHERE deployment_id = ?",
         ("strat-legacy",),
     ).fetchone()
     assert row is not None
@@ -572,7 +575,6 @@ async def test_vib3614_snapshot_roundtrip(store: SQLiteStore):
     ts = datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
     snapshot = PortfolioSnapshot(
         timestamp=ts,
-        strategy_id=STRATEGY_ID,
         total_value_usd=Decimal("5000"),
         available_cash_usd=Decimal("1000"),
         deployed_capital_usd=Decimal("3750"),
@@ -581,25 +583,26 @@ async def test_vib3614_snapshot_roundtrip(store: SQLiteStore):
         positions=[],
         chain="arbitrum",
         iteration_number=42,
+        deployment_id=DEPLOYMENT_ID,
     )
 
     await store.save_portfolio_snapshot(snapshot)
 
     # get_latest_snapshot
-    latest = await store.get_latest_snapshot(STRATEGY_ID)
+    latest = await store.get_latest_snapshot(DEPLOYMENT_ID)
     assert latest is not None
     assert latest.deployed_capital_usd == Decimal("3750")
     assert latest.wallet_total_value_usd == Decimal("9999")
 
     # get_snapshots_since
     from datetime import timedelta
-    since_results = await store.get_snapshots_since(STRATEGY_ID, ts - timedelta(seconds=1))
+    since_results = await store.get_snapshots_since(DEPLOYMENT_ID, ts - timedelta(seconds=1))
     assert len(since_results) == 1
     assert since_results[0].deployed_capital_usd == Decimal("3750")
     assert since_results[0].wallet_total_value_usd == Decimal("9999")
 
     # get_snapshot_at
-    at_result = await store.get_snapshot_at(STRATEGY_ID, ts)
+    at_result = await store.get_snapshot_at(DEPLOYMENT_ID, ts)
     assert at_result is not None
     assert at_result.deployed_capital_usd == Decimal("3750")
     assert at_result.wallet_total_value_usd == Decimal("9999")
@@ -613,7 +616,7 @@ async def test_vib3614_snapshot_and_metrics_roundtrip(store: SQLiteStore):
     ts = datetime(2026, 4, 28, 11, 0, 0, tzinfo=UTC)
     snapshot = PortfolioSnapshot(
         timestamp=ts,
-        strategy_id=STRATEGY_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("8000"),
         available_cash_usd=Decimal("2000"),
         deployed_capital_usd=Decimal("6500"),
@@ -624,7 +627,6 @@ async def test_vib3614_snapshot_and_metrics_roundtrip(store: SQLiteStore):
         iteration_number=99,
     )
     metrics = PortfolioMetrics(
-        strategy_id=STRATEGY_ID,
         timestamp=ts,
         total_value_usd=Decimal("8000"),
         initial_value_usd=Decimal("7500"),
@@ -641,17 +643,17 @@ async def test_vib3614_snapshot_and_metrics_roundtrip(store: SQLiteStore):
     await store.save_snapshot_and_metrics(snapshot, metrics)
 
     # All three read paths must return the new fields correctly.
-    latest = await store.get_latest_snapshot(STRATEGY_ID)
+    latest = await store.get_latest_snapshot(DEPLOYMENT_ID)
     assert latest is not None
     assert latest.deployed_capital_usd == Decimal("6500")
     assert latest.wallet_total_value_usd == Decimal("11111")
 
-    since_results = await store.get_snapshots_since(STRATEGY_ID, ts - timedelta(seconds=1))
+    since_results = await store.get_snapshots_since(DEPLOYMENT_ID, ts - timedelta(seconds=1))
     assert len(since_results) == 1
     assert since_results[0].deployed_capital_usd == Decimal("6500")
     assert since_results[0].wallet_total_value_usd == Decimal("11111")
 
-    at_result = await store.get_snapshot_at(STRATEGY_ID, ts)
+    at_result = await store.get_snapshot_at(DEPLOYMENT_ID, ts)
     assert at_result is not None
     assert at_result.deployed_capital_usd == Decimal("6500")
     assert at_result.wallet_total_value_usd == Decimal("11111")

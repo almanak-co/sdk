@@ -356,7 +356,7 @@ class TestDeFAIVaultLP:
             "usdc_token": USDC_TOKEN,
             "vault": {"name": "Test Vault", "symbol": "tVLT", "underlying_token": USDC_TOKEN},
             "lp": {"amount_almanak": "1000", "amount_usdc": "10", "range_width_pct": "0.50"},
-            "strategy_id": "test-defai",
+            "deployment_id": "test-defai",
         }
 
         from defai_vault_lp.run import create_dynamic_mock_llm
@@ -398,7 +398,7 @@ class TestDeFAIVaultLP:
             policy=policy,
             catalog=catalog,
             wallet_address=TEST_WALLET,
-            strategy_id="test",
+            deployment_id="test",
             default_chain="base",
         )
 

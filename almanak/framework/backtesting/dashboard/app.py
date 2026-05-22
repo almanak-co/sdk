@@ -405,7 +405,7 @@ def render_backtest_info(result: BacktestResult) -> None:
     with col1:
         st.markdown("**Strategy Details**")
         info_data = {
-            "Strategy ID": result.strategy_id,
+            "Deployment ID": result.deployment_id,
             "Engine": result.engine.value if result.engine else "-",
             "Chain": result.chain or "-",
             "Duration": f"{result.simulation_duration_days:.1f} days",
@@ -888,8 +888,8 @@ def main() -> None:  # noqa: C901
                     data = json.load(uploaded_file)
                     result = load_backtest_result(data)
                     if result is not None:
-                        # Use strategy_id as display name, fallback to filename
-                        display_name = result.strategy_id or file_name.replace(".json", "")
+                        # Use deployment_id as display name, fallback to filename
+                        display_name = result.deployment_id or file_name.replace(".json", "")
                         # Ensure unique names
                         base_name = display_name
                         counter = 1
@@ -1032,7 +1032,7 @@ def main() -> None:  # noqa: C901
             st.code(
                 """
 {
-    "strategy_id": "my_strategy",
+    "deployment_id": "my_strategy",
     "engine": "pnl",
     "chain": "arbitrum",
     "start_time": "2024-01-01T00:00:00",

@@ -66,7 +66,7 @@ def _make_executor(
         policy=policy,
         catalog=get_default_catalog(),
         wallet_address="0x1111111111111111111111111111111111111111",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         default_chain="base",
     )
     return executor

@@ -242,7 +242,7 @@ class TestToolExecutorFiltering:
                 cooldown_seconds=0,
             ),
             wallet_address="0x" + "ab" * 20,
-            strategy_id="test-filter",
+            deployment_id="test-filter",
         )
 
     def test_executor_none_returns_all(self):

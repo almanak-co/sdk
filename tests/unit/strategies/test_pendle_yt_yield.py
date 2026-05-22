@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "arbitrum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-pendle-yt"
+    strat._deployment_id = "test-pendle-yt"
     strat.market = "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b"
     strat.market_name = "wstETH-25JUN2026"
     strat.trade_size_token = Decimal("0.01")

@@ -46,7 +46,7 @@ class SimpleAaveSupplyStrategy:
     supply transaction and then holds, letting interest accrue.
     """
 
-    strategy_id = "test_aave_yield"
+    deployment_id = "test_aave_yield"
     chain = "arbitrum"
     _supplied = False
 
@@ -114,7 +114,7 @@ async def test_fork_lifecycle_persistent_config():
     config = PaperTraderConfig(
         chain="arbitrum",
         rpc_url="https://example.com/rpc",
-        strategy_id="test",
+        deployment_id="test",
         fork_lifecycle=ForkLifecycle.PERSISTENT,
         yield_poker_enabled=True,
         use_rich_valuation=True,
@@ -134,7 +134,7 @@ async def test_fork_lifecycle_persistent_config():
     config2 = PaperTraderConfig.from_dict({
         "chain": "arbitrum",
         "rpc_url": "https://example.com/rpc",
-        "strategy_id": "test",
+        "deployment_id": "test",
         "fork_lifecycle": "persistent",
         "yield_poker_enabled": True,
         "use_rich_valuation": True,
@@ -149,7 +149,7 @@ async def test_fork_lifecycle_rolling_reset_default():
     config = PaperTraderConfig(
         chain="arbitrum",
         rpc_url="https://example.com/rpc",
-        strategy_id="test",
+        deployment_id="test",
     )
     assert config.fork_lifecycle == ForkLifecycle.ROLLING_RESET
     assert config.yield_poker_enabled is False

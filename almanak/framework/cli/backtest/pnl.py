@@ -36,7 +36,7 @@ from .helpers import (
     parse_date,
 )
 from .run_helpers import (
-    ensure_strategy_id,
+    ensure_deployment_id,
     parse_token_list,
     validate_strategy_is_registered,
 )
@@ -750,6 +750,7 @@ def _generate_html_report(
         click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @backtest.command("pnl")
 @click.option(
     "--strategy",
@@ -1005,12 +1006,12 @@ def pnl_backtest(
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
 
     fallback_id = (
-        strategy_config.get("strategy_id")
+        strategy_config.get("deployment_id")
         or strategy_config.get("name")
         or ctx.strategy
         or strategy_instance.__class__.__name__
     )
-    ensure_strategy_id(strategy_instance, fallback=fallback_id)
+    ensure_deployment_id(strategy_instance, fallback=fallback_id)
 
     # Phase 8: initialize data provider for the backtest run
     click.echo()

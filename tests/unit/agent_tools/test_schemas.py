@@ -138,7 +138,7 @@ class TestStateToolSchemas:
     def test_save_state(self):
         req = SaveAgentStateRequest(state={"position_id": 12345})
         assert req.state == {"position_id": 12345}
-        assert req.strategy_id == ""
+        assert req.deployment_id == ""
 
 
 class TestSchemaValidation:

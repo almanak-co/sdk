@@ -70,7 +70,7 @@ def _make_backtest_result(
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="incubating_aerodrome_lp_sweep",
+        deployment_id="incubating_aerodrome_lp_sweep",
         start_time=datetime(2024, 10, 1, tzinfo=UTC),
         end_time=datetime(2024, 12, 1, tzinfo=UTC),
         trades=[],
@@ -195,7 +195,7 @@ class TestAerodromeLPSweepExecution:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "incubating_aerodrome_lp_sweep"
+            deployment_id = "incubating_aerodrome_lp_sweep"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -239,7 +239,7 @@ class TestAerodromeLPSweepExecution:
         """Verify sweep result contains correct metrics for LP strategy."""
 
         class SimpleStrategy:
-            strategy_id = "lp_test"
+            deployment_id = "lp_test"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

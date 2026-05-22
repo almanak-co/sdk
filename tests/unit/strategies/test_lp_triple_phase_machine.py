@@ -45,7 +45,7 @@ def _bare_strategy() -> AccountingQuantLPTripleStrategy:
     obj._initial_balance_usd = Decimal("100")
     obj._initial_balance_token = Decimal("100")
     obj.pool = "WETH/USDC/500"
-    obj._strategy_id = "test"
+    obj._deployment_id = "test"
     return obj
 
 

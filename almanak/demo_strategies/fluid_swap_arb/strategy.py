@@ -70,7 +70,7 @@ class FluidSwapStrategy(IntentStrategy):
 
     def get_open_positions(self):
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=[],
         )

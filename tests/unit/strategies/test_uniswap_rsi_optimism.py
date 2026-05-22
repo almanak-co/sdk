@@ -44,7 +44,7 @@ def strategy(rsi_config):
     strat.config = config
     strat._chain = "optimism"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-rsi-optimism"
+    strat._deployment_id = "test-rsi-optimism"
 
     strat.trade_size_usd = config.trade_size_usd
     strat.rsi_period = config.rsi_period

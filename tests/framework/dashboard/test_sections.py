@@ -40,11 +40,11 @@ def test_render_trade_tape_section_delegates_to_render_trade_tape() -> None:
         patch.object(sections.st, "markdown") as mock_markdown,
         patch.object(sections, "render_trade_tape") as mock_render,
     ):
-        sections.render_trade_tape_section("my-strategy-id", limit=25)
+        sections.render_trade_tape_section("my-deployment-id", limit=25)
 
     mock_divider.assert_called_once_with()
     mock_markdown.assert_called_once_with("### Trade Tape")
-    mock_render.assert_called_once_with("my-strategy-id", limit=25)
+    mock_render.assert_called_once_with("my-deployment-id", limit=25)
 
 
 def test_render_trade_tape_section_default_limit_is_50() -> None:

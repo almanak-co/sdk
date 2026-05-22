@@ -3,7 +3,7 @@
 Defines the abstract interface that both SQLite (public SDK) and
 PostgreSQL (private platform plugin) backends implement.
 
-Keyed by agent_id only -- platform-level queries are handled
+Keyed by deployment_id only -- platform-level queries are handled
 by the orchestration layer, not the lifecycle store.
 """
 
@@ -18,7 +18,7 @@ from typing import Protocol, runtime_checkable
 class AgentState:
     """Current state of an agent."""
 
-    agent_id: str
+    deployment_id: str
     state: str  # INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED
     state_changed_at: datetime
     last_heartbeat_at: datetime | None = None
@@ -36,7 +36,7 @@ class AgentCommand:
     """A command issued to an agent."""
 
     id: int
-    agent_id: str
+    deployment_id: str
     command: str  # PAUSE, RESUME, STOP
     issued_at: datetime
     issued_by: str
@@ -48,7 +48,7 @@ class LifecycleStore(Protocol):
     """Protocol for agent lifecycle persistence (commands + state).
 
     Both SQLite (public) and PostgreSQL (private plugin) implement this.
-    Keyed by agent_id only -- platform-level queries are handled
+    Keyed by deployment_id only -- platform-level queries are handled
     by the orchestration layer, not the lifecycle store.
     """
 
@@ -58,17 +58,17 @@ class LifecycleStore(Protocol):
     # State
     def write_state(
         self,
-        agent_id: str,
+        deployment_id: str,
         state: str,
         error_message: str | None = None,
         running_almanak_version: str | None = None,
     ) -> None: ...
 
-    def read_state(self, agent_id: str) -> AgentState | None: ...
+    def read_state(self, deployment_id: str) -> AgentState | None: ...
 
-    def heartbeat(self, agent_id: str) -> None: ...
+    def heartbeat(self, deployment_id: str) -> None: ...
 
     # Commands
-    def read_pending_command(self, agent_id: str) -> AgentCommand | None: ...
+    def read_pending_command(self, deployment_id: str) -> AgentCommand | None: ...
     def ack_command(self, command_id: int) -> None: ...
-    def write_command(self, agent_id: str, command: str, issued_by: str) -> None: ...
+    def write_command(self, deployment_id: str, command: str, issued_by: str) -> None: ...

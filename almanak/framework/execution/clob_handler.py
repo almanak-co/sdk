@@ -295,6 +295,14 @@ class ClobOrderState:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Canonical deployment identity (blueprint 29 §3). Must be stamped with
+    # the runner's resolved deployment_id by the caller before the order is
+    # persisted — clob_orders is deployment-scoped and
+    # SQLiteStore.save_clob_order rejects a blank id. Defaults to "" for
+    # in-memory / pre-persist use. NOTE: the CLOB execution path does not yet
+    # persist orders at all; wiring that path (and the stamping) is
+    # outstanding follow-up work, not done by VIB-4722.
+    deployment_id: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -326,6 +334,7 @@ class ClobOrderState:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
+            "deployment_id": self.deployment_id,
             "order_id": self.order_id,
             "market_id": self.market_id,
             "token_id": self.token_id,
@@ -376,6 +385,7 @@ class ClobOrderState:
             updated_at=datetime.fromisoformat(data["updated_at"]),
             error=data.get("error"),
             metadata=data.get("metadata", {}),
+            deployment_id=data.get("deployment_id", ""),
         )
 
 

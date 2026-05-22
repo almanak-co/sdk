@@ -26,8 +26,8 @@ Usage:
         signal_type="reversion",  # or "momentum"
     )
 
-    def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
-        render_ta_dashboard(strategy_id, strategy_config, session_state, config)
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+        render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
 import logging
@@ -394,7 +394,7 @@ def prepare_ta_session_state(
 
 
 def render_ta_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     session_state: dict[str, Any],
     config: TADashboardConfig,
@@ -408,7 +408,7 @@ def render_ta_dashboard(
     the section helpers directly rather than parameterizing this template.
 
     Args:
-        strategy_id: The strategy identifier
+        deployment_id: The deployment identifier
         strategy_config: Strategy configuration dictionary
         session_state: Current session state with indicator values
         config: TADashboardConfig for this dashboard
@@ -422,12 +422,12 @@ def render_ta_dashboard(
     protocol = strategy_config.get("protocol", config.protocol)
     period = strategy_config.get(f"{config.indicator_name.lower()}_period", config.indicator_period)
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pair:** {base_token}/{quote_token}")
     st.markdown(f"**Chain:** {chain} | **Protocol:** {protocol}")
 
     # Eyeball — am I making or losing money?
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     # Charts section - Price with signals and indicator
     _render_charts_section(session_state, strategy_config, config, period)
@@ -450,8 +450,8 @@ def render_ta_dashboard(
     _render_performance(session_state)
 
     # Audit — life-to-date costs + per-intent trade tape
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_charts_section(  # noqa: C901

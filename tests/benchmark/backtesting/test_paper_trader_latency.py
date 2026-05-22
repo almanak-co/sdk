@@ -53,8 +53,8 @@ BASELINE_TICK_THROUGHPUT = 0.2  # At least 1 tick per 5 seconds
 # Mock RPC URL for testing (not used for actual calls)
 MOCK_RPC_URL = "http://localhost:8545"
 
-# Mock strategy ID
-MOCK_STRATEGY_ID = "benchmark_strategy"
+# Mock deployment ID
+MOCK_DEPLOYMENT_ID = "benchmark_strategy"
 
 
 # =============================================================================
@@ -129,7 +129,7 @@ class MockPortfolioTracker:
     Simulates portfolio state without persistent storage.
     """
 
-    strategy_id: str = "benchmark_strategy"
+    deployment_id: str = "benchmark_strategy"
     chain: str = "arbitrum"
     initial_balances: dict[str, Decimal] = field(
         default_factory=lambda: {"USDC": Decimal("10000"), "ETH": Decimal("5")}
@@ -200,16 +200,16 @@ class MockBenchmarkStrategy:
 
     def __init__(
         self,
-        strategy_id: str = "benchmark_strategy",
+        deployment_id: str = "benchmark_strategy",
         trade_every_n_ticks: int = 10,
     ):
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._trade_every_n_ticks = trade_every_n_ticks
         self._tick_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: MarketSnapshot) -> MockSwapIntent | None:
         """Return a swap intent at configured interval.
@@ -559,7 +559,7 @@ class TestPaperTraderTickLatency:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=MOCK_RPC_URL,
-            strategy_id=MOCK_STRATEGY_ID,
+            deployment_id=MOCK_DEPLOYMENT_ID,
             tick_interval_seconds=1,
         )
         trader = BenchmarkPaperTrader(
@@ -601,7 +601,7 @@ class TestPaperTraderTickLatency:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=MOCK_RPC_URL,
-            strategy_id=MOCK_STRATEGY_ID,
+            deployment_id=MOCK_DEPLOYMENT_ID,
             tick_interval_seconds=1,
         )
         trader = BenchmarkPaperTrader(
@@ -648,7 +648,7 @@ class TestPaperTraderTickLatency:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=MOCK_RPC_URL,
-            strategy_id=MOCK_STRATEGY_ID,
+            deployment_id=MOCK_DEPLOYMENT_ID,
             tick_interval_seconds=60,  # 1-minute intervals (realistic)
         )
         trader = BenchmarkPaperTrader(
@@ -692,7 +692,7 @@ class TestPaperTraderTickLatency:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=MOCK_RPC_URL,
-            strategy_id=MOCK_STRATEGY_ID,
+            deployment_id=MOCK_DEPLOYMENT_ID,
             tick_interval_seconds=1,
         )
         trader = BenchmarkPaperTrader(
@@ -738,7 +738,7 @@ class TestTickLatencyConsistency:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=MOCK_RPC_URL,
-            strategy_id=MOCK_STRATEGY_ID,
+            deployment_id=MOCK_DEPLOYMENT_ID,
         )
         trader = BenchmarkPaperTrader(
             portfolio_tracker=portfolio_tracker,
@@ -790,7 +790,7 @@ class TestTickLatencyConsistency:
             config = PaperTraderConfig(
                 chain="arbitrum",
                 rpc_url=MOCK_RPC_URL,
-                strategy_id=MOCK_STRATEGY_ID,
+                deployment_id=MOCK_DEPLOYMENT_ID,
             )
             trader = BenchmarkPaperTrader(
                 portfolio_tracker=portfolio_tracker,
@@ -843,7 +843,7 @@ class TestThroughputScaling:
             config = PaperTraderConfig(
                 chain="arbitrum",
                 rpc_url=MOCK_RPC_URL,
-                strategy_id=MOCK_STRATEGY_ID,
+                deployment_id=MOCK_DEPLOYMENT_ID,
             )
             trader = BenchmarkPaperTrader(
                 portfolio_tracker=portfolio_tracker,

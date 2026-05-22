@@ -74,7 +74,6 @@ def _event(
     return {
         "id": "ev-1",
         "deployment_id": "strat-1",
-        "strategy_id": "strat-1",
         "cycle_id": "cyc-1",
         "execution_mode": "live",
         "event_type": event_type,

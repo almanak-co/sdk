@@ -2,7 +2,6 @@
   "_comment": "Expected `transaction_ledger` row after build_ledger_entry() runs against the LP_OPEN receipt + intent. UUID + timestamp pinned for determinism.",
   "id": "00000000-0000-0000-0000-000000004194",
   "cycle_id": "vib-4194-lp-open-cycle",
-  "strategy_id": "UniswapLPStrategy:12c53b4b6c31",
   "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
   "execution_mode": "live",
   "timestamp": "2026-05-04T20:20:46.819000+00:00",

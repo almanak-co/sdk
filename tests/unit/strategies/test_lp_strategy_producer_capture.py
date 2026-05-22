@@ -260,7 +260,7 @@ def test_strategy_on_lp_open_captures_pool_address_end_to_end():
     strat.protocol = "uniswap_v3"
     strat.swap_protocol = "uniswap_v3"
     strat._wallet_address = "0xtest"
-    strat._strategy_id = "AccountingQuantLPStrategy:test"
+    strat._deployment_id = "AccountingQuantLPStrategy:test"
     strat._phase = PHASE_SWAPPED_IN
     strat._position_id = None
     strat._pool_address = None
@@ -328,7 +328,7 @@ def test_strategy_on_lp_open_falls_back_to_descriptor_when_no_pool_in_lp_open_da
     strat.protocol = "uniswap_v3"
     strat.swap_protocol = "uniswap_v3"
     strat._wallet_address = "0xtest"
-    strat._strategy_id = "AccountingQuantLPStrategy:test"
+    strat._deployment_id = "AccountingQuantLPStrategy:test"
     strat._phase = PHASE_SWAPPED_IN
     strat._position_id = None
     strat._pool_address = None

@@ -56,7 +56,7 @@ def collect_channels_to_send(
     Args:
         manager: the AlertManager instance (used to call _should_send_alert)
         matching_rules: output of ``_find_matching_rules``
-        card: the OperatorCard being sent (for strategy_id / severity / logging)
+        card: the OperatorCard being sent (for deployment_id / severity / logging)
 
     Returns:
         Deduplicated set of channels that should receive this alert.
@@ -65,14 +65,14 @@ def collect_channels_to_send(
     for rule in matching_rules:
         should_send, skip_reason = manager._should_send_alert(
             rule=rule,
-            strategy_id=card.strategy_id,
+            deployment_id=card.deployment_id,
             severity=card.severity,
         )
         if should_send:
             for channel in rule.channels:
                 channels_to_send.add(channel)
         else:
-            logger.debug(f"Rule {rule.condition.value} skipped for {card.strategy_id}: {skip_reason}")
+            logger.debug(f"Rule {rule.condition.value} skipped for {card.deployment_id}: {skip_reason}")
     return channels_to_send
 
 
@@ -95,7 +95,7 @@ async def dispatch_telegram(
     if telegram_channel is None:
         result.channels_failed.append(channel)
         result.errors[channel] = "Telegram channel not configured"
-        logger.warning(f"Telegram alert requested but channel not configured for {card.strategy_id}")
+        logger.warning(f"Telegram alert requested but channel not configured for {card.deployment_id}")
         return
 
     try:
@@ -103,16 +103,16 @@ async def dispatch_telegram(
     except Exception as e:  # noqa: BLE001 - intentionally broad, operator-facing
         result.channels_failed.append(channel)
         result.errors[channel] = str(e)
-        logger.exception(f"Exception sending Telegram alert for {card.strategy_id}: {e}")
+        logger.exception(f"Exception sending Telegram alert for {card.deployment_id}: {e}")
         return
 
     if send_result.success:
         result.channels_sent.append(channel)
-        logger.info(f"Telegram alert sent for {card.strategy_id} (severity={card.severity.value})")
+        logger.info(f"Telegram alert sent for {card.deployment_id} (severity={card.severity.value})")
     else:
         result.channels_failed.append(channel)
         result.errors[channel] = send_result.error or "Unknown error"
-        logger.error(f"Telegram alert failed for {card.strategy_id}: {send_result.error}")
+        logger.error(f"Telegram alert failed for {card.deployment_id}: {send_result.error}")
 
 
 async def dispatch_slack(
@@ -129,7 +129,7 @@ async def dispatch_slack(
     if slack_channel is None:
         result.channels_failed.append(channel)
         result.errors[channel] = "Slack channel not configured"
-        logger.warning(f"Slack alert requested but channel not configured for {card.strategy_id}")
+        logger.warning(f"Slack alert requested but channel not configured for {card.deployment_id}")
         return
 
     try:
@@ -137,7 +137,7 @@ async def dispatch_slack(
     except Exception as e:  # noqa: BLE001
         result.channels_failed.append(channel)
         result.errors[channel] = str(e)
-        logger.exception(f"Exception sending Slack alert for {card.strategy_id}: {e}")
+        logger.exception(f"Exception sending Slack alert for {card.deployment_id}: {e}")
         return
 
     if slack_send_result.success:
@@ -145,11 +145,11 @@ async def dispatch_slack(
         thread_info = ""
         if slack_send_result.thread_ts:
             thread_info = f", thread_ts={slack_send_result.thread_ts}"
-        logger.info(f"Slack alert sent for {card.strategy_id} (severity={card.severity.value}{thread_info})")
+        logger.info(f"Slack alert sent for {card.deployment_id} (severity={card.severity.value}{thread_info})")
     else:
         result.channels_failed.append(channel)
         result.errors[channel] = slack_send_result.error or "Unknown error"
-        logger.error(f"Slack alert failed for {card.strategy_id}: {slack_send_result.error}")
+        logger.error(f"Slack alert failed for {card.deployment_id}: {slack_send_result.error}")
 
 
 def dispatch_unsupported(channel: AlertChannel, card: OperatorCard) -> None:
@@ -158,7 +158,7 @@ def dispatch_unsupported(channel: AlertChannel, card: OperatorCard) -> None:
     Matches the original inline log shape so ops scraping these lines
     continues to work.
     """
-    logger.debug(f"Channel {channel.value} not yet implemented, skipping for {card.strategy_id}")
+    logger.debug(f"Channel {channel.value} not yet implemented, skipping for {card.deployment_id}")
 
 
 async def dispatch_to_channels(
@@ -190,7 +190,7 @@ def record_cooldowns_for_sent_rules(
     cooldown_tracker: CooldownTracker,
     matching_rules: list[AlertRule],
     result: AlertSendResult,
-    strategy_id: str,
+    deployment_id: str,
 ) -> None:
     """Record cooldown for each rule whose channels successfully sent.
 
@@ -202,7 +202,7 @@ def record_cooldowns_for_sent_rules(
     for rule in matching_rules:
         if any(ch in result.channels_sent for ch in rule.channels):
             cooldown_tracker.record_alert(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 condition=rule.condition,
             )
 
@@ -212,7 +212,7 @@ def record_cooldowns_for_sent_rules(
 # ---------------------------------------------------------------------------
 
 
-def finalize_result(result: AlertSendResult, strategy_id: str) -> AlertSendResult:
+def finalize_result(result: AlertSendResult, deployment_id: str) -> AlertSendResult:
     """Set ``success`` from ``channels_sent`` and emit the summary log line.
 
     Log shapes preserved byte-for-byte from the legacy in-line block.
@@ -220,12 +220,12 @@ def finalize_result(result: AlertSendResult, strategy_id: str) -> AlertSendResul
     result.success = len(result.channels_sent) > 0
     if result.success:
         logger.info(
-            f"Alert sent for {strategy_id}: "
+            f"Alert sent for {deployment_id}: "
             f"channels_sent={[c.value for c in result.channels_sent]}, "
             f"channels_failed={[c.value for c in result.channels_failed]}"
         )
     else:
         logger.warning(
-            f"Alert failed for {strategy_id}: errors={result.errors}, skipped_reason={result.skipped_reason}"
+            f"Alert failed for {deployment_id}: errors={result.errors}, skipped_reason={result.skipped_reason}"
         )
     return result

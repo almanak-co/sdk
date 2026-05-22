@@ -24,7 +24,7 @@ def _create_strategy(config_overrides: dict | None = None):
     )
 
     config = {
-        "strategy_id": "test-compound-v3-velo-carry",
+        "deployment_id": "test-compound-v3-velo-carry",
         "strategy_name": "test-compound-v3-velo-carry",
         "chain": "optimism",
         "collateral_token": "WETH",
@@ -42,7 +42,7 @@ def _create_strategy(config_overrides: dict | None = None):
     with patch.object(CompoundV3VelodromeCarryOptimismStrategy, "__init__", lambda self, *a, **kw: None):
         strategy = CompoundV3VelodromeCarryOptimismStrategy.__new__(CompoundV3VelodromeCarryOptimismStrategy)
 
-    strategy._strategy_id = config["strategy_id"]
+    strategy._deployment_id = config["deployment_id"]
     strategy._chain = config["chain"]
     strategy.collateral_token = config["collateral_token"]
     strategy.collateral_amount = Decimal(config["collateral_amount"])

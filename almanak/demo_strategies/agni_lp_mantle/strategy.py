@@ -268,7 +268,7 @@ class AgniLPStrategy(IntentStrategy[AgniLPConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             total_value_usd=sum(p.value_usd for p in positions),
             positions=positions,

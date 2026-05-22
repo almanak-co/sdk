@@ -58,19 +58,19 @@ logger = logging.getLogger(__name__)
 # Phase 0: deployment-mode invariants (VIB-3760, plan §A4)
 # ---------------------------------------------------------------------------
 def validate_deployment_invariants(settings: GatewaySettings) -> None:
-    """Refuse to start when ``AGENT_ID`` and the gateway's deployment-shape
-    settings disagree.
+    """Refuse to start when ``ALMANAK_IS_HOSTED`` and the gateway's
+    deployment-shape settings disagree.
 
-    ``AGENT_ID`` is the single deployment-mode signal (see
+    ``ALMANAK_IS_HOSTED`` is the single deployment-mode signal (see
     ``almanak.framework.deployment``). Every other env var is *configuration
     within* a mode and must be consistent with the chosen mode:
 
-    Hosted (``AGENT_ID`` set):
+    Hosted (``ALMANAK_IS_HOSTED`` truthy):
       * ``ALMANAK_GATEWAY_DATABASE_URL`` MUST be set (Postgres backend required).
       * ``ALMANAK_GATEWAY_ALLOW_INSECURE`` MUST NOT be true.
       * ``ALMANAK_GATEWAY_AUTH_TOKEN`` MUST be set.
 
-    Local (``AGENT_ID`` unset):
+    Local (``ALMANAK_IS_HOSTED`` unset/false):
       * ``ALMANAK_GATEWAY_DATABASE_URL`` MUST NOT be set. Silent fallback to
         SQLite when DATABASE_URL is set was the April 29 silent-failure class
         and is removed by design.
@@ -91,29 +91,42 @@ def validate_deployment_invariants(settings: GatewaySettings) -> None:
 
     errors: list[str] = []
     if is_hosted():
+        # Joint invariant (blueprint 29 §2.3): hosted mode requires a
+        # non-blank ALMANAK_DEPLOYMENT_ID. mode.deployment_id() is the single
+        # source of truth for that check — fold its FatalBootError into the
+        # combined report so a deployer that sets ALMANAK_IS_HOSTED without
+        # the id fails fast at this boot guard, not lazily after the server
+        # is already marked serving (and never, for read-only dashboard pods
+        # that take the lifecycle_writer=false path).
+        from almanak.framework.deployment.mode import FatalBootError, deployment_id
+
+        try:
+            deployment_id()
+        except FatalBootError as exc:
+            errors.append(str(exc))
         if not _present(settings.database_url):
             errors.append(
-                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_DATABASE_URL is unset. "
+                "ALMANAK_IS_HOSTED is set (hosted mode) but ALMANAK_GATEWAY_DATABASE_URL is unset. "
                 "Hosted mode requires the metrics-database Postgres URL. "
-                "Set ALMANAK_GATEWAY_DATABASE_URL or unset AGENT_ID to run local."
+                "Set ALMANAK_GATEWAY_DATABASE_URL or unset ALMANAK_IS_HOSTED to run local."
             )
         if settings.allow_insecure:
             errors.append(
-                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_ALLOW_INSECURE=true. "
+                "ALMANAK_IS_HOSTED is set (hosted mode) but ALMANAK_GATEWAY_ALLOW_INSECURE=true. "
                 "Hosted mode forbids insecure operation. "
                 "Unset ALMANAK_GATEWAY_ALLOW_INSECURE."
             )
         if not _present(settings.auth_token):
             errors.append(
-                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_AUTH_TOKEN is unset. "
+                "ALMANAK_IS_HOSTED is set (hosted mode) but ALMANAK_GATEWAY_AUTH_TOKEN is unset. "
                 "Hosted mode requires an auth token. "
                 "Set ALMANAK_GATEWAY_AUTH_TOKEN."
             )
     else:
         if _present(settings.database_url):
             errors.append(
-                "ALMANAK_GATEWAY_DATABASE_URL is set but AGENT_ID is not. "
-                "Either unset DATABASE_URL (run local) or set AGENT_ID (run hosted). "
+                "ALMANAK_GATEWAY_DATABASE_URL is set but ALMANAK_IS_HOSTED is not. "
+                "Either unset DATABASE_URL (run local) or set ALMANAK_IS_HOSTED (run hosted). "
                 "Silent fallback removed because it hides bad configs."
             )
 
@@ -276,8 +289,8 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
     lifetime; ``None`` in hosted mode.
 
     Mode is determined by ``is_hosted()`` (the single permitted reader
-    of ``AGENT_ID``), not by ``settings.database_url`` — they should
-    agree, but ``validate_deployment_invariants`` is the place that
+    of ``ALMANAK_IS_HOSTED``), not by ``settings.database_url`` — they
+    should agree, but ``validate_deployment_invariants`` is the place that
     enforces the agreement; this helper consumes the canonical signal.
     """
     from almanak.framework.deployment import is_hosted
@@ -355,7 +368,8 @@ async def validate_state_schema_at_boot(settings: GatewaySettings) -> None:
         # ``GatewaySettings`` and skip Phase 0.
         if settings.database_url is None or not settings.database_url.strip():
             raise RuntimeError(
-                "Gateway startup aborted: AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_DATABASE_URL is unset."
+                "Gateway startup aborted: ALMANAK_IS_HOSTED is set (hosted mode) "
+                "but ALMANAK_GATEWAY_DATABASE_URL is unset."
             )
         await validate_postgres_schema_or_raise(settings.database_url.strip())
         return

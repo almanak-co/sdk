@@ -91,7 +91,7 @@ def test_success_with_no_tx_and_non_hold_intent_is_reclassified_noop():
         status=IterationStatus.SUCCESS,
         intent=_make_intent("PERP_OPEN"),
         execution_result=_exec_result_no_tx(),
-        strategy_id="bb-perps",
+        deployment_id="bb-perps",
         duration_ms=812.0,
     )
 
@@ -124,7 +124,7 @@ def test_success_with_supply_intent_no_tx_is_reclassified_noop():
         status=IterationStatus.SUCCESS,
         intent=_make_intent("SUPPLY"),
         execution_result=_exec_result_no_tx(),
-        strategy_id="ethena-double-yield",
+        deployment_id="ethena-double-yield",
         duration_ms=410.0,
     )
 
@@ -144,7 +144,7 @@ def test_success_with_no_execution_result_and_real_intent_is_reclassified_noop()
         status=IterationStatus.SUCCESS,
         intent=_make_intent("LP_OPEN"),
         execution_result=None,  # <-- nothing executed at all
-        strategy_id="lp-no-exec",
+        deployment_id="lp-no-exec",
         duration_ms=50.0,
     )
 
@@ -178,7 +178,7 @@ def test_success_with_tx_hash_keeps_success_status():
         status=IterationStatus.SUCCESS,
         intent=_make_intent("SWAP"),
         execution_result=er,
-        strategy_id="real-swap",
+        deployment_id="real-swap",
         duration_ms=120.0,
     )
 
@@ -205,7 +205,7 @@ def test_success_with_clob_order_id_keeps_success_status():
         status=IterationStatus.SUCCESS,
         intent=_make_intent("PREDICTION_BUY"),
         execution_result=er,
-        strategy_id="poly-buy",
+        deployment_id="poly-buy",
         duration_ms=120.0,
     )
 
@@ -226,7 +226,7 @@ def test_hold_intent_is_not_reclassified():
     result = IterationResult(
         status=IterationStatus.HOLD,
         intent=HoldIntent(reason="Waiting for entry"),
-        strategy_id="rsi-strat",
+        deployment_id="rsi-strat",
         duration_ms=42.5,
     )
 
@@ -245,7 +245,7 @@ def test_dry_run_success_is_not_reclassified():
         status=IterationStatus.SUCCESS,
         intent=_make_intent("SWAP"),
         execution_result=_exec_result_no_tx(),
-        strategy_id="dry-strat",
+        deployment_id="dry-strat",
         duration_ms=10.0,
     )
 
@@ -265,7 +265,7 @@ def test_failure_status_is_not_reclassified():
         status=IterationStatus.EXECUTION_FAILED,
         intent=_make_intent("LP_OPEN"),
         error="reverted",
-        strategy_id="failed-strat",
+        deployment_id="failed-strat",
         duration_ms=200.0,
     )
 
@@ -287,7 +287,7 @@ def test_success_no_intent_is_not_reclassified():
         status=IterationStatus.SUCCESS,
         intent=None,
         execution_result=None,
-        strategy_id="callback-strat",
+        deployment_id="callback-strat",
         duration_ms=10.0,
     )
 
@@ -306,7 +306,7 @@ def test_teardown_status_is_not_reclassified():
         status=IterationStatus.TEARDOWN,
         intent=_make_intent("SWAP"),
         execution_result=_exec_result_no_tx(),
-        strategy_id="teardown-strat",
+        deployment_id="teardown-strat",
         duration_ms=10.0,
     )
 

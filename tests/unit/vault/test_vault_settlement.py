@@ -52,7 +52,7 @@ def _make_execution_result(success: bool = True, error: str | None = None):
 
 def _make_manager(
     vault_config: VaultConfig | None = None,
-    strategy_id: str = "test-strategy-1",
+    deployment_id: str = "test-strategy-1",
     vault_state: VaultState | None = None,
 ) -> VaultLifecycleManager:
     """Create a VaultLifecycleManager with mocked dependencies."""
@@ -72,7 +72,7 @@ def _make_manager(
         vault_sdk=sdk,
         vault_adapter=adapter,
         execution_orchestrator=orchestrator,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
     )
 
     if vault_state is not None:

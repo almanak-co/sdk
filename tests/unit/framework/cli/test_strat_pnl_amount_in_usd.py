@@ -37,7 +37,6 @@ def _make_entry(
     chain: str = "arbitrum",
 ) -> LedgerEntry:
     return LedgerEntry(
-        strategy_id="test",
         deployment_id="test:abc123",
         timestamp=datetime.now(UTC),
         intent_type=intent_type,
@@ -161,7 +160,6 @@ def test_borrow_returns_none() -> None:
 
 def _make_metrics(initial: str = "9.00", total: str = "9.00") -> PortfolioMetrics:
     return PortfolioMetrics(
-        strategy_id="test:abc123",
         deployment_id="test:abc123",
         timestamp=datetime.now(UTC),
         total_value_usd=Decimal(total),

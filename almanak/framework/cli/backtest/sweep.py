@@ -278,15 +278,15 @@ async def run_sweep_backtest(
                 ),
             )
 
-    # Ensure strategy has a non-empty strategy_id (same pattern as PnL backtest)
-    existing_id = getattr(strategy_instance, "strategy_id", "")
+    # Ensure strategy has a non-empty deployment_id (same pattern as PnL backtest)
+    existing_id = getattr(strategy_instance, "deployment_id", "")
     if not existing_id:
         param_str = "_".join(f"{k}{v}" for k, v in params.items())
         fallback_id = f"sweep-{param_str}" if param_str else "sweep"
-        if hasattr(strategy_instance, "_strategy_id"):
-            strategy_instance._strategy_id = fallback_id
+        if hasattr(strategy_instance, "_deployment_id"):
+            strategy_instance._deployment_id = fallback_id
         else:
-            strategy_instance.strategy_id = fallback_id
+            strategy_instance.deployment_id = fallback_id
 
     # Create backtester
     backtester = PnLBacktester(
@@ -663,7 +663,7 @@ def _run_parallel_sweep(
                     # previously raised TypeError, meaning the error-handler itself
                     # crashed and propagated rather than recording a failed SweepResult.
                     # Correct pattern: set `error=str(e)` and let `success` derive from it.
-                    # Required BacktestResult fields (engine, strategy_id, start_time,
+                    # Required BacktestResult fields (engine, deployment_id, start_time,
                     # end_time, metrics) are populated explicitly, and the metadata
                     # fields (chain, initial/final capital) are propagated from
                     # pnl_config so failed results carry the same run metadata as
@@ -675,7 +675,7 @@ def _run_parallel_sweep(
                             params=task.params,
                             result=BacktestResult(
                                 engine=BacktestEngine.PNL,
-                                strategy_id="error",
+                                deployment_id="error",
                                 start_time=pnl_config.start_time,
                                 end_time=pnl_config.end_time,
                                 metrics=BacktestMetrics(),
@@ -808,14 +808,14 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
                 ),
             )
 
-    existing_id = getattr(strategy_instance, "strategy_id", "")
+    existing_id = getattr(strategy_instance, "deployment_id", "")
     if not existing_id:
         param_str = "_".join(f"{k}{v}" for k, v in task.params.items())
         fallback_id = f"sweep-{param_str}" if param_str else "sweep"
-        if hasattr(strategy_instance, "_strategy_id"):
-            strategy_instance._strategy_id = fallback_id
+        if hasattr(strategy_instance, "_deployment_id"):
+            strategy_instance._deployment_id = fallback_id
         else:
-            strategy_instance.strategy_id = fallback_id
+            strategy_instance.deployment_id = fallback_id
 
     # Recreate PnL config (remove computed properties first)
     pnl_config_dict = task.pnl_config_dict.copy()

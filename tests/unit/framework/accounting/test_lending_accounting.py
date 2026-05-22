@@ -34,7 +34,6 @@ def _make_outbox_row(
     wallet_address: str = "0xwallet",
     position_key: str = "lending:arbitrum:aave_v3:0xwallet:usdc",
     deployment_id: str = "dep-1",
-    strategy_id: str = "strat-1",
     cycle_id: str = "cycle-1",
     market_id: str = "",
 ) -> dict[str, Any]:
@@ -42,7 +41,6 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": ledger_entry_id,
         "deployment_id": deployment_id,
-        "strategy_id": strategy_id,
         "cycle_id": cycle_id,
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -68,12 +66,10 @@ def _make_ledger_row(
     tx_hash: str = "0xdeadbeef",
     token_in: str = "USDC",
     deployment_id: str = "dep-1",
-    strategy_id: str = "strat-1",
     cycle_id: str = "cycle-1",
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
-        "strategy_id": strategy_id,
         "deployment_id": deployment_id,
         "cycle_id": cycle_id,
         "execution_mode": "live",
@@ -145,7 +141,7 @@ class TestHandleLendingSupply:
         assert event.principal_delta_usd == Decimal("100")
 
     def test_supply_event_carries_identity_fields(self) -> None:
-        """SUPPLY event has deployment_id, strategy_id, chain, protocol populated."""
+        """SUPPLY event has deployment_id, chain, protocol populated."""
         led_id = str(uuid.uuid4())
         extracted = json.dumps({"supply_amount": 50_000_000})
         outbox = _make_outbox_row(led_id, intent_type="SUPPLY")

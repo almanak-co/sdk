@@ -351,7 +351,7 @@ def collect_compliance_violations(
 def assemble_backtest_result(
     *,
     trader: PaperTrader,
-    strategy_id: str,
+    deployment_id: str,
     run_started_at: datetime,
     run_ended_at: datetime,
     metrics: BacktestMetrics,
@@ -368,7 +368,7 @@ def assemble_backtest_result(
     """Build the final ``BacktestResult`` — pure data assembly, no I/O."""
     return BacktestResult(
         engine=BacktestEngine.PAPER,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         start_time=run_started_at,
         end_time=run_ended_at,
         metrics=metrics,

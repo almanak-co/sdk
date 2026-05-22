@@ -19,7 +19,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -34,7 +34,7 @@ def render_custom_dashboard(
     - Stable pool health (peg status)
     """
     st.title("Aerodrome Stable Yield Farmer Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -48,7 +48,7 @@ def render_custom_dashboard(
     token1 = pool_parts[1] if len(pool_parts) > 1 else "USDbC"
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1} ({'Stable' if stable else 'Volatile'})")
     st.markdown("**Chain:** Base")
 
@@ -68,7 +68,7 @@ def render_custom_dashboard(
 
     # Trading Fees Earned section
     st.subheader("Trading Fees Earned")
-    _render_fee_metrics(api_client, strategy_id, amount0, amount1)
+    _render_fee_metrics(api_client, deployment_id, amount0, amount1)
 
     st.divider()
 
@@ -80,7 +80,7 @@ def render_custom_dashboard(
 
     # APR Estimate section
     st.subheader("APR Estimate")
-    _render_apr_estimate(api_client, strategy_id, amount0, amount1)
+    _render_apr_estimate(api_client, deployment_id, amount0, amount1)
 
     st.divider()
 
@@ -88,8 +88,8 @@ def render_custom_dashboard(
     st.subheader("Stable Pool Health")
     _render_peg_status(session_state, token0, token1)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_lp_balance(
@@ -136,7 +136,7 @@ def _render_lp_balance(
 
 def _render_fee_metrics(
     api_client: Any,
-    strategy_id: str,
+    deployment_id: str,
     amount0: Decimal,
     amount1: Decimal,
 ) -> None:
@@ -144,7 +144,7 @@ def _render_fee_metrics(
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=100)
+            events = api_client.get_timeline(deployment_id, limit=100)
         except Exception:
             pass
 
@@ -241,7 +241,7 @@ def _render_pool_tvl(token0: str, token1: str) -> None:
 
 def _render_apr_estimate(
     api_client: Any,
-    strategy_id: str,
+    deployment_id: str,
     amount0: Decimal,
     amount1: Decimal,
 ) -> None:

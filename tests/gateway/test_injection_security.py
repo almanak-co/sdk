@@ -88,8 +88,8 @@ class TestStateServiceInjection:
         return StateServiceServicer(settings)
 
     @pytest.mark.asyncio
-    async def test_strategy_id_path_traversal_blocked(self, state_service):
-        """Test that path traversal in strategy_id is blocked."""
+    async def test_deployment_id_path_traversal_blocked(self, state_service):
+        """Test that path traversal in deployment_id is blocked."""
         from unittest.mock import MagicMock
 
         context = MagicMock()
@@ -101,15 +101,15 @@ class TestStateServiceInjection:
             "/etc/passwd",
         ]
 
-        for strategy_id in traversal_attempts:
-            request = gateway_pb2.LoadStateRequest(strategy_id=strategy_id)
+        for deployment_id in traversal_attempts:
+            request = gateway_pb2.LoadStateRequest(deployment_id=deployment_id)
             await state_service.LoadState(request, context)
             # Verify error was set
             context.set_code.assert_called()
 
     @pytest.mark.asyncio
-    async def test_strategy_id_sql_injection_blocked(self, state_service):
-        """Test that SQL injection in strategy_id is blocked."""
+    async def test_deployment_id_sql_injection_blocked(self, state_service):
+        """Test that SQL injection in deployment_id is blocked."""
         from unittest.mock import MagicMock
 
         context = MagicMock()
@@ -121,8 +121,8 @@ class TestStateServiceInjection:
             "'; DELETE FROM state WHERE '1'='1",
         ]
 
-        for strategy_id in injection_attempts:
-            request = gateway_pb2.LoadStateRequest(strategy_id=strategy_id)
+        for deployment_id in injection_attempts:
+            request = gateway_pb2.LoadStateRequest(deployment_id=deployment_id)
             await state_service.LoadState(request, context)
             context.set_code.assert_called()
 
@@ -139,7 +139,7 @@ class TestStateServiceInjection:
         large_data = b"x" * (MAX_STATE_SIZE_BYTES + 1)
 
         request = gateway_pb2.SaveStateRequest(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             data=large_data,
             expected_version=0,
         )

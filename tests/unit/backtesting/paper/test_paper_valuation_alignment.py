@@ -190,7 +190,7 @@ class TestEquityPointEnrichment:
 class TestPaperTradingSummaryValuationSource:
     def test_default_valuation_source(self):
         summary = PaperTradingSummary(
-            strategy_id="test",
+            deployment_id="test",
             start_time=datetime.now(UTC),
             duration=timedelta(seconds=60),
             total_trades=0,
@@ -201,7 +201,7 @@ class TestPaperTradingSummaryValuationSource:
 
     def test_portfolio_valuer_source(self):
         summary = PaperTradingSummary(
-            strategy_id="test",
+            deployment_id="test",
             start_time=datetime.now(UTC),
             duration=timedelta(seconds=60),
             total_trades=1,
@@ -222,19 +222,19 @@ class _FakeStrategy:
 
     def __init__(
         self,
-        strategy_id: str = "test",
+        deployment_id: str = "test",
         chain: str = "arbitrum",
         tokens: list[str] | None = None,
         wallet_address: str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     ):
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._chain = chain
         self._tokens = tokens or ["USDC", "ETH"]
         self._wallet_address = wallet_address
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     @property
     def chain(self) -> str:
@@ -263,13 +263,13 @@ class TestPaperTraderValuerIntegration:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="http://localhost:8545",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
         fork_manager = MagicMock()
         fork_manager.get_rpc_url.return_value = "http://localhost:8545"
         fork_manager.is_running = True
 
-        tracker = PaperPortfolioTracker(strategy_id="test_strategy")
+        tracker = PaperPortfolioTracker(deployment_id="test_strategy")
         tracker.start_session({"USDC": Decimal("10000"), "ETH": Decimal("5")})
 
         trader = PaperTrader(
@@ -312,7 +312,7 @@ class TestPaperTraderValuerIntegration:
     def test_value_portfolio_rich_strategy_missing_chain(self):
         trader = self._make_trader()
         trader._init_portfolio_valuer()
-        strategy = MagicMock(spec=["strategy_id", "decide"])  # No chain attr
+        strategy = MagicMock(spec=["deployment_id", "decide"])  # No chain attr
         trader._current_strategy = strategy
         trader._last_market_snapshot = MagicMock()
         assert trader._value_portfolio_rich() is None

@@ -328,7 +328,7 @@ def _stub_config_loader(monkeypatch: pytest.MonkeyPatch, config: dict | None = N
 
     def fake_load(strategy_name: str, config_file: str | None) -> dict:
         captured[0] = config_file
-        return dict(config) if config is not None else {"strategy_id": strategy_name}
+        return dict(config) if config is not None else {"deployment_id": strategy_name}
 
     monkeypatch.setattr(run_module, "load_strategy_config", fake_load)
     monkeypatch.setattr(run_module, "is_multi_chain_strategy", lambda cls, config=None: False)
@@ -566,7 +566,7 @@ def _capture_banner(**overrides) -> str:
     """Invoke the banner with sane defaults + overrides, capturing stdout."""
     defaults = dict(
         strategy_name="DemoStrat",
-        strategy_id="demo:abcd",
+        deployment_id="demo:abcd",
         run_id="run-1",
         is_resume=False,
         existing_state_info=None,
@@ -629,13 +629,14 @@ class TestPrintStartupBanner:
     def test_hosted_mode_shows_gateway_managed_state(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Hosted mode (AGENT_ID set) keeps state in Postgres via the gateway —
-        the runner CLI does no SQLite resume detection so is_resume is always
-        False. Without a hosted-aware branch the banner would always print
-        the misleading "FRESH START (no existing state)" even when the agent
-        is actually resuming from prior Postgres state across pod restarts.
-        Regression guard for the gemini-code-assist review on PR #2004."""
-        monkeypatch.setenv("AGENT_ID", "test-agent-id")
+        """Hosted mode (ALMANAK_IS_HOSTED set) keeps state in Postgres via the
+        gateway — the runner CLI does no SQLite resume detection so is_resume
+        is always False. Without a hosted-aware branch the banner would always
+        print the misleading "FRESH START (no existing state)" even when the
+        agent is actually resuming from prior Postgres state across pod
+        restarts. Regression guard for the gemini-code-assist review on PR #2004."""
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "test-agent-id")
         output = _capture_banner(is_resume=False)
         assert "HOSTED" in output
         assert "Postgres" in output

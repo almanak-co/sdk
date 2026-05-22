@@ -200,7 +200,7 @@ class UniswapRSISweepStrategy(IntentStrategy):
             logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_uniswap_rsi_sweep"),
+            deployment_id=getattr(self, "deployment_id", "demo_uniswap_rsi_sweep"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

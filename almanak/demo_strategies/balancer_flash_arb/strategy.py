@@ -381,7 +381,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
                 )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_balancer_flash_arb"),
+            deployment_id=getattr(self, "deployment_id", "demo_balancer_flash_arb"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

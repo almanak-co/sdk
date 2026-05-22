@@ -19,7 +19,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -33,7 +33,7 @@ def render_custom_dashboard(
     - Trend reversal history with entry/exit markers
     """
     st.title("Aerodrome Trend-Following LP Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -45,7 +45,7 @@ def render_custom_dashboard(
     token1 = pool_parts[1] if len(pool_parts) > 1 else "USDC"
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1} ({'Stable' if stable else 'Volatile'})")
     st.markdown("**Chain:** Base")
 
@@ -71,16 +71,16 @@ def render_custom_dashboard(
 
     # Position Time Section
     st.subheader("Position Time Analysis")
-    _render_position_time(api_client, strategy_id)
+    _render_position_time(api_client, deployment_id)
 
     st.divider()
 
     # Trend Reversal History Section
     st.subheader("Trend Reversal History")
-    _render_trend_history(api_client, strategy_id)
+    _render_trend_history(api_client, deployment_id)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_trend_indicator(session_state: dict[str, Any]) -> None:
@@ -215,12 +215,12 @@ def _render_ema_values(session_state: dict[str, Any], token0: str) -> None:
     )
 
 
-def _render_position_time(api_client: Any, strategy_id: str) -> None:
+def _render_position_time(api_client: Any, deployment_id: str) -> None:
     """Render in-position vs out-of-position time percentage."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=100)
+            events = api_client.get_timeline(deployment_id, limit=100)
         except Exception:
             pass
 
@@ -330,12 +330,12 @@ def _render_position_time(api_client: Any, strategy_id: str) -> None:
         st.info("Position time is evenly split between in and out of LP.")
 
 
-def _render_trend_history(api_client: Any, strategy_id: str) -> None:
+def _render_trend_history(api_client: Any, deployment_id: str) -> None:
     """Render trend reversal history with entry/exit markers."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=50)
+            events = api_client.get_timeline(deployment_id, limit=50)
         except Exception:
             pass
 

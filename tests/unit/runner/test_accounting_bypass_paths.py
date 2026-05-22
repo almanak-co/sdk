@@ -36,7 +36,7 @@ from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunne
 # ---------------------------------------------------------------------------
 class _Strategy:
     def __init__(self, sid: str = "s1") -> None:
-        self.strategy_id = sid
+        self.deployment_id = sid
 
 
 class _Runner(StrategyRunner):
@@ -163,7 +163,7 @@ async def test_t_3762_3_update_portfolio_metrics_logs_error_on_failure(
     try:
         await runner_state.update_portfolio_metrics(
             runner=monkey_runner,
-            strategy_id="s1",
+            deployment_id="s1",
             snapshot=MagicMock(),
         )
     finally:

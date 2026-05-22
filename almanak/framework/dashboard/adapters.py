@@ -69,8 +69,8 @@ def strategy_from_pm_dict(entry: dict[str, Any]) -> Strategy:
             return Decimal("0")
 
     return Strategy(
-        id=entry.get("strategy_id") or entry.get("id") or "",
-        name=entry.get("name") or entry.get("strategy_name") or entry.get("strategy_id") or "",
+        id=entry.get("deployment_id") or entry.get("id") or "",
+        name=entry.get("name") or entry.get("strategy_name") or entry.get("deployment_id") or "",
         status=status,
         pnl_24h_usd=_dec("pnl_24h_usd"),
         total_value_usd=_dec("total_value_usd"),

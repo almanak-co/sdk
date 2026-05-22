@@ -56,7 +56,7 @@ class TestSumLedgerGasUsdServiceValidation:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("deployment_id", ["", "  "])
     async def test_missing_deployment_id(self, sqlite_service, mock_context, deployment_id):
-        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id=deployment_id, strategy_id="demo")
+        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id=deployment_id)
 
         resp = await sqlite_service.SumLedgerGasUsd(req, mock_context)
 
@@ -65,8 +65,8 @@ class TestSumLedgerGasUsdServiceValidation:
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id(self, sqlite_service, mock_context):
-        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id="dep-A", strategy_id="../../bad")
+    async def test_invalid_deployment_id(self, sqlite_service, mock_context):
+        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id="../bad")
 
         resp = await sqlite_service.SumLedgerGasUsd(req, mock_context)
 
@@ -77,31 +77,34 @@ class TestSumLedgerGasUsdServiceValidation:
 
 class TestSumLedgerGasUsdPostgres:
     @pytest.mark.asyncio
-    async def test_pg_sums_by_deployment_and_resolved_agent_id(self, pg_service, mock_context, monkeypatch):
-        monkeypatch.setenv("AGENT_ID", "agent-123")
-        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id="dep-A", strategy_id="Strategy:local")
+    async def test_pg_sums_by_deployment_id_only(self, pg_service, mock_context):
+        """Blueprint 29 §4: the query filters the single deployment_id column.
+
+        VIB-4722 removed the deployment_id translation and the legacy
+        ``deployment_id = ''`` fallback — one identity column, one param.
+        """
+        req = gateway_pb2.SumLedgerGasUsdRequest(deployment_id="Strategy:local")
 
         resp = await pg_service.SumLedgerGasUsd(req, mock_context)
 
         assert resp.success is True
         assert resp.gas_usd_total == "0.0059"
         pg_service._snapshot_fetchrow.assert_awaited_once()
-        sql, deployment_id, agent_id = pg_service._snapshot_fetchrow.await_args.args
+        sql, deployment_id = pg_service._snapshot_fetchrow.await_args.args
         assert "BTRIM(gas_usd)" in sql
         assert "::numeric" in sql
         assert "[eE][+-]?[0-9]+" in sql
-        assert "agent_id = $2" in sql
-        assert "deployment_id = $1 OR deployment_id = ''" in sql
+        assert "WHERE deployment_id = $1" in sql
         assert "strategy_id" not in sql
-        assert deployment_id == "dep-A"
-        assert agent_id == "agent-123"
+        assert "agent_id" not in sql
+        assert deployment_id == "Strategy:local"
 
     @pytest.mark.asyncio
     async def test_pg_no_rows_returns_zero(self, pg_service, mock_context):
         pg_service._snapshot_fetchrow = AsyncMock(return_value=None)
 
         resp = await pg_service.SumLedgerGasUsd(
-            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="dep-A", strategy_id="demo"),
+            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="demo"),
             mock_context,
         )
 
@@ -113,7 +116,7 @@ class TestSumLedgerGasUsdPostgres:
         pg_service._snapshot_fetchrow = AsyncMock(side_effect=RuntimeError("password leaked in dsn"))
 
         resp = await pg_service.SumLedgerGasUsd(
-            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="dep-A", strategy_id="demo"),
+            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="demo"),
             mock_context,
         )
 
@@ -131,13 +134,15 @@ class TestSumLedgerGasUsdSqlite:
         sqlite_service._state_manager = MagicMock(warm_backend=warm)
 
         resp = await sqlite_service.SumLedgerGasUsd(
-            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="dep-A", strategy_id="demo"),
+            gateway_pb2.SumLedgerGasUsdRequest(deployment_id="demo"),
             mock_context,
         )
 
         assert resp.success is True
         assert resp.gas_usd_total == "0.42"
-        warm.sum_ledger_gas_usd.assert_awaited_once_with("dep-A", "demo")
+        # One identity (blueprint 29 §4): the warm backend is called with the
+        # single canonical deployment_id — no second deployment_id argument.
+        warm.sum_ledger_gas_usd.assert_awaited_once_with("demo")
 
 
 class TestGatewayStateManagerSumLedgerGasUsd:
@@ -151,13 +156,12 @@ class TestGatewayStateManagerSumLedgerGasUsd:
         client = MagicMock(state=state_stub)
         manager = GatewayStateManager(client)
 
-        total = await manager.sum_ledger_gas_usd("dep-A", "demo")
+        total = await manager.sum_ledger_gas_usd("dep-A")
 
         assert total == Decimal("0.1234")
         state_stub.SumLedgerGasUsd.assert_called_once()
         request = state_stub.SumLedgerGasUsd.call_args.args[0]
         assert request.deployment_id == "dep-A"
-        assert request.strategy_id == "demo"
 
     @pytest.mark.asyncio
     async def test_response_failure_raises_accounting_persistence_error(self):
@@ -169,10 +173,10 @@ class TestGatewayStateManagerSumLedgerGasUsd:
         manager = GatewayStateManager(MagicMock(state=state_stub))
 
         with pytest.raises(AccountingPersistenceError) as excinfo:
-            await manager.sum_ledger_gas_usd("dep-A", "demo")
+            await manager.sum_ledger_gas_usd("dep-A")
 
         assert excinfo.value.write_kind == "metrics"
-        assert excinfo.value.strategy_id == "demo"
+        assert excinfo.value.deployment_id == "dep-A"
         assert "internal server error" in str(excinfo.value)
 
     @pytest.mark.asyncio
@@ -182,7 +186,7 @@ class TestGatewayStateManagerSumLedgerGasUsd:
         manager = GatewayStateManager(MagicMock(state=state_stub))
 
         with pytest.raises(NotImplementedError):
-            await manager.sum_ledger_gas_usd("dep-A", "demo")
+            await manager.sum_ledger_gas_usd("dep-A")
 
     @pytest.mark.asyncio
     async def test_invalid_decimal_raises_accounting_persistence_error(self):
@@ -194,7 +198,7 @@ class TestGatewayStateManagerSumLedgerGasUsd:
         manager = GatewayStateManager(MagicMock(state=state_stub))
 
         with pytest.raises(AccountingPersistenceError) as excinfo:
-            await manager.sum_ledger_gas_usd("dep-A", "demo")
+            await manager.sum_ledger_gas_usd("dep-A")
 
         assert excinfo.value.write_kind == "metrics"
-        assert excinfo.value.strategy_id == "demo"
+        assert excinfo.value.deployment_id == "dep-A"

@@ -3,7 +3,7 @@
 Phase 0 skeleton: subclass of :class:`BaseConfig` with mode-specific fields
 landing in later phases.
 
-* Phase 1 — ``agent_id``, ``gateway_db_url``, ``gateway_auth_token`` (the
+* Phase 1 — ``deployment_id``, ``gateway_db_url``, ``gateway_auth_token`` (the
   hosted gateway boot surface).
 * Phase 5b — ``connectors``: same submodel as ``LocalConfig`` so connectors
   consume one shape regardless of deployment mode. The hosted gateway
@@ -46,7 +46,7 @@ class HostedConfig(BaseConfig):
     """Hosted-mode config (gateway-managed, postgres-backed).
 
     Phase 0 skeleton — no fields beyond ``BaseConfig.gateway``. The hosted
-    surface resolves ``agent_id`` via :func:`almanak.framework.deployment.mode.agent_id`
+    surface resolves ``deployment_id`` via :func:`almanak.framework.deployment.mode.deployment_id`
     and gateway-managed secrets land here in Phase 1.
 
     ``connectors`` mirrors :attr:`LocalConfig.connectors`; the default

@@ -740,7 +740,7 @@ class SaveAgentStateRequest(BaseModel):
     """Persist agent/strategy state."""
 
     state: dict = Field(description="Arbitrary JSON-serializable state to persist")
-    strategy_id: str = Field(default="", description="Strategy identifier; uses default if empty")
+    deployment_id: str = Field(default="", description="Deployment identifier; uses default if empty")
 
 
 class SaveAgentStateResponse(BaseModel):
@@ -751,7 +751,7 @@ class SaveAgentStateResponse(BaseModel):
 class LoadAgentStateRequest(BaseModel):
     """Load previously saved state."""
 
-    strategy_id: str = Field(default="", description="Strategy identifier; uses default if empty")
+    deployment_id: str = Field(default="", description="Deployment identifier; uses default if empty")
 
 
 class LoadAgentStateResponse(BaseModel):
@@ -765,7 +765,7 @@ class RecordAgentDecisionRequest(BaseModel):
     decision_summary: str = Field(description="What the agent decided and why")
     tool_calls: list[dict] = Field(default_factory=list, description="Tool calls made during this decision")
     intent_type: str | None = Field(default=None, description="Resulting intent type, if any")
-    strategy_id: str = Field(default="")
+    deployment_id: str = Field(default="")
 
 
 class RecordAgentDecisionResponse(BaseModel):

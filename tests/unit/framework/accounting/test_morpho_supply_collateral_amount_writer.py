@@ -88,8 +88,7 @@ class TestMorphoSupplyCollateralAmountReachesWriter:
             event = build_lending_accounting_event(
                 intent=intent,
                 result=result,
-                deployment_id="dep-1",
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 cycle_id="cycle-001",
                 execution_mode="paper",
                 chain=_CHAIN,
@@ -124,8 +123,7 @@ class TestMorphoSupplyCollateralAmountReachesWriter:
             event = build_lending_accounting_event(
                 intent=intent,
                 result=result,
-                deployment_id="dep-1",
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 cycle_id="cycle-001",
                 execution_mode="paper",
                 chain=_CHAIN,
@@ -162,8 +160,7 @@ class TestMorphoSupplyCollateralAmountReachesWriter:
             event = build_lending_accounting_event(
                 intent=intent,
                 result=result,
-                deployment_id="dep-1",
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 cycle_id="cycle-001",
                 execution_mode="paper",
                 chain=_CHAIN,
@@ -202,8 +199,7 @@ class TestMorphoSupplyCollateralAmountReachesWriter:
             event = build_lending_accounting_event(
                 intent=intent,
                 result=result,
-                deployment_id="dep-1",
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 cycle_id="cycle-001",
                 execution_mode="paper",
                 chain=_CHAIN,

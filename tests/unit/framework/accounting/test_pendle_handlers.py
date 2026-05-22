@@ -34,7 +34,6 @@ def _outbox(
     return {
         "id": str(uuid.uuid4()),
         "deployment_id": "dep-1",
-        "strategy_id": "strat-1",
         "cycle_id": "cycle-1",
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -53,7 +52,6 @@ def _ledger(
     return {
         "id": str(uuid.uuid4()),
         "deployment_id": "dep-1",
-        "strategy_id": "strat-1",
         "cycle_id": "cycle-1",
         "execution_mode": "live",
         "timestamp": datetime.now(UTC).isoformat(),

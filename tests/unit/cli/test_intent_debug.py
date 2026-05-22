@@ -150,7 +150,7 @@ class TestTraceStrategy:
             "from dataclasses import dataclass\n"
             "@dataclass\n"
             "class StubConfig:\n"
-            "    strategy_id: str = 'trace-test'\n"
+            "    deployment_id: str = 'trace-test'\n"
             "    chain: str = 'arbitrum'\n"
             "    wallet_address: str = '0x' + '1' * 40\n"
         )
@@ -207,7 +207,7 @@ class TestTraceStrategy:
             "from dataclasses import dataclass\n"
             "@dataclass\n"
             "class StubConfig:\n"
-            "    strategy_id: str = 'trace-test'\n"
+            "    deployment_id: str = 'trace-test'\n"
             "    chain: str = 'arbitrum'\n"
             "    wallet_address: str = '0x' + '1' * 40\n"
         )
@@ -336,11 +336,11 @@ class TestResolveTraceConfig:
         wallet = "0x" + "1" * 40
         config = _resolve_trace_config(strat, {}, "arbitrum", wallet)
         assert config is not None
-        assert config.strategy_id == "trace-test"
+        assert config.deployment_id == "trace-test"
         assert config.chain == "arbitrum"
         assert config.wallet_address == wallet
         assert config.to_dict() == {
-            "strategy_id": "trace-test",
+            "deployment_id": "trace-test",
             "chain": "arbitrum",
             "wallet_address": wallet,
         }
@@ -352,7 +352,7 @@ class TestResolveTraceConfig:
             "from dataclasses import dataclass\n"
             "@dataclass\n"
             "class StubConfig:\n"
-            "    strategy_id: str = 'x'\n"
+            "    deployment_id: str = 'x'\n"
             "    chain: str = 'arbitrum'\n"
             "    wallet_address: str = '0x' + '1' * 40\n"
         )

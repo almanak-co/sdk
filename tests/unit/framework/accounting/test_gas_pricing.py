@@ -420,7 +420,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("SWAP", protocol="uniswap_v3")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -446,7 +446,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -465,7 +465,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("LP_CLOSE", protocol="aerodrome")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -482,7 +482,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("SWAP", protocol="traderjoe_v2")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -504,7 +504,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("SWAP")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -522,7 +522,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
 
         with caplog.at_level("WARNING", logger="almanak.framework.observability.ledger"):
             entry = build_ledger_entry(
-                strategy_id="strat_oracle_gap",
+                deployment_id="strat_oracle_gap",
                 cycle_id="cycle_test",
                 intent=intent,
                 result=result,
@@ -547,7 +547,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("PREDICTION_BUY", protocol="polymarket")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -564,7 +564,7 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         intent = _make_intent("SWAP")
 
         entry = build_ledger_entry(
-            strategy_id="strat_test",
+            deployment_id="strat_test",
             cycle_id="cycle_test",
             intent=intent,
             result=result,
@@ -597,7 +597,7 @@ class TestSidecarPopulatesGasUsd:
             "almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path
         ):
             writer.append(
-                strategy_id="strat_sidecar",
+                deployment_id="strat_sidecar",
                 intent=_make_intent("SWAP"),
                 result=result,
                 chain="arbitrum",
@@ -618,7 +618,7 @@ class TestSidecarPopulatesGasUsd:
             "almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path
         ):
             writer.append(
-                strategy_id="strat_sidecar_no_oracle",
+                deployment_id="strat_sidecar_no_oracle",
                 intent=_make_intent("SWAP"),
                 result=result,
                 chain="arbitrum",
@@ -639,7 +639,7 @@ class TestSidecarPopulatesGasUsd:
             "almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path
         ):
             writer.append(
-                strategy_id="strat_sidecar_precomputed",
+                deployment_id="strat_sidecar_precomputed",
                 intent=_make_intent("PREDICTION_BUY", protocol="polymarket"),
                 result=result,
                 chain="polygon",
@@ -660,7 +660,7 @@ class TestSidecarPopulatesGasUsd:
             "almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path
         ):
             writer.append(
-                strategy_id="strat_sidecar_zero",
+                deployment_id="strat_sidecar_zero",
                 intent=_make_intent("SWAP"),
                 result=result,
                 chain="ethereum",

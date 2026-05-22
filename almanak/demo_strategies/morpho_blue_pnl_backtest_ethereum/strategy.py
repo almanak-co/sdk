@@ -172,7 +172,7 @@ class MorphoBluePnLBacktestStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_OPENED,
                         description=f"Supplied {self.supply_amount} {self.supply_token} to Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "action": "supply",
                             "market_id": self.market_id,
@@ -188,7 +188,7 @@ class MorphoBluePnLBacktestStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_CLOSED,
                         description=f"Withdrew {self.supply_token} from Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "withdraw", "protocol": "morpho_blue"},
                     )
                 )
@@ -255,7 +255,7 @@ class MorphoBluePnLBacktestStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

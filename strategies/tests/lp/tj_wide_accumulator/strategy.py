@@ -218,7 +218,7 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
                             timestamp=now,
                             event_type=TimelineEventType.STATE_CHANGE,
                             description=f"Rebalancing: {rebalance_reason}",
-                            strategy_id=self.strategy_id,
+                            deployment_id=self.deployment_id,
                             details={
                                 "trigger": "time" if "time" in rebalance_reason else "price",
                                 "price_change_pct": str(price_change_pct * 100),
@@ -263,7 +263,7 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.STATE_CHANGE,
                     description="Opening new TraderJoe LP position for JOE/AVAX accumulation",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "opening_new_position", "pool": self.pool},
                 )
             )
@@ -333,7 +333,7 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"TraderJoe wide-range LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "bin_step": self.bin_step,
@@ -365,7 +365,7 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"TraderJoe wide-range LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool},
                 )
             )
@@ -439,7 +439,7 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

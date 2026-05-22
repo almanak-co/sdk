@@ -8,7 +8,7 @@ Example:
 
     snapshot = PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id="my_strategy",
+        deployment_id="my_strategy",
         total_value_usd=Decimal("15234.50"),
         available_cash_usd=Decimal("1000.00"),
         value_confidence=ValueConfidence.HIGH,

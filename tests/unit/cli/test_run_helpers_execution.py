@@ -68,7 +68,7 @@ def _make_fake_runner(
 def _make_fake_strategy(*, with_load_state: bool = False, with_flush: bool = False) -> MagicMock:
     """Build a minimal strategy instance fake."""
     strategy = MagicMock()
-    strategy.strategy_id = "test-strat"
+    strategy.deployment_id = "test-strat"
     strategy.STRATEGY_NAME = "TestStrategy"
     strategy.chain = "arbitrum"
     # activity_provider stays None unless a test wires it up
@@ -99,7 +99,7 @@ def _make_fake_state_manager() -> MagicMock:
 def _make_success_result() -> IterationResult:
     return IterationResult(
         status=IterationStatus.SUCCESS,
-        strategy_id="test-strat",
+        deployment_id="test-strat",
         duration_ms=1.0,
     )
 
@@ -108,7 +108,7 @@ def _make_failed_result() -> IterationResult:
     return IterationResult(
         status=IterationStatus.EXECUTION_FAILED,
         error="it blew up",
-        strategy_id="test-strat",
+        deployment_id="test-strat",
         duration_ms=1.0,
     )
 
@@ -116,7 +116,7 @@ def _make_failed_result() -> IterationResult:
 def _make_teardown_result() -> IterationResult:
     return IterationResult(
         status=IterationStatus.TEARDOWN,
-        strategy_id="test-strat",
+        deployment_id="test-strat",
         duration_ms=1.0,
     )
 
@@ -546,7 +546,7 @@ class TestRunOnce:
         otherwise hard-fails when no strategy folder is set). The DB sits
         in a per-test tmp file; ``create_request`` writes one row and that's it.
         """
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
         monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
         # Reset the singleton in case a prior test already cached a manager

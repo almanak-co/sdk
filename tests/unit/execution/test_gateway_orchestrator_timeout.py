@@ -110,7 +110,7 @@ class TestExecuteUsesExecuteTimeout:
             execute_timeout=600.0,
         )
         bundle = {"transactions": []}
-        await orch.execute(bundle, strategy_id="test", intent_id="test", wallet_address="0x" + "a" * 40)
+        await orch.execute(bundle, deployment_id="test", intent_id="test", wallet_address="0x" + "a" * 40)
 
         # Verify Execute was called with execute_timeout (600), not timeout (120)
         call_kwargs = client.execution.Execute.call_args

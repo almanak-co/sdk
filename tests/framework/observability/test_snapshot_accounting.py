@@ -31,7 +31,7 @@ class TestPortfolioSnapshotTokenPrices:
     def test_to_dict_includes_token_prices(self):
         snapshot = PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="test",
+            deployment_id="test",
             total_value_usd=Decimal("1000"),
             available_cash_usd=Decimal("500"),
             token_prices={
@@ -56,7 +56,7 @@ class TestPortfolioSnapshotTokenPrices:
     def test_from_dict_restores_token_prices(self):
         data = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "strategy_id": "test",
+            "deployment_id": "test",
             "total_value_usd": "1000",
             "available_cash_usd": "500",
             "value_confidence": "HIGH",
@@ -78,7 +78,7 @@ class TestPortfolioSnapshotTokenPrices:
     def test_empty_token_prices_default(self):
         snapshot = PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="test",
+            deployment_id="test",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
         )
@@ -91,7 +91,7 @@ class TestPortfolioSnapshotWalletBalances:
     def test_wallet_balances_to_dict_and_back(self):
         snapshot = PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="test",
+            deployment_id="test",
             total_value_usd=Decimal("1500"),
             available_cash_usd=Decimal("1500"),
             wallet_balances=[
@@ -142,7 +142,7 @@ class TestSQLiteSnapshotPersistence:
 
             snapshot = PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 total_value_usd=Decimal("12890.50"),
                 available_cash_usd=Decimal("5000.00"),
                 value_confidence=ValueConfidence.HIGH,
@@ -198,7 +198,7 @@ class TestSQLiteSnapshotPersistence:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy_id TEXT NOT NULL,
+                deployment_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 iteration_number INTEGER DEFAULT 0,
                 total_value_usd TEXT NOT NULL,
@@ -213,7 +213,7 @@ class TestSQLiteSnapshotPersistence:
         conn.execute(
             """
             INSERT INTO portfolio_snapshots
-            (strategy_id, timestamp, iteration_number, total_value_usd,
+            (deployment_id, timestamp, iteration_number, total_value_usd,
              available_cash_usd, positions_json, chain, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -259,7 +259,7 @@ class TestSQLiteSnapshotPersistence:
             CREATE TABLE IF NOT EXISTS transaction_ledger (
                 id TEXT PRIMARY KEY,
                 cycle_id TEXT NOT NULL,
-                strategy_id TEXT NOT NULL,
+                deployment_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 intent_type TEXT NOT NULL,
                 token_in TEXT, amount_in TEXT,

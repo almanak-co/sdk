@@ -12,7 +12,7 @@ def _create_strategy() -> TraderJoeLPStrategy:
     with patch.object(TraderJoeLPStrategy, "__init__", lambda self, *args, **kwargs: None):
         strategy = TraderJoeLPStrategy.__new__(TraderJoeLPStrategy)
 
-    strategy._strategy_id = "test-traderjoe-lp"
+    strategy._deployment_id = "test-traderjoe-lp"
     strategy._chain = "avalanche"
     strategy.pool = "WAVAX/USDC/20"
     strategy.bin_step = 20
@@ -31,7 +31,7 @@ def test_get_open_positions_returns_valid_summary_without_position() -> None:
 
     summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-traderjoe-lp"
+    assert summary.deployment_id == "test-traderjoe-lp"
     assert len(summary.positions) == 0
     assert summary.total_value_usd == Decimal("0")
 
@@ -45,7 +45,7 @@ def test_get_open_positions_returns_valid_summary_with_position() -> None:
     with patch.object(TraderJoeLPStrategy, "create_market_snapshot", return_value=snapshot):
         summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-traderjoe-lp"
+    assert summary.deployment_id == "test-traderjoe-lp"
     assert len(summary.positions) == 1
     pos = summary.positions[0]
     assert pos.protocol == "traderjoe_v2"

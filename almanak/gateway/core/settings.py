@@ -204,12 +204,12 @@ class GatewaySettings(BaseSettings):
     # than silently writing to the per-user utility DB. The CLI flag
     # ``almanak gateway --standalone`` is the operator-facing surface; tests
     # and ``almanak ax`` workflows that need a non-strategy gateway pass it
-    # explicitly. Hosted mode (``AGENT_ID`` set) ignores this field entirely.
+    # explicitly. Hosted mode (``ALMANAK_IS_HOSTED`` set) ignores this field entirely.
     standalone: bool = False
 
     # ALM-2732 follow-up: distinguishes the strategy-pod gateway (writer) from
     # the dashboard-pod gateway (reader). Both pods ship the same image with
-    # the same AGENT_ID and metrics_db credentials, so a startup write to
+    # the same ALMANAK_IS_HOSTED and metrics_db credentials, so a startup write to
     # ``agent_state`` from both would race — the late writer would clobber
     # whatever the strategy has already reported. Only the strategy-pod
     # gateway gets ``ALMANAK_GATEWAY_LIFECYCLE_WRITER=true``; the dashboard-

@@ -60,7 +60,7 @@ from almanak.gateway.services._dashboard_helpers import (
 
 def _make_inst(
     *,
-    strategy_id: str = "test_strategy",
+    deployment_id: str = "test_strategy",
     strategy_name: str = "test_strategy",
     chain: str = "arbitrum",
     protocol: str = "Uniswap V3",
@@ -74,7 +74,7 @@ def _make_inst(
     attribute set is sufficient.
     """
     inst = MagicMock()
-    inst.strategy_id = strategy_id
+    inst.deployment_id = deployment_id
     inst.strategy_name = strategy_name
     inst.chain = chain
     inst.protocol = protocol
@@ -104,7 +104,7 @@ class TestBuildRegistryStrategyInfo:
 
         info = build_registry_strategy_info(inst, effective_status="RUNNING")
 
-        assert info["strategy_id"] == "test_strategy"
+        assert info["deployment_id"] == "test_strategy"
         # strategy_name is title-cased with underscores → spaces.
         assert info["name"] == "Test Strategy"
         assert info["status"] == "RUNNING"
@@ -266,7 +266,7 @@ class TestEnrichStrategyInfo:
 
     def _base_info(self, status: str = "RUNNING") -> dict:
         return {
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "name": "Test Strategy",
             "status": status,
             "chain": "arbitrum",
@@ -575,7 +575,7 @@ class TestBuildStrategySummaryKwargs:
     # ``StrategySummary``, update this set *and* update the helper.
     GOLDEN_KEYSET_ALL_PRESENT = frozenset(
         {
-            "strategy_id",
+            "deployment_id",
             "name",
             "status",
             "chain",
@@ -606,7 +606,7 @@ class TestBuildStrategySummaryKwargs:
 
     def _full_info(self) -> dict:
         return {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "name": "S1",
             "status": "RUNNING",
             "chain": "arbitrum",
@@ -656,14 +656,14 @@ class TestBuildStrategySummaryKwargs:
         kwargs = build_strategy_summary_kwargs(info)
         summary = gateway_pb2.StrategySummary(**kwargs)
 
-        assert summary.strategy_id == "s1"
+        assert summary.deployment_id == "s1"
         assert summary.wallet_address == "0x1234"
         assert dict(summary.chain_wallets) == {"arbitrum": "0x1234"}
 
     def test_defaults_for_missing_optional_scalar_keys(self):
         """Missing optional scalar keys coalesce to helper-defined defaults."""
         info = {
-            "strategy_id": "s1",
+            "deployment_id": "s1",
             "name": "S1",
             "status": "RUNNING",
             "chain": "arbitrum",
@@ -737,7 +737,7 @@ class TestBuildPositionProto:
     def _make_snapshot(self, balances: list[tuple[str, str, str]]) -> PortfolioSnapshot:
         return PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="s1",
+            deployment_id="s1",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
             value_confidence=ValueConfidence.HIGH,
@@ -935,12 +935,11 @@ class TestLookupStrategySource:
         registry_getter = MagicMock(return_value=registry)
 
         compute_effective_status = MagicMock(return_value="RUNNING")
-        discover_filesystem = MagicMock(return_value=[{"strategy_id": "test_strategy"}])
+        discover_filesystem = MagicMock(return_value=[{"deployment_id": "test_strategy"}])
         discover_paper_sessions = MagicMock(return_value=[])
 
         result = lookup_strategy_source(
-            strategy_id="test_strategy",
-            original_strategy_id="test_strategy",
+            deployment_id="test_strategy",
             registry_getter=registry_getter,
             compute_effective_status=compute_effective_status,
             discover_filesystem=discover_filesystem,
@@ -948,7 +947,7 @@ class TestLookupStrategySource:
         )
 
         assert result is not None
-        assert result["strategy_id"] == "test_strategy"
+        assert result["deployment_id"] == "test_strategy"
         # Fallbacks NOT invoked — registry short-circuit.
         discover_filesystem.assert_not_called()
         discover_paper_sessions.assert_not_called()
@@ -961,7 +960,7 @@ class TestLookupStrategySource:
         registry_getter = MagicMock(return_value=registry)
 
         filesystem_info = {
-            "strategy_id": "fs_strategy",
+            "deployment_id": "fs_strategy",
             "name": "Fs",
             "status": "RUNNING",
             "chain": "arbitrum",
@@ -971,8 +970,7 @@ class TestLookupStrategySource:
         discover_paper_sessions = MagicMock(return_value=[])
 
         result = lookup_strategy_source(
-            strategy_id="fs_strategy",
-            original_strategy_id="fs_strategy",
+            deployment_id="fs_strategy",
             registry_getter=registry_getter,
             compute_effective_status=MagicMock(),
             discover_filesystem=discover_filesystem,
@@ -983,18 +981,17 @@ class TestLookupStrategySource:
         discover_paper_sessions.assert_not_called()
 
     def test_paper_hit_matches_on_resolved_id(self):
-        """Paper cascade matches when ``s[strategy_id] == strategy_id``."""
+        """Paper cascade matches when ``s[deployment_id] == deployment_id``."""
         registry = MagicMock()
         registry.get.return_value = None
         registry_getter = MagicMock(return_value=registry)
 
-        paper_info = {"strategy_id": "paper:agent-xyz", "name": "P"}
+        paper_info = {"deployment_id": "paper:agent-xyz", "name": "P"}
         discover_filesystem = MagicMock(return_value=[])
         discover_paper_sessions = MagicMock(return_value=[paper_info])
 
         result = lookup_strategy_source(
-            strategy_id="paper:agent-xyz",
-            original_strategy_id="paper:agent-xyz",
+            deployment_id="paper:agent-xyz",
             registry_getter=registry_getter,
             compute_effective_status=MagicMock(),
             discover_filesystem=discover_filesystem,
@@ -1003,31 +1000,31 @@ class TestLookupStrategySource:
 
         assert result is paper_info
 
-    def test_paper_hit_matches_on_original_id(self):
-        """Paper cascade matches when ``s[strategy_id] == original_strategy_id``.
+    def test_paper_miss_on_id_mismatch_no_translation(self):
+        """A paper session is found ONLY by its exact id (blueprint 29 §4).
 
-        ``resolve_agent_id`` may rewrite paper IDs, so matching must try
-        both. A paper session stored under the pre-resolution ID must
-        still be findable.
+        VIB-4722 removed the ``resolve_deployment_id`` rewrite: there is no
+        "original vs resolved" id distinction. A lookup with a different id
+        than the stored session genuinely misses — it is not a silent
+        translation hit.
         """
         registry = MagicMock()
         registry.get.return_value = None
         registry_getter = MagicMock(return_value=registry)
 
-        paper_info = {"strategy_id": "paper:original-id", "name": "P"}
+        paper_info = {"deployment_id": "paper:stored-id", "name": "P"}
         discover_filesystem = MagicMock(return_value=[])
         discover_paper_sessions = MagicMock(return_value=[paper_info])
 
         result = lookup_strategy_source(
-            strategy_id="paper:resolved-id",  # different from the stored ID
-            original_strategy_id="paper:original-id",
+            deployment_id="paper:different-id",  # not the stored id
             registry_getter=registry_getter,
             compute_effective_status=MagicMock(),
             discover_filesystem=discover_filesystem,
             discover_paper_sessions=discover_paper_sessions,
         )
 
-        assert result is paper_info
+        assert result is None
 
     def test_all_miss_returns_none(self):
         """Every source empty → helper returns ``None``."""
@@ -1039,8 +1036,7 @@ class TestLookupStrategySource:
         discover_paper_sessions = MagicMock(return_value=[])
 
         result = lookup_strategy_source(
-            strategy_id="missing",
-            original_strategy_id="missing",
+            deployment_id="missing",
             registry_getter=registry_getter,
             compute_effective_status=MagicMock(),
             discover_filesystem=discover_filesystem,
@@ -1053,12 +1049,11 @@ class TestLookupStrategySource:
         """A raising registry does not propagate — filesystem is still tried."""
         registry_getter = MagicMock(side_effect=RuntimeError("db down"))
 
-        filesystem_info = {"strategy_id": "fs_strategy", "name": "Fs"}
+        filesystem_info = {"deployment_id": "fs_strategy", "name": "Fs"}
         discover_filesystem = MagicMock(return_value=[filesystem_info])
 
         result = lookup_strategy_source(
-            strategy_id="fs_strategy",
-            original_strategy_id="fs_strategy",
+            deployment_id="fs_strategy",
             registry_getter=registry_getter,
             compute_effective_status=MagicMock(),
             discover_filesystem=discover_filesystem,

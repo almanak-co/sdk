@@ -288,7 +288,7 @@ class IterationResult:
         intent: The intent produced by the strategy (if any)
         execution_result: Result from execution orchestrator (if executed)
         error: Error message (if failed)
-        strategy_id: ID of the strategy that ran
+        deployment_id: ID of the strategy that ran
         duration_ms: Time taken for the iteration in milliseconds
         timestamp: When the iteration completed
     """
@@ -297,7 +297,7 @@ class IterationResult:
     intent: AnyIntent | None = None
     execution_result: "Any | None" = None
     error: str | None = None
-    strategy_id: str = ""
+    deployment_id: str = ""
     duration_ms: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     balance_reconciliation: dict[str, Any] | None = None  # Post-execution balance check
@@ -319,7 +319,7 @@ class IterationResult:
             "intent": self.intent.serialize() if self.intent else None,
             "execution_result": self.execution_result.to_dict() if self.execution_result else None,
             "error": self.error,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp.isoformat(),
             "balance_reconciliation": self.balance_reconciliation,
@@ -332,7 +332,7 @@ class ExecutionProgress:
 
     Attributes:
         execution_id: Unique ID for this execution sequence
-        strategy_id: Strategy that owns this execution
+        deployment_id: Strategy that owns this execution
         intents_hash: Hash of serialized intents (to detect changes)
         total_steps: Total number of steps in the sequence
         completed_step_index: Index of last completed step (-1 if none)
@@ -345,7 +345,7 @@ class ExecutionProgress:
     """
 
     execution_id: str
-    strategy_id: str
+    deployment_id: str
     intents_hash: str
     total_steps: int
     completed_step_index: int = -1  # -1 means no steps completed
@@ -372,7 +372,7 @@ class ExecutionProgress:
         """Convert to dictionary for storage."""
         return {
             "execution_id": self.execution_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "intents_hash": self.intents_hash,
             "total_steps": self.total_steps,
             "completed_step_index": self.completed_step_index,
@@ -392,7 +392,7 @@ class ExecutionProgress:
         previous_amount = data.get("previous_amount_received")
         return cls(
             execution_id=data["execution_id"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             intents_hash=data["intents_hash"],
             total_steps=data["total_steps"],
             completed_step_index=data.get("completed_step_index", -1),
@@ -464,7 +464,7 @@ class StrategyProtocol(Protocol):
     """
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         """Unique identifier for the strategy."""
         ...
 

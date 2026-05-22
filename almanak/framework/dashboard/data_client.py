@@ -50,7 +50,7 @@ class TradeRecord:
 
     id: str = ""
     cycle_id: str = ""
-    strategy_id: str = ""
+    deployment_id: str = ""
     timestamp: datetime | None = None
     intent_type: str = ""
     token_in: str = ""
@@ -72,7 +72,7 @@ class TradeRecord:
         return {
             "id": self.id,
             "cycle_id": self.cycle_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else "",
             "intent_type": self.intent_type,
             "token_in": self.token_in,
@@ -111,7 +111,7 @@ class PnLDataPoint:
 class PortfolioMetricsSummary:
     """Summary of portfolio metrics for a strategy."""
 
-    strategy_id: str = ""
+    deployment_id: str = ""
     total_value_usd: Decimal = Decimal("0")
     initial_value_usd: Decimal = Decimal("0")
     pnl_usd: Decimal = Decimal("0")
@@ -119,7 +119,7 @@ class PortfolioMetricsSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "total_value_usd": str(self.total_value_usd),
             "initial_value_usd": str(self.initial_value_usd),
             "pnl_usd": str(self.pnl_usd),
@@ -203,14 +203,14 @@ class DashboardDataClient:
 
     def get_strategy_detail(
         self,
-        strategy_id: str,
+        deployment_id: str,
         include_timeline: bool = True,
         include_pnl_history: bool = False,
         timeline_limit: int = 20,
     ) -> StrategyDetails:
         """Get detailed strategy information."""
         return self._gw.get_strategy_details(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             include_timeline=include_timeline,
             include_pnl_history=include_pnl_history,
             timeline_limit=timeline_limit,
@@ -218,20 +218,20 @@ class DashboardDataClient:
 
     def get_timeline(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int = 50,
         event_type_filter: str | None = None,
     ) -> list[TimelineEvent]:
         """Get timeline events for a strategy."""
         return self._gw.get_timeline(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             limit=limit,
             event_type_filter=event_type_filter,
         )
 
     def get_pnl_history(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime | None = None,
     ) -> list[PnLDataPoint]:
         """Get PnL history for charting.
@@ -239,7 +239,7 @@ class DashboardDataClient:
         Returns plain ``PnLDataPoint`` dataclasses.
         """
         details = self._gw.get_strategy_details(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             include_timeline=False,
             include_pnl_history=True,
         )
@@ -261,7 +261,7 @@ class DashboardDataClient:
 
     def get_trades(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime | None = None,
         intent_type: str | None = None,
         limit: int = 100,
@@ -272,7 +272,7 @@ class DashboardDataClient:
         """
         try:
             records = self._gw.get_transaction_ledger(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 since=since,
                 intent_type=intent_type,
                 limit=limit,
@@ -281,7 +281,7 @@ class DashboardDataClient:
                 TradeRecord(
                     id=r.id,
                     cycle_id=r.cycle_id,
-                    strategy_id=r.strategy_id,
+                    deployment_id=r.deployment_id,
                     timestamp=r.timestamp,
                     intent_type=r.intent_type,
                     token_in=r.token_in,
@@ -301,45 +301,45 @@ class DashboardDataClient:
                 for r in records
             ]
         except Exception:
-            logger.debug("Failed to fetch trades for %s", strategy_id, exc_info=True)
+            logger.debug("Failed to fetch trades for %s", deployment_id, exc_info=True)
             return []
 
-    def get_portfolio_metrics(self, strategy_id: str) -> PortfolioMetricsSummary:
+    def get_portfolio_metrics(self, deployment_id: str) -> PortfolioMetricsSummary:
         """Get portfolio metrics summary for a strategy."""
         try:
             details = self._gw.get_strategy_details(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 include_timeline=False,
                 include_pnl_history=False,
             )
             summary = details.summary
             return PortfolioMetricsSummary(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 total_value_usd=summary.total_value_usd,
                 pnl_usd=summary.pnl_24h_usd,
             )
         except Exception:
-            logger.debug("Failed to fetch portfolio metrics for %s", strategy_id, exc_info=True)
-            return PortfolioMetricsSummary(strategy_id=strategy_id)
+            logger.debug("Failed to fetch portfolio metrics for %s", deployment_id, exc_info=True)
+            return PortfolioMetricsSummary(deployment_id=deployment_id)
 
-    def get_strategy_config(self, strategy_id: str) -> dict[str, Any]:
+    def get_strategy_config(self, deployment_id: str) -> dict[str, Any]:
         """Get strategy configuration as a plain dict."""
-        return self._gw.get_strategy_config(strategy_id)
+        return self._gw.get_strategy_config(deployment_id)
 
     def get_strategy_state(
         self,
-        strategy_id: str,
+        deployment_id: str,
         fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Get current strategy state as a plain dict."""
-        return self._gw.get_strategy_state(strategy_id, fields=fields)
+        return self._gw.get_strategy_state(deployment_id, fields=fields)
 
     def execute_action(
         self,
-        strategy_id: str,
+        deployment_id: str,
         action: str,
         reason: str,
         params: dict[str, str] | None = None,
     ) -> bool:
         """Execute operator action (pause, resume, etc.)."""
-        return self._gw.execute_action(strategy_id, action, reason, params)
+        return self._gw.execute_action(deployment_id, action, reason, params)

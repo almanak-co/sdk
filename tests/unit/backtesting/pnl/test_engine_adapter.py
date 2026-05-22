@@ -116,12 +116,12 @@ class MockStrategy:
 
     def __init__(
         self,
-        strategy_id: str = "test_strategy",
+        deployment_id: str = "test_strategy",
         tags: list[str] | None = None,
         protocols: list[str] | None = None,
         intent_types: list[str] | None = None,
     ):
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self.STRATEGY_METADATA = MockStrategyMetadata(
             tags=tags or [],
             supported_protocols=protocols or [],
@@ -129,8 +129,8 @@ class MockStrategy:
         )
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def get_metadata(self) -> MockStrategyMetadata | None:
         return self.STRATEGY_METADATA
@@ -406,19 +406,19 @@ def test_backtester_adapter_initially_none():
 def test_adapter_changes_between_strategies(backtester, registered_adapters):
     """Test that adapter changes when initializing for different strategies."""
     # First strategy: LP
-    lp_strategy = MockStrategy(strategy_id="lp_strat", tags=["lp"])
+    lp_strategy = MockStrategy(deployment_id="lp_strat", tags=["lp"])
     backtester._init_adapter(lp_strategy)
     assert backtester._adapter is not None
     assert backtester._adapter.adapter_name == "lp"
 
     # Second strategy: Perp
-    perp_strategy = MockStrategy(strategy_id="perp_strat", tags=["perp"])
+    perp_strategy = MockStrategy(deployment_id="perp_strat", tags=["perp"])
     backtester._init_adapter(perp_strategy)
     assert backtester._adapter is not None
     assert backtester._adapter.adapter_name == "perp"
 
     # Third strategy: Unknown (no adapter)
-    unknown_strategy = MockStrategy(strategy_id="unknown_strat", tags=["custom"])
+    unknown_strategy = MockStrategy(deployment_id="unknown_strat", tags=["custom"])
     backtester._init_adapter(unknown_strategy)
     assert backtester._adapter is None
 

@@ -38,7 +38,7 @@ def _make_strategy(
     strat.supply_amount = Decimal(supply_amount)
     strat.market = market
     strat._chain = chain
-    strat._strategy_id = "test_compound_paper"
+    strat._deployment_id = "test_compound_paper"
     strat._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strat.price_supply_above = Decimal("2000")
     strat.price_withdraw_below = Decimal("1500")
@@ -406,7 +406,7 @@ class TestPortfolioTracker:
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
         tracker = PaperPortfolioTracker(
-            strategy_id="compound_paper_test",
+            deployment_id="compound_paper_test",
             chain="base",
         )
         tracker.start_session({"USDC": Decimal("10000")})
@@ -452,7 +452,7 @@ class TestPortfolioTracker:
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
         tracker = PaperPortfolioTracker(
-            strategy_id="compound_pnl_test",
+            deployment_id="compound_pnl_test",
             chain="base",
         )
         tracker.start_session({"USDC": Decimal("10000")})

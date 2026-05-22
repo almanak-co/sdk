@@ -74,8 +74,28 @@ class Resolution(_Resolution, metaclass=_ResolutionEnumTypeWrapper):
       - Hard cap (sanity ceiling) exceeded:
           gRPC INVALID_ARGUMENT (no next_start_ts over the wire).
 
+    Window + cursor semantics (locked at this layer; POOL-3 validator + POOL-5
+    dispatcher enforce the alignment side):
+      - Requested window is treated as **half-open** `[start_ts, end_ts)`:
+        start inclusive, end exclusive after resolution alignment. Validator
+        rejects `start_ts == 0` / `end_ts == 0` / `start_ts > end_ts` with
+        INVALID_ARGUMENT (see message-level field comments below for the
+        exact validator contract; tightening to `start_ts >= end_ts` is a
+        POOL-3 follow-up and is intentionally not changed in POOL-1).
+      - `snapshots` are guaranteed strictly ordered by `timestamp` ascending,
+        with at most one row per aligned bucket.
+      - `next_start_ts` is the **inclusive** cursor for the next call: when
+        `> 0`, the caller continues by issuing a new request with
+        `start_ts = next_start_ts` (no gaps, no overlaps).
+
     Error semantics — dual-channel wire shape, v1 behavior:
       - status OK + success=true   -> fresh data, returned as envelope.
+        NEVER returns `success=true` with `snapshots=[]` — the service treats
+        an empty range as a not-found failure (UAT card VIB-4728 Trust
+        statement #1: "No silent zeros"). If a documented failure mode is
+        hit (gateway unreachable, all providers fail, pool not found),
+        `success=false` is returned and the framework raises
+        DataSourceUnavailable.
       - status OK + success=false  -> framework raises DataSourceUnavailable
                                       (no fake-success empty list).
       - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
@@ -780,14 +800,14 @@ Global___LookupV4PoolKeyResponse: _TypeAlias = LookupV4PoolKeyResponse  # noqa: 
 class LoadStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LoadStateRequest: _TypeAlias = LoadStateRequest  # noqa: Y015
@@ -796,7 +816,7 @@ Global___LoadStateRequest: _TypeAlias = LoadStateRequest  # noqa: Y015
 class StateData(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     VERSION_FIELD_NUMBER: _builtins.int
     DATA_FIELD_NUMBER: _builtins.int
     SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
@@ -804,7 +824,7 @@ class StateData(_message.Message):
     CREATED_AT_FIELD_NUMBER: _builtins.int
     UPDATED_AT_FIELD_NUMBER: _builtins.int
     LOADED_FROM_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     version: _builtins.int
     data: _builtins.bytes
     """JSON-serialized state"""
@@ -818,7 +838,7 @@ class StateData(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         version: _builtins.int = ...,
         data: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
@@ -827,7 +847,7 @@ class StateData(_message.Message):
         updated_at: _builtins.int = ...,
         loaded_from: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["checksum", b"checksum", "created_at", b"created_at", "data", b"data", "loaded_from", b"loaded_from", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["checksum", b"checksum", "created_at", b"created_at", "data", b"data", "deployment_id", b"deployment_id", "loaded_from", b"loaded_from", "schema_version", b"schema_version", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StateData: _TypeAlias = StateData  # noqa: Y015
@@ -836,11 +856,11 @@ Global___StateData: _TypeAlias = StateData  # noqa: Y015
 class SaveStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     EXPECTED_VERSION_FIELD_NUMBER: _builtins.int
     DATA_FIELD_NUMBER: _builtins.int
     SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     expected_version: _builtins.int
     """For optimistic locking (0 = new state)"""
     data: _builtins.bytes
@@ -849,12 +869,12 @@ class SaveStateRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         expected_version: _builtins.int = ...,
         data: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "expected_version", b"expected_version", "schema_version", b"schema_version", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "deployment_id", b"deployment_id", "expected_version", b"expected_version", "schema_version", b"schema_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveStateRequest: _TypeAlias = SaveStateRequest  # noqa: Y015
@@ -888,14 +908,14 @@ Global___SaveStateResponse: _TypeAlias = SaveStateResponse  # noqa: Y015
 class DeleteStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DeleteStateRequest: _TypeAlias = DeleteStateRequest  # noqa: Y015
@@ -925,7 +945,6 @@ class SaveSnapshotRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     ITERATION_NUMBER_FIELD_NUMBER: _builtins.int
     TOTAL_VALUE_USD_FIELD_NUMBER: _builtins.int
@@ -936,7 +955,6 @@ class SaveSnapshotRequest(_message.Message):
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
     timestamp: _builtins.int
     """Unix epoch seconds"""
     iteration_number: _builtins.int
@@ -957,7 +975,6 @@ class SaveSnapshotRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         timestamp: _builtins.int = ...,
         iteration_number: _builtins.int = ...,
         total_value_usd: _builtins.str = ...,
@@ -969,7 +986,7 @@ class SaveSnapshotRequest(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveSnapshotRequest: _TypeAlias = SaveSnapshotRequest  # noqa: Y015
@@ -1000,14 +1017,14 @@ Global___SaveSnapshotResponse: _TypeAlias = SaveSnapshotResponse  # noqa: Y015
 class GetLatestSnapshotRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetLatestSnapshotRequest: _TypeAlias = GetLatestSnapshotRequest  # noqa: Y015
@@ -1016,10 +1033,10 @@ Global___GetLatestSnapshotRequest: _TypeAlias = GetLatestSnapshotRequest  # noqa
 class GetSnapshotsSinceRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     SINCE_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     since: _builtins.int
     """Unix epoch seconds"""
     limit: _builtins.int
@@ -1027,11 +1044,11 @@ class GetSnapshotsSinceRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         since: _builtins.int = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "since", b"since", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "limit", b"limit", "since", b"since"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetSnapshotsSinceRequest: _TypeAlias = GetSnapshotsSinceRequest  # noqa: Y015
@@ -1040,7 +1057,6 @@ Global___GetSnapshotsSinceRequest: _TypeAlias = GetSnapshotsSinceRequest  # noqa
 class SnapshotData(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     ITERATION_NUMBER_FIELD_NUMBER: _builtins.int
     TOTAL_VALUE_USD_FIELD_NUMBER: _builtins.int
@@ -1052,7 +1068,6 @@ class SnapshotData(_message.Message):
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
     timestamp: _builtins.int
     iteration_number: _builtins.int
     total_value_usd: _builtins.str
@@ -1069,7 +1084,6 @@ class SnapshotData(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         timestamp: _builtins.int = ...,
         iteration_number: _builtins.int = ...,
         total_value_usd: _builtins.str = ...,
@@ -1082,7 +1096,7 @@ class SnapshotData(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SnapshotData: _TypeAlias = SnapshotData  # noqa: Y015
@@ -1110,7 +1124,6 @@ class SaveMetricsRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     INITIAL_VALUE_USD_FIELD_NUMBER: _builtins.int
     INITIAL_TIMESTAMP_FIELD_NUMBER: _builtins.int
     DEPOSITS_USD_FIELD_NUMBER: _builtins.int
@@ -1120,7 +1133,6 @@ class SaveMetricsRequest(_message.Message):
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     IS_COMPLETE_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
     """Unix epoch seconds"""
@@ -1135,7 +1147,6 @@ class SaveMetricsRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         initial_value_usd: _builtins.str = ...,
         initial_timestamp: _builtins.int = ...,
         deposits_usd: _builtins.str = ...,
@@ -1146,7 +1157,7 @@ class SaveMetricsRequest(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
@@ -1174,14 +1185,14 @@ Global___SaveMetricsResponse: _TypeAlias = SaveMetricsResponse  # noqa: Y015
 class GetMetricsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetMetricsRequest: _TypeAlias = GetMetricsRequest  # noqa: Y015
@@ -1190,7 +1201,6 @@ Global___GetMetricsRequest: _TypeAlias = GetMetricsRequest  # noqa: Y015
 class PortfolioMetricsData(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     INITIAL_VALUE_USD_FIELD_NUMBER: _builtins.int
     INITIAL_TIMESTAMP_FIELD_NUMBER: _builtins.int
     DEPOSITS_USD_FIELD_NUMBER: _builtins.int
@@ -1202,7 +1212,6 @@ class PortfolioMetricsData(_message.Message):
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     IS_COMPLETE_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
     deposits_usd: _builtins.str
@@ -1218,7 +1227,6 @@ class PortfolioMetricsData(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         initial_value_usd: _builtins.str = ...,
         initial_timestamp: _builtins.int = ...,
         deposits_usd: _builtins.str = ...,
@@ -1231,7 +1239,7 @@ class PortfolioMetricsData(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015
@@ -1247,7 +1255,6 @@ class SaveLedgerEntryRequest(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -1272,7 +1279,6 @@ class SaveLedgerEntryRequest(_message.Message):
     id: _builtins.str
     """UUID primary key (idempotent ON CONFLICT target)"""
     cycle_id: _builtins.str
-    strategy_id: _builtins.str
     deployment_id: _builtins.str
     """Phase 4 identity (VIB-2835)"""
     execution_mode: _builtins.str
@@ -1311,7 +1317,6 @@ class SaveLedgerEntryRequest(_message.Message):
         *,
         id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         timestamp: _builtins.int = ...,
@@ -1336,7 +1341,7 @@ class SaveLedgerEntryRequest(_message.Message):
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "slippage_bps", b"slippage_bps"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
     _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015
@@ -1375,7 +1380,6 @@ class SaveAccountingEventRequest(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -1394,7 +1398,6 @@ class SaveAccountingEventRequest(_message.Message):
     UUID primary key (idempotent ON CONFLICT target)
     """
     deployment_id: _builtins.str
-    strategy_id: _builtins.str
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     """"live" | "paper" | "dry_run" """
@@ -1422,7 +1425,6 @@ class SaveAccountingEventRequest(_message.Message):
         *,
         id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         timestamp: _builtins.int = ...,
@@ -1437,7 +1439,7 @@ class SaveAccountingEventRequest(_message.Message):
         payload_json: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveAccountingEventRequest: _TypeAlias = SaveAccountingEventRequest  # noqa: Y015
@@ -1638,7 +1640,6 @@ class PositionStateSnapshotRow(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     CAPTURED_AT_FIELD_NUMBER: _builtins.int
@@ -1664,7 +1665,6 @@ class PositionStateSnapshotRow(_message.Message):
     SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
     FORMULA_VERSION_FIELD_NUMBER: _builtins.int
     MATCHING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
     deployment_id: _builtins.str
     cycle_id: _builtins.str
     captured_at: _builtins.str
@@ -1705,7 +1705,6 @@ class PositionStateSnapshotRow(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         captured_at: _builtins.str = ...,
@@ -1734,7 +1733,7 @@ class PositionStateSnapshotRow(_message.Message):
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct", "_borrow_balance", b"_borrow_balance", "_current_tick", b"_current_tick", "_delta_vs_protocol_pct", b"_delta_vs_protocol_pct", "_funding_accrued_since_last", b"_funding_accrued_since_last", "_health_factor", b"_health_factor", "_in_range", b"_in_range", "_interest_accrued_since_last", b"_interest_accrued_since_last", "_liquidation_price", b"_liquidation_price", "_liquidity", b"_liquidity", "_margin_utilisation_pct", b"_margin_utilisation_pct", "_mark_price", b"_mark_price", "_sqrt_price_x96", b"_sqrt_price_x96", "_supply_apy_pct", b"_supply_apy_pct", "_supply_balance", b"_supply_balance", "_unrealized_pnl", b"_unrealized_pnl", "borrow_apy_pct", b"borrow_apy_pct", "borrow_balance", b"borrow_balance", "current_tick", b"current_tick", "delta_vs_protocol_pct", b"delta_vs_protocol_pct", "funding_accrued_since_last", b"funding_accrued_since_last", "health_factor", b"health_factor", "in_range", b"in_range", "interest_accrued_since_last", b"interest_accrued_since_last", "liquidation_price", b"liquidation_price", "liquidity", b"liquidity", "margin_utilisation_pct", b"margin_utilisation_pct", "mark_price", b"mark_price", "sqrt_price_x96", b"sqrt_price_x96", "supply_apy_pct", b"supply_apy_pct", "supply_balance", b"supply_balance", "unrealized_pnl", b"unrealized_pnl"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct", "_borrow_balance", b"_borrow_balance", "_current_tick", b"_current_tick", "_delta_vs_protocol_pct", b"_delta_vs_protocol_pct", "_funding_accrued_since_last", b"_funding_accrued_since_last", "_health_factor", b"_health_factor", "_in_range", b"_in_range", "_interest_accrued_since_last", b"_interest_accrued_since_last", "_liquidation_price", b"_liquidation_price", "_liquidity", b"_liquidity", "_margin_utilisation_pct", b"_margin_utilisation_pct", "_mark_price", b"_mark_price", "_sqrt_price_x96", b"_sqrt_price_x96", "_supply_apy_pct", b"_supply_apy_pct", "_supply_balance", b"_supply_balance", "_unrealized_pnl", b"_unrealized_pnl", "borrow_apy_pct", b"borrow_apy_pct", "borrow_balance", b"borrow_balance", "captured_at", b"captured_at", "current_tick", b"current_tick", "cycle_id", b"cycle_id", "delta_vs_protocol_pct", b"delta_vs_protocol_pct", "deployment_id", b"deployment_id", "formula_version", b"formula_version", "funding_accrued_since_last", b"funding_accrued_since_last", "health_factor", b"health_factor", "in_range", b"in_range", "interest_accrued_since_last", b"interest_accrued_since_last", "liquidation_price", b"liquidation_price", "liquidity", b"liquidity", "margin_utilisation_pct", b"margin_utilisation_pct", "mark_price", b"mark_price", "matching_policy_version", b"matching_policy_version", "position_id", b"position_id", "position_type", b"position_type", "schema_version", b"schema_version", "sqrt_price_x96", b"sqrt_price_x96", "strategy_id", b"strategy_id", "supply_apy_pct", b"supply_apy_pct", "supply_balance", b"supply_balance", "unrealized_pnl", b"unrealized_pnl", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct", "_borrow_balance", b"_borrow_balance", "_current_tick", b"_current_tick", "_delta_vs_protocol_pct", b"_delta_vs_protocol_pct", "_funding_accrued_since_last", b"_funding_accrued_since_last", "_health_factor", b"_health_factor", "_in_range", b"_in_range", "_interest_accrued_since_last", b"_interest_accrued_since_last", "_liquidation_price", b"_liquidation_price", "_liquidity", b"_liquidity", "_margin_utilisation_pct", b"_margin_utilisation_pct", "_mark_price", b"_mark_price", "_sqrt_price_x96", b"_sqrt_price_x96", "_supply_apy_pct", b"_supply_apy_pct", "_supply_balance", b"_supply_balance", "_unrealized_pnl", b"_unrealized_pnl", "borrow_apy_pct", b"borrow_apy_pct", "borrow_balance", b"borrow_balance", "captured_at", b"captured_at", "current_tick", b"current_tick", "cycle_id", b"cycle_id", "delta_vs_protocol_pct", b"delta_vs_protocol_pct", "deployment_id", b"deployment_id", "formula_version", b"formula_version", "funding_accrued_since_last", b"funding_accrued_since_last", "health_factor", b"health_factor", "in_range", b"in_range", "interest_accrued_since_last", b"interest_accrued_since_last", "liquidation_price", b"liquidation_price", "liquidity", b"liquidity", "margin_utilisation_pct", b"margin_utilisation_pct", "mark_price", b"mark_price", "matching_policy_version", b"matching_policy_version", "position_id", b"position_id", "position_type", b"position_type", "schema_version", b"schema_version", "sqrt_price_x96", b"sqrt_price_x96", "supply_apy_pct", b"supply_apy_pct", "supply_balance", b"supply_balance", "unrealized_pnl", b"unrealized_pnl", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__borrow_apy_pct: _TypeAlias = _typing.Literal["borrow_apy_pct"]  # noqa: Y015
     _WhichOneofArgType__borrow_apy_pct: _TypeAlias = _typing.Literal["_borrow_apy_pct", b"_borrow_apy_pct"]  # noqa: Y015
@@ -1859,11 +1858,8 @@ class GetPositionHistoryRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     POSITION_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
-    """resolved to agent_id at the gateway via resolve_agent_id"""
     deployment_id: _builtins.str
     """required"""
     position_id: _builtins.str
@@ -1871,11 +1867,10 @@ class GetPositionHistoryRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         position_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "position_id", b"position_id", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "position_id", b"position_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPositionHistoryRequest: _TypeAlias = GetPositionHistoryRequest  # noqa: Y015
@@ -2105,14 +2100,11 @@ class GetAccountingEventsRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     POSITION_KEY_FIELD_NUMBER: _builtins.int
     EVENT_TYPE_FIELD_NUMBER: _builtins.int
     SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
-    """resolved to agent_id at the gateway via resolve_agent_id"""
     deployment_id: _builtins.str
     """required"""
     position_key: _builtins.str
@@ -2126,14 +2118,13 @@ class GetAccountingEventsRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         position_key: _builtins.str = ...,
         event_type: _builtins.str = ...,
         since_timestamp: _builtins.int = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "event_type", b"event_type", "limit", b"limit", "position_key", b"position_key", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "event_type", b"event_type", "limit", b"limit", "position_key", b"position_key", "since_timestamp", b"since_timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetAccountingEventsRequest: _TypeAlias = GetAccountingEventsRequest  # noqa: Y015
@@ -2144,7 +2135,6 @@ class AccountingEvent(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -2161,8 +2151,6 @@ class AccountingEvent(_message.Message):
     id: _builtins.str
     """UUIDv5, deterministic from (deployment, cycle, intent_type, tx, position)"""
     deployment_id: _builtins.str
-    strategy_id: _builtins.str
-    """PG `agent_id` mapped back to strategy_id on the wire"""
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     timestamp: _builtins.int
@@ -2183,7 +2171,6 @@ class AccountingEvent(_message.Message):
         *,
         id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         timestamp: _builtins.int = ...,
@@ -2198,7 +2185,7 @@ class AccountingEvent(_message.Message):
         payload_json: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AccountingEvent: _TypeAlias = AccountingEvent  # noqa: Y015
@@ -2236,7 +2223,6 @@ class SaveOutboxEntryRequest(_message.Message):
 
     OUTBOX_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
     INTENT_TYPE_FIELD_NUMBER: _builtins.int
@@ -2247,8 +2233,6 @@ class SaveOutboxEntryRequest(_message.Message):
     outbox_id: _builtins.str
     """UUID (INSERT OR IGNORE; ignored on PG where PK = ledger_entry_id)"""
     deployment_id: _builtins.str
-    strategy_id: _builtins.str
-    """resolved to agent_id at the gateway"""
     cycle_id: _builtins.str
     ledger_entry_id: _builtins.str
     """FK to transaction_ledger (PG primary key)"""
@@ -2263,7 +2247,6 @@ class SaveOutboxEntryRequest(_message.Message):
         *,
         outbox_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         ledger_entry_id: _builtins.str = ...,
         intent_type: _builtins.str = ...,
@@ -2272,7 +2255,7 @@ class SaveOutboxEntryRequest(_message.Message):
         market_id: _builtins.str = ...,
         created_at: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "outbox_id", b"outbox_id", "position_key", b"position_key", "strategy_id", b"strategy_id", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "outbox_id", b"outbox_id", "position_key", b"position_key", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveOutboxEntryRequest: _TypeAlias = SaveOutboxEntryRequest  # noqa: Y015
@@ -2302,7 +2285,6 @@ class OutboxEntry(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
     INTENT_TYPE_FIELD_NUMBER: _builtins.int
@@ -2317,7 +2299,6 @@ class OutboxEntry(_message.Message):
     id: _builtins.str
     """= ledger_entry_id on PG, UUID on SQLite"""
     deployment_id: _builtins.str
-    strategy_id: _builtins.str
     cycle_id: _builtins.str
     ledger_entry_id: _builtins.str
     intent_type: _builtins.str
@@ -2337,7 +2318,6 @@ class OutboxEntry(_message.Message):
         *,
         id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         ledger_entry_id: _builtins.str = ...,
         intent_type: _builtins.str = ...,
@@ -2350,7 +2330,7 @@ class OutboxEntry(_message.Message):
         created_at: _builtins.str = ...,
         updated_at: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["attempts", b"attempts", "created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "error", b"error", "id", b"id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "position_key", b"position_key", "status", b"status", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attempts", b"attempts", "created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "error", b"error", "id", b"id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "position_key", b"position_key", "status", b"status", "updated_at", b"updated_at", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___OutboxEntry: _TypeAlias = OutboxEntry  # noqa: Y015
@@ -2539,7 +2519,6 @@ class LedgerEntryData(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -2563,8 +2542,6 @@ class LedgerEntryData(_message.Message):
     POST_STATE_JSON_FIELD_NUMBER: _builtins.int
     id: _builtins.str
     cycle_id: _builtins.str
-    strategy_id: _builtins.str
-    """agent_id in PG, mapped to strategy_id on the wire"""
     deployment_id: _builtins.str
     execution_mode: _builtins.str
     timestamp: _builtins.int
@@ -2592,7 +2569,6 @@ class LedgerEntryData(_message.Message):
         *,
         id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         timestamp: _builtins.int = ...,
@@ -2617,7 +2593,7 @@ class LedgerEntryData(_message.Message):
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "slippage_bps", b"slippage_bps"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
     _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015
@@ -2652,16 +2628,13 @@ class SumLedgerGasUsdRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
-    strategy_id: _builtins.str
     def __init__(
         self,
         *,
         deployment_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SumLedgerGasUsdRequest: _TypeAlias = SumLedgerGasUsdRequest  # noqa: Y015
@@ -3180,7 +3153,6 @@ class SaveLedgerAndRegistryRequest(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -3224,7 +3196,6 @@ class SaveLedgerAndRegistryRequest(_message.Message):
     id: _builtins.str
     """---- LedgerEntry (mirrors SaveLedgerEntryRequest) ----"""
     cycle_id: _builtins.str
-    strategy_id: _builtins.str
     deployment_id: _builtins.str
     execution_mode: _builtins.str
     timestamp: _builtins.int
@@ -3298,7 +3269,6 @@ class SaveLedgerAndRegistryRequest(_message.Message):
         *,
         id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
         deployment_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         timestamp: _builtins.int = ...,
@@ -3342,7 +3312,7 @@ class SaveLedgerAndRegistryRequest(_message.Message):
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "registry_closed_at_block", b"registry_closed_at_block", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_opened_at_block", b"registry_opened_at_block", "slippage_bps", b"slippage_bps"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "handle_mapping_accounting_category", b"handle_mapping_accounting_category", "handle_mapping_deployment_id", b"handle_mapping_deployment_id", "handle_mapping_handle", b"handle_mapping_handle", "id", b"id", "intent_type", b"intent_type", "mode", b"mode", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "registry_accounting_category", b"registry_accounting_category", "registry_chain", b"registry_chain", "registry_closed_at_block", b"registry_closed_at_block", "registry_closed_tx", b"registry_closed_tx", "registry_grouping_policy_version", b"registry_grouping_policy_version", "registry_handle", b"registry_handle", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_matching_policy_version", b"registry_matching_policy_version", "registry_opened_at_block", b"registry_opened_at_block", "registry_opened_tx", b"registry_opened_tx", "registry_payload_json", b"registry_payload_json", "registry_physical_identity_hash", b"registry_physical_identity_hash", "registry_primitive", b"registry_primitive", "registry_semantic_grouping_key", b"registry_semantic_grouping_key", "registry_status", b"registry_status", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "handle_mapping_accounting_category", b"handle_mapping_accounting_category", "handle_mapping_deployment_id", b"handle_mapping_deployment_id", "handle_mapping_handle", b"handle_mapping_handle", "id", b"id", "intent_type", b"intent_type", "mode", b"mode", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "registry_accounting_category", b"registry_accounting_category", "registry_chain", b"registry_chain", "registry_closed_at_block", b"registry_closed_at_block", "registry_closed_tx", b"registry_closed_tx", "registry_grouping_policy_version", b"registry_grouping_policy_version", "registry_handle", b"registry_handle", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_matching_policy_version", b"registry_matching_policy_version", "registry_opened_at_block", b"registry_opened_at_block", "registry_opened_tx", b"registry_opened_tx", "registry_payload_json", b"registry_payload_json", "registry_physical_identity_hash", b"registry_physical_identity_hash", "registry_primitive", b"registry_primitive", "registry_semantic_grouping_key", b"registry_semantic_grouping_key", "registry_status", b"registry_status", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__registry_closed_at_block: _TypeAlias = _typing.Literal["registry_closed_at_block"]  # noqa: Y015
     _WhichOneofArgType__registry_closed_at_block: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block"]  # noqa: Y015
@@ -3478,7 +3448,7 @@ class ExecuteRequest(_message.Message):
     ACTION_BUNDLE_FIELD_NUMBER: _builtins.int
     DRY_RUN_FIELD_NUMBER: _builtins.int
     SIMULATION_ENABLED_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     INTENT_ID_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
@@ -3489,7 +3459,7 @@ class ExecuteRequest(_message.Message):
     """Simulate only, don't submit"""
     simulation_enabled: _builtins.bool
     """Run simulation before execution"""
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     intent_id: _builtins.str
     chain: _builtins.str
     wallet_address: _builtins.str
@@ -3501,13 +3471,13 @@ class ExecuteRequest(_message.Message):
         action_bundle: _builtins.bytes = ...,
         dry_run: _builtins.bool = ...,
         simulation_enabled: _builtins.bool = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         intent_id: _builtins.str = ...,
         chain: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
         max_gas_price_gwei: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "chain", b"chain", "dry_run", b"dry_run", "intent_id", b"intent_id", "max_gas_price_gwei", b"max_gas_price_gwei", "simulation_enabled", b"simulation_enabled", "strategy_id", b"strategy_id", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "chain", b"chain", "deployment_id", b"deployment_id", "dry_run", b"dry_run", "intent_id", b"intent_id", "max_gas_price_gwei", b"max_gas_price_gwei", "simulation_enabled", b"simulation_enabled", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ExecuteRequest: _TypeAlias = ExecuteRequest  # noqa: Y015
@@ -3619,14 +3589,14 @@ class LogEntry(_message.Message):
 
     LEVEL_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CONTEXT_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     LOGGER_NAME_FIELD_NUMBER: _builtins.int
     level: _builtins.str
     """"DEBUG", "INFO", "WARNING", "ERROR" """
     message: _builtins.str
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     timestamp: _builtins.int
     logger_name: _builtins.str
     @_builtins.property
@@ -3636,12 +3606,12 @@ class LogEntry(_message.Message):
         *,
         level: _builtins.str = ...,
         message: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         context: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
         timestamp: _builtins.int = ...,
         logger_name: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "level", b"level", "logger_name", b"logger_name", "message", b"message", "strategy_id", b"strategy_id", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "deployment_id", b"deployment_id", "level", b"level", "logger_name", b"logger_name", "message", b"message", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LogEntry: _TypeAlias = LogEntry  # noqa: Y015
@@ -3670,14 +3640,14 @@ class AlertRequest(_message.Message):
     CHANNEL_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
     SEVERITY_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     METADATA_FIELD_NUMBER: _builtins.int
     channel: _builtins.str
     """"slack", "telegram" """
     message: _builtins.str
     severity: _builtins.str
     """"info", "warning", "critical" """
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     @_builtins.property
     def metadata(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
     def __init__(
@@ -3686,10 +3656,10 @@ class AlertRequest(_message.Message):
         channel: _builtins.str = ...,
         message: _builtins.str = ...,
         severity: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         metadata: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["channel", b"channel", "message", b"message", "metadata", b"metadata", "severity", b"severity", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["channel", b"channel", "deployment_id", b"deployment_id", "message", b"message", "metadata", b"metadata", "severity", b"severity"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AlertRequest: _TypeAlias = AlertRequest  # noqa: Y015
@@ -3767,7 +3737,7 @@ Global___MetricEntry: _TypeAlias = MetricEntry  # noqa: Y015
 class RecordTimelineEventRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     EVENT_TYPE_FIELD_NUMBER: _builtins.int
     DESCRIPTION_FIELD_NUMBER: _builtins.int
     TX_HASH_FIELD_NUMBER: _builtins.int
@@ -3777,7 +3747,7 @@ class RecordTimelineEventRequest(_message.Message):
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     PHASE_FIELD_NUMBER: _builtins.int
     RELATED_LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     event_type: _builtins.str
     """"TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc."""
     description: _builtins.str
@@ -3798,7 +3768,7 @@ class RecordTimelineEventRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         event_type: _builtins.str = ...,
         description: _builtins.str = ...,
         tx_hash: _builtins.str = ...,
@@ -3809,7 +3779,7 @@ class RecordTimelineEventRequest(_message.Message):
         phase: _builtins.str = ...,
         related_ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RecordTimelineEventRequest: _TypeAlias = RecordTimelineEventRequest  # noqa: Y015
@@ -5435,9 +5405,10 @@ class PoolHistoryResponse(_message.Message):
     range was served.
     """
     next_start_ts: _builtins.int
-    """Re-chunk hint. > 0 only for CAP_EXCEEDED / PROVIDER_PAGE_CAP.
-    == 0 (sentinel) for PROVIDER_RETENTION ("do not re-chunk") and
-    for TRUNCATION_REASON_UNSPECIFIED.
+    """Re-chunk hint. > 0 only for CAP_EXCEEDED / PROVIDER_PAGE_CAP, in which
+    case it is the **inclusive** `start_ts` to pass on the next request
+    (no gaps, no overlaps). == 0 (sentinel) for PROVIDER_RETENTION
+    ("do not re-chunk") and for TRUNCATION_REASON_UNSPECIFIED.
     """
     source: _builtins.str
     """Provider that served the response: "the_graph" | "defillama" |
@@ -5461,10 +5432,11 @@ class PoolHistoryResponse(_message.Message):
     error: _builtins.str
     @_builtins.property
     def snapshots(self) -> _containers.RepeatedCompositeFieldContainer[Global___PoolSnapshot]:
-        """The time-series. May be empty when success=false (failure envelope) or
-        when the requested window contained no upstream data (still success=true
-        when the upstream confirmed the empty range — that case is rare for
-        active pools).
+        """The time-series, strictly ordered by `timestamp` ascending, with at
+        most one row per aligned bucket. May be empty ONLY when success=false
+        (failure envelope). The service NEVER returns success=true with
+        snapshots=[] — an empty range from upstream is treated as a not-found
+        failure (UAT card VIB-4728 Trust statement #1: "No silent zeros").
         """
 
     def __init__(
@@ -5557,7 +5529,7 @@ class StrategySummary(_message.Message):
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     NAME_FIELD_NUMBER: _builtins.int
     STATUS_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
@@ -5576,7 +5548,7 @@ class StrategySummary(_message.Message):
     CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     PAPER_METRICS_JSON_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     name: _builtins.str
     status: _builtins.str
     """"RUNNING", "PAUSED", "ERROR", "STUCK" """
@@ -5606,7 +5578,7 @@ class StrategySummary(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         name: _builtins.str = ...,
         status: _builtins.str = ...,
         chain: _builtins.str = ...,
@@ -5626,7 +5598,7 @@ class StrategySummary(_message.Message):
         execution_mode: _builtins.str = ...,
         paper_metrics_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "execution_mode", b"execution_mode", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "paper_metrics_json", b"paper_metrics_json", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "paper_metrics_json", b"paper_metrics_json", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015
@@ -5635,11 +5607,11 @@ Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015
 class GetStrategyDetailsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     INCLUDE_TIMELINE_FIELD_NUMBER: _builtins.int
     INCLUDE_PNL_HISTORY_FIELD_NUMBER: _builtins.int
     TIMELINE_LIMIT_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     include_timeline: _builtins.bool
     """Include recent timeline events"""
     include_pnl_history: _builtins.bool
@@ -5649,12 +5621,12 @@ class GetStrategyDetailsRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         include_timeline: _builtins.bool = ...,
         include_pnl_history: _builtins.bool = ...,
         timeline_limit: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["include_pnl_history", b"include_pnl_history", "include_timeline", b"include_timeline", "strategy_id", b"strategy_id", "timeline_limit", b"timeline_limit"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "include_pnl_history", b"include_pnl_history", "include_timeline", b"include_timeline", "timeline_limit", b"timeline_limit"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetStrategyDetailsRequest: _TypeAlias = GetStrategyDetailsRequest  # noqa: Y015
@@ -5980,7 +5952,7 @@ Global___PnLDataPoint: _TypeAlias = PnLDataPoint  # noqa: Y015
 class OperatorCardInfo(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
     SEVERITY_FIELD_NUMBER: _builtins.int
@@ -5989,7 +5961,7 @@ class OperatorCardInfo(_message.Message):
     RISK_DESCRIPTION_FIELD_NUMBER: _builtins.int
     SUGGESTED_ACTIONS_FIELD_NUMBER: _builtins.int
     AVAILABLE_ACTIONS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     timestamp: _builtins.int
     reason: _builtins.str
     """StuckReason enum value"""
@@ -6005,7 +5977,7 @@ class OperatorCardInfo(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         timestamp: _builtins.int = ...,
         reason: _builtins.str = ...,
         severity: _builtins.str = ...,
@@ -6015,7 +5987,7 @@ class OperatorCardInfo(_message.Message):
         suggested_actions: _abc.Iterable[_builtins.str] | None = ...,
         available_actions: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_actions", b"available_actions", "context_json", b"context_json", "position_at_risk_usd", b"position_at_risk_usd", "reason", b"reason", "risk_description", b"risk_description", "severity", b"severity", "strategy_id", b"strategy_id", "suggested_actions", b"suggested_actions", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_actions", b"available_actions", "context_json", b"context_json", "deployment_id", b"deployment_id", "position_at_risk_usd", b"position_at_risk_usd", "reason", b"reason", "risk_description", b"risk_description", "severity", b"severity", "suggested_actions", b"suggested_actions", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___OperatorCardInfo: _TypeAlias = OperatorCardInfo  # noqa: Y015
@@ -6056,11 +6028,11 @@ Global___ChainHealthInfo: _TypeAlias = ChainHealthInfo  # noqa: Y015
 class GetTimelineRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
     EVENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
     SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     limit: _builtins.int
     """Default 50"""
     event_type_filter: _builtins.str
@@ -6070,12 +6042,12 @@ class GetTimelineRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         limit: _builtins.int = ...,
         event_type_filter: _builtins.str = ...,
         since_timestamp: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["event_type_filter", b"event_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "event_type_filter", b"event_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTimelineRequest: _TypeAlias = GetTimelineRequest  # noqa: Y015
@@ -6104,14 +6076,14 @@ Global___GetTimelineResponse: _TypeAlias = GetTimelineResponse  # noqa: Y015
 class GetStrategyConfigRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetStrategyConfigRequest: _TypeAlias = GetStrategyConfigRequest  # noqa: Y015
@@ -6120,11 +6092,11 @@ Global___GetStrategyConfigRequest: _TypeAlias = GetStrategyConfigRequest  # noqa
 class StrategyConfigResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STRATEGY_NAME_FIELD_NUMBER: _builtins.int
     CONFIG_JSON_FIELD_NUMBER: _builtins.int
     LAST_UPDATED_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     strategy_name: _builtins.str
     config_json: _builtins.str
     """Full config as JSON"""
@@ -6132,12 +6104,12 @@ class StrategyConfigResponse(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         strategy_name: _builtins.str = ...,
         config_json: _builtins.str = ...,
         last_updated: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["config_json", b"config_json", "last_updated", b"last_updated", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["config_json", b"config_json", "deployment_id", b"deployment_id", "last_updated", b"last_updated", "strategy_name", b"strategy_name"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategyConfigResponse: _TypeAlias = StrategyConfigResponse  # noqa: Y015
@@ -6146,9 +6118,9 @@ Global___StrategyConfigResponse: _TypeAlias = StrategyConfigResponse  # noqa: Y0
 class GetStrategyStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     FIELDS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     @_builtins.property
     def fields(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
         """Optional: specific fields to return"""
@@ -6156,10 +6128,10 @@ class GetStrategyStateRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         fields: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["fields", b"fields", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "fields", b"fields"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetStrategyStateRequest: _TypeAlias = GetStrategyStateRequest  # noqa: Y015
@@ -6168,11 +6140,11 @@ Global___GetStrategyStateRequest: _TypeAlias = GetStrategyStateRequest  # noqa: 
 class StrategyStateResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STATE_JSON_FIELD_NUMBER: _builtins.int
     VERSION_FIELD_NUMBER: _builtins.int
     UPDATED_AT_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     state_json: _builtins.str
     """State as JSON (filtered by fields if specified)"""
     version: _builtins.int
@@ -6180,12 +6152,12 @@ class StrategyStateResponse(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         state_json: _builtins.str = ...,
         version: _builtins.int = ...,
         updated_at: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["state_json", b"state_json", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "state_json", b"state_json", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategyStateResponse: _TypeAlias = StrategyStateResponse  # noqa: Y015
@@ -6211,11 +6183,11 @@ class ExecuteActionRequest(_message.Message):
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     ACTION_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
     PARAMS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     action: _builtins.str
     """"PAUSE", "RESUME", "BUMP_GAS", "CANCEL_TX", "EMERGENCY_UNWIND" """
     reason: _builtins.str
@@ -6227,12 +6199,12 @@ class ExecuteActionRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         action: _builtins.str = ...,
         reason: _builtins.str = ...,
         params: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["action", b"action", "params", b"params", "reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["action", b"action", "deployment_id", b"deployment_id", "params", b"params", "reason", b"reason"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ExecuteActionRequest: _TypeAlias = ExecuteActionRequest  # noqa: Y015
@@ -6283,7 +6255,7 @@ class RegisterInstanceRequest(_message.Message):
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STRATEGY_NAME_FIELD_NUMBER: _builtins.int
     TEMPLATE_NAME_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
@@ -6293,10 +6265,10 @@ class RegisterInstanceRequest(_message.Message):
     VERSION_FIELD_NUMBER: _builtins.int
     CHAINS_FIELD_NUMBER: _builtins.int
     CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     """Unique instance ID (e.g. "uniswap_lp:a1b2c3d4e5f6")"""
     strategy_name: _builtins.str
-    """Display name (from config's strategy_id or strategy_name)"""
+    """Display name (from config's deployment_id or strategy_name)"""
     template_name: _builtins.str
     """Class name, e.g. "UniswapLPStrategy" """
     chain: _builtins.str
@@ -6311,7 +6283,7 @@ class RegisterInstanceRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         strategy_name: _builtins.str = ...,
         template_name: _builtins.str = ...,
         chain: _builtins.str = ...,
@@ -6322,7 +6294,7 @@ class RegisterInstanceRequest(_message.Message):
         chains: _abc.Iterable[_builtins.str] | None = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "config_json", b"config_json", "protocol", b"protocol", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "config_json", b"config_json", "deployment_id", b"deployment_id", "protocol", b"protocol", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RegisterInstanceRequest: _TypeAlias = RegisterInstanceRequest  # noqa: Y015
@@ -6337,7 +6309,7 @@ class RegisterInstanceResponse(_message.Message):
     success: _builtins.bool
     error: _builtins.str
     already_existed: _builtins.bool
-    """True if re-registering on restart (same strategy_id)"""
+    """True if re-registering on restart (same deployment_id)"""
     def __init__(
         self,
         *,
@@ -6354,12 +6326,12 @@ Global___RegisterInstanceResponse: _TypeAlias = RegisterInstanceResponse  # noqa
 class UpdateInstanceStatusRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STATUS_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
     HEARTBEAT_ONLY_FIELD_NUMBER: _builtins.int
     POSITIONS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     status: _builtins.str
     """RUNNING, INACTIVE, ERROR, PAUSED"""
     reason: _builtins.str
@@ -6372,13 +6344,13 @@ class UpdateInstanceStatusRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         status: _builtins.str = ...,
         reason: _builtins.str = ...,
         heartbeat_only: _builtins.bool = ...,
         positions: _abc.Iterable[Global___StrategyPosition] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["heartbeat_only", b"heartbeat_only", "positions", b"positions", "reason", b"reason", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "heartbeat_only", b"heartbeat_only", "positions", b"positions", "reason", b"reason", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___UpdateInstanceStatusRequest: _TypeAlias = UpdateInstanceStatusRequest  # noqa: Y015
@@ -6406,17 +6378,17 @@ Global___UpdateInstanceStatusResponse: _TypeAlias = UpdateInstanceStatusResponse
 class ArchiveInstanceRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     reason: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         reason: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "reason", b"reason"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ArchiveInstanceRequest: _TypeAlias = ArchiveInstanceRequest  # noqa: Y015
@@ -6444,18 +6416,18 @@ Global___ArchiveInstanceResponse: _TypeAlias = ArchiveInstanceResponse  # noqa: 
 class PurgeInstanceRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     reason: _builtins.str
     """Required for audit"""
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         reason: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "reason", b"reason"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PurgeInstanceRequest: _TypeAlias = PurgeInstanceRequest  # noqa: Y015
@@ -6485,11 +6457,11 @@ class GetTransactionLedgerRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
     INTENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     since_timestamp: _builtins.int
     """Optional: only entries after this time (unix)"""
     intent_type_filter: _builtins.str
@@ -6499,12 +6471,12 @@ class GetTransactionLedgerRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         since_timestamp: _builtins.int = ...,
         intent_type_filter: _builtins.str = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["intent_type_filter", b"intent_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "intent_type_filter", b"intent_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTransactionLedgerRequest: _TypeAlias = GetTransactionLedgerRequest  # noqa: Y015
@@ -6535,7 +6507,7 @@ class LedgerEntryInfo(_message.Message):
 
     ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     INTENT_TYPE_FIELD_NUMBER: _builtins.int
     TOKEN_IN_FIELD_NUMBER: _builtins.int
@@ -6553,7 +6525,7 @@ class LedgerEntryInfo(_message.Message):
     ERROR_FIELD_NUMBER: _builtins.int
     id: _builtins.str
     cycle_id: _builtins.str
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     timestamp: _builtins.int
     intent_type: _builtins.str
     token_in: _builtins.str
@@ -6574,7 +6546,7 @@ class LedgerEntryInfo(_message.Message):
         *,
         id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         timestamp: _builtins.int = ...,
         intent_type: _builtins.str = ...,
         token_in: _builtins.str = ...,
@@ -6591,7 +6563,7 @@ class LedgerEntryInfo(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "effective_price", b"effective_price", "error", b"error", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
@@ -6847,14 +6819,14 @@ Global___AuditPosture: _TypeAlias = AuditPosture  # noqa: Y015
 class GetPnLSummaryRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPnLSummaryRequest: _TypeAlias = GetPnLSummaryRequest  # noqa: Y015
@@ -6863,14 +6835,14 @@ Global___GetPnLSummaryRequest: _TypeAlias = GetPnLSummaryRequest  # noqa: Y015
 class GetCostStackRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetCostStackRequest: _TypeAlias = GetCostStackRequest  # noqa: Y015
@@ -6879,14 +6851,14 @@ Global___GetCostStackRequest: _TypeAlias = GetCostStackRequest  # noqa: Y015
 class GetAuditPostureRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetAuditPostureRequest: _TypeAlias = GetAuditPostureRequest  # noqa: Y015
@@ -6897,21 +6869,21 @@ class GetTradeTapeRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
     BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     limit: _builtins.int
     before_timestamp: _builtins.int
     """pagination (unix; 0 = newest first)"""
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         limit: _builtins.int = ...,
         before_timestamp: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "deployment_id", b"deployment_id", "limit", b"limit"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTradeTapeRequest: _TypeAlias = GetTradeTapeRequest  # noqa: Y015
@@ -7123,13 +7095,13 @@ class GetActivityFeedRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
     BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
     EVENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
     INTENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
     BEFORE_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     limit: _builtins.int
     """Default 50, capped server-side at 200"""
     before_timestamp: _builtins.int
@@ -7148,14 +7120,14 @@ class GetActivityFeedRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         limit: _builtins.int = ...,
         before_timestamp: _builtins.int = ...,
         event_type_filter: _builtins.str = ...,
         intent_type_filter: _builtins.str = ...,
         before_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_id", b"before_id", "before_timestamp", b"before_timestamp", "event_type_filter", b"event_type_filter", "intent_type_filter", b"intent_type_filter", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_id", b"before_id", "before_timestamp", b"before_timestamp", "deployment_id", b"deployment_id", "event_type_filter", b"event_type_filter", "intent_type_filter", b"intent_type_filter", "limit", b"limit"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetActivityFeedRequest: _TypeAlias = GetActivityFeedRequest  # noqa: Y015
@@ -7233,14 +7205,14 @@ class ActivityFeedItem(_message.Message):
 
     KIND_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     TIMELINE_EVENT_FIELD_NUMBER: _builtins.int
     LEDGER_ENTRY_FIELD_NUMBER: _builtins.int
     kind: Global___ActivityFeedItem.Kind.ValueType
     timestamp: _builtins.int
     """Sort key, copied from the inner row"""
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     cycle_id: _builtins.str
     """For grouping in the renderer"""
     @_builtins.property
@@ -7252,14 +7224,14 @@ class ActivityFeedItem(_message.Message):
         *,
         kind: Global___ActivityFeedItem.Kind.ValueType = ...,
         timestamp: _builtins.int = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         cycle_id: _builtins.str = ...,
         timeline_event: Global___TimelineEventInfo | None = ...,
         ledger_entry: Global___LedgerEntryInfo | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["ledger_entry", b"ledger_entry", "payload", b"payload", "timeline_event", b"timeline_event"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "kind", b"kind", "ledger_entry", b"ledger_entry", "payload", b"payload", "strategy_id", b"strategy_id", "timeline_event", b"timeline_event", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "kind", b"kind", "ledger_entry", b"ledger_entry", "payload", b"payload", "timeline_event", b"timeline_event", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["timeline_event", "ledger_entry"]  # noqa: Y015
     _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
@@ -7271,12 +7243,12 @@ Global___ActivityFeedItem: _TypeAlias = ActivityFeedItem  # noqa: Y015
 class GetPositionsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     PRIMITIVE_FIELD_NUMBER: _builtins.int
     ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
     STATUS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     """required"""
     chain: _builtins.str
     """optional filter"""
@@ -7289,13 +7261,13 @@ class GetPositionsRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         chain: _builtins.str = ...,
         primitive: _builtins.str = ...,
         accounting_category: _builtins.str = ...,
         status: Global___PositionStatus.ValueType = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "primitive", b"primitive", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "deployment_id", b"deployment_id", "primitive", b"primitive", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPositionsRequest: _TypeAlias = GetPositionsRequest  # noqa: Y015
@@ -7474,14 +7446,14 @@ Global___PositionEntry: _TypeAlias = PositionEntry  # noqa: Y015
 class GetPositionRangeHistoryRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
     HANDLE_FIELD_NUMBER: _builtins.int
     PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
     FROM_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
     TO_UNIX_SECONDS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     """required"""
     chain: _builtins.str
     """required (history is per-chain)"""
@@ -7499,7 +7471,7 @@ class GetPositionRangeHistoryRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         chain: _builtins.str = ...,
         accounting_category: _builtins.str = ...,
         handle: _builtins.str = ...,
@@ -7507,7 +7479,7 @@ class GetPositionRangeHistoryRequest(_message.Message):
         from_unix_seconds: _builtins.int = ...,
         to_unix_seconds: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "from_unix_seconds", b"from_unix_seconds", "handle", b"handle", "physical_identity_hash", b"physical_identity_hash", "strategy_id", b"strategy_id", "to_unix_seconds", b"to_unix_seconds"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "deployment_id", b"deployment_id", "from_unix_seconds", b"from_unix_seconds", "handle", b"handle", "physical_identity_hash", b"physical_identity_hash", "to_unix_seconds", b"to_unix_seconds"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPositionRangeHistoryRequest: _TypeAlias = GetPositionRangeHistoryRequest  # noqa: Y015
@@ -7587,14 +7559,14 @@ Global___RangeHistoryEntry: _TypeAlias = RangeHistoryEntry  # noqa: Y015
 class GetReconciliationReportRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetReconciliationReportRequest: _TypeAlias = GetReconciliationReportRequest  # noqa: Y015
@@ -7711,14 +7683,14 @@ Global___PrimitiveCoverageStub: _TypeAlias = PrimitiveCoverageStub  # noqa: Y015
 class PreviewReconcileRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PreviewReconcileRequest: _TypeAlias = PreviewReconcileRequest  # noqa: Y015
@@ -7782,18 +7754,18 @@ Global___PreviewReconcileResponse: _TypeAlias = PreviewReconcileResponse  # noqa
 class ApplyReconcileRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     PREVIEW_TOKEN_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     preview_token: _builtins.str
     """Token issued by PreviewReconcile. INVALID_ARGUMENT if empty."""
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         preview_token: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["preview_token", b"preview_token", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "preview_token", b"preview_token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ApplyReconcileRequest: _TypeAlias = ApplyReconcileRequest  # noqa: Y015
@@ -7841,14 +7813,14 @@ Global___ApplyReconcileResponse: _TypeAlias = ApplyReconcileResponse  # noqa: Y0
 class RefreshRegistryFromChainRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RefreshRegistryFromChainRequest: _TypeAlias = RefreshRegistryFromChainRequest  # noqa: Y015
@@ -9886,11 +9858,11 @@ class WriteAgentStateRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    AGENT_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STATE_FIELD_NUMBER: _builtins.int
     ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
     RUNNING_ALMANAK_VERSION_FIELD_NUMBER: _builtins.int
-    agent_id: _builtins.str
+    deployment_id: _builtins.str
     state: _builtins.str
     """INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED"""
     error_message: _builtins.str
@@ -9900,14 +9872,14 @@ class WriteAgentStateRequest(_message.Message):
     def __init__(
         self,
         *,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         state: _builtins.str = ...,
         error_message: _builtins.str = ...,
         running_almanak_version: _builtins.str | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_running_almanak_version", b"_running_almanak_version", "running_almanak_version", b"running_almanak_version"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_running_almanak_version", b"_running_almanak_version", "agent_id", b"agent_id", "error_message", b"error_message", "running_almanak_version", b"running_almanak_version", "state", b"state"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_running_almanak_version", b"_running_almanak_version", "deployment_id", b"deployment_id", "error_message", b"error_message", "running_almanak_version", b"running_almanak_version", "state", b"state"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__running_almanak_version: _TypeAlias = _typing.Literal["running_almanak_version"]  # noqa: Y015
     _WhichOneofArgType__running_almanak_version: _TypeAlias = _typing.Literal["_running_almanak_version", b"_running_almanak_version"]  # noqa: Y015
@@ -9938,14 +9910,14 @@ Global___WriteAgentStateResponse: _TypeAlias = WriteAgentStateResponse  # noqa: 
 class ReadAgentStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    AGENT_ID_FIELD_NUMBER: _builtins.int
-    agent_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReadAgentStateRequest: _TypeAlias = ReadAgentStateRequest  # noqa: Y015
@@ -9955,14 +9927,14 @@ class ReadAgentStateResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     FOUND_FIELD_NUMBER: _builtins.int
-    AGENT_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     STATE_FIELD_NUMBER: _builtins.int
     STATE_CHANGED_AT_FIELD_NUMBER: _builtins.int
     LAST_HEARTBEAT_AT_FIELD_NUMBER: _builtins.int
     ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
     ITERATION_COUNT_FIELD_NUMBER: _builtins.int
     found: _builtins.bool
-    agent_id: _builtins.str
+    deployment_id: _builtins.str
     state: _builtins.str
     state_changed_at: _builtins.str
     """ISO 8601"""
@@ -9974,14 +9946,14 @@ class ReadAgentStateResponse(_message.Message):
         self,
         *,
         found: _builtins.bool = ...,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         state: _builtins.str = ...,
         state_changed_at: _builtins.str = ...,
         last_heartbeat_at: _builtins.str = ...,
         error_message: _builtins.str = ...,
         iteration_count: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "error_message", b"error_message", "found", b"found", "iteration_count", b"iteration_count", "last_heartbeat_at", b"last_heartbeat_at", "state", b"state", "state_changed_at", b"state_changed_at"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "error_message", b"error_message", "found", b"found", "iteration_count", b"iteration_count", "last_heartbeat_at", b"last_heartbeat_at", "state", b"state", "state_changed_at", b"state_changed_at"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReadAgentStateResponse: _TypeAlias = ReadAgentStateResponse  # noqa: Y015
@@ -9990,14 +9962,14 @@ Global___ReadAgentStateResponse: _TypeAlias = ReadAgentStateResponse  # noqa: Y0
 class HeartbeatRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    AGENT_ID_FIELD_NUMBER: _builtins.int
-    agent_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___HeartbeatRequest: _TypeAlias = HeartbeatRequest  # noqa: Y015
@@ -10025,14 +9997,14 @@ Global___HeartbeatResponse: _TypeAlias = HeartbeatResponse  # noqa: Y015
 class ReadAgentCommandRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    AGENT_ID_FIELD_NUMBER: _builtins.int
-    agent_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReadAgentCommandRequest: _TypeAlias = ReadAgentCommandRequest  # noqa: Y015
@@ -10043,13 +10015,13 @@ class ReadAgentCommandResponse(_message.Message):
 
     FOUND_FIELD_NUMBER: _builtins.int
     COMMAND_ID_FIELD_NUMBER: _builtins.int
-    AGENT_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     COMMAND_FIELD_NUMBER: _builtins.int
     ISSUED_AT_FIELD_NUMBER: _builtins.int
     ISSUED_BY_FIELD_NUMBER: _builtins.int
     found: _builtins.bool
     command_id: _builtins.int
-    agent_id: _builtins.str
+    deployment_id: _builtins.str
     command: _builtins.str
     """PAUSE, RESUME, STOP"""
     issued_at: _builtins.str
@@ -10060,12 +10032,12 @@ class ReadAgentCommandResponse(_message.Message):
         *,
         found: _builtins.bool = ...,
         command_id: _builtins.int = ...,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         command: _builtins.str = ...,
         issued_at: _builtins.str = ...,
         issued_by: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "command_id", b"command_id", "found", b"found", "issued_at", b"issued_at", "issued_by", b"issued_by"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "deployment_id", b"deployment_id", "found", b"found", "issued_at", b"issued_at", "issued_by", b"issued_by"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ReadAgentCommandResponse: _TypeAlias = ReadAgentCommandResponse  # noqa: Y015
@@ -10109,21 +10081,21 @@ Global___AckAgentCommandResponse: _TypeAlias = AckAgentCommandResponse  # noqa: 
 class WriteAgentCommandRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    AGENT_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     COMMAND_FIELD_NUMBER: _builtins.int
     ISSUED_BY_FIELD_NUMBER: _builtins.int
-    agent_id: _builtins.str
+    deployment_id: _builtins.str
     command: _builtins.str
     """PAUSE, RESUME, STOP"""
     issued_by: _builtins.str
     def __init__(
         self,
         *,
-        agent_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         command: _builtins.str = ...,
         issued_by: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "issued_by", b"issued_by"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "deployment_id", b"deployment_id", "issued_by", b"issued_by"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___WriteAgentCommandRequest: _TypeAlias = WriteAgentCommandRequest  # noqa: Y015
@@ -10189,14 +10161,14 @@ Global___CreateTeardownRequestResponse: _TypeAlias = CreateTeardownRequestRespon
 class GetTeardownRequestRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTeardownRequestRequest: _TypeAlias = GetTeardownRequestRequest  # noqa: Y015
@@ -10205,14 +10177,14 @@ Global___GetTeardownRequestRequest: _TypeAlias = GetTeardownRequestRequest  # no
 class GetActiveTeardownRequestRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetActiveTeardownRequestRequest: _TypeAlias = GetActiveTeardownRequestRequest  # noqa: Y015
@@ -10286,14 +10258,14 @@ Global___UpdateTeardownRequestRequest: _TypeAlias = UpdateTeardownRequestRequest
 class AckTeardownRequestRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AckTeardownRequestRequest: _TypeAlias = AckTeardownRequestRequest  # noqa: Y015
@@ -10302,17 +10274,17 @@ Global___AckTeardownRequestRequest: _TypeAlias = AckTeardownRequestRequest  # no
 class MarkTeardownStartedRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     TOTAL_POSITIONS_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     total_positions: _builtins.int
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         total_positions: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "total_positions", b"total_positions"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "total_positions", b"total_positions"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___MarkTeardownStartedRequest: _TypeAlias = MarkTeardownStartedRequest  # noqa: Y015
@@ -10321,11 +10293,11 @@ Global___MarkTeardownStartedRequest: _TypeAlias = MarkTeardownStartedRequest  # 
 class UpdateTeardownProgressRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     POSITIONS_CLOSED_FIELD_NUMBER: _builtins.int
     POSITIONS_FAILED_FIELD_NUMBER: _builtins.int
     CURRENT_PHASE_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     positions_closed: _builtins.int
     positions_failed: _builtins.int
     current_phase: _builtins.str
@@ -10333,12 +10305,12 @@ class UpdateTeardownProgressRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         positions_closed: _builtins.int = ...,
         positions_failed: _builtins.int = ...,
         current_phase: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["current_phase", b"current_phase", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["current_phase", b"current_phase", "deployment_id", b"deployment_id", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___UpdateTeardownProgressRequest: _TypeAlias = UpdateTeardownProgressRequest  # noqa: Y015
@@ -10347,18 +10319,18 @@ Global___UpdateTeardownProgressRequest: _TypeAlias = UpdateTeardownProgressReque
 class MarkTeardownCompletedRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     RESULT_JSON_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     result_json: _builtins.str
     """Optional JSON object"""
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         result_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["result_json", b"result_json", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "result_json", b"result_json"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___MarkTeardownCompletedRequest: _TypeAlias = MarkTeardownCompletedRequest  # noqa: Y015
@@ -10367,11 +10339,11 @@ Global___MarkTeardownCompletedRequest: _TypeAlias = MarkTeardownCompletedRequest
 class MarkTeardownFailedRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
     POSITIONS_CLOSED_FIELD_NUMBER: _builtins.int
     POSITIONS_FAILED_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     error_message: _builtins.str
     positions_closed: _builtins.int
     """VIB-4542: intent-landing counts, parallel to UpdateTeardownProgressRequest.
@@ -10381,7 +10353,7 @@ class MarkTeardownFailedRequest(_message.Message):
     runner's safety-validation early-fail path that has no intent counts)
     instead of accidentally zeroing out a prior progress write.
     Audit (PR #2343): the prior `-1` sentinel was unsafe — proto3 scalar
-    defaults are 0, not -1, so a legacy client sending only strategy_id +
+    defaults are 0, not -1, so a legacy client sending only deployment_id +
     error_message would have arrived as positions_closed=0 (overwrite),
     not -1 (preserve).
     """
@@ -10389,14 +10361,14 @@ class MarkTeardownFailedRequest(_message.Message):
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         error_message: _builtins.str = ...,
         positions_closed: _builtins.int | None = ...,
         positions_failed: _builtins.int | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed", "_positions_failed", b"_positions_failed", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed", "_positions_failed", b"_positions_failed", "error_message", b"error_message", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed", "_positions_failed", b"_positions_failed", "deployment_id", b"deployment_id", "error_message", b"error_message", "positions_closed", b"positions_closed", "positions_failed", b"positions_failed"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__positions_closed: _TypeAlias = _typing.Literal["positions_closed"]  # noqa: Y015
     _WhichOneofArgType__positions_closed: _TypeAlias = _typing.Literal["_positions_closed", b"_positions_closed"]  # noqa: Y015
@@ -10413,14 +10385,14 @@ Global___MarkTeardownFailedRequest: _TypeAlias = MarkTeardownFailedRequest  # no
 class MarkTeardownCancelledRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___MarkTeardownCancelledRequest: _TypeAlias = MarkTeardownCancelledRequest  # noqa: Y015
@@ -10429,14 +10401,14 @@ Global___MarkTeardownCancelledRequest: _TypeAlias = MarkTeardownCancelledRequest
 class RequestTeardownCancelRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RequestTeardownCancelRequest: _TypeAlias = RequestTeardownCancelRequest  # noqa: Y015
@@ -10445,14 +10417,14 @@ Global___RequestTeardownCancelRequest: _TypeAlias = RequestTeardownCancelRequest
 class DeleteTeardownRequestRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DeleteTeardownRequestRequest: _TypeAlias = DeleteTeardownRequestRequest  # noqa: Y015
@@ -10545,14 +10517,14 @@ Global___SaveTeardownStateResponse: _TypeAlias = SaveTeardownStateResponse  # no
 class LoadTeardownStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LoadTeardownStateRequest: _TypeAlias = LoadTeardownStateRequest  # noqa: Y015
@@ -10620,12 +10592,12 @@ class CreateApprovalRequestRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     TEARDOWN_ID_FIELD_NUMBER: _builtins.int
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     LEVEL_FIELD_NUMBER: _builtins.int
     REQUEST_JSON_FIELD_NUMBER: _builtins.int
     EXPIRES_AT_FIELD_NUMBER: _builtins.int
     teardown_id: _builtins.str
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     level: _builtins.str
     request_json: _builtins.str
     expires_at: _builtins.str
@@ -10634,12 +10606,12 @@ class CreateApprovalRequestRequest(_message.Message):
         self,
         *,
         teardown_id: _builtins.str = ...,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         level: _builtins.str = ...,
         request_json: _builtins.str = ...,
         expires_at: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["expires_at", b"expires_at", "level", b"level", "request_json", b"request_json", "strategy_id", b"strategy_id", "teardown_id", b"teardown_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "expires_at", b"expires_at", "level", b"level", "request_json", b"request_json", "teardown_id", b"teardown_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CreateApprovalRequestRequest: _TypeAlias = CreateApprovalRequestRequest  # noqa: Y015
@@ -10730,14 +10702,14 @@ Global___WriteApprovalResponseRequest: _TypeAlias = WriteApprovalResponseRequest
 class GetLatestPendingApprovalRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetLatestPendingApprovalRequest: _TypeAlias = GetLatestPendingApprovalRequest  # noqa: Y015
@@ -10751,7 +10723,7 @@ class GetLatestPendingApprovalResponse(_message.Message):
     ERROR_FIELD_NUMBER: _builtins.int
     found: _builtins.bool
     approval_json: _builtins.str
-    """JSON object with teardown_id, level, strategy_id, request_json, created_at, expires_at"""
+    """JSON object with teardown_id, level, deployment_id, request_json, created_at, expires_at"""
     error: _builtins.str
     def __init__(
         self,
@@ -10769,17 +10741,17 @@ Global___GetLatestPendingApprovalResponse: _TypeAlias = GetLatestPendingApproval
 class WriteApprovalResponseByStrategyRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     RESPONSE_JSON_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
+    deployment_id: _builtins.str
     response_json: _builtins.str
     def __init__(
         self,
         *,
-        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
         response_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["response_json", b"response_json", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "response_json", b"response_json"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___WriteApprovalResponseByStrategyRequest: _TypeAlias = WriteApprovalResponseByStrategyRequest  # noqa: Y015
@@ -10891,8 +10863,7 @@ class ReconcileRequest(_message.Message):
     OPERATOR_NOTE_FIELD_NUMBER: _builtins.int
     TRIGGER_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
-    """Required: deployment that owns the registry rows. Resolved to agent_id
-    at the gateway via resolve_agent_id (matches StateService pattern).
+    """Required: deployment that owns the registry rows.
     Empty string => INVALID_ARGUMENT.
     """
     chain: _builtins.str

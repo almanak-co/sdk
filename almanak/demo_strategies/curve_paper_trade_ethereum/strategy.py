@@ -239,7 +239,7 @@ class CurvePaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_OPENED,
                     description=f"Curve 3pool LP opened: {self.deposit_amount} {self.deposit_token}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "lp_balance": str(self._lp_token_balance),
@@ -260,7 +260,7 @@ class CurvePaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_CLOSED,
                     description=f"Curve 3pool LP closed (cycle {self._cycles_completed})",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "cycle": self._cycles_completed},
                 )
             )
@@ -339,7 +339,7 @@ class CurvePaperTradeStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_curve_paper_trade_ethereum"),
+            deployment_id=getattr(self, "deployment_id", "demo_curve_paper_trade_ethereum"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

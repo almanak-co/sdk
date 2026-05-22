@@ -19,7 +19,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -32,9 +31,7 @@ from almanak.framework.state.state_manager import (
     _pg_row_to_position_event_dict,
 )
 
-
-_AGENT_ID = "AccountingQuantLPStrategy:abc123"
-_DEPLOYMENT_ID = _AGENT_ID  # 1:1 hosted convention
+_DEPLOYMENT_ID = "AccountingQuantLPStrategy:abc123"
 
 
 # =============================================================================
@@ -96,7 +93,7 @@ def _make_store(conn: _FakeConn) -> PostgresStore:
 
 def _snapshot_row(**overrides):
     base = {
-        "agent_id": _AGENT_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "timestamp": datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC),
         "iteration_number": 5,
         "total_value_usd": "1234.50",
@@ -124,27 +121,29 @@ class _DictRow(dict):
 
 
 @pytest.mark.asyncio
-async def test_get_latest_snapshot_keys_on_agent_id_orders_desc():
+async def test_get_latest_snapshot_keys_on_deployment_id_orders_desc():
     conn = _FakeConn(fetchrow_row=_snapshot_row())
     store = _make_store(conn)
 
-    snap = await store.get_latest_snapshot(_AGENT_ID)
+    snap = await store.get_latest_snapshot(_DEPLOYMENT_ID)
 
     assert snap is not None
-    assert snap.strategy_id == _AGENT_ID
+    assert snap.deployment_id == _DEPLOYMENT_ID
     assert snap.total_value_usd == Decimal("1234.50")
     assert snap.deployed_capital_usd == Decimal("1100.00")
     assert snap.chain == "arbitrum"
 
-    # SQL shape — agent_id filter + DESC + LIMIT 1
+    # SQL shape — deployment_id filter + DESC + LIMIT 1 (VIB-4721/4722:
+    # portfolio_snapshots has a single identity column, deployment_id).
     assert len(conn.calls) == 1
     kind, sql, args = conn.calls[0]
     assert kind == "fetchrow"
     assert "FROM portfolio_snapshots" in sql
-    assert "WHERE agent_id = $1" in sql
+    assert "WHERE deployment_id = $1" in sql
+    assert "agent_id" not in sql
     assert "ORDER BY timestamp DESC" in sql
     assert "LIMIT 1" in sql
-    assert args == (_AGENT_ID,)
+    assert args == (_DEPLOYMENT_ID,)
 
 
 @pytest.mark.asyncio
@@ -152,7 +151,7 @@ async def test_get_latest_snapshot_returns_none_on_empty():
     conn = _FakeConn(fetchrow_row=None)
     store = _make_store(conn)
 
-    assert await store.get_latest_snapshot(_AGENT_ID) is None
+    assert await store.get_latest_snapshot(_DEPLOYMENT_ID) is None
 
 
 @pytest.mark.asyncio
@@ -161,15 +160,15 @@ async def test_get_snapshots_since_passes_since_and_limit():
     store = _make_store(conn)
     since = datetime(2026, 5, 1, tzinfo=UTC)
 
-    snaps = await store.get_snapshots_since(_AGENT_ID, since, limit=42)
+    snaps = await store.get_snapshots_since(_DEPLOYMENT_ID, since, limit=42)
 
     assert len(snaps) == 2
     kind, sql, args = conn.calls[0]
     assert kind == "fetch"
-    assert "WHERE agent_id = $1 AND timestamp >= $2" in sql
+    assert "WHERE deployment_id = $1 AND timestamp >= $2" in sql
     assert "ORDER BY timestamp ASC" in sql
     assert "LIMIT $3" in sql
-    assert args == (_AGENT_ID, since, 42)
+    assert args == (_DEPLOYMENT_ID, since, 42)
 
 
 @pytest.mark.asyncio
@@ -178,14 +177,14 @@ async def test_get_snapshot_at_uses_at_or_before_filter():
     store = _make_store(conn)
     ts = datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
 
-    snap = await store.get_snapshot_at(_AGENT_ID, ts)
+    snap = await store.get_snapshot_at(_DEPLOYMENT_ID, ts)
 
     assert snap is not None
     _, sql, args = conn.calls[0]
-    assert "WHERE agent_id = $1 AND timestamp <= $2" in sql
+    assert "WHERE deployment_id = $1 AND timestamp <= $2" in sql
     assert "ORDER BY timestamp DESC" in sql
     assert "LIMIT 1" in sql
-    assert args == (_AGENT_ID, ts)
+    assert args == (_DEPLOYMENT_ID, ts)
 
 
 # =============================================================================
@@ -195,7 +194,7 @@ async def test_get_snapshot_at_uses_at_or_before_filter():
 
 def _metrics_row(**overrides):
     base = {
-        "agent_id": _AGENT_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "initial_value_usd": "10000.00",
         "initial_timestamp": datetime(2026, 5, 1, tzinfo=UTC),
         "deposits_usd": "500.00",
@@ -204,7 +203,6 @@ def _metrics_row(**overrides):
         "total_value_usd": "11000.00",
         "positions_text": "[]",
         "cycle_id": "cycle-42",
-        "deployment_id": _DEPLOYMENT_ID,
         "execution_mode": "live",
         "is_complete": True,
         "updated_at": datetime(2026, 5, 4, tzinfo=UTC),
@@ -214,22 +212,23 @@ def _metrics_row(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_get_portfolio_metrics_keys_on_agent_id():
+async def test_get_portfolio_metrics_keys_on_deployment_id():
     conn = _FakeConn(fetchrow_row=_metrics_row())
     store = _make_store(conn)
 
-    metrics = await store.get_portfolio_metrics(_AGENT_ID)
+    metrics = await store.get_portfolio_metrics(_DEPLOYMENT_ID)
 
     assert metrics is not None
-    assert metrics.strategy_id == _AGENT_ID
+    assert metrics.deployment_id == _DEPLOYMENT_ID
     assert metrics.initial_value_usd == Decimal("10000.00")
     assert metrics.execution_mode == "live"
     assert metrics.is_complete is True
 
     _, sql, args = conn.calls[0]
     assert "FROM portfolio_metrics" in sql
-    assert "WHERE agent_id = $1" in sql
-    assert args == (_AGENT_ID,)
+    assert "WHERE deployment_id = $1" in sql
+    assert "agent_id" not in sql
+    assert args == (_DEPLOYMENT_ID,)
 
 
 @pytest.mark.asyncio
@@ -237,7 +236,7 @@ async def test_get_portfolio_metrics_returns_none_on_empty():
     conn = _FakeConn(fetchrow_row=None)
     store = _make_store(conn)
 
-    assert await store.get_portfolio_metrics(_AGENT_ID) is None
+    assert await store.get_portfolio_metrics(_DEPLOYMENT_ID) is None
 
 
 # =============================================================================
@@ -249,7 +248,6 @@ def _ledger_row(**overrides):
     base = {
         "id": "tx-1",
         "cycle_id": "cycle-1",
-        "agent_id": _AGENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "execution_mode": "live",
         "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
@@ -281,7 +279,7 @@ async def test_get_ledger_entries_minimal_filters():
     conn = _FakeConn(fetch_rows=[_ledger_row()])
     store = _make_store(conn)
 
-    entries = await store.get_ledger_entries(_AGENT_ID, limit=50)
+    entries = await store.get_ledger_entries(_DEPLOYMENT_ID, limit=50)
 
     assert len(entries) == 1
     e = entries[0]
@@ -293,10 +291,11 @@ async def test_get_ledger_entries_minimal_filters():
 
     _, sql, args = conn.calls[0]
     assert "FROM transaction_ledger" in sql
-    assert "WHERE agent_id = $1" in sql
+    assert "WHERE deployment_id = $1" in sql
+    assert "agent_id" not in sql
     assert "LIMIT $2" in sql  # limit is the only extra param
     assert "ORDER BY timestamp DESC" in sql
-    assert args == (_AGENT_ID, 50)
+    assert args == (_DEPLOYMENT_ID, 50)
 
 
 @pytest.mark.asyncio
@@ -307,7 +306,7 @@ async def test_get_ledger_entries_with_all_filters():
     before = datetime(2026, 5, 4, tzinfo=UTC)
 
     await store.get_ledger_entries(
-        _AGENT_ID,
+        _DEPLOYMENT_ID,
         since=since,
         intent_type="LP_OPEN",
         limit=100,
@@ -315,12 +314,13 @@ async def test_get_ledger_entries_with_all_filters():
     )
 
     _, sql, args = conn.calls[0]
-    assert "agent_id = $1" in sql
+    assert "deployment_id = $1" in sql
+    assert "agent_id" not in sql
     assert "timestamp > $2" in sql
     assert "timestamp < $3" in sql
     assert "intent_type = $4" in sql
     assert "LIMIT $5" in sql
-    assert args == (_AGENT_ID, since, before, "LP_OPEN", 100)
+    assert args == (_DEPLOYMENT_ID, since, before, "LP_OPEN", 100)
 
 
 # =============================================================================
@@ -332,7 +332,6 @@ def _ae_row(**overrides):
     base = {
         "id": "ae-1",
         "deployment_id": _DEPLOYMENT_ID,
-        "agent_id": _AGENT_ID,
         "cycle_id": "cycle-1",
         "execution_mode": "live",
         "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
@@ -364,9 +363,9 @@ async def test_get_accounting_events_keys_on_deployment_id():
     assert r["event_type"] == "LP_OPEN"
     assert r["payload_json"] == '{"cost_basis_usd":"1000"}'
     assert r["timestamp"].startswith("2026-05-04T")
-    # SQLite parity: deployment_id, agent_id, strategy_id all present in dict
+    # SQLite parity: deployment_id, agent_id, deployment_id all present in dict
     assert r["deployment_id"] == _DEPLOYMENT_ID
-    assert r["strategy_id"] == _AGENT_ID
+    assert r["deployment_id"] == _DEPLOYMENT_ID
 
     _, sql, args = conn.calls[0]
     assert "FROM accounting_events" in sql
@@ -403,7 +402,6 @@ async def test_get_accounting_events_with_filters():
 def _pe_row(**overrides):
     base = {
         "id": "pe-1",
-        "agent_id": _AGENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": "cycle-1",
         "execution_mode": "live",
@@ -538,9 +536,16 @@ def _make_position_event(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_save_position_event_writes_all_columns_with_agent_id_from_env(monkeypatch):
-    """SQL shape pin + agent_id resolution from AGENT_ID env (hosted mode)."""
-    monkeypatch.setenv("AGENT_ID", "hosted-agent-xyz")
+async def test_save_position_event_writes_all_columns_from_deployment_id(monkeypatch):
+    """SQL shape pin + one-identity binding (blueprint 29 §4).
+
+    VIB-4721/4722: ``position_events`` has a single identity column,
+    ``deployment_id`` (the legacy ``agent_id`` column was DROPPED).
+    ``save_position_event`` stamps ``event.deployment_id`` directly with no
+    gateway-side translation.
+    """
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "hosted-agent-xyz")
     conn = _FakeConn()
     store = _make_store(conn)
 
@@ -554,72 +559,84 @@ async def test_save_position_event_writes_all_columns_with_agent_id_from_env(mon
     # Schema columns the SDK must persist; if a new column is added this
     # assertion fails loudly — same anti-drift contract as the reader test.
     for col in (
-        "id", "agent_id", "deployment_id", "cycle_id", "execution_mode",
-        "position_id", "position_type", "event_type", "timestamp",
-        "protocol_fees_usd", "attribution_json", "attribution_version",
+        "id",
+        "deployment_id",
+        "cycle_id",
+        "execution_mode",
+        "position_id",
+        "position_type",
+        "event_type",
+        "timestamp",
+        "protocol_fees_usd",
+        "attribution_json",
+        "attribution_version",
     ):
         assert col in sql, f"column {col!r} missing from save_position_event INSERT"
+    # The legacy agent_id column is gone.
+    assert "agent_id" not in sql
     # First-write-wins idempotency (matches SQLite INSERT OR IGNORE).
     assert "ON CONFLICT (id) DO NOTHING" in sql
     # JSONB column must be cast on the wire.
-    assert "$32::jsonb" in sql
+    assert "$31::jsonb" in sql
 
-    # agent_id binding is the hosted AGENT_ID env var, NOT the deployment_id.
-    assert args[0] == "pe-1"          # id
-    assert args[1] == "hosted-agent-xyz"  # agent_id from env
-    assert args[2] == _DEPLOYMENT_ID  # deployment_id
+    # Blueprint 29 §4: one identity column — deployment_id gets
+    # event.deployment_id, no hosted-env translation.
+    assert args[0] == "pe-1"  # id
+    assert args[1] == _DEPLOYMENT_ID  # canonical deployment_id column
 
 
 @pytest.mark.asyncio
-async def test_save_position_event_falls_back_to_deployment_id_when_agent_id_unset(monkeypatch):
-    """No AGENT_ID env → agent_id column gets the deployment_id (pass-through)."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+async def test_save_position_event_uses_deployment_id_in_local_mode(monkeypatch):
+    """Local mode → the deployment_id column gets event.deployment_id."""
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     conn = _FakeConn()
     store = _make_store(conn)
 
     await store.save_position_event(_make_position_event())
 
     _, _, args = conn.calls[0]
-    assert args[1] == _DEPLOYMENT_ID  # agent_id falls back to deployment_id
+    assert args[1] == _DEPLOYMENT_ID  # deployment_id column
 
 
 @pytest.mark.asyncio
 async def test_save_position_event_preserves_protocol_fees_empty_vs_zero(monkeypatch):
     """AGENTS.md "Empty ≠ Zero" — Decimal("0") must not collapse to "" on the wire."""
-    monkeypatch.setenv("AGENT_ID", "a")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "a")
 
     # Measured zero stays "0".
     conn = _FakeConn()
     store = _make_store(conn)
     await store.save_position_event(_make_position_event(protocol_fees_usd="0"))
-    assert conn.calls[0][2][30] == "0"
+    assert conn.calls[0][2][29] == "0"
 
     # Parser-did-not-emit stays "".
     conn = _FakeConn()
     store = _make_store(conn)
     await store.save_position_event(_make_position_event(protocol_fees_usd=""))
-    assert conn.calls[0][2][30] == ""
+    assert conn.calls[0][2][29] == ""
 
 
 @pytest.mark.asyncio
 async def test_save_position_event_preserves_tri_state_optionals(monkeypatch):
     """tick_lower / tick_upper / in_range / is_long None must bind as None (NULL)."""
-    monkeypatch.setenv("AGENT_ID", "a")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "a")
     conn = _FakeConn()
     store = _make_store(conn)
 
-    await store.save_position_event(
-        _make_position_event(tick_lower=None, tick_upper=None, in_range=None, is_long=None)
-    )
+    await store.save_position_event(_make_position_event(tick_lower=None, tick_upper=None, in_range=None, is_long=None))
 
     _, _, args = conn.calls[0]
-    # Positional order matches the INSERT VALUES list:
+    # Positional order matches the INSERT VALUES list (VIB-4721/4722: no
+    # agent_id column, so indices shift down by one from the legacy shape):
     # ..., $16 tick_lower, $17 tick_upper, $18 liquidity, $19 in_range, ...
     # ..., $26 unrealized_pnl, $27 is_long, ...
-    assert args[16] is None  # tick_lower
-    assert args[17] is None  # tick_upper
-    assert args[19] is None  # in_range
-    assert args[26] is None  # is_long
+    assert args[15] is None  # tick_lower
+    assert args[16] is None  # tick_upper
+    assert args[18] is None  # in_range
+    assert args[25] is None  # is_long
 
 
 @pytest.mark.asyncio
@@ -631,7 +648,8 @@ async def test_save_position_event_binds_datetime_not_string(monkeypatch):
     string to ``conn.execute`` would fail the test instead of crashing in
     hosted prod.
     """
-    monkeypatch.setenv("AGENT_ID", "a")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "a")
     conn = _FakeConn()
     store = _make_store(conn)
 
@@ -639,10 +657,10 @@ async def test_save_position_event_binds_datetime_not_string(monkeypatch):
     await store.save_position_event(_make_position_event(timestamp=ts))
 
     _, _, args = conn.calls[0]
-    # $9 timestamp position.
-    assert args[8] == ts
-    assert isinstance(args[8], datetime)
-    assert args[8].tzinfo is not None
+    # $8 timestamp position (VIB-4721/4722: no agent_id column).
+    assert args[7] == ts
+    assert isinstance(args[7], datetime)
+    assert args[7].tzinfo is not None
 
 
 @pytest.mark.asyncio
@@ -785,7 +803,7 @@ def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
     )
     row = _DictRow(
         {
-            "agent_id": _AGENT_ID,
+            "deployment_id": _DEPLOYMENT_ID,
             "timestamp": datetime(2026, 5, 4, tzinfo=UTC),
             "iteration_number": 1,
             "total_value_usd": "1",
@@ -800,7 +818,7 @@ def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
         }
     )
     snap = _pg_row_to_portfolio_snapshot(row)
-    assert snap.strategy_id == _AGENT_ID
+    assert snap.deployment_id == _DEPLOYMENT_ID
     assert len(snap.positions) == 1
     # Envelope metadata round-trips into snapshot_metadata
     assert snap.snapshot_metadata.get("source") == "test"
@@ -809,7 +827,6 @@ def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
 def test_pg_row_to_portfolio_metrics_defaults_missing_columns():
     row = _DictRow(
         {
-            "agent_id": _AGENT_ID,
             "initial_value_usd": "100",
             "initial_timestamp": datetime(2026, 5, 1, tzinfo=UTC),
             "deposits_usd": None,  # NULL on legacy row → defaults to "0"
@@ -836,7 +853,6 @@ def test_pg_row_to_ledger_entry_preserves_jsonb_text_passthrough():
         {
             "id": "tx-1",
             "cycle_id": "c1",
-            "agent_id": _AGENT_ID,
             "deployment_id": _DEPLOYMENT_ID,
             "execution_mode": "live",
             "timestamp": datetime(2026, 5, 4, tzinfo=UTC),
@@ -875,8 +891,6 @@ def test_pg_row_to_accounting_event_dict_matches_sqlite_keys():
     expected_keys = {
         "id",
         "deployment_id",
-        "agent_id",
-        "strategy_id",
         "cycle_id",
         "execution_mode",
         "timestamp",
@@ -1114,7 +1128,7 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
     )
 
     inputs = ParsedMetricsInputs(
-        strategy_id=_AGENT_ID,
+        deployment_id=_DEPLOYMENT_ID,
         initial_value_usd=Decimal("100"),
         deposits_usd=Decimal("0"),
         withdrawals_usd=Decimal("0"),
@@ -1126,11 +1140,14 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
 
     args = build_pg_upsert_args(inputs, request, now, Decimal("12345.67"))
 
-    # Length matches $1..$13 placeholders in PG_UPSERT_QUERY.
-    assert len(args) == 13
-    assert args[11] == "12345.67"  # total_value_usd
-    assert args[12] == "[]"  # positions_json default
+    # Length matches $1..$12 placeholders in PG_UPSERT_QUERY (VIB-4721/4722:
+    # portfolio_metrics has a single identity column, deployment_id — the
+    # separate request.deployment_id arg was dropped).
+    assert len(args) == 12
+    assert args[0] == _DEPLOYMENT_ID  # deployment_id column (canonical wire id)
+    assert args[10] == "12345.67"  # total_value_usd
+    assert args[11] == "[]"  # positions_json default
 
     # Override positions_json explicitly.
     args2 = build_pg_upsert_args(inputs, request, now, Decimal("0"), positions_json='[{"x":1}]')
-    assert args2[12] == '[{"x":1}]'
+    assert args2[11] == '[{"x":1}]'

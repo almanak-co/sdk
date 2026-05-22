@@ -68,7 +68,7 @@ class VaultLifecycleManager:
         vault_sdk: LagoonVaultSDK,
         vault_adapter: LagoonVaultAdapter,
         execution_orchestrator: Any,
-        strategy_id: str = "",
+        deployment_id: str = "",
         initial_vault_state: dict | None = None,
         persistence_callback: Callable[[dict], None] | None = None,
     ) -> None:
@@ -76,7 +76,7 @@ class VaultLifecycleManager:
         self._vault_sdk = vault_sdk
         self._vault_adapter = vault_adapter
         self._execution_orchestrator = execution_orchestrator
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._initial_vault_state = initial_vault_state
         self._vault_state: VaultState | None = None
         self._persistence_callback = persistence_callback

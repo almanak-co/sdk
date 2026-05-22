@@ -136,6 +136,7 @@ def _add_gateway_options(func):
 # =============================================================================
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("list")
 @click.option(
     "--status",
@@ -195,7 +196,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
         for s in strategies:
             rows.append(
                 {
-                    "strategy_id": s.strategy_id,
+                    "deployment_id": s.deployment_id,
                     "name": s.name,
                     "status": s.status,
                     "chain": s.chain,
@@ -220,7 +221,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
     click.echo()
 
     # Column widths
-    id_w = max(12, max((len(s.strategy_id) for s in strategies), default=12))
+    id_w = max(12, max((len(s.deployment_id) for s in strategies), default=12))
     id_w = min(id_w, 35)  # cap width
 
     header = f"{'ID':<{id_w}}  {'STATUS':<10}  {'CHAIN':<12}  {'VALUE (USD)':>12}  {'PnL 24h':>10}  {'LAST ACTIVE':<14}"
@@ -228,7 +229,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
     click.echo("-" * len(header))
 
     for s in strategies:
-        sid = s.strategy_id[:id_w] if len(s.strategy_id) > id_w else s.strategy_id
+        sid = s.deployment_id[:id_w] if len(s.deployment_id) > id_w else s.deployment_id
         value = s.total_value_usd if s.total_value_usd is not None else "-"
         pnl = s.pnl_24h_usd if s.pnl_24h_usd is not None else "-"
         chain_display = ",".join(s.chains) if s.is_multi_chain else (s.chain or "-")
@@ -254,7 +255,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
 
 @click.command("status")
 @click.option(
-    "--strategy-id",
+    "--deployment-id",
     "-s",
     required=True,
     help="Strategy instance ID.",
@@ -272,7 +273,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
 @_add_gateway_options
-def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host, gateway_port):
+def strategy_status(deployment_id, timeline, timeline_limit, as_json, gateway_host, gateway_port):
     """Get detailed status of a strategy.
 
     Shows strategy summary, position details, chain health, and recent
@@ -291,7 +292,7 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
     client = _make_client(gateway_host, gateway_port)
     details = _fetch_strategy_details(
         client,
-        strategy_id,
+        deployment_id,
         include_timeline=timeline,
         timeline_limit=timeline_limit,
     )
@@ -339,13 +340,13 @@ def _parse_since_value(since: str | None) -> int:
         sys.exit(1)
 
 
-def _fetch_strategy_timeline(client, strategy_id: str, limit: int, event_type: str | None, since_ts: int):
+def _fetch_strategy_timeline(client, deployment_id: str, limit: int, event_type: str | None, since_ts: int):
     """Fetch the timeline RPC, exit 1 on RPC error, disconnect in finally."""
     from almanak.gateway.proto import gateway_pb2
 
     try:
         request = gateway_pb2.GetTimelineRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             limit=limit,
             event_type_filter=event_type.upper() if event_type else "",
             since_timestamp=since_ts,
@@ -409,10 +410,10 @@ def _print_log_event(evt) -> None:
     click.echo()
 
 
-def _render_logs_pretty(strategy_id: str, event_type: str | None, events, has_more: bool) -> None:
+def _render_logs_pretty(deployment_id: str, event_type: str | None, events, has_more: bool) -> None:
     """Emit the full pretty (human) timeline output."""
     click.echo()
-    click.echo(click.style(f"Timeline: {strategy_id}", bold=True, fg="cyan"))
+    click.echo(click.style(f"Timeline: {deployment_id}", bold=True, fg="cyan"))
     if event_type:
         click.echo(f"  Filter: {event_type}")
     click.echo()
@@ -426,7 +427,7 @@ def _render_logs_pretty(strategy_id: str, event_type: str | None, events, has_mo
 
 @click.command("logs")
 @click.option(
-    "--strategy-id",
+    "--deployment-id",
     "-s",
     required=True,
     help="Strategy instance ID.",
@@ -452,7 +453,7 @@ def _render_logs_pretty(strategy_id: str, event_type: str | None, events, has_mo
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
 @_add_gateway_options
-def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, gateway_port):
+def strategy_logs(deployment_id, limit, event_type, since, as_json, gateway_host, gateway_port):
     """Show timeline events for a strategy.
 
     Displays the event log (trades, errors, state changes) from the
@@ -470,18 +471,18 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
     since_ts = _parse_since_value(since)
 
     client = _make_client(gateway_host, gateway_port)
-    response = _fetch_strategy_timeline(client, strategy_id, limit, event_type, since_ts)
+    response = _fetch_strategy_timeline(client, deployment_id, limit, event_type, since_ts)
     events = list(response.events)
 
     if not events:
-        click.echo("[]" if as_json else f"No events found for strategy: {strategy_id}")
+        click.echo("[]" if as_json else f"No events found for strategy: {deployment_id}")
         return
 
     if as_json:
         click.echo(_render_logs_as_json(events))
         return
 
-    _render_logs_pretty(strategy_id, event_type, events, response.has_more)
+    _render_logs_pretty(deployment_id, event_type, events, response.has_more)
 
 
 # =============================================================================
@@ -489,8 +490,9 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
 # =============================================================================
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("pause")
-@click.option("--strategy-id", "-s", required=True, help="Strategy instance ID.")
+@click.option("--deployment-id", "-s", required=True, help="Strategy instance ID.")
 @click.option("--reason", required=True, help="Reason for pause (required for audit trail).")
 @click.option(
     "--wait",
@@ -500,7 +502,7 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
 )
 @click.option("--timeout", default=60, type=int, help="Seconds to wait (default 60).")
 @_add_gateway_options
-def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_port):
+def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_port):
     """Suspend a strategy's iteration loop without closing positions.
 
     The strategy completes its current iteration, then enters a suspended state.
@@ -524,7 +526,7 @@ def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_por
         pre_status = ""
         if wait:
             try:
-                pre_req = gateway_pb2.GetStrategyDetailsRequest(strategy_id=strategy_id)
+                pre_req = gateway_pb2.GetStrategyDetailsRequest(deployment_id=deployment_id)
                 pre_details = client.dashboard.GetStrategyDetails(pre_req)
                 pre_status = pre_details.summary.status
             except Exception:
@@ -532,7 +534,7 @@ def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_por
 
         try:
             request = gateway_pb2.ExecuteActionRequest(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 action="PAUSE",
                 reason=reason,
             )
@@ -545,21 +547,21 @@ def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_por
             click.secho(f"Pause failed: {response.error}", fg="red", err=True)
             sys.exit(1)
 
-        click.echo(f"Pause command issued for {strategy_id} (action_id: {response.action_id})")
+        click.echo(f"Pause command issued for {deployment_id} (action_id: {response.action_id})")
 
         if wait:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
-                    det_req = gateway_pb2.GetStrategyDetailsRequest(strategy_id=strategy_id)
+                    det_req = gateway_pb2.GetStrategyDetailsRequest(deployment_id=deployment_id)
                     details = client.dashboard.GetStrategyDetails(det_req)
                     if details.summary.status == "PAUSED" and pre_status != "PAUSED":
-                        click.secho(f"Strategy {strategy_id} is now PAUSED.", fg="yellow")
+                        click.secho(f"Strategy {deployment_id} is now PAUSED.", fg="yellow")
                         return
                 except Exception as exc:
                     click.secho(f"Poll error: {exc}", fg="red", err=True)
                 time.sleep(2)
-            click.secho(f"Timed out waiting for {strategy_id} to reach PAUSED status.", fg="red", err=True)
+            click.secho(f"Timed out waiting for {deployment_id} to reach PAUSED status.", fg="red", err=True)
             sys.exit(1)
     finally:
         client.disconnect()
@@ -571,10 +573,10 @@ def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_por
 
 
 @click.command("resume")
-@click.option("--strategy-id", "-s", required=True, help="Strategy instance ID.")
+@click.option("--deployment-id", "-s", required=True, help="Strategy instance ID.")
 @click.option("--reason", required=True, help="Reason for resume (required for audit trail).")
 @_add_gateway_options
-def strategy_resume(strategy_id, reason, gateway_host, gateway_port):
+def strategy_resume(deployment_id, reason, gateway_host, gateway_port):
     """Resume a previously paused strategy.
 
     Sends a RESUME command to the gateway, which the strategy runner picks up
@@ -590,7 +592,7 @@ def strategy_resume(strategy_id, reason, gateway_host, gateway_port):
     client = _make_client(gateway_host, gateway_port)
     try:
         request = gateway_pb2.ExecuteActionRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             action="RESUME",
             reason=reason,
         )
@@ -600,7 +602,7 @@ def strategy_resume(strategy_id, reason, gateway_host, gateway_port):
             click.secho(f"Resume failed: {response.error}", fg="red", err=True)
             sys.exit(1)
 
-        click.secho(f"Resume command issued for {strategy_id} (action_id: {response.action_id})", fg="green")
+        click.secho(f"Resume command issued for {deployment_id} (action_id: {response.action_id})", fg="green")
     except SystemExit:
         raise
     except Exception as e:

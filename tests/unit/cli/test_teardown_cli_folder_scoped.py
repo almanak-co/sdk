@@ -45,7 +45,8 @@ from almanak.framework.teardown import (
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Clear every env var the resolver consults."""
     for var in (
-        "AGENT_ID",
+        "ALMANAK_IS_HOSTED",
+        "ALMANAK_DEPLOYMENT_ID",
         "ALMANAK_STATE_DB",
         "ALMANAK_STRATEGY_FOLDER",
         "ALMANAK_GATEWAY_DB_PATH",
@@ -105,7 +106,7 @@ def test_t_3835_2_status_reads_from_d_flag_folder(clean_env, strategy_folder: Pa
     mgr = TeardownStateManager(db_path=str(db_file))
     mgr.create_request(
         TeardownRequest(
-            strategy_id="TestStrat:def",
+            deployment_id="TestStrat:def",
             mode=TeardownMode.SOFT,
             asset_policy=TeardownAssetPolicy.TARGET_TOKEN,
             target_token="USDC",
@@ -121,7 +122,7 @@ def test_t_3835_2_status_reads_from_d_flag_folder(clean_env, strategy_folder: Pa
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
-    assert payload["strategy_id"] == "TestStrat:def"
+    assert payload["deployment_id"] == "TestStrat:def"
 
 
 def test_t_3835_3_list_uses_d_flag_db(clean_env, strategy_folder: Path) -> None:
@@ -130,7 +131,7 @@ def test_t_3835_3_list_uses_d_flag_db(clean_env, strategy_folder: Path) -> None:
     mgr = TeardownStateManager(db_path=str(db_file))
     mgr.create_request(
         TeardownRequest(
-            strategy_id="StratA:1",
+            deployment_id="StratA:1",
             mode=TeardownMode.SOFT,
             asset_policy=TeardownAssetPolicy.TARGET_TOKEN,
             target_token="USDC",
@@ -146,7 +147,7 @@ def test_t_3835_3_list_uses_d_flag_db(clean_env, strategy_folder: Path) -> None:
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
-    assert {row["strategy_id"] for row in payload} == {"StratA:1"}
+    assert {row["deployment_id"] for row in payload} == {"StratA:1"}
 
 
 def test_t_3835_4_cancel_targets_d_flag_db(clean_env, strategy_folder: Path) -> None:
@@ -155,7 +156,7 @@ def test_t_3835_4_cancel_targets_d_flag_db(clean_env, strategy_folder: Path) -> 
     mgr = TeardownStateManager(db_path=str(db_file))
     mgr.create_request(
         TeardownRequest(
-            strategy_id="StratC:1",
+            deployment_id="StratC:1",
             mode=TeardownMode.SOFT,
             asset_policy=TeardownAssetPolicy.TARGET_TOKEN,
             target_token="USDC",
@@ -213,9 +214,7 @@ def test_t_3835_6_hard_fails_when_no_folder_resolves(
     assert "--working-dir" in result.output
 
 
-def test_t_3835_7_hard_fails_when_d_path_lacks_strategy_files(
-    clean_env, tmp_path: Path
-) -> None:
+def test_t_3835_7_hard_fails_when_d_path_lacks_strategy_files(clean_env, tmp_path: Path) -> None:
     """T-3835-7: -d points at a real dir but it has no config.json/strategy.py."""
     junk = tmp_path / "junk"
     junk.mkdir()
@@ -255,7 +254,7 @@ def test_t_3835_8_env_var_resolution_is_honoured(
 # ---------------------------------------------------------------------------
 def _drive_runner_to_completion(
     db_file: Path,
-    strategy_id: str,
+    deployment_id: str,
     *,
     delay_per_step: float = 0.3,
     final_status: TeardownStatus = TeardownStatus.COMPLETED,
@@ -267,7 +266,7 @@ def _drive_runner_to_completion(
     # thread isn't racing the CLI's confirmation/import overhead.
     req = None
     for _ in range(20):  # ~2s max wait
-        req = mgr.get_active_request(strategy_id)
+        req = mgr.get_active_request(deployment_id)
         if req is not None:
             break
         time.sleep(0.1)
@@ -294,12 +293,10 @@ def _drive_runner_to_completion(
     mgr.update_request(req)
 
 
-def test_t_3835_9_wait_returns_zero_on_completion(
-    clean_env, strategy_folder: Path
-) -> None:
+def test_t_3835_9_wait_returns_zero_on_completion(clean_env, strategy_folder: Path) -> None:
     """T-3835-9: --wait blocks through the state ladder and returns 0 on COMPLETED."""
     db_file = strategy_folder / "almanak_state.db"
-    strategy_id = "WaitStrat:1"
+    deployment_id = "WaitStrat:1"
 
     # Pre-create the DB by writing a request synchronously, then immediately
     # spawn the simulated runner thread before the CLI starts polling. The CLI
@@ -309,7 +306,7 @@ def test_t_3835_9_wait_returns_zero_on_completion(
         target=_drive_runner_to_completion,
         kwargs={
             "db_file": db_file,
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "delay_per_step": 0.3,
         },
         daemon=True,
@@ -324,7 +321,7 @@ def test_t_3835_9_wait_returns_zero_on_completion(
             "-d",
             str(strategy_folder),
             "-s",
-            strategy_id,
+            deployment_id,
             "--mode",
             "graceful",
             "--force",
@@ -342,18 +339,16 @@ def test_t_3835_9_wait_returns_zero_on_completion(
     assert "completed" in out.lower()
 
 
-def test_t_3835_10_wait_returns_nonzero_on_failure(
-    clean_env, strategy_folder: Path
-) -> None:
+def test_t_3835_10_wait_returns_nonzero_on_failure(clean_env, strategy_folder: Path) -> None:
     """T-3835-10: --wait returns non-zero when the runner reports FAILED."""
     db_file = strategy_folder / "almanak_state.db"
-    strategy_id = "WaitFail:1"
+    deployment_id = "WaitFail:1"
 
     runner_thread = threading.Thread(
         target=_drive_runner_to_completion,
         kwargs={
             "db_file": db_file,
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "delay_per_step": 0.3,
             "final_status": TeardownStatus.FAILED,
         },
@@ -369,7 +364,7 @@ def test_t_3835_10_wait_returns_nonzero_on_failure(
             "-d",
             str(strategy_folder),
             "-s",
-            strategy_id,
+            deployment_id,
             "--force",
             "--wait",
             "--timeout",
@@ -382,9 +377,7 @@ def test_t_3835_10_wait_returns_nonzero_on_failure(
     assert "FAILED" in result.output
 
 
-def test_t_3835_11_wait_times_out_when_no_runner(
-    clean_env, strategy_folder: Path
-) -> None:
+def test_t_3835_11_wait_times_out_when_no_runner(clean_env, strategy_folder: Path) -> None:
     """T-3835-11: --wait --timeout 3 with no runner exits non-zero with the hint."""
     cli_runner = CliRunner()
     result = cli_runner.invoke(
@@ -406,9 +399,7 @@ def test_t_3835_11_wait_times_out_when_no_runner(
     assert "is the runner running" in result.output.lower()
 
 
-def test_t_3835_12_wait_off_is_fire_and_forget(
-    clean_env, strategy_folder: Path
-) -> None:
+def test_t_3835_12_wait_off_is_fire_and_forget(clean_env, strategy_folder: Path) -> None:
     """T-3835-12: default behaviour (no --wait) returns immediately with exit 0."""
     cli_runner = CliRunner()
     result = cli_runner.invoke(
@@ -438,7 +429,7 @@ def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
     """Ctrl-C during --wait exits 130 with a yellow info line, not a traceback."""
     from almanak.framework.cli import teardown as teardown_module
 
-    strategy_id = "InterruptStrat:1"
+    deployment_id = "InterruptStrat:1"
 
     # Pre-create a pending row so the wait loop has something to read on the
     # first poll. Then make the SECOND poll raise KeyboardInterrupt to
@@ -447,7 +438,7 @@ def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
     pre_mgr = TeardownStateManager(db_path=str(db_file))
     pre_mgr.create_request(
         TeardownRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=TeardownMode.SOFT,
             asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
             requested_by="test",
@@ -475,7 +466,7 @@ def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
             "-d",
             str(strategy_folder),
             "-s",
-            strategy_id,
+            deployment_id,
             "--force",
             "--wait",
             "--timeout",
@@ -491,7 +482,7 @@ def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
     # the operator can pick up status from a different cwd after the
     # ALMANAK_STRATEGY_FOLDER process-export dies with this CLI process.
     assert f"-d {strategy_folder}" in result.output
-    assert f"-s {strategy_id}" in result.output
+    assert f"-s {deployment_id}" in result.output
     # No traceback bled through.
     assert "Traceback" not in result.output
 
@@ -499,9 +490,7 @@ def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
 # ---------------------------------------------------------------------------
 # VIB-3838: execute -d routes through the canonical resolver
 # ---------------------------------------------------------------------------
-def test_t_3838_1_execute_rejects_non_strategy_folder(
-    clean_env, tmp_path: Path
-) -> None:
+def test_t_3838_1_execute_rejects_non_strategy_folder(clean_env, tmp_path: Path) -> None:
     """`teardown execute -d <real-but-non-strategy-dir>` hard-fails with the
     canonical "does not look like a strategy folder" message — not a noisier
     failure later in strategy loading.

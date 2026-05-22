@@ -39,7 +39,7 @@ from almanak.framework.accounting.models import LendingEventType
 _WALLET = "0xa11ce0000000000000000000000000000000a11ce"
 _MARKET_ID = "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca66322ec41"
 _DEPLOYMENT_ID = "dep-1"
-_STRATEGY_ID = "strat-1"
+_DEPLOYMENT_ID = "strat-1"
 _CYCLE_ID = "cycle-1"
 
 
@@ -53,7 +53,7 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": ledger_entry_id,
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": _WALLET,
@@ -79,7 +79,7 @@ def _make_ledger_row(
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",

@@ -420,7 +420,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Phase: {old.upper()} -> {new.upper()}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "old_phase": old,
                     "new_phase": new,
@@ -500,7 +500,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Supplied {amount} sUSDe to Morpho Blue",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "action": "supply_collateral",
                         "token": "sUSDe",
@@ -532,7 +532,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Borrowed {amount} USDC from Morpho Blue",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "action": "borrow",
                         "token": "USDC",
@@ -652,7 +652,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -90,7 +90,7 @@ class TestAnvilFundingConfigLoading:
 
     def test_no_anvil_funding_key(self):
         """Config without anvil_funding key returns empty dict."""
-        config = {"chain": "base", "strategy_id": "test"}
+        config = {"chain": "base", "deployment_id": "test"}
         anvil_funding = config.get("anvil_funding", {})
         assert anvil_funding == {}
 

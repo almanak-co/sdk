@@ -57,7 +57,7 @@ class EvmExecutionStrategy(ChainExecutionStrategy):
 
         result = await self._orchestrator.execute(
             action_bundle=bundle,
-            strategy_id=ctx.get("strategy_id", ""),
+            deployment_id=ctx.get("deployment_id", ""),
             intent_id=ctx.get("intent_id", ""),
             dry_run=ctx.get("dry_run", False),
             simulation_enabled=ctx.get("simulation_enabled", True),

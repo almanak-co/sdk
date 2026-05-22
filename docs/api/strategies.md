@@ -40,7 +40,7 @@ class MyStrategy(IntentStrategy):
             PositionInfo, PositionType, TeardownPositionSummary,
         )
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "my_strategy"),
+            deployment_id=getattr(self, "deployment_id", "my_strategy"),
             timestamp=datetime.now(UTC),
             positions=[
                 PositionInfo(

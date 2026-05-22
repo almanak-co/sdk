@@ -12,12 +12,12 @@ e2e level by the §7 D4.3b SQL count.
 Distinguishability (the asymmetric drift-guard):
 
 - `_stamp_snapshot_identity` is 3-step (`runner.deployment_id →
-  snapshot.deployment_id → snapshot.strategy_id`).
+  snapshot.deployment_id → snapshot.deployment_id`).
 - `_build_metrics_for_snapshot` is 2-step (`runner.deployment_id →
-  snapshot.strategy_id`, no intermediate `snapshot.deployment_id`).
+  snapshot.deployment_id`, no intermediate `snapshot.deployment_id`).
 
 Drift guard: snapshot with non-empty `snapshot.deployment_id` + empty
-`runner.deployment_id` → snapshot's value in helper #1, `strategy_id` in
+`runner.deployment_id` → snapshot's value in helper #1, `deployment_id` in
 helper #2. A future commit that unifies / accidentally diverges the two
 chains gets caught.
 """
@@ -55,7 +55,6 @@ def _runner(
     if state_manager_returns_existing:
         from almanak.framework.portfolio import PortfolioMetrics
         existing = PortfolioMetrics(
-            strategy_id="demo",
             timestamp=datetime.now(UTC),
             initial_value_usd=Decimal("100"),
             total_value_usd=Decimal("100"),
@@ -73,13 +72,11 @@ def _runner(
 
 def _snapshot(
     *,
-    strategy_id: str = "demo",
-    deployment_id: str = "",
+    deployment_id: str = "demo",
     total_value_usd: Decimal = Decimal("100"),
 ):
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=strategy_id,
         total_value_usd=total_value_usd,
         available_cash_usd=total_value_usd,
         value_confidence=ValueConfidence.HIGH,
@@ -130,36 +127,30 @@ def test_snapshot_helper_3_step_fallback() -> None:
     assert snapshot.deployment_id == "snapshot-pre-stamped"
 
 
-def test_snapshot_helper_falls_back_to_strategy_id() -> None:
-    """3-step chain final fallback: empty runner + empty snapshot → strategy_id."""
+def test_snapshot_helper_does_not_fallback_when_identity_is_empty() -> None:
+    """Empty runner + empty snapshot stays empty; deployment_id is resolved at boot."""
     runner = _runner(deployment_id="")
-    snapshot = _snapshot(strategy_id="my-strat", deployment_id="")
+    snapshot = _snapshot(deployment_id="")
     with patch(
         "almanak.framework.runner.strategy_runner.derive_execution_mode_from_config",
         return_value=MagicMock(value="paper"),
     ):
         _stamp_snapshot_identity(runner, snapshot)
-    assert snapshot.deployment_id == "my-strat"
+    assert snapshot.deployment_id == ""
 
 
 @pytest.mark.asyncio
-async def test_metrics_helper_2_step_falls_to_strategy_id_skipping_snapshot_deployment_id() -> None:
-    """Distinguishability — the 2-step chain: snapshot.deployment_id is non-empty but
-    metrics still falls through to strategy_id (does NOT pick up the snapshot's value).
-    """
+async def test_metrics_helper_uses_snapshot_deployment_id_when_runner_identity_is_empty() -> None:
+    """No legacy fallback: metrics uses the already-stamped snapshot deployment_id."""
     runner = _runner(deployment_id="")
-    snapshot = _snapshot(strategy_id="my-strat", deployment_id="snapshot-pre-stamped")
+    snapshot = _snapshot(deployment_id="snapshot-pre-stamped")
     with patch(
         "almanak.framework.runner.strategy_runner.derive_execution_mode_from_config",
         return_value=MagicMock(value="paper"),
     ):
         metrics = await _build_metrics_for_snapshot(runner, "my-strat", snapshot)
-    # 2-step chain: runner.deployment_id ('') → snapshot.strategy_id ('my-strat').
-    # The intermediate snapshot.deployment_id ('snapshot-pre-stamped') is INTENTIONALLY
-    # skipped — different from the snapshot helper. A unification commit would
-    # silently flip this to "snapshot-pre-stamped".
     assert metrics is not None
-    assert metrics.deployment_id == "my-strat"
+    assert metrics.deployment_id == "snapshot-pre-stamped"
 
 
 # --- Existing-row path on metrics helper ------------------------------------

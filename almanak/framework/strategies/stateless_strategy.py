@@ -22,7 +22,7 @@ class StatelessStrategy(IntentStrategy):
         """Return empty position summary (no positions held)."""
         from ..teardown.models import TeardownPositionSummary
 
-        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+        return TeardownPositionSummary.empty(self._require_deployment_id("get_open_positions"))
 
     def generate_teardown_intents(self, mode=None, market=None):
         """Return empty list (no positions to close)."""

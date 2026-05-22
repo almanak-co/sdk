@@ -21,7 +21,7 @@ class TestLedgerEntry:
     def test_to_dict_round_trip(self):
         entry = LedgerEntry(
             cycle_id="cycle-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             intent_type="SWAP",
             token_in="USDC",
             amount_in="1000",
@@ -38,7 +38,7 @@ class TestLedgerEntry:
         d = entry.to_dict()
         restored = LedgerEntry.from_dict(d)
         assert restored.cycle_id == "cycle-1"
-        assert restored.strategy_id == "strat-1"
+        assert restored.deployment_id == "strat-1"
         assert restored.intent_type == "SWAP"
         assert restored.token_in == "USDC"
         assert restored.token_out == "ETH"
@@ -53,8 +53,8 @@ class TestLedgerEntry:
         assert restored.success is True
 
     def test_from_dict_missing_fields_uses_defaults(self):
-        entry = LedgerEntry.from_dict({"strategy_id": "s1"})
-        assert entry.strategy_id == "s1"
+        entry = LedgerEntry.from_dict({"deployment_id": "s1"})
+        assert entry.deployment_id == "s1"
         assert entry.intent_type == ""
         assert entry.success is True
         assert entry.error == ""
@@ -86,7 +86,7 @@ class TestBuildLedgerEntry:
         )
 
         entry = build_ledger_entry(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-1",
             intent=intent,
             result=result,
@@ -122,7 +122,7 @@ class TestBuildLedgerEntry:
         )
 
         entry = build_ledger_entry(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-2",
             intent=intent,
             result=result,
@@ -150,7 +150,7 @@ class TestBuildLedgerEntry:
         )
 
         entry = build_ledger_entry(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-3",
             intent=intent,
             result=result,
@@ -167,7 +167,7 @@ class TestBuildLedgerEntry:
             protocol="",
         )
         entry = build_ledger_entry(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="",
             intent=intent,
             result=None,

@@ -92,7 +92,7 @@ class DashboardAPIClient:
 
     Example usage in custom dashboard (ui.py):
         def render_custom_dashboard(
-            strategy_id: str,
+            deployment_id: str,
             strategy_config: dict,
             api_client: DashboardAPIClient,  # This client
             session_state: dict,
@@ -107,15 +107,15 @@ class DashboardAPIClient:
             eth_price = api_client.get_price("ETH", "USD")
     """
 
-    def __init__(self, gateway_client: Any, strategy_id: str):
+    def __init__(self, gateway_client: Any, deployment_id: str):
         """Initialize the API client.
 
         Args:
             gateway_client: The underlying GatewayDashboardClient
-            strategy_id: The strategy this dashboard is for (for scoping)
+            deployment_id: The strategy this dashboard is for (for scoping)
         """
         self._client = gateway_client
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         # Cache of the strategy's configured chain, resolved lazily on first
         # chain-omitted price/balance call. Config is immutable for a given
         # strategy session, so there is no need to re-fetch on every chart
@@ -124,9 +124,9 @@ class DashboardAPIClient:
         self._chain_cache: str | None | _Sentinel = _UNSET
 
     @property
-    def strategy_id(self) -> str:
-        """Get the strategy ID this client is scoped to."""
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        """Get the deployment ID this client is scoped to."""
+        return self._deployment_id
 
     # =========================================================================
     # Strategy Data (scoped to current strategy)
@@ -143,7 +143,7 @@ class DashboardAPIClient:
             Strategy state as dictionary.
         """
         try:
-            return self._client.get_strategy_state(self._strategy_id, fields)
+            return self._client.get_strategy_state(self._deployment_id, fields)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get strategy state: {e}")
             return {}
@@ -164,7 +164,7 @@ class DashboardAPIClient:
         """
         try:
             events = self._client.get_timeline(
-                self._strategy_id,
+                self._deployment_id,
                 limit=limit,
                 event_type_filter=event_type,
             )
@@ -180,7 +180,7 @@ class DashboardAPIClient:
             Strategy configuration as dictionary.
         """
         try:
-            return self._client.get_strategy_config(self._strategy_id)
+            return self._client.get_strategy_config(self._deployment_id)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get strategy config: {e}")
             return {}
@@ -192,7 +192,7 @@ class DashboardAPIClient:
             Position data including balances, LP positions, etc.
         """
         try:
-            details = self._client.get_strategy_details(self._strategy_id)
+            details = self._client.get_strategy_details(self._deployment_id)
             return self._position_to_dict(details.position)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get position: {e}")
@@ -205,7 +205,7 @@ class DashboardAPIClient:
             Summary data including status, value, PnL, etc.
         """
         try:
-            details = self._client.get_strategy_details(self._strategy_id)
+            details = self._client.get_strategy_details(self._deployment_id)
             return self._summary_to_dict(details.summary)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get summary: {e}")
@@ -227,7 +227,7 @@ class DashboardAPIClient:
             shape on failure.
         """
         try:
-            return self._client.get_trade_tape(self._strategy_id, limit=limit)
+            return self._client.get_trade_tape(self._deployment_id, limit=limit)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get trade tape: {e}")
             from almanak.framework.dashboard.gateway_client import TradeTapeResponse
@@ -586,7 +586,7 @@ class DashboardAPIClient:
                 effective_types = list(position_types)
             response = self._client._client.state.GetPositionEventsFiltered(
                 gateway_pb2.GetPositionEventsFilteredRequest(
-                    deployment_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     position_types=effective_types,
                 )
             )
@@ -627,8 +627,7 @@ class DashboardAPIClient:
 
             response = self._client._client.state.GetPositionHistory(
                 gateway_pb2.GetPositionHistoryRequest(
-                    strategy_id=self._strategy_id,
-                    deployment_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     position_id=position_id,
                 )
             )
@@ -656,7 +655,7 @@ class DashboardAPIClient:
 
         try:
             return self._client.execute_action(
-                self._strategy_id,
+                self._deployment_id,
                 action="PAUSE",
                 reason=reason,
             )
@@ -675,7 +674,7 @@ class DashboardAPIClient:
         """
         try:
             return self._client.execute_action(
-                self._strategy_id,
+                self._deployment_id,
                 action="RESUME",
                 reason=reason,
             )
@@ -750,7 +749,7 @@ class DashboardAPIClient:
             return {}
 
         return {
-            "strategy_id": summary.strategy_id if hasattr(summary, "strategy_id") else self._strategy_id,
+            "deployment_id": summary.deployment_id if hasattr(summary, "deployment_id") else self._deployment_id,
             "name": summary.name if hasattr(summary, "name") else "",
             "status": summary.status if hasattr(summary, "status") else "UNKNOWN",
             "chain": summary.chain if hasattr(summary, "chain") else "",
@@ -762,7 +761,7 @@ class DashboardAPIClient:
         }
 
 
-def create_api_client(gateway_client: Any, strategy_id: str) -> DashboardAPIClient:
+def create_api_client(gateway_client: Any, deployment_id: str) -> DashboardAPIClient:
     """Create API client for custom dashboard.
 
     This is the factory function used by the renderer to create
@@ -770,9 +769,9 @@ def create_api_client(gateway_client: Any, strategy_id: str) -> DashboardAPIClie
 
     Args:
         gateway_client: The GatewayDashboardClient instance
-        strategy_id: Strategy this dashboard is for
+        deployment_id: Strategy this dashboard is for
 
     Returns:
         DashboardAPIClient for use in custom dashboard
     """
-    return DashboardAPIClient(gateway_client, strategy_id)
+    return DashboardAPIClient(gateway_client, deployment_id)

@@ -138,7 +138,6 @@ class TestBuildPendlePtBuyAccountingEvent:
             intent=intent,
             result=result,
             deployment_id="dep-1",
-            strategy_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain="arbitrum",
@@ -197,7 +196,7 @@ class TestBuildPendlePtBuyAccountingEvent:
         result.extracted_data = {}
         ev = build_pendle_pt_buy_accounting_event(
             intent=intent, result=result,
-            deployment_id="d", strategy_id="s", cycle_id="c",
+            deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
         )
         assert ev is None

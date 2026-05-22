@@ -214,7 +214,7 @@ async def _open_v4_position(
 
 def _execution_context(wallet: str) -> ExecutionContext:
     return ExecutionContext(
-        strategy_id="layer5-uniswap-v4-lp",
+        deployment_id="layer5-uniswap-v4-lp",
         chain=CHAIN_NAME,
         wallet_address=wallet,
         protocol="uniswap_v4",
@@ -243,7 +243,6 @@ def _to_human(raw: int | None, decimals: int) -> Decimal | None:
 
 def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
     assert row["deployment_id"] == "layer5-intent-test"
-    assert row["strategy_id"] == "layer5-intent-test"
     assert row["cycle_id"] == "layer5-cycle"
     assert row["execution_mode"] == "paper"
     assert row["event_type"] == event_type

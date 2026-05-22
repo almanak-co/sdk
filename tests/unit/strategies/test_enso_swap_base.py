@@ -25,7 +25,7 @@ def strategy():
     strat.config = {}
     strat._chain = "base"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-enso-rsi-base"
+    strat._deployment_id = "test-enso-rsi-base"
     strat.trade_size_usd = Decimal("3")
     strat.rsi_oversold = 30
     strat.rsi_overbought = 70

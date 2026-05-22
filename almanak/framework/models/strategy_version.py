@@ -11,7 +11,7 @@ Usage:
     from almanak.framework.models.strategy_version import StrategyVersion, VersionManager
 
     # Create a version manager
-    manager = VersionManager(strategy_id="my_strategy")
+    manager = VersionManager(deployment_id="my_strategy")
 
     # Deploy a new version
     version = manager.deploy_version(
@@ -121,8 +121,8 @@ class StrategyVersion:
     - Optional performance metrics over time
 
     Attributes:
-        version_id: Unique identifier for this version (format: "v_{strategy_id}_{timestamp}")
-        strategy_id: ID of the strategy this version belongs to
+        version_id: Unique identifier for this version (format: "v_{deployment_id}_{timestamp}")
+        deployment_id: ID of the strategy this version belongs to
         code_hash: Hash of the strategy code for integrity verification
         code_version: Semantic version string (e.g., "1.0.0", "2.1.3-beta")
         config_snapshot: Configuration values at deployment time
@@ -136,7 +136,7 @@ class StrategyVersion:
     """
 
     version_id: str
-    strategy_id: str
+    deployment_id: str
     code_hash: str
     code_version: str
     config_snapshot: dict[str, Any]
@@ -152,7 +152,7 @@ class StrategyVersion:
         """Convert the version to a dictionary for serialization."""
         return {
             "version_id": self.version_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "code_hash": self.code_hash,
             "code_version": self.code_version,
             "config_snapshot": self.config_snapshot,
@@ -181,7 +181,7 @@ class StrategyVersion:
 
         return cls(
             version_id=data["version_id"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             code_hash=data["code_hash"],
             code_version=data["code_version"],
             config_snapshot=data.get("config_snapshot", {}),
@@ -237,23 +237,23 @@ class VersionManager:
     uses an in-memory store for demonstration.
 
     Attributes:
-        strategy_id: The ID of the strategy being managed
+        deployment_id: The ID of the strategy being managed
     """
 
     def __init__(
         self,
-        strategy_id: str,
+        deployment_id: str,
         on_deploy: VersionDeployCallback | None = None,
         on_rollback: VersionRollbackCallback | None = None,
     ) -> None:
         """Initialize the version manager.
 
         Args:
-            strategy_id: ID of the strategy to manage versions for
+            deployment_id: ID of the strategy to manage versions for
             on_deploy: Optional callback called after successful deployment
             on_rollback: Optional callback called after successful rollback
         """
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self._versions: dict[str, StrategyVersion] = {}
         self._version_order: list[str] = []  # Ordered list of version IDs
         self._on_deploy = on_deploy
@@ -272,19 +272,19 @@ class VersionManager:
         return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def generate_version_id(strategy_id: str, timestamp: datetime | None = None) -> str:
+    def generate_version_id(deployment_id: str, timestamp: datetime | None = None) -> str:
         """Generate a unique version ID.
 
         Args:
-            strategy_id: ID of the strategy
+            deployment_id: ID of the strategy
             timestamp: Optional timestamp (defaults to now)
 
         Returns:
-            Version ID in format "v_{strategy_id}_{timestamp}"
+            Version ID in format "v_{deployment_id}_{timestamp}"
         """
         ts = timestamp or datetime.now(UTC)
         ts_str = ts.strftime("%Y%m%d%H%M%S")
-        return f"v_{strategy_id}_{ts_str}"
+        return f"v_{deployment_id}_{ts_str}"
 
     def get_active_version(self) -> StrategyVersion | None:
         """Get the currently active version.
@@ -308,6 +308,7 @@ class VersionManager:
         """
         return self._versions.get(version_id)
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def deploy_version(
         self,
         code_hash: str,
@@ -345,12 +346,12 @@ class VersionManager:
 
         # Generate version ID
         created_at = datetime.now(UTC)
-        version_id = self.generate_version_id(self.strategy_id, created_at)
+        version_id = self.generate_version_id(self.deployment_id, created_at)
 
         # Create the new version
         new_version = StrategyVersion(
             version_id=version_id,
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             code_hash=code_hash,
             code_version=code_version,
             config_snapshot=config_snapshot,
@@ -370,7 +371,7 @@ class VersionManager:
         self._version_order.append(version_id)
 
         logger.info(
-            f"Deployed version {version_id} for strategy {self.strategy_id} "
+            f"Deployed version {version_id} for strategy {self.deployment_id} "
             f"(code: {code_version}, hash: {code_hash[:8]}...)"
         )
 
@@ -387,6 +388,7 @@ class VersionManager:
             previous_version_id=previous_version_id,
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def rollback(self, version_id: str, rolled_back_by: str = "system") -> DeploymentResult:
         """Rollback to a previous version.
 
@@ -425,11 +427,11 @@ class VersionManager:
 
         # Create a new version for the rollback
         created_at = datetime.now(UTC)
-        rollback_version_id = self.generate_version_id(self.strategy_id, created_at)
+        rollback_version_id = self.generate_version_id(self.deployment_id, created_at)
 
         rollback_version = StrategyVersion(
             version_id=rollback_version_id,
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             code_hash=target_version.code_hash,
             code_version=target_version.code_version,
             config_snapshot=target_version.config_snapshot.copy(),
@@ -449,7 +451,7 @@ class VersionManager:
         self._version_order.append(rollback_version_id)
 
         logger.info(
-            f"Rolled back strategy {self.strategy_id} from {current_version.version_id} "
+            f"Rolled back strategy {self.deployment_id} from {current_version.version_id} "
             f"to {version_id} (new version: {rollback_version_id})"
         )
 
@@ -499,7 +501,7 @@ class VersionManager:
                     # Create a copy without metrics
                     version = StrategyVersion(
                         version_id=version.version_id,
-                        strategy_id=version.strategy_id,
+                        deployment_id=version.deployment_id,
                         code_hash=version.code_hash,
                         code_version=version.code_version,
                         config_snapshot=version.config_snapshot,
@@ -620,7 +622,7 @@ class VersionManager:
         """Clear all versions (for testing purposes)."""
         self._versions.clear()
         self._version_order.clear()
-        logger.warning(f"Cleared all versions for strategy {self.strategy_id}")
+        logger.warning(f"Cleared all versions for strategy {self.deployment_id}")
 
     def to_dict(self) -> dict[str, Any]:
         """Export the version manager state for persistence.
@@ -629,7 +631,7 @@ class VersionManager:
             Dictionary containing all version data
         """
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "versions": [v.to_dict() for v in self._versions.values()],
             "version_order": self._version_order,
         }
@@ -652,7 +654,7 @@ class VersionManager:
             VersionManager instance with restored state
         """
         manager = cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             on_deploy=on_deploy,
             on_rollback=on_rollback,
         )

@@ -19,7 +19,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 def _make_state() -> ExecutionPipelineState:
     bundle = ActionBundle(intent_type="SWAP", transactions=[])
     context = ExecutionContext(
-        strategy_id="s",
+        deployment_id="s",
         intent_id="i",
         chain="arbitrum",
         wallet_address="0x00",
@@ -46,7 +46,7 @@ class TestExecutionPipelineStateDefaults:
     def test_required_fields_are_set(self):
         state = _make_state()
         assert state.action_bundle.intent_type == "SWAP"
-        assert state.context.strategy_id == "s"
+        assert state.context.deployment_id == "s"
         assert state.result.phase == ExecutionPhase.VALIDATION
 
 

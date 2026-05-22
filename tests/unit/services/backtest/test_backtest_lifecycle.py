@@ -25,12 +25,12 @@ from almanak.services.backtest.services.job_manager import JobManager
 class TestSpecBacktestStrategy:
     """Tests for the StrategySpec -> BacktestableStrategy adapter."""
 
-    def test_strategy_id_from_spec(self):
+    def test_deployment_id_from_spec(self):
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(protocol="uniswap_v3", chain="arbitrum", action="swap")
         strategy = SpecBacktestStrategy(spec)
-        assert strategy.strategy_id == "spec_uniswap_v3_swap_arbitrum"
+        assert strategy.deployment_id == "spec_uniswap_v3_swap_arbitrum"
 
     def test_decide_swap_returns_swap_intent(self):
         from almanak.services.backtest.models import StrategySpec

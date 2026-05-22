@@ -67,7 +67,6 @@ class TestBuildPendleLpAccountingEvent:
             intent=intent,
             result=result,
             deployment_id="dep-1",
-            strategy_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain="arbitrum",
@@ -112,7 +111,7 @@ class TestBuildPendleLpAccountingEvent:
         result.extracted_data = {}
         ev = build_pendle_lp_accounting_event(
             intent=intent, result=result,
-            deployment_id="dep", strategy_id="s", cycle_id="c",
+            deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
         )
         assert ev is None
@@ -120,7 +119,6 @@ class TestBuildPendleLpAccountingEvent:
     def test_identity_fields_populated(self):
         ev = self._call("LP_OPEN")
         assert ev.identity.deployment_id == "dep-1"
-        assert ev.identity.strategy_id == "strat-1"
         assert ev.identity.chain == "arbitrum"
         assert ev.identity.ledger_entry_id == "led-001"
 
@@ -158,7 +156,7 @@ class TestBuildPendleLpAccountingEvent:
         result.extracted_data = {}
         ev = build_pendle_lp_accounting_event(
             intent=intent, result=result,
-            deployment_id="dep", strategy_id="s", cycle_id="c",
+            deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
         )
         assert ev is not None
@@ -296,7 +294,7 @@ class TestConfidenceAlwaysEstimated:
         result.extracted_data = extracted
         return build_pendle_lp_accounting_event(
             intent=intent, result=result,
-            deployment_id="dep", strategy_id="s", cycle_id="c",
+deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
         )
 

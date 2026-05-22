@@ -41,7 +41,7 @@ def _strip_schema_param(database_url: str) -> tuple[str, str | None]:
 POSTGRES_SCHEMA = """
 -- Lifecycle tables ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_state (
-    agent_id                TEXT PRIMARY KEY,
+    deployment_id           TEXT PRIMARY KEY,
     state                   TEXT NOT NULL,
     state_changed_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_heartbeat_at       TIMESTAMPTZ,
@@ -58,7 +58,7 @@ ALTER TABLE agent_state ADD COLUMN IF NOT EXISTS running_almanak_version TEXT;
 
 CREATE TABLE IF NOT EXISTS agent_command (
     id            BIGSERIAL PRIMARY KEY,
-    agent_id      TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
     command       TEXT NOT NULL,
     issued_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     issued_by     TEXT NOT NULL,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS agent_command (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_command_pending
-    ON agent_command (agent_id, id DESC)
+    ON agent_command (deployment_id, id DESC)
     WHERE processed_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_agent_state_heartbeat
@@ -74,10 +74,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_state_heartbeat
     WHERE state = 'RUNNING';
 
 -- Strategy state tables ----------------------------------------------------
--- Single row per agent with CAS (Compare-And-Swap) via version field.
+-- Single row per deployment with CAS (Compare-And-Swap) via version field.
 -- Each gateway serves exactly one strategy; no two strategies share a gateway.
 CREATE TABLE IF NOT EXISTS strategy_state (
-    agent_id        TEXT PRIMARY KEY,
+    deployment_id   TEXT PRIMARY KEY,
     version         BIGINT NOT NULL DEFAULT 1,
     state_data      JSONB NOT NULL,
     schema_version  INTEGER NOT NULL DEFAULT 1,
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS strategy_state (
 -- Portfolio snapshots table -------------------------------------------------
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id                 BIGSERIAL PRIMARY KEY,
-    agent_id           TEXT NOT NULL,
+    deployment_id      TEXT NOT NULL,
     timestamp          TIMESTAMPTZ NOT NULL,
     iteration_number   INTEGER DEFAULT 0,
     total_value_usd    TEXT NOT NULL,
@@ -101,25 +101,23 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_agent_time
-    ON portfolio_snapshots (agent_id, timestamp);
+    ON portfolio_snapshots (deployment_id, timestamp);
 
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_cleanup
     ON portfolio_snapshots (created_at);
 
 -- Migration: add Phase 4 columns to portfolio_snapshots
-ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS cycle_id TEXT DEFAULT '';
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
 
 -- Portfolio metrics table ---------------------------------------------------
 CREATE TABLE IF NOT EXISTS portfolio_metrics (
-    agent_id          TEXT PRIMARY KEY,
+    deployment_id     TEXT PRIMARY KEY,
     initial_value_usd TEXT NOT NULL,
     initial_timestamp TIMESTAMPTZ NOT NULL,
     deposits_usd      TEXT DEFAULT '0',
     withdrawals_usd   TEXT DEFAULT '0',
     gas_spent_usd     TEXT DEFAULT '0',
-    deployment_id     TEXT DEFAULT '',
     cycle_id          TEXT DEFAULT '',
     execution_mode    TEXT DEFAULT '',
     is_complete       BOOLEAN DEFAULT TRUE,
@@ -129,7 +127,6 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
 );
 
 -- Migration: add Phase 4 columns to portfolio_metrics
-ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS cycle_id TEXT DEFAULT '';
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS is_complete BOOLEAN DEFAULT TRUE;
@@ -139,7 +136,7 @@ ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS positions_json JSONB DEFA
 -- CLOB orders table ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS clob_orders (
     id                 BIGSERIAL PRIMARY KEY,
-    agent_id           TEXT NOT NULL,
+    deployment_id      TEXT NOT NULL,
     order_id           TEXT NOT NULL,
     market_id          TEXT NOT NULL,
     token_id           TEXT NOT NULL,
@@ -159,19 +156,19 @@ CREATE TABLE IF NOT EXISTS clob_orders (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_clob_orders_agent_order
-    ON clob_orders (agent_id, order_id);
+    ON clob_orders (deployment_id, order_id);
 
 CREATE INDEX IF NOT EXISTS idx_clob_orders_status
-    ON clob_orders (agent_id, status);
+    ON clob_orders (deployment_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_clob_orders_market
-    ON clob_orders (agent_id, market_id, status);
+    ON clob_orders (deployment_id, market_id, status);
 
 -- Timeline events table (dashboard data) ------------------------------------
 CREATE TABLE IF NOT EXISTS timeline_events (
     id            BIGSERIAL PRIMARY KEY,
     event_id      TEXT NOT NULL UNIQUE,
-    agent_id      TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
     timestamp     TIMESTAMPTZ NOT NULL,
     event_type    TEXT NOT NULL,
     description   TEXT,
@@ -184,10 +181,10 @@ CREATE TABLE IF NOT EXISTS timeline_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_time
-    ON timeline_events (agent_id, timestamp DESC);
+    ON timeline_events (deployment_id, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_type
-    ON timeline_events (agent_id, event_type);
+    ON timeline_events (deployment_id, event_type);
 
 CREATE INDEX IF NOT EXISTS idx_timeline_events_cycle_id
     ON timeline_events (cycle_id) WHERE cycle_id != '';
@@ -196,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_timeline_events_cycle_id
 CREATE TABLE IF NOT EXISTS transaction_ledger (
     id                TEXT PRIMARY KEY,
     cycle_id          TEXT NOT NULL,
-    agent_id          TEXT NOT NULL,
+    deployment_id     TEXT NOT NULL,
     timestamp         TIMESTAMPTZ NOT NULL,
     intent_type       TEXT NOT NULL,
     token_in          TEXT,
@@ -216,15 +213,14 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
 );
 
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_agent_time
-    ON transaction_ledger (agent_id, timestamp DESC);
+    ON transaction_ledger (deployment_id, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_cycle_id
     ON transaction_ledger (cycle_id);
 
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
-    ON transaction_ledger (agent_id, intent_type);
+    ON transaction_ledger (deployment_id, intent_type);
 
 -- Migration: add Phase 4 columns to transaction_ledger
-ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
 ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
 """

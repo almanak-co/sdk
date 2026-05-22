@@ -41,7 +41,7 @@ def _spinner_label(display_name: str | None) -> str:
 
 
 def _resolve_api_client(
-    strategy_id: str,
+    deployment_id: str,
     api_client: DashboardAPIClient | Any | None,
     gateway_client: Any | None,
 ) -> DashboardAPIClient | Any:
@@ -56,7 +56,7 @@ def _resolve_api_client(
 
     if gateway_client is not None:
         # Create a scoped API client for this dashboard
-        return create_api_client(gateway_client, strategy_id)
+        return create_api_client(gateway_client, deployment_id)
 
     # Try to get gateway client from the dashboard module
     try:
@@ -68,17 +68,17 @@ def _resolve_api_client(
         gw_client_inner = get_dashboard_client()
         if not gw_client_inner.is_connected:
             try:
-                logger.debug(f"Attempting to connect to gateway for {strategy_id}")
+                logger.debug(f"Attempting to connect to gateway for {deployment_id}")
                 gw_client_inner.connect()
             except GatewayConnectionError as conn_err:
-                logger.warning(f"Gateway connection failed for {strategy_id}: {conn_err}, using mock API client")
+                logger.warning(f"Gateway connection failed for {deployment_id}: {conn_err}, using mock API client")
                 return create_mock_api_client()
 
         if gw_client_inner.is_connected:
-            return create_api_client(gw_client_inner, strategy_id)
+            return create_api_client(gw_client_inner, deployment_id)
 
         # gw_client_inner exists but failed to connect for other reason
-        logger.warning(f"Gateway not connected, using mock API client for {strategy_id}")
+        logger.warning(f"Gateway not connected, using mock API client for {deployment_id}")
         return create_mock_api_client()
     except Exception as e:  # noqa: BLE001
         # Fallback to mock client on any unexpected error
@@ -88,7 +88,7 @@ def _resolve_api_client(
 
 def render_custom_dashboard_safe(
     dashboard_info: CustomDashboardInfo,
-    strategy_id: str | None = None,
+    deployment_id: str | None = None,
     strategy_config: dict | None = None,
     api_client: DashboardAPIClient | Any | None = None,
     gateway_client: Any | None = None,
@@ -101,7 +101,7 @@ def render_custom_dashboard_safe(
 
     Args:
         dashboard_info: Dashboard metadata from discovery
-        strategy_id: Currently selected strategy ID
+        deployment_id: Currently selected deployment ID
         strategy_config: Strategy configuration dictionary
         api_client: DashboardAPIClient instance (preferred) or legacy API client
         gateway_client: GatewayDashboardClient for creating api_client if not provided
@@ -111,8 +111,8 @@ def render_custom_dashboard_safe(
         True if rendering succeeded, False if there was an error
     """
     # Provide defaults
-    if strategy_id is None:
-        strategy_id = dashboard_info.strategy_name
+    if deployment_id is None:
+        deployment_id = dashboard_info.strategy_name
 
     if strategy_config is None:
         strategy_config = {}
@@ -121,7 +121,7 @@ def render_custom_dashboard_safe(
         session_state = {}
 
     # Create gateway-backed API client if not provided
-    api_client = _resolve_api_client(strategy_id, api_client, gateway_client)
+    api_client = _resolve_api_client(deployment_id, api_client, gateway_client)
 
     # Show loading indicator while importing.
     with st.spinner(f"Loading {_spinner_label(dashboard_info.display_name)}..."):
@@ -146,7 +146,7 @@ def render_custom_dashboard_safe(
     # Render the dashboard with error boundary
     try:
         render_func(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             strategy_config=strategy_config,
             api_client=api_client,
             session_state=session_state,
@@ -195,7 +195,7 @@ def _render_interface_error(dashboard_info: CustomDashboardInfo, error_msg: str)
 
     ```python
     def render_custom_dashboard(
-        strategy_id: str,
+        deployment_id: str,
         strategy_config: dict,
         api_client: APIClient,
         session_state: dict,
@@ -259,10 +259,10 @@ def create_mock_api_client():
     class MockAPIClient:
         """Mock API client for custom dashboards."""
 
-        def get_strategy_state(self, strategy_id: str) -> dict:
+        def get_strategy_state(self, deployment_id: str) -> dict:
             """Get current strategy state (mock)."""
             return {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "status": "RUNNING",
                 "total_value": 0.0,
                 "pnl": 0.0,
@@ -270,7 +270,7 @@ def create_mock_api_client():
 
         def get_timeline(
             self,
-            strategy_id: str,
+            deployment_id: str,
             limit: int = 50,
             event_type: str | None = None,
         ) -> list[dict]:
@@ -287,7 +287,7 @@ def create_mock_api_client():
                         events_data = json.load(f)
 
                     # Get events for this strategy or any if not found
-                    events = events_data.get(strategy_id, [])
+                    events = events_data.get(deployment_id, [])
                     if not events:
                         # Try to get events from any strategy
                         for _sid, evts in events_data.items():
@@ -312,11 +312,11 @@ def create_mock_api_client():
 
             return []
 
-        def pause_strategy(self, strategy_id: str, reason: str) -> dict:
+        def pause_strategy(self, deployment_id: str, reason: str) -> dict:
             """Pause a strategy (mock - not implemented)."""
             return {"status": "not_implemented", "message": "Mock API client"}
 
-        def resume_strategy(self, strategy_id: str) -> dict:
+        def resume_strategy(self, deployment_id: str) -> dict:
             """Resume a strategy (mock - not implemented)."""
             return {"status": "not_implemented", "message": "Mock API client"}
 

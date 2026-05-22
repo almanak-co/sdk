@@ -382,7 +382,7 @@ class RunIterationState:
     """
 
     strategy: "StrategyProtocol"
-    strategy_id: str
+    deployment_id: str
     start_time: datetime
     market: Any | None = None
     decide_result: Any | None = None
@@ -424,7 +424,7 @@ class SingleChainExecutionState:
     # typed as ``Any`` (not ``Any | None``) so mypy does not complain about
     # ``union-attr`` at read sites after init has run. The runtime default is
     # still ``None`` -- the contract is "readers only touch these after init".
-    strategy_id: str = ""
+    deployment_id: str = ""
     gateway_client: Any = None
     rpc_url: str | None = None
     price_oracle: dict | None = None
@@ -472,7 +472,7 @@ class BridgeWaitState:
     # Fields populated unconditionally by ``_init_bridge_wait_state`` use
     # ``Any`` (not ``Any | None``) so mypy does not warn about ``union-attr``
     # at read sites. The contract is "readers only touch these after init".
-    strategy_id: str = ""
+    deployment_id: str = ""
     first_intent: "AnyIntent | None" = None
     wallet_address: str = ""
     rpc_urls: dict[str, str] = field(default_factory=dict)
@@ -643,7 +643,7 @@ class StrategyRunner:
 
         # Track recovered session tx_hashes to prevent duplicates
         self._recovered_tx_hashes: set[str] = set()
-        self._recovered_nonces: dict[str, set[int]] = {}  # strategy_id -> set of nonces
+        self._recovered_nonces: dict[str, set[int]] = {}  # deployment_id -> set of nonces
 
         # Portfolio snapshot tracking
         self._last_snapshot_time: datetime | None = None
@@ -674,7 +674,7 @@ class StrategyRunner:
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
         # Track pause log state to avoid repetitive per-iteration info spam.
-        self._logged_paused_strategy_ids: set[str] = set()
+        self._logged_paused_deployment_ids: set[str] = set()
 
         # VIB-3418: FIFO basis store for lending interest attribution.
         # Lives for the runner's lifetime so BORROW lots are available when REPAY arrives.
@@ -684,7 +684,7 @@ class StrategyRunner:
         self._lending_basis_store = FIFOBasisStore()
 
         # VIB-3467: AccountingProcessor — drains accounting_outbox after each execution.
-        # Initialised with an empty deployment_id; updated in run_loop once strategy_id is known.
+        # Initialised with an empty deployment_id; updated in run_loop once deployment_id is known.
         from ..accounting.processor import AccountingProcessor
 
         self._accounting_processor = AccountingProcessor(
@@ -779,45 +779,45 @@ class StrategyRunner:
 
         register_with_gateway(self, strategy)
 
-    def _deregister_from_gateway(self, strategy_id: str) -> None:
+    def _deregister_from_gateway(self, deployment_id: str) -> None:
         from .runner_gateway import deregister_from_gateway
 
-        deregister_from_gateway(self, strategy_id)
+        deregister_from_gateway(self, deployment_id)
 
-    def _gateway_update_status(self, strategy_id: str, status: str) -> None:
+    def _gateway_update_status(self, deployment_id: str, status: str) -> None:
         from .runner_gateway import gateway_update_status
 
-        gateway_update_status(self, strategy_id, status)
+        gateway_update_status(self, deployment_id, status)
 
-    def _gateway_heartbeat(self, strategy_id: str, positions: list | None = None) -> None:
+    def _gateway_heartbeat(self, deployment_id: str, positions: list | None = None) -> None:
         from .runner_gateway import gateway_heartbeat
 
-        gateway_heartbeat(self, strategy_id, positions)
+        gateway_heartbeat(self, deployment_id, positions)
 
     def _collect_position_snapshot(self, strategy: "StrategyProtocol") -> list | None:
         from .runner_gateway import collect_position_snapshot
 
         return collect_position_snapshot(self, strategy)
 
-    def _lifecycle_write_state(self, agent_id: str, state: str, error_message: str | None = None) -> None:
+    def _lifecycle_write_state(self, deployment_id: str, state: str, error_message: str | None = None) -> None:
         from .runner_gateway import lifecycle_write_state
 
-        lifecycle_write_state(self, agent_id, state, error_message)
+        lifecycle_write_state(self, deployment_id, state, error_message)
 
-    def _lifecycle_heartbeat(self, agent_id: str) -> None:
+    def _lifecycle_heartbeat(self, deployment_id: str) -> None:
         from .runner_gateway import lifecycle_heartbeat
 
-        lifecycle_heartbeat(self, agent_id)
+        lifecycle_heartbeat(self, deployment_id)
 
-    def _lifecycle_poll_command(self, agent_id: str) -> str | None:
+    def _lifecycle_poll_command(self, deployment_id: str) -> str | None:
         from .runner_gateway import lifecycle_poll_command
 
-        return lifecycle_poll_command(self, agent_id)
+        return lifecycle_poll_command(self, deployment_id)
 
-    def _lifecycle_handle_stop(self, strategy_id: str, strategy: Any) -> None:
+    def _lifecycle_handle_stop(self, deployment_id: str, strategy: Any) -> None:
         from .runner_gateway import lifecycle_handle_stop
 
-        lifecycle_handle_stop(self, strategy_id, strategy)
+        lifecycle_handle_stop(self, deployment_id, strategy)
 
     def set_gateway_client(self, client: Any) -> None:
         from .runner_gateway import set_gateway_client
@@ -829,10 +829,10 @@ class StrategyRunner:
 
         setup_gateway_integration(self, strategy)
 
-    def teardown_gateway_integration(self, strategy_id: str) -> None:
+    def teardown_gateway_integration(self, deployment_id: str) -> None:
         from .runner_gateway import teardown_gateway_integration
 
-        teardown_gateway_integration(self, strategy_id)
+        teardown_gateway_integration(self, deployment_id)
 
     async def run_iteration(self, strategy: StrategyProtocol) -> IterationResult:
         """Run a single iteration of the strategy.
@@ -858,11 +858,11 @@ class StrategyRunner:
             IterationResult with status and any execution results
         """
         start_time = datetime.now(UTC)
-        strategy_id = strategy.strategy_id
+        deployment_id = strategy.deployment_id
 
         # Bind correlation ID for all log messages during this iteration
-        iteration_id = f"{strategy_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
-        add_context(correlation_id=iteration_id, strategy_id=strategy_id)
+        iteration_id = f"{deployment_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
+        add_context(correlation_id=iteration_id, deployment_id=deployment_id)
 
         # Generate cycle_id for forensic event correlation across phases
         from almanak.framework.observability.context import clear_cycle_id, new_cycle_id
@@ -871,11 +871,11 @@ class StrategyRunner:
         self._last_cycle_id = cycle_id  # Phase 4: preserve for snapshot capture after iteration
         add_context(cycle_id=cycle_id)
 
-        logger.info(f"Starting iteration for strategy: {strategy_id}")
+        logger.info(f"Starting iteration for strategy: {deployment_id}")
 
         state = RunIterationState(
             strategy=strategy,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             start_time=start_time,
         )
 
@@ -934,12 +934,12 @@ class StrategyRunner:
             if isinstance(e, AccountingPersistenceError):
                 logger.exception(
                     "Accounting persistence failed in live mode for %s (write_kind=%s)",
-                    strategy_id,
+                    deployment_id,
                     e.write_kind,
                 )
                 await self._alert_accounting_failure(strategy, e)
                 return self._create_error_result(
-                    strategy_id,
+                    deployment_id,
                     IterationStatus.ACCOUNTING_FAILED,
                     f"Accounting persistence failed ({e.write_kind}): {e}",
                     start_time,
@@ -953,21 +953,21 @@ class StrategyRunner:
             if isinstance(e, CriticalAccountingError):
                 logger.exception(
                     "Receipt enrichment failed in live mode for %s (field=%s, intent=%s, protocol=%s)",
-                    strategy_id,
+                    deployment_id,
                     e.field_name,
                     e.intent_type,
                     e.protocol,
                 )
                 await self._alert_enrichment_failure(strategy, e)
                 return self._create_error_result(
-                    strategy_id,
+                    deployment_id,
                     IterationStatus.ACCOUNTING_FAILED,
                     f"Receipt enrichment failed (field={e.field_name}, intent={e.intent_type}): {e}",
                     start_time,
                 )
-            logger.exception(f"Unexpected error in iteration for {strategy_id}: {e}")
+            logger.exception(f"Unexpected error in iteration for {deployment_id}: {e}")
             return self._create_error_result(
-                strategy_id,
+                deployment_id,
                 IterationStatus.STRATEGY_ERROR,
                 f"Unexpected error: {e}",
                 start_time,
@@ -989,27 +989,27 @@ class StrategyRunner:
 
     async def _step_pause_gate(self, state: RunIterationState) -> IterationResult | None:
         """Honor operator pause before any strategy logic/execution runs."""
-        strategy_id = state.strategy_id
-        paused, pause_reason = await self._is_strategy_paused(strategy_id)
+        deployment_id = state.deployment_id
+        paused, pause_reason = await self._is_strategy_paused(deployment_id)
         if paused:
-            if strategy_id not in self._logged_paused_strategy_ids:
+            if deployment_id not in self._logged_paused_deployment_ids:
                 logger.info(
                     "%s %s is paused by operator%s",
                     "[PAUSED]" if not _emojis_enabled() else "⏸️",
-                    strategy_id,
+                    deployment_id,
                     f" ({pause_reason})" if pause_reason else "",
                 )
-                self._logged_paused_strategy_ids.add(strategy_id)
+                self._logged_paused_deployment_ids.add(deployment_id)
             self._record_success()
             return IterationResult(
                 status=IterationStatus.HOLD,
                 intent=HoldIntent(reason=pause_reason or "Paused by operator"),
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(state.start_time),
             )
 
         # Strategy resumed: clear pause log marker.
-        self._logged_paused_strategy_ids.discard(strategy_id)
+        self._logged_paused_deployment_ids.discard(deployment_id)
         return None
 
     async def _step_teardown_and_cb_gate(self, state: RunIterationState) -> IterationResult | None:
@@ -1029,7 +1029,7 @@ class StrategyRunner:
         single-chain path unchanged.
         """
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         start_time = state.start_time
 
         # Step 0a: Check for teardown early — needed to gate circuit breaker
@@ -1060,7 +1060,7 @@ class StrategyRunner:
             if not cb_result.can_execute:
                 logger.warning(
                     "Circuit breaker blocking execution for %s: %s (state=%s, failures=%d)",
-                    strategy_id,
+                    deployment_id,
                     cb_result.reason,
                     cb_result.state.value,
                     cb_result.consecutive_failures,
@@ -1084,7 +1084,7 @@ class StrategyRunner:
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.STRATEGY_STUCK,
                         description=f"Circuit breaker {cb_state_label}: {_trip_label}",
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         details={
                             "circuit_breaker_state": cb_state_label,
                             "trip_reason": cb_result.trip_reason.value if cb_result.trip_reason else None,
@@ -1101,7 +1101,7 @@ class StrategyRunner:
                 return IterationResult(
                     status=IterationStatus.CIRCUIT_BREAKER_OPEN,
                     error=cb_result.reason,
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     duration_ms=self._calculate_duration_ms(start_time),
                 )
 
@@ -1121,7 +1121,7 @@ class StrategyRunner:
         Never early-exits: errors are logged and iteration continues.
         """
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
 
         # Step 0b: Poll copy trading wallet activity (if configured)
         activity_provider = getattr(strategy, "_wallet_activity_provider", None)
@@ -1168,23 +1168,23 @@ class StrategyRunner:
 
                         vault_state_dict = self._vault_lifecycle.get_vault_state_dict()
                         if vault_state_dict is not None:
-                            await self._persist_vault_state(strategy_id, vault_state_dict, VAULT_STATE_KEY)
+                            await self._persist_vault_state(deployment_id, vault_state_dict, VAULT_STATE_KEY)
                     except Exception as persist_err:
                         logger.warning("Failed to persist vault state: %s", persist_err)
 
     async def _step_build_snapshot(self, state: RunIterationState) -> IterationResult | None:
         """Create market snapshot, inject dry-run balances, pre-warm prices."""
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
 
         # Step 1: Create market snapshot
         try:
             market = strategy.create_market_snapshot()
-            logger.debug(f"Created market snapshot for {strategy_id}")
+            logger.debug(f"Created market snapshot for {deployment_id}")
         except Exception as e:
             logger.error(f"Failed to create market snapshot: {e}")
             return self._create_error_result(
-                strategy_id,
+                deployment_id,
                 IterationStatus.DATA_ERROR,
                 f"Market snapshot failed: {e}",
                 state.start_time,
@@ -1223,7 +1223,7 @@ class StrategyRunner:
         and returns ``None``.
         """
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         market = state.market
         start_time = state.start_time
 
@@ -1238,17 +1238,17 @@ class StrategyRunner:
                 elapsed = time.monotonic() - self._decide_timed_out_at
                 if elapsed > 2 * decide_timeout:
                     logger.warning(
-                        f"Resetting decide guard after {elapsed:.1f}s (timeout was {decide_timeout}s) for {strategy_id}"
+                        f"Resetting decide guard after {elapsed:.1f}s (timeout was {decide_timeout}s) for {deployment_id}"
                     )
                     self._decide_in_progress = False
                     self._decide_timed_out_at = None
             if self._decide_in_progress:
                 msg = "strategy.decide() still running from previous timed-out call"
-                logger.error(f"OVERLAP: {msg} for {strategy_id}")
+                logger.error(f"OVERLAP: {msg} for {deployment_id}")
                 if self._circuit_breaker is not None:
                     self._circuit_breaker.record_failure(error_message=msg)
                 return self._create_error_result(
-                    strategy_id,
+                    deployment_id,
                     IterationStatus.STRATEGY_TIMEOUT,
                     msg,
                     start_time,
@@ -1259,7 +1259,7 @@ class StrategyRunner:
             from almanak.framework.observability.events import StrategyPhase
 
             emit_phase_event(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 phase=StrategyPhase.DECIDE,
                 event_type="STATE_CHANGE",
                 description="decide() started",
@@ -1274,7 +1274,7 @@ class StrategyRunner:
                 )
             self._decide_in_progress = False
             emit_phase_event(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 phase=StrategyPhase.DECIDE,
                 event_type="STATE_CHANGE",
                 description=f"decide() returned {type(decide_result).__name__}",
@@ -1284,11 +1284,11 @@ class StrategyRunner:
             # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
             self._decide_timed_out_at = time.monotonic()
             msg = f"strategy.decide() timed out after {decide_timeout}s"
-            logger.error(f"TIMEOUT: {msg} for {strategy_id}")
+            logger.error(f"TIMEOUT: {msg} for {deployment_id}")
             if self._circuit_breaker is not None:
                 self._circuit_breaker.record_failure(error_message=msg)
             return self._create_error_result(
-                strategy_id,
+                deployment_id,
                 IterationStatus.STRATEGY_TIMEOUT,
                 msg,
                 start_time,
@@ -1307,7 +1307,7 @@ class StrategyRunner:
                     kind=classify_failure(e),
                 )
             return self._create_error_result(
-                strategy_id,
+                deployment_id,
                 IterationStatus.STRATEGY_ERROR,
                 f"Strategy decision failed: {e}",
                 start_time,
@@ -1316,10 +1316,11 @@ class StrategyRunner:
         state.decide_result = decide_result
         return None
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _step_extract_intents(self, state: RunIterationState) -> IterationResult | None:
         """Normalise ``decide_result`` into ``state.intents`` and handle HOLD."""
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         decide_result = state.decide_result
 
         # Step 3: Extract intents from DecideResult
@@ -1405,7 +1406,7 @@ class StrategyRunner:
                     error = f"{error}: {details}"
                 logger.error("%s", error)
                 return self._create_error_result(
-                    strategy_id,
+                    deployment_id,
                     IterationStatus.DATA_ERROR,
                     error,
                     state.start_time,
@@ -1413,12 +1414,12 @@ class StrategyRunner:
                 )
 
             hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
-            logger.info(f"{hold_prefix} {strategy_id} HOLD: {reason}")
+            logger.info(f"{hold_prefix} {deployment_id} HOLD: {reason}")
             self._record_success()
             return IterationResult(
                 status=IterationStatus.HOLD,
                 intent=hold_intent,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(state.start_time),
             )
         return None
@@ -1426,18 +1427,18 @@ class StrategyRunner:
     def _step_log_intents(self, state: RunIterationState) -> None:
         """Log the intent or intent sequence with human-readable formatting."""
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         intents = state.intents
 
         _chain = getattr(strategy, "chain", "")
         if len(intents) == 1:
             intent_summary = _format_intent_for_log(intents[0], chain=_chain)
             intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
-            logger.info(f"{intent_prefix} {strategy_id} intent: {intent_summary}")
+            logger.info(f"{intent_prefix} {deployment_id} intent: {intent_summary}")
         else:
             # Log intent sequence with details for each step
             intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
-            logger.info(f"{intent_prefix} {strategy_id} intent sequence ({len(intents)} steps):")
+            logger.info(f"{intent_prefix} {deployment_id} intent sequence ({len(intents)} steps):")
             for i, intent in enumerate(intents, 1):
                 intent_summary = _format_intent_for_log(intent, chain=_chain)
                 logger.info(f"   {i}. {intent_summary}")
@@ -1453,13 +1454,13 @@ class StrategyRunner:
             return None
 
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         intents = state.intents
 
         cb_check = self._circuit_breaker.check()
         if not cb_check.can_execute:
             logger.warning(
-                f"Circuit breaker BLOCKED execution for {strategy_id}: "
+                f"Circuit breaker BLOCKED execution for {deployment_id}: "
                 f"state={cb_check.state.value}, reason={cb_check.reason}"
             )
             # VIB-4043 / PR4: cumulative_loss_usd is money-shaped; loss totals
@@ -1473,7 +1474,7 @@ class StrategyRunner:
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.ERROR,
                     description=f"Circuit breaker blocked execution: {_trip_label}",
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     chain=getattr(strategy, "chain", ""),
                     details={
                         "circuit_breaker_state": cb_check.state.value,
@@ -1491,7 +1492,7 @@ class StrategyRunner:
                 status=IterationStatus.CIRCUIT_BREAKER_OPEN,
                 intent=intents[0] if intents else None,
                 error=f"Circuit breaker open: {cb_check.reason}",
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(state.start_time),
             )
         return None
@@ -1560,7 +1561,7 @@ class StrategyRunner:
         # Single-chain execution path
         # Execute all intents sequentially, stopping on first failure
         if len(intents) > 1:
-            logger.info(f"Executing {len(intents)} intents sequentially for {strategy.strategy_id}")
+            logger.info(f"Executing {len(intents)} intents sequentially for {strategy.deployment_id}")
 
         _chain = getattr(strategy, "chain", "")
         intent_result: IterationResult | None = None
@@ -1757,7 +1758,7 @@ class StrategyRunner:
                 result = IterationResult(
                     status=IterationStatus.DRY_RUN,
                     intent=intent,
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     duration_ms=self._calculate_duration_ms(start_time),
                 )
                 return intent, result, True  # continue
@@ -1767,7 +1768,7 @@ class StrategyRunner:
                 status=IterationStatus.COMPILATION_FAILED,
                 intent=intent,
                 error="amount='all' used but no previous step amount available",
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
             return intent, result, False  # break
@@ -1831,7 +1832,7 @@ class StrategyRunner:
                         status=IterationStatus.COMPILATION_FAILED,
                         intent=intent,
                         error=f"amount='all' for {balance_token} but balance is 0",
-                        strategy_id=strategy.strategy_id,
+                        deployment_id=strategy.deployment_id,
                         duration_ms=self._calculate_duration_ms(start_time),
                     )
                     return intent, result, False  # break
@@ -1844,7 +1845,7 @@ class StrategyRunner:
                     status=IterationStatus.COMPILATION_FAILED,
                     intent=intent,
                     error=f"Cannot resolve amount='all' for {balance_token}: {e}",
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     duration_ms=self._calculate_duration_ms(start_time),
                 )
                 return intent, result, False  # break
@@ -1860,7 +1861,7 @@ class StrategyRunner:
             status=IterationStatus.COMPILATION_FAILED,
             intent=intent,
             error=(f"amount='all' for {balance_token} but no market context available"),
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=self._calculate_duration_ms(start_time),
         )
         return intent, result, False  # break
@@ -1891,15 +1892,15 @@ class StrategyRunner:
         # Explicit None check, not `or`: a caller passing 0 means "no inter-iteration
         # delay", and `0 or default` would silently fall back to default_interval_seconds.
         interval = self.config.default_interval_seconds if interval_seconds is None else interval_seconds
-        strategy_id = strategy.strategy_id
+        deployment_id = strategy.deployment_id
 
         max_iter_msg = f", max_iterations={max_iterations}" if max_iterations else ""
-        logger.info(f"Starting run loop for strategy {strategy_id} with interval={interval}s{max_iter_msg}")
+        logger.info(f"Starting run loop for strategy {deployment_id} with interval={interval}s{max_iter_msg}")
 
         # Phase 1: setup (state manager init, session recovery, copy-trading
         # restore, shutdown flag reset, gateway wiring, RUNNING write,
         # STRATEGY_STARTED event).
-        activity_provider = await _run_loop_helpers.initialize_run_loop(self, strategy, strategy_id, interval)
+        activity_provider = await _run_loop_helpers.initialize_run_loop(self, strategy, deployment_id, interval)
 
         loop_iteration_count = 0
         while not self._shutdown_requested:
@@ -1939,7 +1940,7 @@ class StrategyRunner:
                 result = await _run_loop_helpers.capture_snapshot_with_accounting(
                     self,
                     strategy,
-                    strategy_id,
+                    deployment_id,
                     result,
                     iteration_start_monotonic=iteration_start_monotonic,
                 )
@@ -1949,12 +1950,12 @@ class StrategyRunner:
 
                 # Update state
                 if self.config.enable_state_persistence:
-                    await self._update_state(strategy_id, result, strategy=strategy)
+                    await self._update_state(deployment_id, result, strategy=strategy)
 
                 # Persist copy trading cursor state (if configured)
                 if activity_provider is not None and self.config.enable_state_persistence:
                     try:
-                        await self._persist_copy_trading_state(strategy_id, activity_provider)
+                        await self._persist_copy_trading_state(deployment_id, activity_provider)
                     except Exception as e:
                         logger.warning(f"Failed to persist copy trading state: {e}")
 
@@ -1968,25 +1969,25 @@ class StrategyRunner:
                 # Phase 8: post-iteration bookkeeping (consecutive-errors,
                 # circuit breaker, lifecycle recovery writes).
                 if not result.success:
-                    await _run_loop_helpers.handle_iteration_failure(self, strategy, strategy_id, result)
+                    await _run_loop_helpers.handle_iteration_failure(self, strategy, deployment_id, result)
                 else:
-                    _run_loop_helpers.handle_iteration_success(self, strategy_id, was_in_error_streak)
+                    _run_loop_helpers.handle_iteration_success(self, deployment_id, was_in_error_streak)
 
                 # Report positions and send heartbeat to gateway after each iteration
                 position_protos = self._collect_position_snapshot(strategy)
-                self._gateway_heartbeat(strategy_id, positions=position_protos)
+                self._gateway_heartbeat(deployment_id, positions=position_protos)
 
                 # Send lifecycle heartbeat
-                self._lifecycle_heartbeat(strategy_id)
+                self._lifecycle_heartbeat(deployment_id)
 
                 # Poll for + route lifecycle commands (PAUSE, RESUME, STOP).
-                command = self._lifecycle_poll_command(strategy_id)
-                await _run_loop_helpers.handle_lifecycle_command(self, strategy, strategy_id, command)
+                command = self._lifecycle_poll_command(deployment_id)
+                await _run_loop_helpers.handle_lifecycle_command(self, strategy, deployment_id, command)
 
                 # Check max iterations limit
                 loop_iteration_count += 1
                 if max_iterations is not None and loop_iteration_count >= max_iterations:
-                    logger.info(f"Reached max iterations ({max_iterations}) for {strategy_id}. Stopping.")
+                    logger.info(f"Reached max iterations ({max_iterations}) for {deployment_id}. Stopping.")
                     break
 
                 # Sleep until next iteration (unless shutdown requested)
@@ -1995,7 +1996,7 @@ class StrategyRunner:
                     await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
-                logger.info(f"Run loop cancelled for {strategy_id}")
+                logger.info(f"Run loop cancelled for {deployment_id}")
                 break
             except CriticalCallbackError:
                 logger.error("Critical callback error — stopping strategy loop")
@@ -2008,7 +2009,7 @@ class StrategyRunner:
 
         # Phase 12: shutdown drain (final lifecycle write, deregister,
         # STRATEGY_STOPPED event, flush, state manager close).
-        await _run_loop_helpers.finalize_run_loop(self, strategy, strategy_id)
+        await _run_loop_helpers.finalize_run_loop(self, strategy, deployment_id)
 
     def _notify_intent_executed(
         self,
@@ -2085,7 +2086,7 @@ class StrategyRunner:
         `tests/static/test_timeline_payload_keys.py` will fail the build.
         """
         try:
-            strategy_id = strategy.strategy_id
+            deployment_id = strategy.deployment_id
             intent_type = getattr(intent, "intent_type", None)
             intent_type_value = getattr(intent_type, "value", None)
             intent_type_str = intent_type_value if isinstance(intent_type_value, str) else str(intent_type)
@@ -2142,7 +2143,7 @@ class StrategyRunner:
                 timestamp=datetime.now(UTC),
                 event_type=event_type,
                 description=description,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
                 tx_hash=tx_hash,
                 details=details,
@@ -2337,7 +2338,7 @@ class StrategyRunner:
             self._maybe_enrich_lp_close_with_slot0(result, chain)
 
             entry = build_ledger_entry(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 cycle_id=cycle_id,
                 intent=intent,
                 result=result,
@@ -2353,9 +2354,8 @@ class StrategyRunner:
             # VIB-3157: tri-state (dry_run / live / paper) via the shared
             # ``derive_execution_mode_from_config`` helper so ledger,
             # snapshot, and metrics stamping stay in lockstep.
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            deployment_id = strategy.deployment_id
             execution_mode = self._derive_execution_mode()
-            entry.deployment_id = deployment_id
             entry.execution_mode = execution_mode
 
             # VIB-3157: fail-closed live path. A missing state manager or a
@@ -2368,13 +2368,13 @@ class StrategyRunner:
                 if self._is_live_mode():
                     raise AccountingPersistenceError(
                         write_kind="ledger",
-                        strategy_id=strategy.strategy_id,
+                        deployment_id=strategy.deployment_id,
                         message="State manager does not provide save_ledger_entry",
                     )
                 logger.error(
                     "Ledger write unavailable in non-live mode for %s "
                     "(continuing, pre-prod drift; fix before promoting to live)",
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                 )
             else:
                 # VIB-3201 closed the gateway ledger gap (SaveLedgerEntry RPC).
@@ -2435,7 +2435,7 @@ class StrategyRunner:
             logger.error(
                 "Ledger write failed in non-live mode for %s (continuing, pre-prod drift): "
                 "fix before promoting to live",
-                strategy.strategy_id,
+                strategy.deployment_id,
             )
         except Exception as e:  # noqa: BLE001
             # Unexpected failure outside the persistence path (build_ledger_entry
@@ -2444,7 +2444,7 @@ class StrategyRunner:
             if self._is_live_mode():
                 raise AccountingPersistenceError(
                     write_kind="ledger",
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     cause=e,
                 ) from e
             logger.error(f"Failed to write ledger entry (non-live): {e}")
@@ -2662,7 +2662,7 @@ class StrategyRunner:
         from almanak.framework.primitives.types import Primitive
 
         open_payload = await self._lookup_open_registry_payload(
-            deployment_id=getattr(strategy, "deployment_id", "") or strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             chain=chain,
             token_id=None,
             receipt=receipt,
@@ -2939,7 +2939,7 @@ class StrategyRunner:
         from almanak.framework.migration.backfill import _UNIV3_GROUPING_POLICY_VERSION
         from almanak.framework.primitives.types import AccountingCategory
 
-        deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+        deployment_id = strategy.deployment_id
         chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
         return RegistryRow(
             deployment_id=deployment_id,
@@ -3331,7 +3331,7 @@ class StrategyRunner:
 
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.ACCOUNTING,
-                strategy_id=getattr(strategy, "strategy_id", ""),
+                deployment_id=strategy.deployment_id,
                 message=(
                     f"Position event save failed for {pos_event.event_type} "
                     f"{pos_event.position_type} position={pos_event.position_id} "
@@ -3413,7 +3413,7 @@ class StrategyRunner:
 
             chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
             wallet_address = getattr(strategy, "wallet_address", "") or ""
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            deployment_id = strategy.deployment_id
             cycle_id = get_cycle_id() or ""
 
             # Compute position_key and market_id for each supported category
@@ -3425,8 +3425,7 @@ class StrategyRunner:
 
             outbox_id = await write_outbox_entry(
                 self.state_manager,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 cycle_id=cycle_id,
                 ledger_entry_id=ledger_entry_id,
                 intent_type=intent_type_str,
@@ -3451,7 +3450,7 @@ class StrategyRunner:
 
                     raise AccountingPersistenceError(
                         write_kind=AccountingWriteKind.ACCOUNTING,
-                        strategy_id=getattr(strategy, "strategy_id", ""),
+                        deployment_id=strategy.deployment_id,
                         message=f"Outbox write failed for {ledger_entry_id!r} — accounting event will be lost",
                     )
                 # VIB-3762 §C2: outbox drift is operator-visible ERROR in
@@ -3469,7 +3468,7 @@ class StrategyRunner:
 
                 raise AccountingPersistenceError(
                     write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    deployment_id=strategy.deployment_id,
                     message=f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}",
                     cause=e,
                 ) from e
@@ -3620,7 +3619,7 @@ class StrategyRunner:
         """Return (deployment_id, cycle_id, execution_mode, chain, wallet_address) for accounting builders."""
         from ..observability.context import get_cycle_id
 
-        deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+        deployment_id = strategy.deployment_id
         cycle_id = get_cycle_id() or ""
         execution_mode = self._derive_execution_mode()
         chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
@@ -3639,7 +3638,7 @@ class StrategyRunner:
             return
         logger.warning(
             "DELEVERAGE intent executed for strategy=%s — trigger=%r observed_hf=%s target_hf=%s",
-            getattr(strategy, "strategy_id", ""),
+            getattr(strategy, "deployment_id", ""),
             getattr(intent, "trigger_reason", "") or "",
             getattr(intent, "observed_hf", None),
             getattr(intent, "target_hf", None),
@@ -3673,7 +3672,7 @@ class StrategyRunner:
     def _is_managed_deployment(self) -> bool:
         """Return True if running as a deployed agent (not local development).
 
-        Delegates to `framework.deployment.is_hosted()` — `AGENT_ID` is the
+        Delegates to `framework.deployment.is_hosted()` — `ALMANAK_IS_HOSTED` is the
         single deployment-mode signal across the SDK.
         """
         from almanak.framework.deployment import is_hosted
@@ -3778,7 +3777,7 @@ class StrategyRunner:
             total_intents=total_intents,
             market=market,
             record_metrics=record_metrics,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
         )
 
         # Setup: build compiler, state machine, pre-balance snapshot. If a
@@ -3831,7 +3830,7 @@ class StrategyRunner:
         """
         strategy = state.strategy
         intent = state.intent
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
 
         # Resolve gateway client from any available source (GatewayExecutionOrchestrator,
         # MultiChainOrchestrator with _gateway_client, or explicit set_gateway_client()).
@@ -3900,7 +3899,7 @@ class StrategyRunner:
         )
 
         logger.info(
-            f"Created IntentStateMachine for {strategy_id} "
+            f"Created IntentStateMachine for {deployment_id} "
             f"(intent={intent.intent_id}, max_retries={self.config.max_retries})"
         )
 
@@ -3908,7 +3907,7 @@ class StrategyRunner:
         from almanak.framework.observability.events import StrategyPhase
 
         emit_phase_event(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             phase=StrategyPhase.COMPILE,
             event_type="STATE_CHANGE",
             description=f"Compiling intent {intent.intent_id} ({getattr(intent, 'intent_type', 'unknown')})",
@@ -4255,7 +4254,7 @@ class StrategyRunner:
         """
         strategy = state.strategy
         intent = state.intent
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         state_machine = state.state_machine
         compiler = state.compiler
 
@@ -4267,7 +4266,7 @@ class StrategyRunner:
         # Dry run mode - skip actual execution
         if self.config.dry_run:
             logger.info(
-                f"Dry run mode - skipping execution for {strategy_id}. "
+                f"Dry run mode - skipping execution for {deployment_id}. "
                 f"Would execute {len(step_result.action_bundle.transactions)} transactions."
             )
             if state.clob_client is not None:
@@ -4277,7 +4276,7 @@ class StrategyRunner:
             return IterationResult(
                 status=IterationStatus.DRY_RUN,
                 intent=intent,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(state.start_time),
             )
 
@@ -4287,7 +4286,7 @@ class StrategyRunner:
         from almanak.framework.observability.context import get_cycle_id
 
         execution_context = ExecutionContext(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=strategy.chain,
             wallet_address=strategy.wallet_address,
             correlation_id=intent.intent_id,
@@ -4350,7 +4349,7 @@ class StrategyRunner:
             if not execution_result.success:
                 details["failure_reason"] = self._classify_failure_reason(execution_result.error or "")
             emit_phase_event(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 phase=StrategyPhase.EXECUTE,
                 event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
                 description=f"Execution {'succeeded' if execution_result.success else 'failed'}",
@@ -4361,13 +4360,13 @@ class StrategyRunner:
 
             if execution_result.success:
                 logger.info(
-                    f"Execution successful for {strategy_id}: "
+                    f"Execution successful for {deployment_id}: "
                     f"gas_used={execution_result.total_gas_used}, "
                     f"tx_count={len(execution_result.transaction_results)}"
                 )
             else:
                 logger.warning(
-                    f"Execution failed for {strategy_id}: {execution_result.error} "
+                    f"Execution failed for {deployment_id}: {execution_result.error} "
                     f"(retry {state_machine.retry_count}/{self.config.max_retries})"
                 )
                 # On timeout, approvals likely succeeded -- keep cache valid.
@@ -4569,7 +4568,7 @@ class StrategyRunner:
         """
         strategy = state.strategy
         intent = state.intent
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         state_machine = state.state_machine
 
         # Enrich result with intent-specific extracted data
@@ -4731,7 +4730,7 @@ class StrategyRunner:
             from ..accounting.sidecar import AccountingSidecarWriter
 
             AccountingSidecarWriter().append(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 intent=intent,
                 result=state.last_execution_result,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
@@ -4773,7 +4772,7 @@ class StrategyRunner:
             status=IterationStatus.SUCCESS,
             intent=intent,
             execution_result=state.last_execution_result,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
             balance_reconciliation=recon,
         )
@@ -4892,7 +4891,7 @@ class StrategyRunner:
             intent=intent,
             execution_result=last_execution_result,
             error=slippage_error,
-            strategy_id=state.strategy_id,
+            deployment_id=state.deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )
 
@@ -4913,7 +4912,7 @@ class StrategyRunner:
         recon_error = self._format_reconciliation_error(recon)
         logger.error(
             "Reconciliation enforcement tripped for %s: %s",
-            state.strategy_id,
+            state.deployment_id,
             recon_error,
         )
 
@@ -5023,7 +5022,7 @@ class StrategyRunner:
             intent=intent,
             execution_result=last_execution_result,
             error=recon_error,
-            strategy_id=state.strategy_id,
+            deployment_id=state.deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
             balance_reconciliation=recon,
         )
@@ -5038,7 +5037,7 @@ class StrategyRunner:
         """
         strategy = state.strategy
         intent = state.intent
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         state_machine = state.state_machine
         last_execution_result = state.last_execution_result
 
@@ -5154,10 +5153,11 @@ class StrategyRunner:
             intent=intent,
             execution_result=last_execution_result,
             error=error_msg,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _check_and_resume_stuck_execution(
         self,
         strategy: StrategyProtocol,
@@ -5180,10 +5180,10 @@ class StrategyRunner:
         """
         from ..intents.vocabulary import Intent
 
-        strategy_id = strategy.strategy_id
+        deployment_id = strategy.deployment_id
 
         # Load any saved execution progress
-        saved_progress = await self._load_execution_progress(strategy_id)
+        saved_progress = await self._load_execution_progress(deployment_id)
 
         if saved_progress is None:
             # No saved progress - proceed with normal decide() flow
@@ -5200,10 +5200,10 @@ class StrategyRunner:
         # We have a stuck execution - check if we can resume
         if saved_progress.serialized_intents is None:
             logger.warning(
-                f"Stuck execution found for {strategy_id} but no serialized intents. "
+                f"Stuck execution found for {deployment_id} but no serialized intents. "
                 f"Clearing progress and starting fresh."
             )
-            await self._clear_execution_progress(strategy_id)
+            await self._clear_execution_progress(deployment_id)
             return None
 
         # Deserialize the saved intents
@@ -5213,16 +5213,16 @@ class StrategyRunner:
             ]
         except Exception as e:
             logger.error(
-                f"Failed to deserialize saved intents for {strategy_id}: {e}. Clearing progress and starting fresh."
+                f"Failed to deserialize saved intents for {deployment_id}: {e}. Clearing progress and starting fresh."
             )
-            await self._clear_execution_progress(strategy_id)
+            await self._clear_execution_progress(deployment_id)
             return None
 
         failed_step = saved_progress.failed_at_step_index or 0
         total_steps = saved_progress.total_steps
 
         logger.info(
-            f"Resuming stuck execution for {strategy_id}: "
+            f"Resuming stuck execution for {deployment_id}: "
             f"retrying step {failed_step + 1}/{total_steps} "
             f"(execution_id={saved_progress.execution_id}, "
             f"error was: {saved_progress.failure_error})"
@@ -5232,7 +5232,7 @@ class StrategyRunner:
         saved_progress.failed_at_step_index = None
         saved_progress.failure_error = None
         saved_progress.last_updated = datetime.now(UTC)
-        await self._save_execution_progress(strategy_id, saved_progress)
+        await self._save_execution_progress(deployment_id, saved_progress)
 
         # Get orchestrator (must be multi-chain since we only check stuck in multi-chain mode)
         assert isinstance(self.execution_orchestrator, MultiChainOrchestrator)
@@ -5263,7 +5263,7 @@ class StrategyRunner:
         Returns:
             TeardownMode if teardown is requested and supported, None otherwise
         """
-        strategy_id = strategy.strategy_id
+        deployment_id = strategy.deployment_id
 
         # Check if strategy has teardown support (graceful degradation)
         if not hasattr(strategy, "should_teardown"):
@@ -5276,9 +5276,9 @@ class StrategyRunner:
             from ..deployment import is_hosted
 
             if is_hosted():
-                logger.error(f"Error checking hosted teardown status for {strategy_id}: {e}")
+                logger.error(f"Error checking hosted teardown status for {deployment_id}: {e}")
                 raise
-            logger.warning(f"Error checking teardown status for {strategy_id}: {e}")
+            logger.warning(f"Error checking teardown status for {deployment_id}: {e}")
             return None
 
         if not should_teardown:
@@ -5288,7 +5288,7 @@ class StrategyRunner:
         if hasattr(strategy, "acknowledge_teardown_request"):
             try:
                 strategy.acknowledge_teardown_request()
-                logger.info(f"Acknowledged teardown request for {strategy_id}")
+                logger.info(f"Acknowledged teardown request for {deployment_id}")
             except Exception as e:  # noqa: BLE001
                 from ..deployment import is_hosted
 
@@ -5307,14 +5307,15 @@ class StrategyRunner:
         # re-raise so the operator sees it rather than silently downgrading.
         try:
             manager = get_teardown_state_manager_for_runtime(gateway_client=self._get_gateway_client())
-            request = manager.get_active_request(strategy_id)
+            request = manager.get_active_request(deployment_id)
         except LocalPathError:
             raise
         mode = request.mode if request else TeardownMode.SOFT
 
-        logger.info(f"Teardown requested for {strategy_id} (mode={mode.value})")
+        logger.info(f"Teardown requested for {deployment_id} (mode={mode.value})")
         return mode
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _execute_multi_chain(  # noqa: C901
         self,
         strategy: StrategyProtocol,
@@ -5343,7 +5344,7 @@ class StrategyRunner:
         Returns:
             IterationResult with execution details
         """
-        strategy_id = strategy.strategy_id
+        deployment_id = strategy.deployment_id
 
         # Type assertion for multi-chain orchestrator
         assert isinstance(self.execution_orchestrator, MultiChainOrchestrator)
@@ -5389,19 +5390,19 @@ class StrategyRunner:
                 price_oracle = None
 
         logger.info(
-            f"Multi-chain execution for {strategy_id}: "
+            f"Multi-chain execution for {deployment_id}: "
             f"{len(intents)} intents across {chains_involved}, "
             f"has_cross_chain={has_cross_chain}"
         )
 
         # Dry run mode
         if self.config.dry_run:
-            logger.info(f"Dry run mode - skipping execution for {strategy_id}. Would execute {len(intents)} intents.")
+            logger.info(f"Dry run mode - skipping execution for {deployment_id}. Would execute {len(intents)} intents.")
             self._record_success()
             return IterationResult(
                 status=IterationStatus.DRY_RUN,
                 intent=intents[0] if intents else None,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
 
@@ -5426,7 +5427,7 @@ class StrategyRunner:
 
         if multi_result.success:
             logger.info(
-                f"Multi-chain execution successful for {strategy_id}: "
+                f"Multi-chain execution successful for {deployment_id}: "
                 f"{multi_result.successful_count}/{len(intents)} succeeded, "
                 f"chains={list(multi_result.chains_used)}, "
                 f"time={multi_result.total_execution_time_ms:.0f}ms"
@@ -5436,7 +5437,7 @@ class StrategyRunner:
             return IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=first_intent,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
         else:
@@ -5447,7 +5448,7 @@ class StrategyRunner:
             error_summary = "; ".join(error_msgs) if error_msgs else "Unknown error"
 
             logger.error(
-                f"Multi-chain execution failed for {strategy_id}: "
+                f"Multi-chain execution failed for {deployment_id}: "
                 f"{multi_result.failed_count}/{len(intents)} failed: {error_summary}"
             )
 
@@ -5459,7 +5460,7 @@ class StrategyRunner:
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=first_intent,
                 error=error_summary,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
 
@@ -5505,7 +5506,7 @@ class StrategyRunner:
             resume_progress=resume_progress,
             price_map=price_map,
             price_oracle=price_oracle,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             first_intent=intents[0] if intents else None,
         )
 
@@ -5547,7 +5548,7 @@ class StrategyRunner:
 
         orchestrator = state.orchestrator
         intents = state.intents
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
 
         # Get wallet address from orchestrator (works for both config and gateway modes)
         state.wallet_address = orchestrator.wallet_address
@@ -5580,7 +5581,7 @@ class StrategyRunner:
         else:
             # Check for saved execution progress (resumption after restart)
             intents_hash = self._compute_intents_hash(intents)
-            saved_progress = await self._load_execution_progress(strategy_id)
+            saved_progress = await self._load_execution_progress(deployment_id)
 
             if saved_progress and saved_progress.intents_hash == intents_hash:
                 # Resume from last completed step
@@ -5595,23 +5596,23 @@ class StrategyRunner:
                 # Start fresh execution
                 if saved_progress:
                     logger.info("Intents changed (hash mismatch), starting fresh execution")
-                    await self._clear_execution_progress(strategy_id)
+                    await self._clear_execution_progress(deployment_id)
 
                 # Serialize intents for stuck execution recovery
                 serialized_intents = [intent.serialize() for intent in intents]
 
                 state.progress = ExecutionProgress(
                     execution_id=str(uuid.uuid4())[:8],
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     intents_hash=intents_hash,
                     total_steps=len(intents),
                     serialized_intents=serialized_intents,
                 )
                 # Save initial progress with serialized intents
-                await self._save_execution_progress(strategy_id, state.progress)
+                await self._save_execution_progress(deployment_id, state.progress)
 
         logger.info(
-            f"Executing {len(intents)} intents with bridge waiting for {strategy_id} "
+            f"Executing {len(intents)} intents with bridge waiting for {deployment_id} "
             f"(starting from step {state.start_step_index + 1})"
         )
 
@@ -5635,7 +5636,7 @@ class StrategyRunner:
         intents = state.intents
         intent = intents[i]
         orchestrator = state.orchestrator
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
 
         # Skip already-completed steps when resuming
         if i < state.start_step_index:
@@ -5810,7 +5811,7 @@ class StrategyRunner:
         assert state.progress is not None
         state.progress.completed_step_index = i
         state.progress.previous_amount_received = state.previous_amount_received
-        await self._save_execution_progress(strategy_id, state.progress)
+        await self._save_execution_progress(deployment_id, state.progress)
         logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
 
         return False
@@ -6193,7 +6194,7 @@ class StrategyRunner:
         record success metric).
         """
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         intents = state.intents
 
         # Ensure strategy is notified of failure even for paths that didn't fire the callback
@@ -6211,25 +6212,25 @@ class StrategyRunner:
         self.balance_provider.invalidate_cache()
 
         logger.info(
-            f"Multi-chain execution with bridge waiting successful for {strategy_id}: "
+            f"Multi-chain execution with bridge waiting successful for {deployment_id}: "
             f"{state.successful_count}/{len(intents)} succeeded"
         )
 
         # Clear execution progress on successful completion
-        await self._clear_execution_progress(strategy_id)
+        await self._clear_execution_progress(deployment_id)
 
         self._record_success(execution_proved=True)
         return IterationResult(
             status=IterationStatus.SUCCESS,
             intent=state.first_intent,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )
 
     async def _bridge_wait_build_failed_result(self, state: BridgeWaitState) -> IterationResult:
         """Persist failure progress, run diagnostics, return failed result."""
         strategy = state.strategy
-        strategy_id = state.strategy_id
+        deployment_id = state.deployment_id
         intents = state.intents
         # Precondition: callers only invoke this when state.failed_step is set
         # and state.progress has been populated by ``_init_bridge_wait_state``.
@@ -6252,7 +6253,7 @@ class StrategyRunner:
         state.progress.failed_at_step_index = failed_intent_index
         state.progress.failure_error = error_message
         state.progress.last_updated = datetime.now(UTC)
-        await self._save_execution_progress(strategy_id, state.progress)
+        await self._save_execution_progress(deployment_id, state.progress)
         logger.info(f"Saved failure state for retry: step {failed_intent_index + 1}, error: {error_message}")
 
         # Run diagnostics on the failed intent to help identify the cause
@@ -6339,7 +6340,7 @@ class StrategyRunner:
             status=IterationStatus.EXECUTION_FAILED,
             intent=state.first_intent,
             error=f"{failed_step}: {error_message}",
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )
 
@@ -6452,7 +6453,7 @@ class StrategyRunner:
 
     def _create_error_result(
         self,
-        strategy_id: str,
+        deployment_id: str,
         status: IterationStatus,
         error: str,
         start_time: datetime,
@@ -6494,7 +6495,7 @@ class StrategyRunner:
             status=status,
             intent=intent,
             error=error,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
@@ -6611,25 +6612,25 @@ class StrategyRunner:
 
         emit_iteration_summary(self, result, chain)
 
-    async def _is_strategy_paused(self, strategy_id):
+    async def _is_strategy_paused(self, deployment_id):
         from .runner_state import is_strategy_paused
 
-        return await is_strategy_paused(self, strategy_id)
+        return await is_strategy_paused(self, deployment_id)
 
-    async def _update_state(self, strategy_id, result, strategy=None):
+    async def _update_state(self, deployment_id, result, strategy=None):
         from .runner_state import update_state
 
-        await update_state(self, strategy_id, result, strategy)
+        await update_state(self, deployment_id, result, strategy)
 
-    async def _persist_copy_trading_state(self, strategy_id, activity_provider):
+    async def _persist_copy_trading_state(self, deployment_id, activity_provider):
         from .runner_state import persist_copy_trading_state
 
-        await persist_copy_trading_state(self, strategy_id, activity_provider)
+        await persist_copy_trading_state(self, deployment_id, activity_provider)
 
-    async def _persist_vault_state(self, strategy_id, vault_state_dict, vault_state_key):
+    async def _persist_vault_state(self, deployment_id, vault_state_dict, vault_state_key):
         from .runner_state import persist_vault_state
 
-        await persist_vault_state(self, strategy_id, vault_state_dict, vault_state_key)
+        await persist_vault_state(self, deployment_id, vault_state_dict, vault_state_key)
 
     async def _capture_portfolio_snapshot(self, strategy, iteration_number):
         from .runner_state import capture_portfolio_snapshot
@@ -6655,10 +6656,10 @@ class StrategyRunner:
                     logger.debug("Failed to record exposure on circuit breaker", exc_info=True)
         return result
 
-    async def _update_portfolio_metrics(self, strategy_id, snapshot):
+    async def _update_portfolio_metrics(self, deployment_id, snapshot):
         from .runner_state import update_portfolio_metrics
 
-        await update_portfolio_metrics(self, strategy_id, snapshot)
+        await update_portfolio_metrics(self, deployment_id, snapshot)
 
     async def _handle_execution_error(
         self,
@@ -6686,7 +6687,7 @@ class StrategyRunner:
                     revert_reason=getattr(execution_result, "revert_reason", None),
                 )
                 strategy_state = StrategyState(
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     status="error",
                     total_value_usd=exec_total_value,
                     available_balance_usd=exec_available,
@@ -6700,7 +6701,7 @@ class StrategyRunner:
                 )
             else:
                 card = OperatorCard(
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     timestamp=datetime.now(UTC),
                     event_type=EventType.ERROR,
                     reason=StuckReason.TRANSACTION_REVERTED,
@@ -6751,7 +6752,7 @@ class StrategyRunner:
             total_value, available = self._query_portfolio_value(strategy)
             write_kind = getattr(error, "write_kind", "unknown")
             card = OperatorCard(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 timestamp=datetime.now(UTC),
                 event_type=EventType.ERROR,
                 reason=StuckReason.UNKNOWN,
@@ -6805,7 +6806,7 @@ class StrategyRunner:
         try:
             total_value, available = self._query_portfolio_value(strategy)
             card = OperatorCard(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 timestamp=datetime.now(UTC),
                 event_type=EventType.ERROR,
                 reason=StuckReason.UNKNOWN,
@@ -6868,7 +6869,7 @@ class StrategyRunner:
 
                 # Build StrategyState with what we know from the runner
                 strategy_state = StrategyState(
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     status="stuck" if self._consecutive_errors >= self.config.max_consecutive_errors else "error",
                     total_value_usd=consec_total_value,
                     available_balance_usd=consec_available,
@@ -6883,7 +6884,7 @@ class StrategyRunner:
                     from ..services.stuck_detector import StrategySnapshot
 
                     snapshot = StrategySnapshot(
-                        strategy_id=strategy.strategy_id,
+                        deployment_id=strategy.deployment_id,
                         chain=getattr(strategy, "chain", "unknown"),
                         current_state=last_result.status.value,
                         state_entered_at=self._first_error_at or datetime.now(UTC),
@@ -6902,7 +6903,7 @@ class StrategyRunner:
                         stuck_reason = detection.reason
                         logger.info(
                             "StuckDetector classified %s as %s",
-                            strategy.strategy_id,
+                            strategy.deployment_id,
                             stuck_reason.value,
                         )
 
@@ -6916,7 +6917,7 @@ class StrategyRunner:
             else:
                 # Fallback: basic card without intelligent classification
                 card = OperatorCard(
-                    strategy_id=strategy.strategy_id,
+                    deployment_id=strategy.deployment_id,
                     timestamp=datetime.now(UTC),
                     event_type=EventType.WARNING,
                     reason=StuckReason.UNKNOWN,
@@ -6981,11 +6982,11 @@ class StrategyRunner:
             )
             logger.warning(
                 "EMERGENCY: triggering emergency stop for %s — %s",
-                strategy.strategy_id,
+                strategy.deployment_id,
                 reason,
             )
             await self._emergency_manager.emergency_stop_async(
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 reason=reason,
                 chain=getattr(strategy, "chain", ""),
                 trigger_context={
@@ -7005,14 +7006,14 @@ class StrategyRunner:
                 self._terminal_lifecycle_state = "ERROR"
                 self._terminal_lifecycle_error_message = f"Circuit breaker tripped: {last_result.error or 'unknown'}"
                 self._lifecycle_write_state(
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     "ERROR",
                     error_message=self._terminal_lifecycle_error_message,
                 )
                 logger.critical("Circuit breaker tripped in managed deployment — exiting process")
                 self.request_shutdown()
         except Exception as e:
-            logger.error(f"Failed to trigger emergency stop for {strategy.strategy_id}: {e}")
+            logger.error(f"Failed to trigger emergency stop for {strategy.deployment_id}: {e}")
 
     def get_metrics(self):
         from .runner_state import get_metrics
@@ -7044,10 +7045,10 @@ class StrategyRunner:
 
         await update_recovered_state(self, session)
 
-    def is_duplicate_transaction(self, tx_hash=None, nonce=None, strategy_id=None):
+    def is_duplicate_transaction(self, tx_hash=None, nonce=None, deployment_id=None):
         from .runner_recovery import is_duplicate_transaction
 
-        return is_duplicate_transaction(self, tx_hash, nonce, strategy_id)
+        return is_duplicate_transaction(self, tx_hash, nonce, deployment_id)
 
     # =========================================================================
     # Execution Progress Management (for resuming after restart)
@@ -7058,20 +7059,20 @@ class StrategyRunner:
 
         return compute_intents_hash(self, intents)
 
-    async def _load_execution_progress(self, strategy_id):
+    async def _load_execution_progress(self, deployment_id):
         from .runner_recovery import load_execution_progress
 
-        return await load_execution_progress(self, strategy_id)
+        return await load_execution_progress(self, deployment_id)
 
-    async def _save_execution_progress(self, strategy_id, progress):
+    async def _save_execution_progress(self, deployment_id, progress):
         from .runner_recovery import save_execution_progress
 
-        await save_execution_progress(self, strategy_id, progress)
+        await save_execution_progress(self, deployment_id, progress)
 
-    async def _clear_execution_progress(self, strategy_id):
+    async def _clear_execution_progress(self, deployment_id):
         from .runner_recovery import clear_execution_progress
 
-        await clear_execution_progress(self, strategy_id)
+        await clear_execution_progress(self, deployment_id)
 
 
 __all__ = [

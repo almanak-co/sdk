@@ -142,7 +142,6 @@ def _make_ledger_entry(
     return LedgerEntry(
         id=id_,
         cycle_id="cycle-bug2130",
-        strategy_id="test-bug-2130",
         deployment_id=deployment_id or _DEPLOYMENT["deployment_id"],
         execution_mode=execution_mode,
         timestamp=datetime(2026, 5, 5, 3, 16, 35, tzinfo=UTC),

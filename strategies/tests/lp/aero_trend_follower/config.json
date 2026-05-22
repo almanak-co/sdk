@@ -1,5 +1,5 @@
 {
-    "strategy_id": "test_aero_trend_follower",
+    "deployment_id": "test_aero_trend_follower",
     "strategy_name": "test_aero_trend_follower",
     "chain": "base",
     "pool": "WETH/USDC",

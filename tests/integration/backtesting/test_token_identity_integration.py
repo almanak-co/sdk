@@ -207,7 +207,7 @@ class TestPortfolioTracksBalancesBySymbol:
     def test_portfolio_tracker_uses_symbols(self):
         """Test PaperPortfolioTracker uses symbols as balance keys."""
         tracker = PaperPortfolioTracker(
-            strategy_id="symbol_test",
+            deployment_id="symbol_test",
             chain="ethereum",
         )
 
@@ -229,7 +229,7 @@ class TestPortfolioTracksBalancesBySymbol:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="trade_symbol_test",
+            deployment_id="trade_symbol_test",
             chain="ethereum",
         )
 
@@ -421,7 +421,7 @@ class TestFinalValuationAccurateForKnownTokens:
     def test_pnl_calculation_consistent(self):
         """Test PnL calculation is consistent with symbol-based tracking."""
         tracker = PaperPortfolioTracker(
-            strategy_id="pnl_consistency_test",
+            deployment_id="pnl_consistency_test",
             chain="ethereum",
         )
 
@@ -544,7 +544,7 @@ class TestEndToEndTokenIdentity:
 
         # 1. Initialize portfolio with symbol-based balances
         tracker = PaperPortfolioTracker(
-            strategy_id="e2e_identity_test",
+            deployment_id="e2e_identity_test",
             chain="ethereum",
         )
         initial_balances = {"USDC": Decimal("10000")}

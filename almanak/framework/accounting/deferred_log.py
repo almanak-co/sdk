@@ -13,11 +13,11 @@ take here other than "keep moving and surface the gap loudly."
 
 Targets
 -------
-* **Local** (``AGENT_ID`` unset): append a JSON line to
+* **Local** (``ALMANAK_IS_HOSTED`` unset): append a JSON line to
   ``<local_db_dir>/accounting_deferred.jsonl``. Atomic per write because the
   file is opened with ``O_APPEND`` and each line is a single ``write``
   call sized well below ``PIPE_BUF``.
-* **Hosted** (``AGENT_ID`` set): emit a stdlib log record at WARNING with a
+* **Hosted** (``ALMANAK_IS_HOSTED`` set): emit a stdlib log record at WARNING with a
   stable ``event="accounting_deferred"`` field. Almanak Infra's log
   pipeline already provides durability + queryability; no Postgres DDL is
   added (CLAUDE.md: "metrics_db schema is owned outside this repo").
@@ -27,7 +27,6 @@ Schema (kept tiny on purpose — operators reconcile via this + outbox tail):
         "ts":           ISO-8601 UTC,
         "kind":         "ledger" | "outbox" | "enrich" | "sidecar"
                         | "snapshot" | "metrics" | "position_event",
-        "strategy_id":  ...,
         "deployment_id": ...,
         "cycle_id":     "teardown-<uuid>",
         "intent_type":  e.g. "LP_CLOSE" | "SWAP" | "REPAY" | None,
@@ -72,7 +71,6 @@ class DeferredWrite:
 
     ts: str
     kind: str
-    strategy_id: str
     deployment_id: str
     cycle_id: str
     intent_type: str | None = None
@@ -85,7 +83,6 @@ class DeferredWrite:
     def now(
         *,
         kind: str,
-        strategy_id: str,
         deployment_id: str,
         cycle_id: str,
         intent_type: str | None = None,
@@ -98,7 +95,6 @@ class DeferredWrite:
         return DeferredWrite(
             ts=datetime.now(UTC).isoformat(),
             kind=kind,
-            strategy_id=strategy_id,
             deployment_id=deployment_id,
             cycle_id=cycle_id,
             intent_type=intent_type,
@@ -119,7 +115,6 @@ class DeferredWrite:
             stripped = DeferredWrite(
                 ts=self.ts,
                 kind=self.kind,
-                strategy_id=self.strategy_id,
                 deployment_id=self.deployment_id,
                 cycle_id=self.cycle_id,
                 intent_type=self.intent_type,
@@ -204,7 +199,7 @@ def _emit_hosted(record: DeferredWrite) -> None:
     logger.warning(
         "accounting_deferred: kind=%s strategy=%s cycle=%s intent_type=%s tx=%s err=%s",
         record.kind,
-        record.strategy_id,
+        record.deployment_id,
         record.cycle_id,
         record.intent_type or "-",
         record.tx_hash or "-",
@@ -212,7 +207,6 @@ def _emit_hosted(record: DeferredWrite) -> None:
         extra={
             "event": "accounting_deferred",
             "deferred_kind": record.kind,
-            "strategy_id": record.strategy_id,
             "deployment_id": record.deployment_id,
             "cycle_id": record.cycle_id,
             "intent_type": record.intent_type,
@@ -243,7 +237,7 @@ def append(record: DeferredWrite) -> bool:
         try:
             sys.stderr.write(
                 f"accounting_deferred: SERIALIZE_FAILED kind={record.kind} "
-                f"strategy={record.strategy_id} cycle={record.cycle_id} err={exc}\n"
+                f"strategy={record.deployment_id} cycle={record.cycle_id} err={exc}\n"
             )
         except Exception:  # pragma: no cover — stderr should not fail
             pass
@@ -274,7 +268,6 @@ def append(record: DeferredWrite) -> bool:
 def append_now(
     *,
     kind: str,
-    strategy_id: str,
     deployment_id: str,
     cycle_id: str,
     intent_type: str | None = None,
@@ -289,7 +282,6 @@ def append_now(
     return append(
         DeferredWrite.now(
             kind=kind,
-            strategy_id=strategy_id,
             deployment_id=deployment_id,
             cycle_id=cycle_id,
             intent_type=intent_type,

@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "optimism"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-curve-stableswap-pnl-optimism"
+    strat._deployment_id = "test-curve-stableswap-pnl-optimism"
     strat.trade_size_usd = Decimal("100")
     strat.base_token = "USDC"
     strat.quote_token = "USDT"

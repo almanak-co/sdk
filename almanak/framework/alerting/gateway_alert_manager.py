@@ -36,7 +36,7 @@ class GatewayAlertManager:
         from almanak.framework.alerting.gateway_alert_manager import GatewayAlertManager
 
         with GatewayClient() as client:
-            alert_manager = GatewayAlertManager(client, strategy_id="my-strategy")
+            alert_manager = GatewayAlertManager(client, deployment_id="my-strategy")
             result = await alert_manager.send_alert(
                 message="Strategy executed successfully",
                 severity="info",
@@ -47,24 +47,24 @@ class GatewayAlertManager:
     def __init__(
         self,
         client: GatewayClient,
-        strategy_id: str = "",
+        deployment_id: str = "",
         timeout: float = 30.0,
     ):
         """Initialize gateway-backed alert manager.
 
         Args:
             client: Connected GatewayClient instance
-            strategy_id: Strategy identifier for alert context
+            deployment_id: Deployment identifier for alert context
             timeout: RPC timeout in seconds
         """
         self._client = client
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._timeout = timeout
 
     @property
-    def strategy_id(self) -> str:
-        """Get the strategy ID."""
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        """Get the deployment ID."""
+        return self._deployment_id
 
     async def send_alert(
         self,
@@ -89,7 +89,7 @@ class GatewayAlertManager:
                 channel=channel,
                 message=message,
                 severity=severity,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 metadata=metadata or {},
             )
 
@@ -133,7 +133,7 @@ class GatewayAlertManager:
             request = gateway_pb2.LogEntry(
                 level=level.upper(),
                 message=message,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 context=context or {},
                 timestamp=int(time.time()),
                 logger_name=logger_name,

@@ -31,7 +31,7 @@ def _resolve_event_type(event_type: TimelineEventType | str) -> TimelineEventTyp
 
 def emit_phase_event(
     *,
-    strategy_id: str,
+    deployment_id: str,
     phase: StrategyPhase,
     event_type: TimelineEventType | str,
     description: str,
@@ -45,7 +45,7 @@ def emit_phase_event(
     through the standard timeline path (local + gateway).
 
     Args:
-        strategy_id: Strategy identifier.
+        deployment_id: Deployment identifier.
         phase: Current lifecycle phase (DECIDE, COMPILE, etc.).
         event_type: Timeline event type.
         description: Human-readable description.
@@ -59,7 +59,7 @@ def emit_phase_event(
         timestamp=datetime.now(UTC),
         event_type=_resolve_event_type(event_type),
         description=description,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         chain=chain,
         tx_hash=tx_hash or None,
         details=details or {},

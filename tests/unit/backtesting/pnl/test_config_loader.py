@@ -64,7 +64,7 @@ def valid_result_dict(valid_config_dict: dict) -> dict:
     """Create a valid backtest result dictionary for testing."""
     return {
         "engine": "pnl",
-        "strategy_id": "test_strategy",
+        "deployment_id": "test_strategy",
         "start_time": "2024-01-01T00:00:00+00:00",
         "end_time": "2024-06-01T00:00:00+00:00",
         "metrics": {
@@ -164,7 +164,7 @@ class TestLoadConfigFromResult:
     def test_missing_config_field(self, tmp_path: Path) -> None:
         """Test error when config field is missing."""
         no_config_file = tmp_path / "no_config.json"
-        no_config_file.write_text(json.dumps({"engine": "pnl", "strategy_id": "test"}))
+        no_config_file.write_text(json.dumps({"engine": "pnl", "deployment_id": "test"}))
 
         with pytest.raises(ConfigLoadError) as exc_info:
             load_config_from_result(no_config_file)
@@ -463,7 +463,7 @@ class TestRoundTrip:
         # Create a mock result file
         result_dict = {
             "engine": "pnl",
-            "strategy_id": "roundtrip_test",
+            "deployment_id": "roundtrip_test",
             "config": original.to_dict_with_metadata(),
         }
 

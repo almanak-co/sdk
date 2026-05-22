@@ -44,7 +44,7 @@ def _make_strategy(
     strat.base_token = base_token
     strat.quote_token = quote_token
     strat._chain = chain
-    strat._strategy_id = "test_curve_cryptoswap_pnl"
+    strat._deployment_id = "test_curve_cryptoswap_pnl"
     strat._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strat._consecutive_holds = 0
     strat._has_position = False

@@ -12,7 +12,7 @@ def _runner_with_lifecycle_client():
 
 def test_lifecycle_write_state_reports_loaded_almanak_version_once_per_agent(monkeypatch):
     monkeypatch.setattr(runner_gateway, "_REPORTED_ALMANAK_VERSION", "2.16.0rc1")
-    runner_gateway._RUNNING_VERSION_REPORTED_AGENT_IDS.clear()
+    runner_gateway._RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS.clear()
     runner, client = _runner_with_lifecycle_client()
 
     runner_gateway.lifecycle_write_state(runner, "agent-1", "RUNNING")
@@ -27,7 +27,7 @@ def test_lifecycle_write_state_reports_loaded_almanak_version_once_per_agent(mon
 
 def test_lifecycle_write_state_does_not_report_version_before_running(monkeypatch):
     monkeypatch.setattr(runner_gateway, "_REPORTED_ALMANAK_VERSION", "2.16.0rc1")
-    runner_gateway._RUNNING_VERSION_REPORTED_AGENT_IDS.clear()
+    runner_gateway._RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS.clear()
     runner, client = _runner_with_lifecycle_client()
 
     runner_gateway.lifecycle_write_state(runner, "agent-1", "INITIALIZING")

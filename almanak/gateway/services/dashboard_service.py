@@ -36,7 +36,7 @@ from almanak.gateway.services._dashboard_helpers import (
     lookup_strategy_source,
 )
 from almanak.gateway.timeline.store import get_timeline_store
-from almanak.gateway.validation import ValidationError, resolve_agent_id, validate_strategy_id
+from almanak.gateway.validation import ValidationError, validate_deployment_id
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,7 @@ def _to_timeline_feed_item(event: Any, resolved_id: str) -> tuple[gateway_pb2.Ac
         gateway_pb2.ActivityFeedItem(
             kind=gateway_pb2.ActivityFeedItem.Kind.TIMELINE_EVENT,
             timestamp=ts_unix,
-            strategy_id=resolved_id,
+            deployment_id=resolved_id,
             cycle_id=event.cycle_id or "",
             timeline_event=gateway_pb2.TimelineEventInfo(
                 timestamp=ts_unix,
@@ -282,12 +282,12 @@ def _to_ledger_feed_item(entry: Any) -> tuple[gateway_pb2.ActivityFeedItem, str]
         gateway_pb2.ActivityFeedItem(
             kind=gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY,
             timestamp=ts_unix,
-            strategy_id=entry.strategy_id,
+            deployment_id=entry.deployment_id,
             cycle_id=entry.cycle_id,
             ledger_entry=gateway_pb2.LedgerEntryInfo(
                 id=entry.id,
                 cycle_id=entry.cycle_id,
-                strategy_id=entry.strategy_id,
+                deployment_id=entry.deployment_id,
                 timestamp=ts_unix,
                 intent_type=entry.intent_type,
                 token_in=entry.token_in,
@@ -654,7 +654,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
                 try:
                     config = json.loads(config_file.read_text())
-                    strategy_id = config.get("strategy_id", strategy_dir.name)
+                    deployment_id = config.get("deployment_id", strategy_dir.name)
                     strategy_name = config.get("strategy_name", strategy_dir.name)
 
                     # Derive display name
@@ -664,11 +664,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
                     # Determine chain and protocol from config
                     chain = config.get("chain", "arbitrum")
-                    protocol = self._derive_protocol_from_config(config, strategy_id)
+                    protocol = self._derive_protocol_from_config(config, deployment_id)
 
                     strategies.append(
                         {
-                            "strategy_id": strategy_id,
+                            "deployment_id": deployment_id,
                             "name": display_name,
                             "status": "PAUSED",  # Default - will be updated from state
                             "chain": chain,
@@ -716,15 +716,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
     def _build_paper_session(self, state_file: Path, data: dict) -> dict:
         """Assemble a single paper-session info dict from a parsed state file."""
-        # ``data.get("strategy_id", default)`` returns ``None`` when the key is
+        # ``data.get("deployment_id", default)`` returns ``None`` when the key is
         # *present-and-explicitly-null* (the default only fires on absent keys).
-        # Downstream we call ``strategy_id.replace(...)`` and pass it into
+        # Downstream we call ``deployment_id.replace(...)`` and pass it into
         # ``_derive_protocol_from_config``, which would crash and abort discovery
         # for *every* paper session. Guard with isinstance + non-empty check.
-        raw_strategy_id = data.get("strategy_id")
-        strategy_id = (
-            raw_strategy_id
-            if isinstance(raw_strategy_id, str) and raw_strategy_id
+        raw_deployment_id = data.get("deployment_id")
+        deployment_id = (
+            raw_deployment_id
+            if isinstance(raw_deployment_id, str) and raw_deployment_id
             else state_file.stem.replace(".state", "")
         )
         raw_config = data.get("config")
@@ -741,7 +741,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         protocol = (
             raw_protocol
             if isinstance(raw_protocol, str) and raw_protocol
-            else self._derive_protocol_from_config(config, strategy_id)
+            else self._derive_protocol_from_config(config, deployment_id)
         )
 
         # Filter list contents — not just the container type — so a single
@@ -771,8 +771,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         return {
-            "strategy_id": f"paper:{strategy_id}",
-            "name": strategy_id.replace("_", " ").title() + " (Paper)",
+            "deployment_id": f"paper:{deployment_id}",
+            "name": deployment_id.replace("_", " ").title() + " (Paper)",
             "status": status,
             "chain": chain,
             "protocol": protocol,
@@ -788,11 +788,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             "paper_metrics_json": json.dumps(paper_metrics),
         }
 
-    def _derive_protocol_from_config(self, config: dict, strategy_id: str) -> str:  # noqa: C901
-        """Derive protocol string from config or strategy ID."""
+    def _derive_protocol_from_config(self, config: dict, deployment_id: str) -> str:  # noqa: C901
+        """Derive protocol string from config or deployment ID."""
         # Same untrusted-JSON hazard as the caller: ``config["protocol"]`` could
         # be a list / dict / None. Only honour a non-empty string; otherwise
-        # fall through to the strategy-id heuristics below.
+        # fall through to the deployment-id heuristics below.
         explicit = config.get("protocol")
         if isinstance(explicit, str) and explicit:
             return explicit
@@ -800,47 +800,48 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if "pool" in config:
             return "Uniswap V3"
 
-        strategy_id_lower = strategy_id.lower()
-        if "uniswap" in strategy_id_lower:
+        deployment_id_lower = deployment_id.lower()
+        if "uniswap" in deployment_id_lower:
             return "Uniswap V3"
-        if "aave" in strategy_id_lower:
+        if "aave" in deployment_id_lower:
             return "Aave V3"
-        if "gmx" in strategy_id_lower:
+        if "gmx" in deployment_id_lower:
             return "GMX V2"
-        if "enso" in strategy_id_lower:
+        if "enso" in deployment_id_lower:
             return "Enso"
-        if "pancake" in strategy_id_lower:
+        if "pancake" in deployment_id_lower:
             return "PancakeSwap V3"
-        if "aerodrome" in strategy_id_lower:
+        if "aerodrome" in deployment_id_lower:
             return "Aerodrome"
-        if "traderjoe" in strategy_id_lower or "tj_" in strategy_id_lower:
+        if "traderjoe" in deployment_id_lower or "tj_" in deployment_id_lower:
             return "TraderJoe V2"
-        if "benqi" in strategy_id_lower:
+        if "benqi" in deployment_id_lower:
             return "Benqi"
-        if "morpho" in strategy_id_lower:
+        if "morpho" in deployment_id_lower:
             return "Morpho"
-        if "compound" in strategy_id_lower:
+        if "compound" in deployment_id_lower:
             return "Compound V3"
-        if "sushi" in strategy_id_lower:
+        if "sushi" in deployment_id_lower:
             return "SushiSwap V3"
-        if "curve" in strategy_id_lower:
+        if "curve" in deployment_id_lower:
             return "Curve"
-        if "balancer" in strategy_id_lower:
+        if "balancer" in deployment_id_lower:
             return "Balancer"
-        if "velodrome" in strategy_id_lower:
+        if "velodrome" in deployment_id_lower:
             return "Velodrome"
 
         return "Unknown"
 
-    async def _get_strategy_state_data(self, strategy_id: str, fallback_strategy_id: str | None = None) -> dict | None:
+    async def _get_strategy_state_data(self, deployment_id: str) -> dict | None:
         """Get strategy state from StateManager.
 
+        Per blueprint 29 §4 the gateway filters the caller-supplied
+        ``deployment_id`` directly — there is no identity translation and
+        no fallback key. A zero-row read means the deployment genuinely has
+        no state.
+
         Args:
-            strategy_id: Primary key to look up.
-            fallback_strategy_id: If provided and different from strategy_id,
-                tried when the primary lookup returns nothing.  This bridges
-                legacy warm state written under the SDK key before AGENT_ID
-                normalization was deployed.
+            deployment_id: The canonical deployment_id to look up.
 
         Returns:
             State dict or None if not found
@@ -849,19 +850,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return None
 
         try:
-            state = await self._state_manager.load_state(strategy_id)
-            if state is None and fallback_strategy_id and fallback_strategy_id != strategy_id:
-                state = await self._state_manager.load_state(fallback_strategy_id)
+            state = await self._state_manager.load_state(deployment_id)
             if state is not None:
                 return state.state
         except Exception as e:
-            logger.debug(f"Failed to load state for {strategy_id}: {e}")
+            logger.debug(f"Failed to load state for {deployment_id}: {e}")
 
         return None
 
     async def _get_portfolio_value_and_pnl(
         self,
-        strategy_id: str,
+        deployment_id: str,
     ) -> tuple[str, str]:
         """Get portfolio total value and PnL.
 
@@ -880,16 +879,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # They are framework-owned and updated by PortfolioValuer each iteration.
         if self._state_manager is not None:
             try:
-                metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+                metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
                 if metrics is not None:
-                    pnl_24h = await self._compute_pnl_24h(strategy_id, metrics.total_value_usd)
+                    pnl_24h = await self._compute_pnl_24h(deployment_id, metrics.total_value_usd)
                     return str(metrics.total_value_usd), str(pnl_24h)
             except Exception:
-                logger.debug("Failed to get portfolio metrics for %s", strategy_id, exc_info=True)
+                logger.debug("Failed to get portfolio metrics for %s", deployment_id, exc_info=True)
 
         # Level 2 — Fresh snapshot (brief grace period for new strategies that
         # haven't written PortfolioMetrics yet).
-        latest_snapshot = await self._get_latest_snapshot(strategy_id)
+        latest_snapshot = await self._get_latest_snapshot(deployment_id)
         if latest_snapshot is not None and self._snapshot_is_fresh(latest_snapshot):
             return str(latest_snapshot.total_value_usd), "0"
 
@@ -897,11 +896,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         logger.info(
             "No portfolio data available for %s — neither metrics nor a fresh snapshot exist. "
             "The dashboard will show $0 until the strategy's PortfolioValuer writes data.",
-            strategy_id,
+            deployment_id,
         )
         return "0", "0"
 
-    async def _compute_pnl_24h(self, strategy_id: str, current_value: Decimal) -> Decimal:
+    async def _compute_pnl_24h(self, deployment_id: str, current_value: Decimal) -> Decimal:
         """Compute PnL over a 24-hour window using snapshot history.
 
         Falls back to lifetime PnL if strategy has been running < 24h.
@@ -918,23 +917,24 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             target_time = datetime.now(UTC) - timedelta(hours=24)
-            snapshot_24h = await self._state_manager.get_snapshot_at(strategy_id, target_time)
+            snapshot_24h = await self._state_manager.get_snapshot_at(deployment_id, target_time)
 
             if snapshot_24h is not None and snapshot_24h.total_value_usd > 0:
                 return current_value - snapshot_24h.total_value_usd
 
             # Strategy running < 24h: fall back to lifetime PnL.
             # Gas is already reflected in current_value (wallet balance reduced).
-            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             if metrics is not None and metrics.initial_value_usd > 0:
                 return current_value - metrics.initial_value_usd
 
         except Exception:
-            logger.debug("Failed to compute PnL 24h for %s", strategy_id, exc_info=True)
+            logger.debug("Failed to compute PnL 24h for %s", deployment_id, exc_info=True)
 
         return Decimal("0")
 
-    async def _build_pnl_history(self, strategy_id: str) -> list:
+    # crap-allowlist: VIB-4722 only renamed identity plumbing inside existing dashboard history logic.
+    async def _build_pnl_history(self, deployment_id: str) -> list:
         """Build PnL time series from portfolio snapshots for chart rendering.
 
         Returns a list of PnLDataPoint protos from the last 7 days of snapshots.
@@ -947,13 +947,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             since = datetime.now(UTC) - timedelta(days=7)
-            snapshots = await self._state_manager.get_snapshots_since(strategy_id, since, limit=168)
+            snapshots = await self._state_manager.get_snapshots_since(deployment_id, since, limit=168)
 
             if not snapshots:
                 return pnl_points
 
             # Get initial value for PnL calculation
-            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             initial_value = metrics.initial_value_usd if metrics else Decimal("0")
 
             for snap in snapshots:
@@ -969,18 +969,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     )
                 )
         except Exception:
-            logger.debug("Failed to build PnL history for %s", strategy_id, exc_info=True)
+            logger.debug("Failed to build PnL history for %s", deployment_id, exc_info=True)
 
         return pnl_points
 
-    async def _get_latest_snapshot(self, strategy_id: str) -> PortfolioSnapshot | None:
+    async def _get_latest_snapshot(self, deployment_id: str) -> PortfolioSnapshot | None:
         """Get the most recent portfolio snapshot for staleness checks."""
         if self._state_manager is None:
             return None
         try:
-            return await self._state_manager.get_latest_snapshot(strategy_id)
+            return await self._state_manager.get_latest_snapshot(deployment_id)
         except Exception:
-            logger.debug("Failed to get latest snapshot for %s", strategy_id, exc_info=True)
+            logger.debug("Failed to get latest snapshot for %s", deployment_id, exc_info=True)
             return None
 
     @staticmethod
@@ -997,12 +997,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         age = (datetime.now(UTC) - timestamp).total_seconds()
         return age <= stale_threshold_seconds
 
-    async def _get_portfolio_metrics(self, strategy_id: str) -> Decimal | None:
+    async def _get_portfolio_metrics(self, deployment_id: str) -> Decimal | None:
         """Return pnl_after_gas for a strategy, or None if unavailable."""
         if self._state_manager is None:
             return None
         try:
-            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             if metrics is None:
                 return None
             return metrics.pnl_after_gas
@@ -1039,14 +1039,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     _VALID_FILTERS = _SOURCE_FILTERS | _STATUS_FILTERS
 
     @staticmethod
-    def _canonical_template_id(strategy_id: str) -> str:
+    def _canonical_template_id(deployment_id: str) -> str:
         """Extract canonical template ID from a strategy instance ID.
 
         Instance IDs use the format ``"template_name:uuid_suffix"`` for
         continuous runs, or plain ``"template_name"`` for ``--once`` runs.
         This returns the part before the first colon.
         """
-        return strategy_id.split(":")[0]
+        return deployment_id.split(":")[0]
 
     async def ListStrategies(
         self,
@@ -1106,10 +1106,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
 
                 for inst in registered:
-                    # Use strategy_name for dedupe — after AGENT_ID normalization,
-                    # strategy_id may be a platform UUID that won't match filesystem
+                    # Use strategy_name for dedupe — after ALMANAK_IS_HOSTED normalization,
+                    # deployment_id may be a platform UUID that won't match filesystem
                     # template names.  strategy_name preserves the original template ID.
-                    template_key = inst.strategy_name or self._canonical_template_id(inst.strategy_id)
+                    template_key = inst.strategy_name or self._canonical_template_id(inst.deployment_id)
                     registry_template_ids.add(template_key)
 
                     if include_registry:
@@ -1117,11 +1117,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         strategy_info = build_registry_strategy_info(inst, effective_status)
 
                         # Enrich with state + portfolio data
-                        state = await self._get_strategy_state_data(inst.strategy_id)
+                        state = await self._get_strategy_state_data(inst.deployment_id)
                         total_value, pnl = await self._get_portfolio_value_and_pnl(
-                            inst.strategy_id,
+                            inst.deployment_id,
                         )
-                        pnl_metrics = await self._get_portfolio_metrics(inst.strategy_id)
+                        pnl_metrics = await self._get_portfolio_metrics(inst.deployment_id)
                         enrich_strategy_info(
                             strategy_info,
                             state=state,
@@ -1139,7 +1139,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # --- Collect filesystem templates (for AVAILABLE and ALL) ---
         if status_filter in ("AVAILABLE", "ALL"):
             for fs_strategy in self._discover_strategies_from_filesystem():
-                template_id = self._canonical_template_id(fs_strategy["strategy_id"])
+                template_id = self._canonical_template_id(fs_strategy["deployment_id"])
                 if template_id in registry_template_ids:
                     continue
                 strategies.append(fs_strategy)
@@ -1180,7 +1180,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Get detailed information about a specific strategy.
 
         Args:
-            request: Details request with strategy_id
+            request: Details request with deployment_id
             context: gRPC context
 
         Returns:
@@ -1189,20 +1189,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.StrategyDetails()
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        original_strategy_id = strategy_id
-        strategy_id = resolve_agent_id(strategy_id)
-
+        # One identity (blueprint 29 §4): the validated deployment_id is the
+        # canonical deployment_id; the gateway filters it directly.
         # Resolve strategy source via registry → filesystem → paper cascade
         strategy_info = lookup_strategy_source(
-            strategy_id=strategy_id,
-            original_strategy_id=original_strategy_id,
+            deployment_id=deployment_id,
             registry_getter=get_instance_registry,
             compute_effective_status=self._compute_effective_status,
             discover_filesystem=self._discover_strategies_from_filesystem,
@@ -1211,13 +1208,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         if strategy_info is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(f"Strategy not found: {strategy_id}")
+            context.set_details(f"Strategy not found: {deployment_id}")
             return gateway_pb2.StrategyDetails()
 
-        # Enrich with state data (fallback bridges legacy pre-normalization state)
-        state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
-        total_value, pnl = await self._get_portfolio_value_and_pnl(strategy_id)
-        pnl_metrics = await self._get_portfolio_metrics(strategy_id)
+        # Enrich with state data
+        state = await self._get_strategy_state_data(deployment_id)
+        total_value, pnl = await self._get_portfolio_value_and_pnl(deployment_id)
+        pnl_metrics = await self._get_portfolio_metrics(deployment_id)
         enrich_strategy_info(
             strategy_info,
             state=state,
@@ -1232,13 +1229,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         # Build position info — snapshot wins over state dict fallback
         try:
-            latest_snap = await self._get_latest_snapshot(strategy_id)
+            latest_snap = await self._get_latest_snapshot(deployment_id)
         except Exception:
-            logger.debug("Failed to get snapshot balances for %s", strategy_id, exc_info=True)
+            logger.debug("Failed to get snapshot balances for %s", deployment_id, exc_info=True)
             latest_snap = None
         position = build_position_proto(
             state=state,
-            cached_positions=self._cached_positions.get(strategy_id),
+            cached_positions=self._cached_positions.get(deployment_id),
             snapshot=latest_snap,
         )
 
@@ -1247,7 +1244,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if request.include_timeline:
             limit = request.timeline_limit if request.timeline_limit > 0 else 20
             timeline_response = await self.GetTimeline(
-                gateway_pb2.GetTimelineRequest(strategy_id=strategy_id, limit=limit),
+                gateway_pb2.GetTimelineRequest(deployment_id=deployment_id, limit=limit),
                 context,
             )
             timeline = list(timeline_response.events)
@@ -1255,7 +1252,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Build PnL history time series from portfolio snapshots
         pnl_history = []
         if request.include_pnl_history:
-            pnl_history = await self._build_pnl_history(strategy_id)
+            pnl_history = await self._build_pnl_history(deployment_id)
 
         # Derive chain health from strategy chains (stub — UNKNOWN until real probing wired)
         # Fix (#1705): accept any Sequence[str] (tuples are valid). A strict
@@ -1272,7 +1269,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 logger.warning(
                     "Unexpected chains type %s for strategy %s; coercing to empty list",
                     type(raw_chains).__name__,
-                    strategy_info.get("strategy_id", "<unknown>"),
+                    strategy_info.get("deployment_id", "<unknown>"),
                 )
             chains = []
         chain_health = build_chain_health(chains)
@@ -1299,7 +1296,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Get timeline events for a strategy.
 
         Args:
-            request: Timeline request with strategy_id, limit, filters
+            request: Timeline request with deployment_id, limit, filters
             context: gRPC context
 
         Returns:
@@ -1308,14 +1305,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetTimelineResponse()
-
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
 
         limit = request.limit if request.limit > 0 else 50
         event_type_filter = request.event_type_filter if request.event_type_filter else None
@@ -1328,7 +1322,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         try:
             store = get_timeline_store()
             timeline_events = store.get_events(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 limit=limit,
                 event_type=event_type_filter,
                 since=since,
@@ -1357,7 +1351,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             if cache_file and cache_file.exists():
                 try:
                     cached_data = json.loads(cache_file.read_text())
-                    strategy_events = cached_data.get(strategy_id, [])
+                    strategy_events = cached_data.get(deployment_id, [])
 
                     for event_data in strategy_events[:limit]:
                         events.append(
@@ -1379,7 +1373,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     logger.debug(f"Failed to load timeline events from cache: {e}")
 
         # Also check state for execution history
-        state = await self._get_strategy_state_data(strategy_id)
+        state = await self._get_strategy_state_data(deployment_id)
         if state and "execution_history" in state:
             for exec_record in state.get("execution_history", [])[:limit]:
                 if isinstance(exec_record, dict):
@@ -1413,7 +1407,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Get strategy configuration.
 
         Args:
-            request: Config request with strategy_id
+            request: Config request with deployment_id
             context: gRPC context
 
         Returns:
@@ -1422,30 +1416,27 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.StrategyConfigResponse()
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
-
         # Try filesystem first (local development)
         if self._strategies_root is not None:
             for category in STRATEGY_CATEGORIES:
-                config_file = self._strategies_root / category / strategy_id / "config.json"
+                config_file = self._strategies_root / category / deployment_id / "config.json"
                 if config_file.exists():
                     try:
                         config = json.loads(config_file.read_text())
                         return gateway_pb2.StrategyConfigResponse(
-                            strategy_id=strategy_id,
-                            strategy_name=config.get("strategy_name", strategy_id),
+                            deployment_id=deployment_id,
+                            strategy_name=config.get("strategy_name", deployment_id),
                             config_json=json.dumps(config),
                             last_updated=int(config_file.stat().st_mtime),
                         )
                     except Exception as e:
-                        logger.error(f"Failed to read config file for {strategy_id}: {e}")
+                        logger.error(f"Failed to read config file for {deployment_id}: {e}")
                         context.set_code(grpc.StatusCode.INTERNAL)
                         context.set_details("Failed to read strategy config")
                         return gateway_pb2.StrategyConfigResponse()
@@ -1453,9 +1444,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Fallback to instance registry (deployed mode — config was stored at registration)
         try:
             registry = get_instance_registry()
-            inst = registry.get(strategy_id)
+            inst = registry.get(deployment_id)
         except Exception as e:
-            logger.error(f"Failed to get config from registry for {strategy_id}: {e}")
+            logger.error(f"Failed to get config from registry for {deployment_id}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("Failed to read strategy config")
             return gateway_pb2.StrategyConfigResponse()
@@ -1468,14 +1459,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 context.set_details("Stored config is invalid JSON")
                 return gateway_pb2.StrategyConfigResponse()
             return gateway_pb2.StrategyConfigResponse(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 strategy_name=config.get("strategy_name", inst.strategy_name),
                 config_json=inst.config_json,
                 last_updated=int(inst.updated_at.timestamp()) if inst.updated_at else 0,
             )
 
         context.set_code(grpc.StatusCode.NOT_FOUND)
-        context.set_details(f"Config not found for strategy: {strategy_id}")
+        context.set_details(f"Config not found for strategy: {deployment_id}")
         return gateway_pb2.StrategyConfigResponse()
 
     async def GetStrategyState(
@@ -1486,7 +1477,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Get current strategy state.
 
         Args:
-            request: State request with strategy_id and optional field filter
+            request: State request with deployment_id and optional field filter
             context: gRPC context
 
         Returns:
@@ -1495,20 +1486,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.StrategyStateResponse()
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        original_strategy_id = strategy_id
-        strategy_id = resolve_agent_id(strategy_id)
-
-        state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
+        # One identity (blueprint 29 §4): no gateway-side translation.
+        state = await self._get_strategy_state_data(deployment_id)
         if state is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(f"State not found for strategy: {strategy_id}")
+            context.set_details(f"State not found for strategy: {deployment_id}")
             return gateway_pb2.StrategyStateResponse()
 
         # Filter fields if specified
@@ -1522,7 +1510,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         updated_at = 0
         if self._state_manager:
             try:
-                state_obj = await self._state_manager.load_state(strategy_id)
+                state_obj = await self._state_manager.load_state(deployment_id)
                 if state_obj:
                     version = state_obj.version
                     if state_obj.created_at:
@@ -1531,7 +1519,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 pass
 
         return gateway_pb2.StrategyStateResponse(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             state_json=json.dumps(filtered_state),
             version=version,
             updated_at=updated_at,
@@ -1545,7 +1533,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Execute operator action (pause, resume, emergency).
 
         Args:
-            request: Action request with strategy_id, action, reason
+            request: Action request with deployment_id, action, reason
             context: gRPC context
 
         Returns:
@@ -1554,14 +1542,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         await self._ensure_initialized()
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.ExecuteActionResponse(success=False, error=str(e))
-
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
 
         action = request.action.upper()
         reason = request.reason
@@ -1574,7 +1559,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         action_id = str(uuid4())
 
         # Log the action for audit
-        logger.info(f"Dashboard action: {action} on {strategy_id}, reason: {reason}, action_id: {action_id}")
+        logger.info(f"Dashboard action: {action} on {deployment_id}, reason: {reason}, action_id: {action_id}")
 
         # Map dashboard actions to lifecycle commands.
         # Instead of mutating state flags directly, we write a command to the
@@ -1596,17 +1581,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
             store = get_lifecycle_store()
             store.write_command(
-                agent_id=strategy_id,
+                deployment_id=deployment_id,
                 command=command,
                 issued_by=f"dashboard:{reason}",
             )
-            logger.info(f"Issued {command} command to {strategy_id} via lifecycle store: {reason}")
+            logger.info(f"Issued {command} command to {deployment_id} via lifecycle store: {reason}")
             return gateway_pb2.ExecuteActionResponse(
                 success=True,
                 action_id=action_id,
             )
         except Exception as e:
-            logger.error(f"Failed to issue {command} command to {strategy_id}: {e}")
+            logger.error(f"Failed to issue {command} command to {deployment_id}: {e}")
             return gateway_pb2.ExecuteActionResponse(
                 success=False,
                 error=str(e),
@@ -1617,6 +1602,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # Instance Registry RPCs
     # =========================================================================
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing registry RPC.
     async def RegisterStrategyInstance(
         self,
         request: gateway_pb2.RegisterInstanceRequest,
@@ -1624,12 +1610,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> gateway_pb2.RegisterInstanceResponse:
         """Register a strategy instance in the persistent registry."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             return gateway_pb2.RegisterInstanceResponse(success=False, error=str(e))
-
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
 
         try:
             from almanak.gateway.registry.store import StrategyInstance
@@ -1637,7 +1620,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             registry = get_instance_registry()
             now = datetime.now(UTC)
 
-            existing = registry.get(strategy_id)
+            existing = registry.get(deployment_id)
             # Read chains and chain_wallets from request
             chains_str = ",".join(request.chains) if request.chains else request.chain
             chain_wallets_str = ""
@@ -1645,8 +1628,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 chain_wallets_str = json.dumps(dict(request.chain_wallets))
 
             # Derive protocol from strategy name/ID if not provided.
-            # Use the original strategy_name or request.strategy_id for derivation,
-            # not the resolved strategy_id which may be a platform UUID/AGENT_ID.
+            # Use the original strategy_name or request.deployment_id for derivation,
+            # not the resolved deployment_id which may be a platform UUID/ALMANAK_IS_HOSTED.
             protocol = request.protocol
             if not protocol:
                 config = {}
@@ -1655,14 +1638,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         config = json.loads(request.config_json)
                     except (json.JSONDecodeError, TypeError):
                         pass
-                derivation_key = request.strategy_name or request.strategy_id or strategy_id
+                derivation_key = request.strategy_name or request.deployment_id or deployment_id
                 protocol = self._derive_protocol_from_config(config, derivation_key)
                 if protocol == "Unknown":
                     protocol = ""
 
             instance = StrategyInstance(
-                strategy_id=strategy_id,
-                strategy_name=request.strategy_name or strategy_id,
+                deployment_id=deployment_id,
+                strategy_name=request.strategy_name or deployment_id,
                 template_name=request.template_name,
                 chain=request.chain,
                 protocol=protocol,
@@ -1685,7 +1668,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 already_existed=existing is not None,
             )
         except Exception as e:
-            logger.error(f"Failed to register instance {request.strategy_id}: {e}")
+            logger.error(f"Failed to register instance {request.deployment_id}: {e}")
             return gateway_pb2.RegisterInstanceResponse(success=False, error=str(e))
 
     async def UpdateStrategyInstanceStatus(
@@ -1695,36 +1678,33 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> gateway_pb2.UpdateInstanceStatusResponse:
         """Update strategy instance status or send heartbeat."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             return gateway_pb2.UpdateInstanceStatusResponse(success=False, error=str(e))
-
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
 
         try:
             registry = get_instance_registry()
 
             if request.heartbeat_only:
-                success = registry.heartbeat(strategy_id)
+                success = registry.heartbeat(deployment_id)
             else:
-                success = registry.update_status(strategy_id, request.status, request.reason)
+                success = registry.update_status(deployment_id, request.status, request.reason)
 
             if not success:
                 return gateway_pb2.UpdateInstanceStatusResponse(
                     success=False,
-                    error=f"Instance not found: {strategy_id}",
+                    error=f"Instance not found: {deployment_id}",
                 )
 
             # Cache strategy positions (clear stale data when none reported)
             if request.positions:
-                self._cached_positions[strategy_id] = list(request.positions)
+                self._cached_positions[deployment_id] = list(request.positions)
             else:
-                self._cached_positions.pop(strategy_id, None)
+                self._cached_positions.pop(deployment_id, None)
 
             return gateway_pb2.UpdateInstanceStatusResponse(success=True)
         except Exception as e:
-            logger.error(f"Failed to update instance status {request.strategy_id}: {e}")
+            logger.error(f"Failed to update instance status {request.deployment_id}: {e}")
             return gateway_pb2.UpdateInstanceStatusResponse(success=False, error=str(e))
 
     async def ArchiveStrategyInstance(
@@ -1734,29 +1714,27 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> gateway_pb2.ArchiveInstanceResponse:
         """Archive a strategy instance (hidden from dashboard, data retained)."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             return gateway_pb2.ArchiveInstanceResponse(success=False, error=str(e))
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
-
         try:
             registry = get_instance_registry()
-            success = registry.archive(strategy_id)
+            success = registry.archive(deployment_id)
             if not success:
                 return gateway_pb2.ArchiveInstanceResponse(
                     success=False,
-                    error=f"Instance not found: {strategy_id}",
+                    error=f"Instance not found: {deployment_id}",
                 )
 
-            self._cached_positions.pop(strategy_id, None)
-            logger.info(f"Archived instance {strategy_id}: {request.reason}")
+            self._cached_positions.pop(deployment_id, None)
+            logger.info(f"Archived instance {deployment_id}: {request.reason}")
             return gateway_pb2.ArchiveInstanceResponse(success=True)
         except Exception as e:
-            logger.error(f"Failed to archive instance {request.strategy_id}: {e}")
+            logger.error(f"Failed to archive instance {request.deployment_id}: {e}")
             return gateway_pb2.ArchiveInstanceResponse(success=False, error=str(e))
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing purge RPC.
     async def PurgeStrategyInstance(
         self,
         request: gateway_pb2.PurgeInstanceRequest,
@@ -1764,12 +1742,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> gateway_pb2.PurgeInstanceResponse:
         """Purge a strategy instance and all its events (permanent delete)."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             return gateway_pb2.PurgeInstanceResponse(success=False, error=str(e))
-
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
 
         if not request.reason:
             return gateway_pb2.PurgeInstanceResponse(
@@ -1781,27 +1756,28 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             registry = get_instance_registry()
 
             # Atomic delete of instance + events in single transaction
-            success = registry.purge_with_events(strategy_id)
+            success = registry.purge_with_events(deployment_id)
             if not success:
                 return gateway_pb2.PurgeInstanceResponse(
                     success=False,
-                    error=f"Instance not found: {strategy_id}",
+                    error=f"Instance not found: {deployment_id}",
                 )
 
             # Also clear from timeline cache
             try:
                 store = get_timeline_store()
-                store.clear_events(strategy_id)
+                store.clear_events(deployment_id)
             except Exception as e:
-                logger.debug(f"Failed to clear timeline cache for {strategy_id} (non-fatal): {e}")
+                logger.debug(f"Failed to clear timeline cache for {deployment_id} (non-fatal): {e}")
 
-            self._cached_positions.pop(strategy_id, None)
-            logger.info(f"Purged instance {strategy_id}: {request.reason}")
+            self._cached_positions.pop(deployment_id, None)
+            logger.info(f"Purged instance {deployment_id}: {request.reason}")
             return gateway_pb2.PurgeInstanceResponse(success=True)
         except Exception as e:
-            logger.error(f"Failed to purge instance {request.strategy_id}: {e}")
+            logger.error(f"Failed to purge instance {request.deployment_id}: {e}")
             return gateway_pb2.PurgeInstanceResponse(success=False, error=str(e))
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing ledger RPC.
     async def GetTransactionLedger(
         self,
         request: gateway_pb2.GetTransactionLedgerRequest,
@@ -1809,15 +1785,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> gateway_pb2.GetTransactionLedgerResponse:
         """Get structured trade records from the transaction ledger."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning(f"Invalid strategy_id in GetTransactionLedger: {e}")
+            logger.warning(f"Invalid deployment_id in GetTransactionLedger: {e}")
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetTransactionLedgerResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         since = None
         if request.since_timestamp > 0:
@@ -1830,10 +1805,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if self._state_manager is not None:
             try:
                 entries = await self._state_manager.get_ledger_entries(
-                    strategy_id, since=since, intent_type=intent_type, limit=limit + 1
+                    deployment_id, since=since, intent_type=intent_type, limit=limit + 1
                 )
             except Exception:
-                logger.debug("Failed to query transaction ledger for %s", strategy_id, exc_info=True)
+                logger.debug("Failed to query transaction ledger for %s", deployment_id, exc_info=True)
 
         has_more = len(entries) > limit
         if has_more:
@@ -1845,7 +1820,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 gateway_pb2.LedgerEntryInfo(
                     id=entry.id,
                     cycle_id=entry.cycle_id,
-                    strategy_id=entry.strategy_id,
+                    deployment_id=entry.deployment_id,
                     timestamp=int(entry.timestamp.timestamp()),
                     intent_type=entry.intent_type,
                     token_in=entry.token_in,
@@ -1874,7 +1849,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # ----------------------------------------------------------------------
 
     async def _load_quant_inputs(  # noqa: C901
-        self, strategy_id: str
+        self, deployment_id: str
     ) -> tuple[Any, list[Any], list[Any], list[dict[str, Any]], Any]:
         """Load the on-disk inputs every quant aggregation needs.
 
@@ -1896,15 +1871,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         if self._state_manager is not None:
             try:
-                portfolio_metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+                portfolio_metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             except Exception:
-                logger.debug("get_portfolio_metrics failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_portfolio_metrics failed for %s", deployment_id, exc_info=True)
             try:
                 snapshots = await self._state_manager.get_snapshots_since(
-                    strategy_id, since=datetime.now(tz=UTC) - timedelta(days=365)
+                    deployment_id, since=datetime.now(tz=UTC) - timedelta(days=365)
                 )
             except Exception:
-                logger.debug("get_snapshots_since failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_snapshots_since failed for %s", deployment_id, exc_info=True)
             # The quant aggregations are LTD surfaces (cost stack,
             # audit-trail counts, G6 reconciliation). A hard row cap
             # silently understates lifetime totals and can mis-PASS G6 by
@@ -1915,7 +1890,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             # backend — is tracked separately (see notes/audit-pr-*.md).
             try:
                 ledger_entries = await self._state_manager.get_ledger_entries(
-                    strategy_id, limit=_QUANT_HEADER_LEDGER_CAP
+                    deployment_id, limit=_QUANT_HEADER_LEDGER_CAP
                 )
                 if len(ledger_entries) >= _QUANT_HEADER_LEDGER_CAP:
                     logger.warning(
@@ -1923,19 +1898,19 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         "LTD cost stack and audit-trail counts may be partial. "
                         "Add SQL-side aggregation when this fires regularly.",
                         _QUANT_HEADER_LEDGER_CAP,
-                        strategy_id,
+                        deployment_id,
                     )
             except Exception:
-                logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_ledger_entries failed for %s", deployment_id, exc_info=True)
             try:
                 accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
-                    deployment_id=strategy_id
+                    deployment_id=deployment_id
                 )
             except Exception:
-                logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_accounting_events_for_dashboard failed for %s", deployment_id, exc_info=True)
 
         # Pull a position summary off the latest snapshot for the primary-risk gauge.
-        latest_snapshot = await self._get_latest_snapshot(strategy_id)
+        latest_snapshot = await self._get_latest_snapshot(deployment_id)
         if latest_snapshot is not None:
 
             class _PosShim:
@@ -1995,15 +1970,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         posture.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetPnLSummary: %s", e)
+            logger.warning("Invalid deployment_id in GetPnLSummary: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PnLSummary()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         from almanak.framework.dashboard.quant_aggregations import compute_pnl_summary
 
@@ -2013,7 +1987,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ledger_entries,
             accounting_events,
             position_summary,
-        ) = await self._load_quant_inputs(strategy_id)
+        ) = await self._load_quant_inputs(deployment_id)
 
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
@@ -2054,19 +2028,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         proportional to ledger length.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetCostStack: %s", e)
+            logger.warning("Invalid deployment_id in GetCostStack: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.CostStackInfo()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         from almanak.framework.dashboard.quant_aggregations import compute_cost_stack
 
-        _, _, ledger_entries, accounting_events, _ = await self._load_quant_inputs(strategy_id)
+        _, _, ledger_entries, accounting_events, _ = await self._load_quant_inputs(deployment_id)
 
         cs = compute_cost_stack(ledger_entries, accounting_events)
 
@@ -2096,15 +2069,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         dashboard and the accountant test harness.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetAuditPosture: %s", e)
+            logger.warning("Invalid deployment_id in GetAuditPosture: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.AuditPosture()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         from almanak.framework.dashboard.quant_aggregations import (
             _detect_primitive,
@@ -2121,7 +2093,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ledger_entries,
             accounting_events,
             position_summary,
-        ) = await self._load_quant_inputs(strategy_id)
+        ) = await self._load_quant_inputs(deployment_id)
 
         # Reconciliation needs deployed/NAV anchored the same way the PnL
         # surface anchors them — so the dashboard and accountant test
@@ -2183,7 +2155,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
     async def _collect_trade_tape_sources(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int,
         before_ts: datetime | None,
     ) -> tuple[list[Any], list[dict[str, Any]], list[Any]]:
@@ -2211,18 +2183,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Over-fetch by 1 to set has_more; push before_timestamp cursor into SQL
         # so we never return an empty page when `limit` newer-than-cursor rows exist.
         ledger_entries = await self._state_manager.get_ledger_entries(
-            strategy_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
+            deployment_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
         )
         # Optional enrichment — swallow per-source errors.
         try:
             # Async sibling — see GetQuantHeader for rationale (VIB-3933).
-            accounting_events = await self._state_manager.get_accounting_events_for_dashboard(deployment_id=strategy_id)
+            accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
+                deployment_id=deployment_id
+            )
         except Exception:
-            logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
+            logger.debug("get_accounting_events_for_dashboard failed for %s", deployment_id, exc_info=True)
         try:
-            position_events = await self._state_manager.get_position_events_for_dashboard(deployment_id=strategy_id)
+            position_events = await self._state_manager.get_position_events_for_dashboard(deployment_id=deployment_id)
         except Exception:
-            logger.debug("get_position_events_for_dashboard failed for %s", strategy_id, exc_info=True)
+            logger.debug("get_position_events_for_dashboard failed for %s", deployment_id, exc_info=True)
         return ledger_entries, accounting_events, position_events
 
     async def GetTradeTape(
@@ -2237,15 +2211,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         a Quant-grade trade tape without re-reading the chain.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetTradeTape: %s", e)
+            logger.warning("Invalid deployment_id in GetTradeTape: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetTradeTapeResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         limit = request.limit if request.limit > 0 else 50
         # Validate the cursor: ``datetime.fromtimestamp`` raises ``OverflowError``
@@ -2266,7 +2239,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             ledger_entries, accounting_events, position_events = await self._collect_trade_tape_sources(
-                strategy_id, limit, before_ts
+                deployment_id, limit, before_ts
             )
         except Exception:
             # Ledger backend failure on the primary source. ``GetTradeTapeResponse``
@@ -2276,7 +2249,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             # Stack trace is logged but not returned to the client (gateway is the
             # security boundary — no implementation details leak across the gRPC
             # response).
-            logger.exception("get_ledger_entries failed for %s", strategy_id)
+            logger.exception("get_ledger_entries failed for %s", deployment_id)
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details("Failed to load trade tape from ledger backend")
             return gateway_pb2.GetTradeTapeResponse()
@@ -2339,15 +2312,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             (a tied item is never returned twice nor skipped).
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning(f"Invalid strategy_id in GetActivityFeed: {e}")
+            logger.warning(f"Invalid deployment_id in GetActivityFeed: {e}")
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetActivityFeedResponse()
 
         await self._ensure_initialized()
-        resolved_id = resolve_agent_id(strategy_id)
+        # One identity (blueprint 29 §4): no gateway-side translation —
+        # the validated deployment_id IS the canonical deployment_id.
+        resolved_id = deployment_id
 
         limit = min(
             request.limit if request.limit > 0 else self._ACTIVITY_FEED_LIMIT_DEFAULT,
@@ -2626,7 +2601,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         try:
             return list(
                 get_timeline_store().get_events(
-                    strategy_id=resolved_id,
+                    deployment_id=resolved_id,
                     limit=limit_plus_one,
                     event_type=event_type_filter,
                     before=store_before,
@@ -2847,12 +2822,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # Phase 1C / 1D land the reconciliation triad + RefreshRegistryFromChain.
     #
     # Pattern matches existing handlers (GetTransactionLedger, GetTradeTape):
-    # validate_strategy_id → _ensure_initialized → resolve_agent_id →
+    # validate_deployment_id → _ensure_initialized →
     # extract params → state_manager calls → build proto response.
 
     async def _build_snapshot_position_index(
         self,
-        strategy_id: str,
+        deployment_id: str,
     ) -> tuple[dict[str, dict[str, Any]], int]:
         """Return ``(position_id → snapshot dict, snapshot_taken_at_unix)``.
 
@@ -2866,7 +2841,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # the assert pins that contract for mypy without a runtime guard cost.
         assert self._state_manager is not None
         try:
-            latest = await self._state_manager.get_latest_snapshot(strategy_id)
+            latest = await self._state_manager.get_latest_snapshot(deployment_id)
         except Exception as e:
             logger.warning("get_latest_snapshot failed in GetPositions: %s", e)
             return snapshot_by_id, 0
@@ -2898,7 +2873,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     async def _collect_cutover_derivations(
         self,
         *,
-        strategy_id: str,
+        deployment_id: str,
         accounting_categories: set[str],
         registry_rows: list[dict[str, Any]],
         now_unix: int,
@@ -2924,7 +2899,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             primitive, cutover_key = cutover_lookup_key(category)
             try:
                 ms_row = await self._state_manager.get_migration_state(
-                    deployment_id=strategy_id,
+                    deployment_id=deployment_id,
                     primitive=primitive,
                     cutover_key=cutover_key,
                 )
@@ -2988,15 +2963,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetPositions: %s", e)
+            logger.warning("Invalid deployment_id in GetPositions: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetPositionsResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         if self._state_manager is None:
             # No backend — return empty response with a single PRE_BACKFILL
@@ -3009,7 +2983,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             registry_rows = await self._state_manager.get_position_registry_open_rows(
-                strategy_id,
+                deployment_id,
                 chain=chain_filter,
                 primitive=primitive_filter,
                 accounting_category=accounting_category_filter,
@@ -3023,7 +2997,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # registry rows use ``handle`` (display) or ``physical_identity_hash``
         # (PK). The gateway-side LP backfill writes ``handle = position_id``
         # today (cutover.py:69 / backfill.py:861), so a single dict suffices.
-        snapshot_by_id, snapshot_taken_at_unix = await self._build_snapshot_position_index(strategy_id)
+        snapshot_by_id, snapshot_taken_at_unix = await self._build_snapshot_position_index(deployment_id)
 
         # Per-category cutover derivations.
         now_unix = int(datetime.now(tz=UTC).timestamp())
@@ -3031,7 +3005,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if accounting_category_filter:
             accounting_categories.add(accounting_category_filter)
         cutover_by_category = await self._collect_cutover_derivations(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             accounting_categories=accounting_categories,
             registry_rows=registry_rows,
             now_unix=now_unix,
@@ -3076,7 +3050,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                          pending VIB-4501 for the state-manager method)
           - SWAP / PREDICTION → empty + RANGE_HISTORY_NA_STUB
 
-        Lookup primary key per v5 design: `(strategy_id, chain,
+        Lookup primary key per v5 design: `(deployment_id, chain,
         accounting_category, handle | physical_identity_hash)`. v1 honors the
         physical_identity_hash when supplied; falls back to handle (display
         key) otherwise. `position_id` from the wire is treated as
@@ -3091,9 +3065,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetPositionRangeHistory: %s", e)
+            logger.warning("Invalid deployment_id in GetPositionRangeHistory: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetPositionRangeHistoryResponse()
@@ -3112,7 +3086,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.GetPositionRangeHistoryResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         if self._state_manager is None:
             return gateway_pb2.GetPositionRangeHistoryResponse(stub_message="state manager unavailable")
@@ -3129,13 +3102,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         # LP/PERP: resolve the wire identifier to the position_events
         # `position_id` we can query with. The state manager's
-        # `get_position_history` only filters by (strategy_id, position_id),
+        # `get_position_history` only filters by (deployment_id, position_id),
         # so we (a) translate physical_identity_hash → handle via the
         # registry when needed, and (b) post-filter the events by chain
         # and accounting_category to honor the wire contract — handles can
         # collide across chains / categories (Codex review fix).
         position_id = await self._resolve_position_history_key(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=request.chain,
             accounting_category=request.accounting_category,
             handle=request.handle,
@@ -3154,11 +3127,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         try:
-            # Positional args — base StateManager uses `strategy_id`, the runtime
+            # Positional args — base StateManager uses `deployment_id`, the runtime
             # GatewayStateManager uses `deployment_id`. Positional binding works
             # for both and keeps mypy from picking the base-class signature.
             events = await self._state_manager.get_position_history(
-                strategy_id,
+                deployment_id,
                 position_id,
             )
         except Exception as e:
@@ -3200,7 +3173,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     async def _resolve_position_history_key(
         self,
         *,
-        strategy_id: str,
+        deployment_id: str,
         chain: str,
         accounting_category: str,
         handle: str,
@@ -3211,7 +3184,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         Behaviour:
           * ``physical_identity_hash`` wins when both are supplied (it's
             the stable primary key). We look it up in the position_registry
-            filtered by (strategy_id, chain, accounting_category) and
+            filtered by (deployment_id, chain, accounting_category) and
             return the matching row's ``handle`` — which IS the
             ``position_id`` used in position_events (writer convention,
             cutover.py:69 / backfill.py:861).
@@ -3228,7 +3201,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return handle  # degraded; let the caller try the raw input
         try:
             rows = await self._state_manager.get_position_registry_open_rows(
-                strategy_id,
+                deployment_id,
                 chain=chain or None,
                 accounting_category=accounting_category or None,
             )
@@ -3249,7 +3222,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # VIB-4493 Phase 1C — Reconciliation triad
     # =========================================================================
 
-    async def _resolve_chain_and_wallet(self, strategy_id: str) -> tuple[str, str]:
+    async def _resolve_chain_and_wallet(self, deployment_id: str) -> tuple[str, str]:
         """Resolve (chain, wallet_address) for a reconciliation call.
 
         v1 sources both from the latest portfolio_snapshot. Multi-chain
@@ -3260,7 +3233,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if self._state_manager is None:
             return ("", "")
         try:
-            snap = await self._state_manager.get_latest_snapshot(strategy_id)
+            snap = await self._state_manager.get_latest_snapshot(deployment_id)
         except Exception as e:
             logger.warning("get_latest_snapshot failed in _resolve_chain_and_wallet: %s", e)
             return ("", "")
@@ -3282,7 +3255,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     async def _invoke_reconcile(
         self,
         *,
-        strategy_id: str,
+        deployment_id: str,
         chain: str,
         wallet_address: str,
         apply: bool,
@@ -3299,7 +3272,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.warning("position_servicer unwired — Reconcile RPC unavailable in this DashboardService instance")
             return None
         req = gateway_pb2.ReconcileRequest(
-            deployment_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet_address,
             primitives=["lp"],  # v1: LP-only; non-LP surface stubs
@@ -3349,7 +3322,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         LP-only in v1 — non-LP primitives surface PrimitiveCoverageStub
         cards (see _dashboard_phase1.PER_PRIMITIVE_STUBS for the catalogue).
-        5-second gateway-side cache per (strategy_id) per v5 design.
+        5-second gateway-side cache per (deployment_id) per v5 design.
         """
         from almanak.gateway.services._dashboard_phase1 import (
             ReconciliationReportCache,
@@ -3357,25 +3330,24 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetReconciliationReport: %s", e)
+            logger.warning("Invalid deployment_id in GetReconciliationReport: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GetReconciliationReportResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
         now_unix = int(datetime.now(tz=UTC).timestamp())
 
         if self._reconciliation_report_cache is None:
             self._reconciliation_report_cache = ReconciliationReportCache(ttl_seconds=5)
 
-        cached = self._reconciliation_report_cache.get(strategy_id, now_unix_seconds=now_unix)
+        cached = self._reconciliation_report_cache.get(deployment_id, now_unix_seconds=now_unix)
         if cached is not None:
             return cached
 
-        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
         if not chain or not wallet:
             # No snapshot yet — return empty findings with a clear stub message
             # via the primitive_stubs surface. The renderer's empty-state copy
@@ -3385,7 +3357,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         reconcile_response = await self._invoke_reconcile(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet,
             apply=False,
@@ -3400,7 +3372,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             reconcile_response=reconcile_response,
             now_unix_seconds=now_unix,
         )
-        self._reconciliation_report_cache.put(strategy_id, report, now_unix_seconds=now_unix)
+        self._reconciliation_report_cache.put(deployment_id, report, now_unix_seconds=now_unix)
         return report
 
     async def _require_operator_authorization(self, context: grpc.aio.ServicerContext) -> bool:
@@ -3469,15 +3441,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in PreviewReconcile: %s", e)
+            logger.warning("Invalid deployment_id in PreviewReconcile: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PreviewReconcileResponse()
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
         now_unix = int(datetime.now(tz=UTC).timestamp())
 
         if self._preview_token_store is None:
@@ -3485,14 +3456,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Opportunistic GC to keep the store bounded.
         self._preview_token_store.gc_expired(now_unix_seconds=now_unix)
 
-        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
         if not chain or not wallet:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details("could not resolve chain/wallet from latest snapshot — strategy may not be initialized")
             return gateway_pb2.PreviewReconcileResponse()
 
         reconcile_response = await self._invoke_reconcile(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet,
             apply=False,
@@ -3508,13 +3479,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         ledger_max_id = ""
         if self._state_manager is not None:
             try:
-                registry_rows = await self._state_manager.get_position_registry_open_rows(strategy_id)
+                registry_rows = await self._state_manager.get_position_registry_open_rows(deployment_id)
             except Exception as e:
                 logger.warning("get_position_registry_open_rows failed in PreviewReconcile: %s", e)
                 registry_rows = []
             try:
                 latest_entries = await self._state_manager.get_ledger_entries(
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     limit=1,
                 )
                 if latest_entries:
@@ -3528,7 +3499,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             source_block_number=reconcile_response.source_block_number,
         )
         token, expires_at = self._preview_token_store.issue(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             fingerprint=fingerprint,
             reconcile_response=reconcile_response,
             now_unix_seconds=now_unix,
@@ -3575,9 +3546,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in ApplyReconcile: %s", e)
+            logger.warning("Invalid deployment_id in ApplyReconcile: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.ApplyReconcileResponse(result="INVALID_ARGUMENT", detail=str(e))
@@ -3588,7 +3559,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.ApplyReconcileResponse(result="INVALID_ARGUMENT", detail="preview_token is required")
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
         now_unix = int(datetime.now(tz=UTC).timestamp())
 
         if self._preview_token_store is None:
@@ -3598,7 +3568,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         status, entry = self._preview_token_store.consume(
             token=request.preview_token,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             now_unix_seconds=now_unix,
         )
         if status != "OK" or entry is None:
@@ -3611,7 +3581,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 }.get(status, "unknown token state"),
             )
 
-        chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+        chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
         if not chain or not wallet:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details("could not resolve chain/wallet from latest snapshot")
@@ -3646,7 +3616,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # in-window drift surfaces as PARTIAL_SUCCESS / per-primitive
         # errors from Reconcile rather than as silent corruption.
         dry_run_response = await self._invoke_reconcile(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet,
             apply=False,
@@ -3663,12 +3633,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         ledger_max_id = ""
         if self._state_manager is not None:
             try:
-                registry_rows = await self._state_manager.get_position_registry_open_rows(strategy_id)
+                registry_rows = await self._state_manager.get_position_registry_open_rows(deployment_id)
             except Exception as e:
                 logger.warning("get_position_registry_open_rows failed in ApplyReconcile fingerprint: %s", e)
             try:
                 latest_entries = await self._state_manager.get_ledger_entries(
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     limit=1,
                 )
                 if latest_entries:
@@ -3694,7 +3664,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Fingerprint matches — safe to apply. The second Reconcile will
         # write registry rows for any phantom_missing it still sees.
         reconcile_response = await self._invoke_reconcile(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             wallet_address=wallet,
             apply=True,
@@ -3755,22 +3725,21 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         import asyncio as _asyncio
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
-            logger.warning("Invalid strategy_id in RefreshRegistryFromChain: %s", e)
+            logger.warning("Invalid deployment_id in RefreshRegistryFromChain: %s", e)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.RefreshRegistryFromChainResponse(result="INVALID_ARGUMENT", detail=str(e))
 
         await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
 
         # Per-strategy lock construction is itself thread-safe in asyncio
         # (single event loop) — no extra synchronization needed.
-        lock = self._registry_refresh_locks.get(strategy_id)
+        lock = self._registry_refresh_locks.get(deployment_id)
         if lock is None:
             lock = _asyncio.Lock()
-            self._registry_refresh_locks[strategy_id] = lock
+            self._registry_refresh_locks[deployment_id] = lock
 
         if lock.locked():
             return gateway_pb2.RefreshRegistryFromChainResponse(
@@ -3779,7 +3748,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         async with lock:
-            chain, wallet = await self._resolve_chain_and_wallet(strategy_id)
+            chain, wallet = await self._resolve_chain_and_wallet(deployment_id)
             if not chain or not wallet:
                 return gateway_pb2.RefreshRegistryFromChainResponse(
                     result="FAILED",
@@ -3787,7 +3756,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
 
             reconcile_response = await self._invoke_reconcile(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 chain=chain,
                 wallet_address=wallet,
                 apply=True,

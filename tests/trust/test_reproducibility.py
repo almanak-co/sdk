@@ -44,7 +44,7 @@ class SimpleStrategy(IntentStrategy):
     """Simple strategy for reproducibility testing."""
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "reproducibility-test-strategy"
 
     def decide(self, market: MarketSnapshot):  # noqa: ARG002
@@ -52,7 +52,7 @@ class SimpleStrategy(IntentStrategy):
 
     def get_open_positions(self):
         from almanak.framework.teardown.models import TeardownPositionSummary
-        return TeardownPositionSummary.empty(self.strategy_id)
+        return TeardownPositionSummary.empty(self.deployment_id)
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []

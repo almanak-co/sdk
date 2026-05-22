@@ -223,20 +223,20 @@ class TraderJoeLPCrisisTestStrategy:
         rebalance_threshold_pct: Decimal = Decimal("0.06"),
         amount_x: Decimal = Decimal("0.5"),
         amount_y: Decimal = Decimal("10"),
-        strategy_id: str = "traderjoe_crisis_lp_test",
+        deployment_id: str = "traderjoe_crisis_lp_test",
     ):
         self._range_width_pct = range_width_pct
         self._rebalance_threshold_pct = rebalance_threshold_pct
         self._amount_x = amount_x
         self._amount_y = amount_y
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._state = "idle"
         self._entry_price: Decimal | None = None
         self._rebalance_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         try:
@@ -278,12 +278,12 @@ class TraderJoeLPCrisisTestStrategy:
 class HoldOnlyStrategy:
     """Strategy that never trades -- baseline for comparison."""
 
-    def __init__(self, strategy_id: str = "hold_baseline_avalanche"):
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "hold_baseline_avalanche"):
+        self._deployment_id = deployment_id
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> None:
         return None

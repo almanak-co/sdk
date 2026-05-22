@@ -37,7 +37,6 @@ class _FakeLedgerRow:
 
     id: str
     deployment_id: str
-    strategy_id: str
     gas_usd: str
     cycle_id: str = "cycle-test"
     execution_mode: str = "paper"
@@ -49,13 +48,13 @@ def _insert_ledger_row(store: SQLiteStore, row: _FakeLedgerRow) -> None:
     store._conn.execute(  # type: ignore[union-attr]
         """
         INSERT INTO transaction_ledger (
-            id, cycle_id, strategy_id, deployment_id, execution_mode,
+            id, cycle_id, deployment_id, execution_mode,
             timestamp, intent_type, gas_usd, success
-        ) VALUES (?, ?, ?, ?, ?, ?, 'SWAP', ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, 'SWAP', ?, 1)
         """,
         (
-            row.id, row.cycle_id, row.strategy_id, row.deployment_id,
-            row.execution_mode, row.timestamp, row.gas_usd,
+            row.id, row.cycle_id, row.deployment_id, row.execution_mode,
+            row.timestamp, row.gas_usd,
         ),
     )
     store._conn.commit()  # type: ignore[union-attr]
@@ -80,10 +79,10 @@ def _runner_for_metrics(state_manager: Any, deployment_id: str = "dep-X", config
     return runner
 
 
-def _snapshot(strategy_id: str = "demo") -> PortfolioSnapshot:
+def _snapshot(deployment_id: str = "demo") -> PortfolioSnapshot:
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         total_value_usd=Decimal("100"),
         available_cash_usd=Decimal("100"),
         value_confidence=ValueConfidence.HIGH,
@@ -99,16 +98,16 @@ async def test_gas_spent_usd_equals_ledger_sum(sqlite_store: SQLiteStore) -> Non
     deployment_id = "dep-A"
     for i, gas in enumerate(["0.0042", "0.0017", ""]):
         _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-            id=f"row-{i}", deployment_id=deployment_id, strategy_id="demo", gas_usd=gas,
+            id=f"row-{i}", deployment_id=deployment_id, gas_usd=gas,
         ))
-    total = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
+    total = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert total == Decimal("0.0059")
 
 
 @pytest.mark.asyncio
 async def test_aggregator_no_rows_returns_zero(sqlite_store: SQLiteStore) -> None:
     """No ledger rows → SUM is Decimal('0'), not None."""
-    total = await sqlite_store.sum_ledger_gas_usd("nonexistent-dep", "nonexistent-strat")
+    total = await sqlite_store.sum_ledger_gas_usd("nonexistent-dep")
     assert total == Decimal("0")
 
 
@@ -125,7 +124,7 @@ async def test_f4a_live_query_failure_raises() -> None:
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await _populate_gas_spent_usd(
             _runner_for_metrics(state_manager), metrics, snapshot,
-            deployment_id="dep-X", strategy_id="demo", is_live=True,
+deployment_id="demo", is_live=True,
         )
     assert excinfo.value.write_kind == "metrics"
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "query_failed"
@@ -141,7 +140,7 @@ async def test_f4a_paper_query_failure_logs_and_continues() -> None:
 
     await _populate_gas_spent_usd(
         _runner_for_metrics(state_manager), metrics, snapshot,
-        deployment_id="dep-X", strategy_id="demo", is_live=False,
+deployment_id="demo", is_live=False,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "query_failed"
@@ -162,7 +161,7 @@ async def test_f4b_hosted_aggregator_unsupported(is_live: bool) -> None:
 
     await _populate_gas_spent_usd(
         _runner_for_metrics(state_manager), metrics, snapshot,
-        deployment_id="dep-X", strategy_id="demo", is_live=is_live,
+deployment_id="demo", is_live=is_live,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "hosted_unsupported"
@@ -183,7 +182,7 @@ async def test_f4c_aggregator_type_narrow_catch() -> None:
     with pytest.raises(AccountingPersistenceError):
         await _populate_gas_spent_usd(
             _runner_for_metrics(state_manager), metrics, snapshot,
-            deployment_id="dep-X", strategy_id="demo", is_live=True,
+deployment_id="demo", is_live=True,
         )
     # Status stamped query_failed (not hosted_unsupported) — proves the catch
     # is type-narrow, not bare-except.
@@ -199,18 +198,18 @@ async def test_f5_null_and_empty_rows_coalesced(sqlite_store: SQLiteStore) -> No
     sqlite_store._conn.execute(  # NULL row directly
         """
         INSERT INTO transaction_ledger
-            (id, cycle_id, strategy_id, deployment_id, execution_mode,
+            (id, cycle_id, deployment_id, execution_mode,
              timestamp, intent_type, gas_usd, success)
-        VALUES ('null-row', 'c', 'demo', ?, 'paper', ?, 'SWAP', NULL, 1)
+        VALUES ('null-row', 'c', ?, 'paper', ?, 'SWAP', NULL, 1)
         """,
         (deployment_id, datetime.now(UTC).isoformat()),
     )
     sqlite_store._conn.commit()
     for i, gas in enumerate(["", "0", "0.001"]):
         _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-            id=f"row-{i}", deployment_id=deployment_id, strategy_id="demo", gas_usd=gas,
+            id=f"row-{i}", deployment_id=deployment_id, gas_usd=gas,
         ))
-    total = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
+    total = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert total == Decimal("0.001")
     # 4 rows total in this deployment — proves no row was dropped from the count.
     cursor = sqlite_store._conn.execute(
@@ -229,17 +228,17 @@ async def test_f6_idempotent_and_fresh(sqlite_store: SQLiteStore) -> None:
     """
     deployment_id = "dep-F6"
     _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-        id="row-0", deployment_id=deployment_id, strategy_id="demo", gas_usd="0.0042",
+        id="row-0", deployment_id=deployment_id, gas_usd="0.0042",
     ))
-    a = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
-    b = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
-    c = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
+    a = await sqlite_store.sum_ledger_gas_usd(deployment_id)
+    b = await sqlite_store.sum_ledger_gas_usd(deployment_id)
+    c = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert a == b == c == Decimal("0.0042")  # idempotent
 
     _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-        id="row-1", deployment_id=deployment_id, strategy_id="demo", gas_usd="0.0001",
+        id="row-1", deployment_id=deployment_id, gas_usd="0.0001",
     ))
-    fresh = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
+    fresh = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert fresh == Decimal("0.0043")  # picked up the new row, not stuck at a's value
 
 
@@ -255,7 +254,7 @@ async def test_happy_path_stamps_ok() -> None:
 
     await _populate_gas_spent_usd(
         _runner_for_metrics(state_manager), metrics, snapshot,
-        deployment_id="dep-X", strategy_id="demo", is_live=True,
+deployment_id="demo", is_live=True,
     )
     assert metrics.gas_spent_usd == Decimal("0.005")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "ok"
@@ -282,21 +281,21 @@ async def test_aggregator_perf_10k_rows(sqlite_store: SQLiteStore) -> None:
             gas = ""
         else:
             gas = None
-        rows.append((f"row-{i}", "cycle-perf", "demo", deployment_id, "paper",
+        rows.append((f"row-{i}", "cycle-perf", deployment_id, "paper",
                      datetime.now(UTC).isoformat(), "SWAP", gas, 1))
     sqlite_store._conn.executemany(
         """
         INSERT INTO transaction_ledger
-            (id, cycle_id, strategy_id, deployment_id, execution_mode,
+            (id, cycle_id, deployment_id, execution_mode,
              timestamp, intent_type, gas_usd, success)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
     sqlite_store._conn.commit()
 
     start = time.perf_counter()
-    total = await sqlite_store.sum_ledger_gas_usd(deployment_id, "demo")
+    total = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     # 1/3 of 10k rows have "0.0001" → ~3334 rows × 0.0001 = ~0.3334.
@@ -314,7 +313,7 @@ async def test_legacy_backend_without_aggregator() -> None:
 
     await _populate_gas_spent_usd(
         _runner_for_metrics(state_manager), metrics, snapshot,
-        deployment_id="dep-X", strategy_id="demo", is_live=True,
+deployment_id="demo", is_live=True,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "hosted_unsupported"

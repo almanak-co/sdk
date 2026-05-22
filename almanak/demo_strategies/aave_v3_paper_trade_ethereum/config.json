@@ -1,5 +1,5 @@
 {
-    "strategy_id": "aave_v3_paper_trade_ethereum",
+    "deployment_id": "aave_v3_paper_trade_ethereum",
     "strategy_name": "aave_v3_paper_trade_ethereum",
     "collateral_token": "USDC",
     "collateral_amount": "500",

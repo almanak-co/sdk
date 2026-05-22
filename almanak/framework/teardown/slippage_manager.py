@@ -136,6 +136,7 @@ class EscalatingSlippageManager:
 
         return EscalationConfig.default_levels()
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def execute_with_escalation(  # noqa: C901
         self,
         intent: Any,
@@ -143,7 +144,7 @@ class EscalatingSlippageManager:
         execute_func: ExecuteFunc,
         on_approval_needed: ApprovalCallback | None = None,
         teardown_id: str = "",
-        strategy_id: str = "",
+        deployment_id: str = "",
         is_auto_mode: bool = False,
         intent_slippage: Decimal | None = None,
     ) -> ExecutionResult:
@@ -166,7 +167,7 @@ class EscalatingSlippageManager:
             execute_func: Async function that attempts execution at given slippage
             on_approval_needed: Callback when human approval is needed
             teardown_id: ID of the teardown operation
-            strategy_id: ID of the strategy
+            deployment_id: ID of the strategy
             is_auto_mode: Whether this is an auto-protect triggered exit
             intent_slippage: Strategy-configured slippage ceiling for auto-approval
 
@@ -275,7 +276,7 @@ class EscalatingSlippageManager:
                             message=f"Approval required for {slippage:.1%} slippage",
                             approval_request=self._create_approval_request(
                                 teardown_id=teardown_id,
-                                strategy_id=strategy_id,
+                                deployment_id=deployment_id,
                                 level=level_config.level,
                                 slippage=slippage,
                                 position_value=position_value,
@@ -285,7 +286,7 @@ class EscalatingSlippageManager:
                     # Request approval
                     approval_request = self._create_approval_request(
                         teardown_id=teardown_id,
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         level=level_config.level,
                         slippage=slippage,
                         position_value=position_value,
@@ -437,7 +438,7 @@ class EscalatingSlippageManager:
     def _create_approval_request(
         self,
         teardown_id: str,
-        strategy_id: str,
+        deployment_id: str,
         level: EscalationLevel,
         slippage: Decimal,
         position_value: Decimal,
@@ -457,7 +458,7 @@ class EscalatingSlippageManager:
 
         return ApprovalRequest(
             teardown_id=teardown_id,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             current_level=level,
             current_slippage=slippage,
             estimated_loss_usd=estimated_loss,

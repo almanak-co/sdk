@@ -186,7 +186,7 @@ class ToolExecutor:
         policy: Agent policy constraints. Uses safe defaults if not provided.
         catalog: Tool catalog. Uses built-in catalog if not provided.
         wallet_address: Strategy wallet address (needed for balance/execution calls).
-        strategy_id: Strategy identifier (needed for state operations).
+        deployment_id: Deployment identifier (needed for state operations).
         safe_addresses: Optional allowlist of known Safe addresses for ``execution_wallet``
             validation. ``None`` = not configured (warn only); empty set = deny all overrides.
             Values are normalized to lowercase for case-insensitive matching.
@@ -199,7 +199,7 @@ class ToolExecutor:
         policy: AgentPolicy | None = None,
         catalog: ToolCatalog | None = None,
         wallet_address: str = "",
-        strategy_id: str = "",
+        deployment_id: str = "",
         default_chain: str = "arbitrum",
         alert_manager: Any | None = None,
         safe_addresses: set[str] | None = None,
@@ -219,7 +219,7 @@ class ToolExecutor:
             price_lookup=self._lookup_token_price,
             default_wallet=wallet_address,
         )
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._default_chain = default_chain
         self._alert_manager = alert_manager
         self._tracer = tracer or DecisionTracer()
@@ -328,7 +328,7 @@ class ToolExecutor:
 
             self._client.observe.RecordTimelineEvent(
                 gateway_pb2.RecordTimelineEventRequest(
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     event_type="tool_execution",
                     details_json=json.dumps(
                         {
@@ -831,7 +831,7 @@ class ToolExecutor:
             # Cache the compiled bundle with chain metadata and original args for
             # later execution and spend tracking. The cache persists to disk so
             # the one-shot CLI can execute a bundle compiled in a previous shell.
-            # wallet_address/strategy_id are recorded to reject cross-identity
+            # wallet_address/deployment_id are recorded to reject cross-identity
             # reuse — the cache is per-machine, so a bundle compiled under
             # wallet A must not execute under wallet B (VIB-2996 P1).
             # sanitize_args is applied defensively: callers that smuggle a
@@ -845,7 +845,7 @@ class ToolExecutor:
                 resp.action_bundle,
                 sanitize_args(args),
                 wallet_address=self._wallet_address,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
             )
 
             # Parse actions for the response
@@ -922,7 +922,7 @@ class ToolExecutor:
                     action_bundle=bundle_bytes,
                     dry_run=True,
                     simulation_enabled=True,
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     chain=chain,
                     wallet_address=self._wallet_address,
                 )
@@ -1019,7 +1019,7 @@ class ToolExecutor:
             self._client,
             chain=chain,
             wallet_address=wallet,
-            strategy_id=self._strategy_id,
+            deployment_id=self._deployment_id,
             retry_policy=self._retry_policy,
             on_sadflow=self._on_sadflow_event,
         )
@@ -1104,7 +1104,7 @@ class ToolExecutor:
                 tool_name="execute_compiled_bundle",
             )
 
-        # Enforce wallet/strategy identity match. The persistent cache is
+        # Enforce wallet/deployment identity match. The persistent cache is
         # per-machine, so a bundle compiled under wallet A must not execute
         # under wallet B even if the bundle_id leaks (VIB-2996 P1). EVM
         # addresses are compared case-insensitively; empty strings (legacy
@@ -1117,10 +1117,10 @@ class ToolExecutor:
                     "Recompile with compile_intent for the current wallet.",
                     tool_name="execute_compiled_bundle",
                 )
-        if cached.strategy_id and self._strategy_id and cached.strategy_id != self._strategy_id:
+        if cached.deployment_id and self._deployment_id and cached.deployment_id != self._deployment_id:
             raise ToolValidationError(
-                f"Bundle was compiled under strategy '{cached.strategy_id}' but "
-                f"execution requested under '{self._strategy_id}'. "
+                f"Bundle was compiled under strategy '{cached.deployment_id}' but "
+                f"execution requested under '{self._deployment_id}'. "
                 "Recompile with compile_intent for the current strategy.",
                 tool_name="execute_compiled_bundle",
             )
@@ -1194,7 +1194,7 @@ class ToolExecutor:
                 action_bundle=bundle_bytes,
                 dry_run=dry_run,
                 simulation_enabled=simulation_enabled,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=self._wallet_address,
             )
@@ -1723,7 +1723,7 @@ class ToolExecutor:
 
         # Idempotency: check if vault already deployed in a previous attempt
         try:
-            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=self._strategy_id))
+            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
             saved_state = json.loads(state_resp.data) if state_resp.data else {}
             existing_vault = saved_state.get("vault_address")
             if existing_vault:
@@ -1799,7 +1799,7 @@ class ToolExecutor:
                 action_bundle=bundle_bytes,
                 dry_run=dry_run,
                 simulation_enabled=simulate,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=self._wallet_address,
             )
@@ -3397,6 +3397,7 @@ class ToolExecutor:
             },
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _compute_vault_nav(self, vault_address: str, safe_address: str, chain: str) -> int:  # noqa: C901
         """Compute deterministic NAV for a vault by summing Safe's assets.
 
@@ -3470,8 +3471,8 @@ class ToolExecutor:
 
         # 3. If there's an LP position, add its token values
         try:
-            strategy_id = self._strategy_id
-            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=strategy_id))
+            deployment_id = self._deployment_id
+            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=deployment_id))
             agent_state = json.loads(state_resp.data) if state_resp.data else {}
             lp_position_id = agent_state.get("lp_position_id")
 
@@ -3640,7 +3641,7 @@ class ToolExecutor:
         from almanak.gateway.proto import gateway_pb2
 
         try:
-            resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=self._strategy_id))
+            resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
             agent_state = json.loads(resp.data) if resp.data else {}
             settle_state = agent_state.get("_vault_settlement", {})
             self._settlement_phase = settle_state.get("phase", "idle")
@@ -3666,7 +3667,7 @@ class ToolExecutor:
         try:
             # Load current state, merge settlement state, save back
             try:
-                resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=self._strategy_id))
+                resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
                 agent_state = json.loads(resp.data) if resp.data else {}
             except Exception as load_err:
                 import grpc
@@ -3685,7 +3686,7 @@ class ToolExecutor:
             }
             self._client.state.SaveState(
                 gateway_pb2.SaveStateRequest(
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     data=json.dumps(agent_state).encode(),
                     schema_version=1,
                 )
@@ -3913,7 +3914,7 @@ class ToolExecutor:
                 action_bundle=propose_bytes,
                 dry_run=dry_run,
                 simulation_enabled=self._resolve_simulation_flag(valuator_address, tool_name="settle_vault.propose"),
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=valuator_address,
             )
@@ -4039,7 +4040,7 @@ class ToolExecutor:
                 simulation_enabled=self._resolve_simulation_flag(
                     safe_address, tool_name="settle_vault.settle", is_safe_wallet=True
                 ),
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=safe_address,
             )
@@ -4090,7 +4091,7 @@ class ToolExecutor:
                     simulation_enabled=self._resolve_simulation_flag(
                         safe_address, tool_name="settle_vault.redeem", is_safe_wallet=True
                     ),
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     chain=chain,
                     wallet_address=safe_address,
                 )
@@ -4178,7 +4179,7 @@ class ToolExecutor:
         from almanak.gateway.proto import gateway_pb2
 
         try:
-            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=self._strategy_id))
+            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
             return json.loads(state_resp.data) if state_resp.data else {}
         except Exception:
             logger.warning("No agent state found during teardown; starting from clean state")
@@ -4196,7 +4197,7 @@ class ToolExecutor:
         try:
             self._client.state.SaveState(
                 gateway_pb2.SaveStateRequest(
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     data=json.dumps(ctx.agent_state).encode(),
                     schema_version=1,
                 )
@@ -4441,7 +4442,7 @@ class ToolExecutor:
         try:
             self._client.state.SaveState(
                 gateway_pb2.SaveStateRequest(
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     data=json.dumps(ctx.agent_state).encode(),
                     schema_version=1,
                 )
@@ -4541,7 +4542,7 @@ class ToolExecutor:
                 simulation_enabled=self._resolve_simulation_flag(
                     safe_address, tool_name="approve_vault_underlying", is_safe_wallet=True
                 ),
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=safe_address,
             )
@@ -4564,6 +4565,7 @@ class ToolExecutor:
             },
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _execute_deposit_vault(self, args: dict) -> ToolResponse:
         """Deposit underlying tokens into a vault (approve + requestDeposit).
 
@@ -4600,7 +4602,7 @@ class ToolExecutor:
                 action_bundle=json.dumps(approve_bundle.to_dict()).encode(),
                 dry_run=dry_run,
                 simulation_enabled=simulate,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=depositor,
             )
@@ -4626,7 +4628,7 @@ class ToolExecutor:
                 action_bundle=json.dumps(deposit_bundle.to_dict()).encode(),
                 dry_run=dry_run,
                 simulation_enabled=False,
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=depositor,
             )
@@ -4660,15 +4662,15 @@ class ToolExecutor:
     async def _dispatch_state(self, tool_name: str, args: dict) -> ToolResponse:
         from almanak.gateway.proto import gateway_pb2
 
-        strategy_id = args.get("strategy_id") or self._strategy_id
+        deployment_id = args.get("deployment_id") or self._deployment_id
 
         if tool_name == "save_agent_state":
             state_bytes = json.dumps(args.get("state", {})).encode()
             # Use tracked version for optimistic locking
-            expected_version = self._state_versions.get(strategy_id, 0)
+            expected_version = self._state_versions.get(deployment_id, 0)
             resp = self._client.state.SaveState(
                 gateway_pb2.SaveStateRequest(
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                     expected_version=expected_version,
                     data=state_bytes,
                     schema_version=1,
@@ -4676,7 +4678,7 @@ class ToolExecutor:
             )
             # Track the new version for subsequent saves
             if resp.success:
-                self._state_versions[strategy_id] = resp.new_version
+                self._state_versions[deployment_id] = resp.new_version
             return ToolResponse(
                 status="success" if resp.success else "error",
                 data={"version": resp.new_version, "checksum": resp.checksum},
@@ -4684,10 +4686,10 @@ class ToolExecutor:
 
         if tool_name == "load_agent_state":
             try:
-                resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=strategy_id))
+                resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=deployment_id))
                 state = json.loads(resp.data) if resp.data else {}
                 # Track version for subsequent saves
-                self._state_versions[strategy_id] = resp.version
+                self._state_versions[deployment_id] = resp.version
                 return ToolResponse(
                     status="success",
                     data={"state": state, "version": resp.version},
@@ -4725,7 +4727,7 @@ class ToolExecutor:
             try:
                 self._client.observe.RecordTimelineEvent(
                     gateway_pb2.RecordTimelineEventRequest(
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         event_type="agent_decision",
                         details_json=decision_payload,
                     )

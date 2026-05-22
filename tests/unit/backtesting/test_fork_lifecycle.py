@@ -32,7 +32,7 @@ class TestPaperTraderConfigForkLifecycle:
         defaults = {
             "chain": "arbitrum",
             "rpc_url": "https://example.com/rpc",
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
         }
         defaults.update(kwargs)
         return PaperTraderConfig(**defaults)
@@ -109,7 +109,7 @@ class TestPaperTraderConfigForkLifecycle:
         d = {
             "chain": "arbitrum",
             "rpc_url": "https://example.com/rpc",
-            "strategy_id": "test",
+            "deployment_id": "test",
         }
         config = PaperTraderConfig.from_dict(d)
         assert config.fork_lifecycle == ForkLifecycle.ROLLING_RESET

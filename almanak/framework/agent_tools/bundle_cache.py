@@ -33,7 +33,7 @@ DEFAULT_MAX_MEMORY_ENTRIES = 100
 
 # Schema version:
 #   1 -> initial layout (chain, bundle_b64, args, created_at, ttl_seconds)
-#   2 -> adds wallet_address and strategy_id so the executor can reject a
+#   2 -> adds wallet_address and deployment_id so the executor can reject a
 #        cached bundle compiled under a different identity when the cache is
 #        shared across CLI invocations. v1 files are treated as corrupt
 #        (and unlinked) because the older `args` dict is not trusted to
@@ -71,7 +71,7 @@ class BundleCacheEntry:
     created_at: float
     ttl_seconds: int
     wallet_address: str = ""
-    strategy_id: str = ""
+    deployment_id: str = ""
 
     def is_expired(self, now: float | None = None) -> bool:
         return ((now if now is not None else time.time()) - self.created_at) > self.ttl_seconds
@@ -176,7 +176,7 @@ class BundleCache:
         args: dict,
         *,
         wallet_address: str = "",
-        strategy_id: str = "",
+        deployment_id: str = "",
         ttl_seconds: int | None = None,
     ) -> None:
         entry = BundleCacheEntry(
@@ -186,7 +186,7 @@ class BundleCache:
             created_at=time.time(),
             ttl_seconds=ttl_seconds if ttl_seconds is not None else self._default_ttl,
             wallet_address=wallet_address,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
         )
         self._insert_memory(bundle_id, entry)
         try:
@@ -309,7 +309,7 @@ class BundleCache:
             "created_at": entry.created_at,
             "ttl_seconds": entry.ttl_seconds,
             "wallet_address": entry.wallet_address,
-            "strategy_id": entry.strategy_id,
+            "deployment_id": entry.deployment_id,
         }
         fd, tmp = tempfile.mkstemp(prefix=".bundle-", suffix=".json", dir=str(self._cache_dir))
         try:
@@ -341,7 +341,7 @@ class BundleCache:
         created_at = payload.get("created_at")
         ttl_seconds = payload.get("ttl_seconds")
         wallet_address = payload.get("wallet_address", "")
-        strategy_id = payload.get("strategy_id", "")
+        deployment_id = payload.get("deployment_id", "")
 
         if not isinstance(chain, str) or not chain:
             raise ValueError(f"invalid chain: {chain!r}")
@@ -353,8 +353,8 @@ class BundleCache:
             raise ValueError(f"invalid created_at: {created_at!r}")
         if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise ValueError(f"invalid ttl_seconds: {ttl_seconds!r}")
-        if not isinstance(wallet_address, str) or not isinstance(strategy_id, str):
-            raise ValueError("wallet_address and strategy_id must be strings")
+        if not isinstance(wallet_address, str) or not isinstance(deployment_id, str):
+            raise ValueError("wallet_address and deployment_id must be strings")
 
         try:
             bundle_bytes = base64.b64decode(bundle_b64, validate=True)
@@ -368,7 +368,7 @@ class BundleCache:
             created_at=float(created_at),
             ttl_seconds=ttl_seconds,
             wallet_address=wallet_address,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
         )
 
     def _remove_disk(self, bundle_id: str) -> None:

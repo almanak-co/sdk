@@ -238,16 +238,16 @@ def _safe_usdc_borrow_amount(price_oracle: dict[str, Decimal], weth_amount: Deci
 
 
 def _execution_context(wallet: str) -> ExecutionContext:
-    # NOTE: this strategy_id flows only into ``enrich_result`` (it labels the
+    # NOTE: this deployment_id flows only into ``enrich_result`` (it labels the
     # ExecutionContext for enrichment). It is deliberately NOT what lands in
     # the persisted accounting row: the conftest ``assert_accounting_persisted``
-    # helper stamps the row's strategy_id from its own ``strategy_id=
+    # helper stamps the row's deployment_id from its own ``deployment_id=
     # "layer5-intent-test"`` default, which is what ``_assert_identity``
     # checks. This split (descriptive enrichment id vs canonical persisted
     # identity) intentionally mirrors the merged Aave V3 golden
-    # (``test_aave_v3_lending.py``: ``strategy_id="layer5-aave-v3-lending"``).
+    # (``test_aave_v3_lending.py``: ``deployment_id="layer5-aave-v3-lending"``).
     return ExecutionContext(
-        strategy_id="layer5-compound-v3-lending",
+        deployment_id="layer5-compound-v3-lending",
         chain=CHAIN_NAME,
         wallet_address=wallet,
         protocol=PROTOCOL,
@@ -301,7 +301,6 @@ def _payload(row: dict) -> dict:
 def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
     """Identity sextuple per epic VIB-4591 decision #5 (no agent_id)."""
     assert row["deployment_id"] == "layer5-intent-test"
-    assert row["strategy_id"] == "layer5-intent-test"
     assert row["cycle_id"] == "layer5-cycle"
     assert row["execution_mode"] == "paper"
     assert row["event_type"] == event_type

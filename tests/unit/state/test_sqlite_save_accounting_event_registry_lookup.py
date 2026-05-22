@@ -101,7 +101,6 @@ def _make_lp_event(
     identity = AccountingIdentity(
         id=event_id,
         deployment_id=deployment_id,
-        strategy_id=deployment_id,
         cycle_id="cycle-vib-4278",
         execution_mode=execution_mode,
         timestamp=datetime(2026, 5, 11, 0, 0, 0, tzinfo=UTC),

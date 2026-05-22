@@ -38,7 +38,7 @@ async def test_state_db_isolation_separate_paths():
         try:
             # Save state in shard 1
             state1 = StateData(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 version=1,
                 state={"shard": "1", "value": 42},
             )
@@ -58,7 +58,7 @@ async def test_state_db_isolation_separate_paths():
 
             # Save different state in shard 2
             state2 = StateData(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 version=1,
                 state={"shard": "2", "value": 99},
             )
@@ -96,11 +96,11 @@ async def test_sqlite_config_default_without_env_var(monkeypatch, tmp_path):
     ``~/.local/share`` equivalent) so multiple strategies launched from
     the same cwd cannot collide on a single SQLite file. Sentinel
     ``:hosted-mode-no-sqlite-path:`` is reserved for hosted-mode
-    construction (``AGENT_ID`` set).
+    construction.
     """
     from pathlib import Path
 
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
     monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
     monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)

@@ -649,20 +649,20 @@ class TestGetPositions:
 
         assert mock_stub.GetPositions.called
         request = mock_stub.GetPositions.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
         assert request.chain == "avalanche"
         assert request.primitive == "lp"
         assert request.accounting_category == "LP_UNIV3"
         assert request.status == gateway_pb2.POSITION_STATUS_OPEN
 
     def test_request_shape_defaults(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
-        """Only strategy_id supplied — all filters empty / unspecified."""
+        """Only deployment_id supplied — all filters empty / unspecified."""
         mock_stub.GetPositions.return_value = gateway_pb2.GetPositionsResponse()
 
         read_client.get_positions("aave-avax")
 
         request = mock_stub.GetPositions.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
         assert request.chain == ""
         assert request.primitive == ""
         assert request.status == gateway_pb2.POSITION_STATUS_UNSPECIFIED
@@ -821,7 +821,7 @@ class TestGetReconciliationReport:
         mock_stub.GetReconciliationReport.return_value = gateway_pb2.GetReconciliationReportResponse()
         read_client.get_reconciliation_report("aave-avax")
         request = mock_stub.GetReconciliationReport.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
 
     def test_parses_findings_and_stubs(
         self, read_client: DashboardServiceClient, mock_stub: MagicMock
@@ -872,7 +872,7 @@ class TestPreviewReconcile:
         mock_stub.PreviewReconcile.return_value = gateway_pb2.PreviewReconcileResponse()
         operator_client.preview_reconcile("aave-avax")
         request = mock_stub.PreviewReconcile.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
 
     def test_parses_diff_buckets(self, operator_client, mock_stub: MagicMock) -> None:
         mock_stub.PreviewReconcile.return_value = gateway_pb2.PreviewReconcileResponse(
@@ -940,7 +940,7 @@ class TestApplyReconcile:
 
         outcome = operator_client.apply_reconcile("aave-avax", "tok-1")
         request = mock_stub.ApplyReconcile.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
         assert request.preview_token == "tok-1"
         assert outcome.result == "SUCCESS"
         assert outcome.is_success is True
@@ -996,7 +996,7 @@ class TestRefreshRegistryFromChain:
         )
         operator_client.refresh_registry_from_chain("aave-avax")
         request = mock_stub.RefreshRegistryFromChain.call_args[0][0]
-        assert request.strategy_id == "aave-avax"
+        assert request.deployment_id == "aave-avax"
 
     def test_rate_limited_outcome(self, operator_client, mock_stub: MagicMock) -> None:
         mock_stub.RefreshRegistryFromChain.return_value = gateway_pb2.RefreshRegistryFromChainResponse(

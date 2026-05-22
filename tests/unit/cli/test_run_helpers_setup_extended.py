@@ -313,7 +313,7 @@ class TestPrintStartupBannerBranches:
         with cli.isolation() as (out, _err):
             run_helpers._print_startup_banner(
                 strategy_name="Foo",
-                strategy_id="dep-1",
+                deployment_id="dep-1",
                 run_id="run-1",
                 is_resume=True,
                 existing_state_info={"version": 2, "keys": ["x"]},
@@ -341,7 +341,7 @@ class TestPrintStartupBannerBranches:
         with cli.isolation() as (out, _err):
             run_helpers._print_startup_banner(
                 strategy_name="Multi",
-                strategy_id="dep-m",
+                deployment_id="dep-m",
                 run_id="run-m",
                 is_resume=False,
                 existing_state_info=None,
@@ -372,7 +372,7 @@ class TestPrintStartupBannerBranches:
         with cli.isolation() as (out, _err):
             run_helpers._print_startup_banner(
                 strategy_name="Safe",
-                strategy_id="dep-s",
+                deployment_id="dep-s",
                 run_id="run-s",
                 is_resume=False,
                 existing_state_info=None,

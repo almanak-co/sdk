@@ -1207,10 +1207,10 @@ class TestGMXv2OnchainPositionParsing:
         with patch.object(adapter, "get_positions_onchain", return_value=mock_positions):
             summary = adapter.get_positions_as_teardown_summary(
                 rpc_url="http://localhost:8545",
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
             )
 
-        assert summary.strategy_id == "test_strategy"
+        assert summary.deployment_id == "test_strategy"
         assert len(summary.positions) == 1
         pos = summary.positions[0]
         assert pos.position_type == PositionType.PERP

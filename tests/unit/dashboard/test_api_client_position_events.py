@@ -188,7 +188,6 @@ def test_get_position_history_calls_history_rpc(
     call_request = state_stub.GetPositionHistory.call_args.args[0]
     assert call_request.position_id == "pid-X"
     assert call_request.deployment_id == "MyStrategy:abc"
-    assert call_request.strategy_id == "MyStrategy:abc"
     assert len(result) == 1
     assert result[0]["position_id"] == "pid-X"
 

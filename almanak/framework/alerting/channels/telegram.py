@@ -90,6 +90,7 @@ class TelegramChannel:
         """Get the Telegram API URL for this bot."""
         return f"{self.TELEGRAM_API_BASE}/bot{self.bot_token}"
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_alert_message(self, card: OperatorCard) -> str:
         """Format an OperatorCard as a Telegram message.
 
@@ -104,7 +105,7 @@ class TelegramChannel:
         lines = [
             f"{emoji} <b>{card.severity.value} Alert</b>",
             "",
-            f"<b>Strategy:</b> {card.strategy_id}",
+            f"<b>Strategy:</b> {card.deployment_id}",
             f"<b>Status:</b> {card.event_type.value}",
             f"<b>Reason:</b> {card.reason.value.replace('_', ' ').title()}",
         ]
@@ -135,7 +136,7 @@ class TelegramChannel:
 
         # Add dashboard link
         if self.dashboard_base_url:
-            dashboard_link = f"{self.dashboard_base_url}/strategy/{card.strategy_id}"
+            dashboard_link = f"{self.dashboard_base_url}/strategy/{card.deployment_id}"
             lines.append("")
             lines.append(f'\ud83d\udcca <a href="{dashboard_link}">View in Dashboard</a>')
 
@@ -196,6 +197,7 @@ class TelegramChannel:
             except httpx.RequestError as e:
                 return TelegramSendResult(success=False, error=f"Request error: {e}")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_alert(self, card: OperatorCard) -> TelegramSendResult:
         """Send an alert to Telegram with exponential backoff retry.
 
@@ -228,7 +230,7 @@ class TelegramChannel:
                 delay = self.base_delay * (2 ** (attempt - 1))
                 logger.info(
                     f"Retrying Telegram send (attempt {attempt + 1}/{self.max_retries + 1}) "
-                    f"after {delay:.1f}s delay for strategy {card.strategy_id}"
+                    f"after {delay:.1f}s delay for strategy {card.deployment_id}"
                 )
                 await asyncio.sleep(delay)
 
@@ -242,7 +244,7 @@ class TelegramChannel:
 
             if result.success:
                 logger.info(
-                    f"Telegram alert sent successfully for strategy {card.strategy_id} "
+                    f"Telegram alert sent successfully for strategy {card.deployment_id} "
                     f"(message_id={result.message_id}, severity={card.severity.value})"
                 )
                 return result
@@ -250,7 +252,7 @@ class TelegramChannel:
             # If rate limited, use the server's retry_after value
             if result.retry_after:
                 logger.warning(
-                    f"Rate limited by Telegram, waiting {result.retry_after}s for strategy {card.strategy_id}"
+                    f"Rate limited by Telegram, waiting {result.retry_after}s for strategy {card.deployment_id}"
                 )
                 if attempt < self.max_retries:
                     await asyncio.sleep(result.retry_after)
@@ -258,13 +260,13 @@ class TelegramChannel:
             last_error = result.error
             logger.warning(
                 f"Telegram send failed (attempt {attempt + 1}/{self.max_retries + 1}): "
-                f"{result.error} for strategy {card.strategy_id}"
+                f"{result.error} for strategy {card.deployment_id}"
             )
 
         # All retries exhausted
         logger.error(
             f"Failed to send Telegram alert after {self.max_retries + 1} attempts "
-            f"for strategy {card.strategy_id}: {last_error}"
+            f"for strategy {card.deployment_id}: {last_error}"
         )
         return TelegramSendResult(success=False, error=last_error)
 
@@ -281,7 +283,7 @@ class TelegramChannel:
 
     def format_custom_message(
         self,
-        strategy_id: str,
+        deployment_id: str,
         severity: Severity,
         title: str,
         message: str,
@@ -293,7 +295,7 @@ class TelegramChannel:
         come from an OperatorCard.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             severity: Alert severity level
             title: Alert title
             message: Alert message body
@@ -307,7 +309,7 @@ class TelegramChannel:
         lines = [
             f"{emoji} <b>{severity.value}: {title}</b>",
             "",
-            f"<b>Strategy:</b> {strategy_id}",
+            f"<b>Strategy:</b> {deployment_id}",
             "",
             message,
         ]
@@ -320,7 +322,7 @@ class TelegramChannel:
                 lines.append(f"  \u2022 {formatted_key}: {value}")
 
         if self.dashboard_base_url:
-            dashboard_link = f"{self.dashboard_base_url}/strategy/{strategy_id}"
+            dashboard_link = f"{self.dashboard_base_url}/strategy/{deployment_id}"
             lines.append("")
             lines.append(f'\ud83d\udcca <a href="{dashboard_link}">View in Dashboard</a>')
 
@@ -328,7 +330,7 @@ class TelegramChannel:
 
     async def send_custom_message(
         self,
-        strategy_id: str,
+        deployment_id: str,
         severity: Severity,
         title: str,
         message: str,
@@ -337,7 +339,7 @@ class TelegramChannel:
         """Send a custom formatted message.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             severity: Alert severity level
             title: Alert title
             message: Alert message body
@@ -347,7 +349,7 @@ class TelegramChannel:
             TelegramSendResult indicating success or failure
         """
         formatted = self.format_custom_message(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             severity=severity,
             title=title,
             message=message,
@@ -363,8 +365,8 @@ class TelegramChannel:
         )
 
         if result.success:
-            logger.info(f"Custom Telegram message sent for strategy {strategy_id} (message_id={result.message_id})")
+            logger.info(f"Custom Telegram message sent for strategy {deployment_id} (message_id={result.message_id})")
         else:
-            logger.error(f"Failed to send custom Telegram message for strategy {strategy_id}: {result.error}")
+            logger.error(f"Failed to send custom Telegram message for strategy {deployment_id}: {result.error}")
 
         return result

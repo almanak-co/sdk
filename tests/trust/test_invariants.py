@@ -46,7 +46,7 @@ class DoNothingStrategy(IntentStrategy):
     """Strategy that always holds - never trades."""
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "do-nothing-trust-test"
 
     def decide(self, market: MarketSnapshot):
@@ -55,7 +55,7 @@ class DoNothingStrategy(IntentStrategy):
     def get_open_positions(self):
         from almanak.framework.teardown import TeardownPositionSummary
 
-        return TeardownPositionSummary.empty(self.strategy_id)
+        return TeardownPositionSummary.empty(self.deployment_id)
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []
@@ -69,7 +69,7 @@ class SingleTradeStrategy(IntentStrategy):
         self.trade_made = False
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "single-trade-trust-test"
 
     def decide(self, market: MarketSnapshot):
@@ -92,7 +92,7 @@ class SingleTradeStrategy(IntentStrategy):
     def get_open_positions(self):
         from almanak.framework.teardown import TeardownPositionSummary
 
-        return TeardownPositionSummary.empty(self.strategy_id)
+        return TeardownPositionSummary.empty(self.deployment_id)
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []

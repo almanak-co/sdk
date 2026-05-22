@@ -35,7 +35,7 @@ class PaperPortfolioTracker:
     methods to calculate PnL and generate session summaries.
 
     Attributes:
-        strategy_id: Identifier of the strategy being tracked
+        deployment_id: Identifier of the strategy being tracked
         chain: Target blockchain (default: arbitrum)
         initial_balances: Token balances at session start
         current_balances: Current token balances
@@ -46,7 +46,7 @@ class PaperPortfolioTracker:
         total_gas_cost_usd: Cumulative gas cost in USD
 
     Example:
-        tracker = PaperPortfolioTracker(strategy_id="my_strategy")
+        tracker = PaperPortfolioTracker(deployment_id="my_strategy")
         tracker.start_session({"ETH": Decimal("10"), "USDC": Decimal("10000")})
 
         # Record trades as they happen
@@ -59,7 +59,7 @@ class PaperPortfolioTracker:
         summary = tracker.get_summary()
     """
 
-    strategy_id: str
+    deployment_id: str
     chain: str = "arbitrum"
     initial_balances: dict[str, Decimal] = field(default_factory=dict)
     current_balances: dict[str, Decimal] = field(default_factory=dict)
@@ -237,7 +237,7 @@ class PaperPortfolioTracker:
         failed_trades = len(self.errors)
 
         return PaperTradingSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             start_time=self.session_started or datetime.now(UTC),
             duration=duration,
             total_trades=total_trades,
@@ -360,7 +360,7 @@ class PaperPortfolioTracker:
             Dictionary representation of tracker state
         """
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self.chain,
             "session_started": self.session_started.isoformat() if self.session_started else None,
             "initial_balances": {k: str(v) for k, v in self.initial_balances.items()},
@@ -384,7 +384,7 @@ class PaperPortfolioTracker:
             PaperPortfolioTracker instance
         """
         tracker = cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             chain=data.get("chain", "arbitrum"),
         )
 

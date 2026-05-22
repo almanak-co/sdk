@@ -34,7 +34,7 @@ from almanak.framework.primitives.types import AccountingCategory
 # Fixed timestamp + identity inputs so handler outputs are byte-deterministic.
 _FIXED_TS = "2026-01-01T00:00:00+00:00"
 _FIXED_DEPLOYMENT_ID = "AccountingTest:vib4163-fixture"
-_FIXED_STRATEGY_ID = "vib4163-fixture"
+_FIXED_DEPLOYMENT_ID = "vib4163-fixture"
 _FIXED_CYCLE_ID = "cycle-1"
 _FIXED_TX_HASH = "0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 _FIXED_WALLET = "0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
@@ -45,7 +45,7 @@ def _base_outbox(*, position_key: str = "", market_id: str = "") -> dict[str, An
     return {
         "id": "ob-vib4163-fixture",
         "deployment_id": _FIXED_DEPLOYMENT_ID,
-        "strategy_id": _FIXED_STRATEGY_ID,
+        "deployment_id": _FIXED_DEPLOYMENT_ID,
         "cycle_id": _FIXED_CYCLE_ID,
         "ledger_entry_id": _FIXED_LEDGER_ENTRY_ID,
         "wallet_address": _FIXED_WALLET,
@@ -65,7 +65,7 @@ def _base_ledger(
     return {
         "id": _FIXED_LEDGER_ENTRY_ID,
         "deployment_id": _FIXED_DEPLOYMENT_ID,
-        "strategy_id": _FIXED_STRATEGY_ID,
+        "deployment_id": _FIXED_DEPLOYMENT_ID,
         "cycle_id": _FIXED_CYCLE_ID,
         "execution_mode": "live",
         "chain": "arbitrum",

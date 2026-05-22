@@ -30,7 +30,7 @@ executor = ToolExecutor(
     policy=AgentPolicy(allowed_chains={"arbitrum"}),
     catalog=get_default_catalog(),
     wallet_address="0x...",
-    strategy_id="my-agent",
+    deployment_id="my-agent",
     default_chain="arbitrum",
 )
 
@@ -48,7 +48,7 @@ result = await executor.execute("get_price", {"token": "ETH", "chain": "arbitrum
 | `policy` | `AgentPolicy` | safe defaults | Safety constraints |
 | `catalog` | `ToolCatalog` | built-in | Tool registry |
 | `wallet_address` | `str` | `""` | Strategy wallet for balance/execution calls |
-| `strategy_id` | `str` | `""` | Strategy ID for state operations |
+| `deployment_id` | `str` | `""` | Deployment ID for state operations |
 | `default_chain` | `str` | `"arbitrum"` | Default chain when not specified in args |
 | `safe_addresses` | `set[str] \| None` | `None` | Allowlist of Safe wallet addresses |
 
@@ -243,9 +243,9 @@ Agent state persistence. Risk tier: **LOW** or **NONE**.
 
 | Tool | Risk | Description | Key Parameters |
 |------|------|-------------|----------------|
-| `save_agent_state` | LOW | Persist agent state across iterations | `strategy_id`, `state` |
-| `load_agent_state` | NONE | Load previously saved state | `strategy_id` |
-| `record_agent_decision` | LOW | Record decision for audit trail | `strategy_id`, `decision_summary` |
+| `save_agent_state` | LOW | Persist agent state across iterations | `deployment_id`, `state` |
+| `load_agent_state` | NONE | Load previously saved state | `deployment_id` |
+| `record_agent_decision` | LOW | Record decision for audit trail | `deployment_id`, `decision_summary` |
 
 ## Error Types
 

@@ -145,7 +145,7 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             add_event(TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
-                strategy_id=getattr(self, "strategy_id", "demo_uniswap_paper_trade_optimism"),
+                deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
                 description=f"BUY {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
             ))
 
@@ -177,7 +177,7 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             add_event(TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
-                strategy_id=getattr(self, "strategy_id", "demo_uniswap_paper_trade_optimism"),
+                deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
                 description=f"SELL {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
             ))
 
@@ -241,7 +241,7 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_uniswap_paper_trade_optimism"),
+            deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

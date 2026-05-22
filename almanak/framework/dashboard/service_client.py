@@ -699,7 +699,7 @@ class DashboardServiceClient:
 
     def get_positions(
         self,
-        strategy_id: str,
+        deployment_id: str,
         *,
         chain: str = "",
         primitive: str = "",
@@ -709,7 +709,7 @@ class DashboardServiceClient:
         """Authoritative positions feed sourced from ``position_registry``.
 
         Args:
-            strategy_id: Required strategy identifier.
+            deployment_id: Required deployment identifier.
             chain: Optional chain filter (e.g. "ethereum", "avalanche").
             primitive: Optional primitive filter ("lp", "lending", "perp").
             accounting_category: Optional category filter ("LP_UNIV3", ...).
@@ -720,7 +720,7 @@ class DashboardServiceClient:
             snapshots for header bucketing.
         """
         request = gateway_pb2.GetPositionsRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             primitive=primitive,
             accounting_category=accounting_category,
@@ -737,7 +737,7 @@ class DashboardServiceClient:
 
     def get_position_range_history(
         self,
-        strategy_id: str,
+        deployment_id: str,
         *,
         chain: str,
         accounting_category: str,
@@ -755,7 +755,7 @@ class DashboardServiceClient:
         if not handle and not physical_identity_hash:
             raise ValueError("get_position_range_history requires either handle or physical_identity_hash")
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             accounting_category=accounting_category,
             handle=handle,
@@ -772,14 +772,14 @@ class DashboardServiceClient:
             stub_message=response.stub_message,
         )
 
-    def get_reconciliation_report(self, strategy_id: str) -> ReconciliationReport:
+    def get_reconciliation_report(self, deployment_id: str) -> ReconciliationReport:
         """Three-way-diff reconciliation report (LP-only in v1; stubs for others).
 
         Server-side 5-second TTL cache means callers may call this freely
         from per-page-render code without overloading the registry or
         triggering RPC fanout.
         """
-        request = gateway_pb2.GetReconciliationReportRequest(strategy_id=strategy_id)
+        request = gateway_pb2.GetReconciliationReportRequest(deployment_id=deployment_id)
         try:
             response = self._stub().GetReconciliationReport(request)
         except grpc.RpcError as exc:
@@ -821,14 +821,14 @@ class OperatorDashboardServiceClient(DashboardServiceClient):
     # Phase 1 mutation RPCs
     # -------------------------------------------------------------------------
 
-    def preview_reconcile(self, strategy_id: str) -> PreviewReconcileResult:
+    def preview_reconcile(self, deployment_id: str) -> PreviewReconcileResult:
         """Dry-run reconcile; returns a token bound to current state hashes.
 
         The token expires after a server-side TTL (default 5 minutes) and
         invalidates if the registry or ledger changes between preview and
         apply. Pass to ``apply_reconcile`` to apply this exact preview.
         """
-        request = gateway_pb2.PreviewReconcileRequest(strategy_id=strategy_id)
+        request = gateway_pb2.PreviewReconcileRequest(deployment_id=deployment_id)
         try:
             response = self._stub().PreviewReconcile(request)
         except grpc.RpcError as exc:
@@ -844,7 +844,7 @@ class OperatorDashboardServiceClient(DashboardServiceClient):
             expires_at_unix_seconds=response.expires_at_unix_seconds,
         )
 
-    def apply_reconcile(self, strategy_id: str, preview_token: str) -> ApplyReconcileResult:
+    def apply_reconcile(self, deployment_id: str, preview_token: str) -> ApplyReconcileResult:
         """Apply a previously-issued preview, idempotently.
 
         Outcomes:
@@ -857,7 +857,7 @@ class OperatorDashboardServiceClient(DashboardServiceClient):
         if not preview_token:
             raise ValueError("apply_reconcile requires a non-empty preview_token")
         request = gateway_pb2.ApplyReconcileRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             preview_token=preview_token,
         )
         try:
@@ -872,13 +872,13 @@ class OperatorDashboardServiceClient(DashboardServiceClient):
             reconciliation_id=response.reconciliation_id,
         )
 
-    def refresh_registry_from_chain(self, strategy_id: str) -> RefreshRegistryResult:
+    def refresh_registry_from_chain(self, deployment_id: str) -> RefreshRegistryResult:
         """Force a fresh on-chain read pass for this strategy's registry.
 
         Gateway enforces a per-strategy lock so two concurrent operator
         clicks coalesce to one chain fanout (the second sees RATE_LIMITED).
         """
-        request = gateway_pb2.RefreshRegistryFromChainRequest(strategy_id=strategy_id)
+        request = gateway_pb2.RefreshRegistryFromChainRequest(deployment_id=deployment_id)
         try:
             response = self._stub().RefreshRegistryFromChain(request)
         except grpc.RpcError as exc:

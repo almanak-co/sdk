@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "base"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aerodrome-rsi"
+    strat._deployment_id = "test-aerodrome-rsi"
     strat.trade_size_usd = Decimal("3")
     strat.rsi_period = 14
     strat.rsi_oversold = Decimal("40")

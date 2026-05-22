@@ -39,7 +39,7 @@ from almanak.framework.accounting.models import PredictionEventType
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DEPLOYMENT_ID = "dep-pred-loaded"
-_STRATEGY_ID = "strat-pred-loaded"
+_DEPLOYMENT_ID = "strat-pred-loaded"
 _CYCLE_ID = "cycle-pred-loaded-1"
 _WALLET = "0xabcdef1234567890abcdef1234567890abcdef12"
 _CHAIN = "polygon"
@@ -57,7 +57,7 @@ def _make_outbox_row(intent_type: str) -> dict[str, Any]:
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": _WALLET,
@@ -78,7 +78,7 @@ def _extracted_data_json(extra: dict[str, Any]) -> str:
 def _make_ledger_row(intent_type: str, *, extracted_data_json: str = "", gas_usd: str = "0") -> dict[str, Any]:
     return {
         "id": str(uuid.uuid4()),
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",

@@ -42,7 +42,7 @@ def _make_runner() -> StrategyRunner:
 def _make_strategy() -> MagicMock:
     """Create a mock strategy that avoids triggering copy-trading paths."""
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.config = {}
     # Explicitly set to None to prevent copy-trading code paths
     strategy._wallet_activity_provider = None
@@ -52,7 +52,7 @@ def _make_strategy() -> MagicMock:
 def _make_result(status: IterationStatus = IterationStatus.SUCCESS) -> IterationResult:
     return IterationResult(
         status=status,
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         duration_ms=10,
     )
 

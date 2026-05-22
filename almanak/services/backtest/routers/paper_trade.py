@@ -83,7 +83,7 @@ async def start_paper_trade(
 
     try:
         session_id = mgr.create_session(
-            strategy_id=f"spec_{request.strategy_spec.protocol}_{request.strategy_spec.action}",
+            deployment_id=f"spec_{request.strategy_spec.protocol}_{request.strategy_spec.action}",
             chain=request.chain,
         )
     except RuntimeError as e:

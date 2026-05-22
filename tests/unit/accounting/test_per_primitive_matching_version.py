@@ -106,10 +106,10 @@ def test_g13_fail_on_intra_primitive_drift(tmp_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO accounting_events
-            (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
+            (id, deployment_id, cycle_id, execution_mode, timestamp,
              chain, protocol, wallet_address, event_type, position_key,
              ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
-            VALUES ('drift-1', 'AccountantBaseline:fixture', 'AccountantBaseline:fixture',
+            VALUES ('drift-1', 'AccountantBaseline:fixture',
                     'c', 'paper', '2026-05-09T00:00:00+00:00',
                     'arbitrum', 'aave_v3', 'wallet', 'SUPPLY',
                     'lending:arbitrum:aave_v3:wallet:USDC',

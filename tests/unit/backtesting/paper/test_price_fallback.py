@@ -60,7 +60,7 @@ class TestPriceSourceOrder:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -83,7 +83,7 @@ class TestPriceSourceOrder:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="coingecko",
         )
         fork_manager = MockForkManager()
@@ -106,7 +106,7 @@ class TestPriceSourceOrder:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="chainlink",
         )
         fork_manager = MockForkManager()
@@ -138,7 +138,7 @@ class TestPriceFallbackBehavior:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
             strict_price_mode=False,  # Explicitly test fallback behavior
         )
@@ -384,7 +384,7 @@ class TestSyncPriceFallback:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -415,7 +415,7 @@ class TestSyncPriceFallback:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
             strict_price_mode=False,  # Explicitly test fallback behavior
         )
@@ -441,7 +441,7 @@ class TestSyncPriceFallback:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -471,7 +471,7 @@ class TestChainlinkProviderIntegration:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -641,7 +641,7 @@ class TestTWAPProviderIntegration:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -774,7 +774,7 @@ class TestProviderInitialization:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -810,7 +810,7 @@ class TestProviderInitialization:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://base-mainnet.g.alchemy.com/v2/...",
-            strategy_id="test",
+            deployment_id="test",
             price_source="auto",
         )
         fork_manager = MockForkManager()
@@ -846,7 +846,7 @@ class TestProviderInitialization:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="test",
+            deployment_id="test",
             price_source="coingecko",
         )
         fork_manager = MockForkManager()

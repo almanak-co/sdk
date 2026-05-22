@@ -34,7 +34,7 @@ def _make_successful_exec_result():
 def _make_strategy(intents, *, persistence_error=None):
     """Create a mock strategy with teardown and persistence methods."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_persist"
+    strategy.deployment_id = "test_persist"
     strategy.name = "PersistTestStrategy"
     strategy.chain = "base"
     strategy.uses_safe_wallet = False

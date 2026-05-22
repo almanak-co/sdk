@@ -18,7 +18,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -33,14 +33,14 @@ def render_custom_dashboard(
     - Protocol utilization rate
     """
     st.title("Spark Lender Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values
     Decimal(str(strategy_config.get("min_supply_amount", "100")))
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown("**Protocol:** Spark (Aave V3 Fork)")
     st.markdown("**Chain:** Ethereum")
     st.markdown("**Asset:** DAI")
@@ -69,8 +69,8 @@ def render_custom_dashboard(
     st.subheader("Risk Information")
     _render_risk_info()
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_supply_position(session_state: dict[str, Any]) -> None:

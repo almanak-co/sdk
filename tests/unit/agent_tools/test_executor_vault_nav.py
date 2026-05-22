@@ -35,7 +35,7 @@ def executor(mock_gateway):
         mock_gateway,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         default_chain="base",
     )
 

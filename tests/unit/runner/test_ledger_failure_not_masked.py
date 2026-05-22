@@ -69,13 +69,13 @@ class TestLedgerFailureNotMaskedByTimeline:
         documented at strategy_runner.py:768-787 (VIB-3157)."""
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x" + "ab" * 20
 
         ledger_error = AccountingPersistenceError(
             "ledger",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             message="Synthetic ledger write failure (test)",
         )
         runner._step_execute = AsyncMock(side_effect=ledger_error)  # type: ignore[method-assign]
@@ -114,13 +114,13 @@ class TestLedgerFailureNotMaskedByTimeline:
         """
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x" + "ab" * 20
 
         ledger_error = AccountingPersistenceError(
             "ledger",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             message="Synthetic ledger write failure (test)",
         )
 
@@ -141,7 +141,7 @@ class TestLedgerFailureNotMaskedByTimeline:
         # ``RunIterationState`` (see ``StrategyRunner._step_execute(state)``
         # at strategy_runner.py:1367) and calls ``_emit_execution_timeline_event``
         # with ``state.strategy`` (NOT ``state`` itself — the emission
-        # boundary reads ``strategy.strategy_id`` / ``strategy.chain``). The
+        # boundary reads ``strategy.deployment_id`` / ``strategy.chain``). The
         # earlier stub forwarded its first argument straight through, which
         # silently passed the run state object into a parameter typed as
         # the strategy and could mask regressions on strategy-derived

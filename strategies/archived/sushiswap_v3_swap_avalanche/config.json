@@ -1,5 +1,5 @@
 {
-    "strategy_id": "sushiswap_v3_swap_avalanche",
+    "deployment_id": "sushiswap_v3_swap_avalanche",
     "strategy_name": "sushiswap_v3_swap_avalanche",
     "description": "SushiSwap V3 swap lifecycle on Avalanche: BUY (USDC->WAVAX) + SELL (WAVAX->USDC). FAIL: insufficient pool liquidity.",
     "chain": "avalanche",

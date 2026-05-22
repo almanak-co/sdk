@@ -326,7 +326,6 @@ async def write_outbox_entry(
     state_manager: Any,
     *,
     deployment_id: str,
-    strategy_id: str,
     cycle_id: str,
     ledger_entry_id: str,
     intent_type: str,
@@ -352,7 +351,6 @@ async def write_outbox_entry(
         result = fn(
             outbox_id,
             deployment_id,
-            strategy_id,
             cycle_id,
             ledger_entry_id,
             intent_type,

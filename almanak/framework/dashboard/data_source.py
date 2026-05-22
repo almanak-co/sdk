@@ -187,7 +187,7 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
     paper_metrics = _build_paper_metrics(summary)
 
     return Strategy(
-        id=summary.strategy_id,
+        id=summary.deployment_id,
         name=summary.name,
         status=_convert_status(summary.status),
         pnl_24h_usd=summary.pnl_24h_usd,
@@ -316,11 +316,11 @@ def get_available_strategies() -> list[Strategy]:
     return [_convert_gateway_summary_to_model(s) for s in summaries]
 
 
-def get_strategy_details(strategy_id: str) -> Strategy | None:
+def get_strategy_details(deployment_id: str) -> Strategy | None:
     """Get detailed strategy information from the gateway.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
 
     Returns:
         Strategy with full details or None if not found
@@ -335,7 +335,7 @@ def get_strategy_details(strategy_id: str) -> Strategy | None:
 
     try:
         details = client.get_strategy_details(
-            strategy_id,
+            deployment_id,
             include_timeline=True,
             include_pnl_history=True,
             timeline_limit=50,
@@ -344,15 +344,15 @@ def get_strategy_details(strategy_id: str) -> Strategy | None:
     except GatewayConnectionError:
         raise
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to get strategy details for {strategy_id}: {e}")
+        logger.warning(f"Failed to get strategy details for {deployment_id}: {e}")
         return None
 
 
-def get_timeline(strategy_id: str, limit: int = 50) -> list[DashboardTimelineEvent]:
+def get_timeline(deployment_id: str, limit: int = 50) -> list[DashboardTimelineEvent]:
     """Get timeline events from the gateway.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         limit: Maximum number of events
 
     Returns:
@@ -366,32 +366,32 @@ def get_timeline(strategy_id: str, limit: int = 50) -> list[DashboardTimelineEve
     if not client.is_connected:
         client.connect()
 
-    events = client.get_timeline(strategy_id, limit=limit)
+    events = client.get_timeline(deployment_id, limit=limit)
     return [_convert_gateway_timeline_event(e) for e in events]
 
 
-def execute_strategy_action(strategy_id: str, action: str, reason: str) -> bool:
+def execute_strategy_action(deployment_id: str, action: str, reason: str) -> bool:
     """Execute an operator action via gateway DashboardService."""
     client = get_dashboard_client()
     if not client.is_connected:
         client.connect()
-    return client.execute_action(strategy_id, action=action, reason=reason)
+    return client.execute_action(deployment_id, action=action, reason=reason)
 
 
-def archive_strategy_instance(strategy_id: str, reason: str = "Archived from dashboard") -> bool:
+def archive_strategy_instance(deployment_id: str, reason: str = "Archived from dashboard") -> bool:
     """Archive a strategy instance via gateway DashboardService."""
     client = get_dashboard_client()
     if not client.is_connected:
         client.connect()
-    return client.archive_strategy_instance(strategy_id, reason=reason)
+    return client.archive_strategy_instance(deployment_id, reason=reason)
 
 
-def purge_strategy_instance(strategy_id: str, reason: str) -> bool:
+def purge_strategy_instance(deployment_id: str, reason: str) -> bool:
     """Purge a strategy instance via gateway DashboardService."""
     client = get_dashboard_client()
     if not client.is_connected:
         client.connect()
-    return client.purge_strategy_instance(strategy_id, reason=reason)
+    return client.purge_strategy_instance(deployment_id, reason=reason)
 
 
 def is_gateway_available() -> bool:
@@ -417,7 +417,7 @@ def reset_gateway_connection() -> None:
     reset_dashboard_client()
 
 
-def get_pnl_summary(strategy_id: str) -> PnLSummary | None:
+def get_pnl_summary(deployment_id: str) -> PnLSummary | None:
     """Fetch the 5-second-eyeball PnL card from the gateway (VIB-3969).
 
     Returns None on connection / RPC failure rather than raising — the
@@ -428,16 +428,16 @@ def get_pnl_summary(strategy_id: str) -> PnLSummary | None:
     try:
         if not client.is_connected:
             client.connect()
-        return client.get_pnl_summary(strategy_id)
+        return client.get_pnl_summary(deployment_id)
     except GatewayConnectionError as exc:
-        logger.warning("get_pnl_summary failed for %s (gateway down): %s", strategy_id, exc)
+        logger.warning("get_pnl_summary failed for %s (gateway down): %s", deployment_id, exc)
         return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("get_pnl_summary failed for %s: %s", strategy_id, exc)
+        logger.warning("get_pnl_summary failed for %s: %s", deployment_id, exc)
         return None
 
 
-def get_cost_stack(strategy_id: str) -> CostStackInfo | None:
+def get_cost_stack(deployment_id: str) -> CostStackInfo | None:
     """Fetch the life-to-date cost / earn decomposition (VIB-3969).
 
     Returns None on outage; see ``get_pnl_summary`` for rationale.
@@ -446,16 +446,16 @@ def get_cost_stack(strategy_id: str) -> CostStackInfo | None:
     try:
         if not client.is_connected:
             client.connect()
-        return client.get_cost_stack(strategy_id)
+        return client.get_cost_stack(deployment_id)
     except GatewayConnectionError as exc:
-        logger.warning("get_cost_stack failed for %s (gateway down): %s", strategy_id, exc)
+        logger.warning("get_cost_stack failed for %s (gateway down): %s", deployment_id, exc)
         return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("get_cost_stack failed for %s: %s", strategy_id, exc)
+        logger.warning("get_cost_stack failed for %s: %s", deployment_id, exc)
         return None
 
 
-def get_audit_posture(strategy_id: str) -> AuditPosture | None:
+def get_audit_posture(deployment_id: str) -> AuditPosture | None:
     """Fetch reconciliation + audit-trail completeness + Accountant Test
     posture from the gateway (VIB-3969). Server-computed only — never
     reconstruct G6 client-side.
@@ -466,24 +466,24 @@ def get_audit_posture(strategy_id: str) -> AuditPosture | None:
     try:
         if not client.is_connected:
             client.connect()
-        return client.get_audit_posture(strategy_id)
+        return client.get_audit_posture(deployment_id)
     except GatewayConnectionError as exc:
-        logger.warning("get_audit_posture failed for %s (gateway down): %s", strategy_id, exc)
+        logger.warning("get_audit_posture failed for %s (gateway down): %s", deployment_id, exc)
         return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("get_audit_posture failed for %s: %s", strategy_id, exc)
+        logger.warning("get_audit_posture failed for %s: %s", deployment_id, exc)
         return None
 
 
-def get_trade_tape(strategy_id: str, limit: int = 50) -> TradeTapeResponse | None:
+def get_trade_tape(deployment_id: str, limit: int = 50) -> TradeTapeResponse | None:
     """Fetch the joined trade-tape rows from the gateway."""
     client = get_dashboard_client()
     if not client.is_connected:
         client.connect()
     try:
-        return client.get_trade_tape(strategy_id, limit=limit)
+        return client.get_trade_tape(deployment_id, limit=limit)
     except GatewayConnectionError:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning("get_trade_tape failed for %s: %s", strategy_id, exc)
+        logger.warning("get_trade_tape failed for %s: %s", deployment_id, exc)
         return None

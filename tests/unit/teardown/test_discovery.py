@@ -529,9 +529,9 @@ class TestToTeardownSummary:
             tick_upper=349_800,
             liquidity=700_417_431_525,
         )
-        summary = to_teardown_summary(strategy_id="exp12", chain="zerog", positions=[p])
+        summary = to_teardown_summary(deployment_id="exp12", chain="zerog", positions=[p])
 
-        assert summary.strategy_id == "exp12"
+        assert summary.deployment_id == "exp12"
         assert len(summary.positions) == 1
         info = summary.positions[0]
         assert info.position_type == PositionType.LP

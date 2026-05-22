@@ -1,6 +1,7 @@
-"""Unit tests for `almanak.framework.deployment` — VIB-3759.
+"""Unit tests for `almanak.framework.deployment` — VIB-4722.
 
-Test IDs map to the test plan in `docs/internal/AccountingApril30-Tests.md`.
+`ALMANAK_IS_HOSTED` is the single deployment-mode signal; `ALMANAK_DEPLOYMENT_ID`
+carries the id value within hosted mode. `mode.py` is the sole reader of both.
 """
 
 from __future__ import annotations
@@ -12,130 +13,127 @@ from pathlib import Path
 import pytest
 
 from almanak.framework.deployment import (
-    agent_id,
+    FatalBootError,
+    deployment_id,
     deployment_mode,
     is_hosted,
     is_local,
 )
 
 
-# --- T-3759-1 / T-3759-2: boolean behavior on unset / set --------------------
+def _clear(monkeypatch):
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
 
 
-def test_t_3759_1_unset_is_local(monkeypatch):
-    """T-3759-1: AGENT_ID unset → is_hosted() False."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+# --- is_hosted / is_local on the ALMANAK_IS_HOSTED signal -------------------
+
+
+def test_unset_is_local(monkeypatch):
+    """ALMANAK_IS_HOSTED unset → is_hosted() False."""
+    _clear(monkeypatch)
     assert is_hosted() is False
-
-
-def test_t_3759_2_set_is_hosted(monkeypatch):
-    """T-3759-2: AGENT_ID set → is_hosted() True."""
-    monkeypatch.setenv("AGENT_ID", "agent-001")
-    assert is_hosted() is True
-
-
-# --- T-3759-3 / T-3759-4: empty / whitespace are not hosted ------------------
-
-
-def test_t_3759_3_empty_string_is_local(monkeypatch):
-    """T-3759-3: empty string AGENT_ID → is_hosted() False.
-
-    Catches the `"AGENT_ID" in os.environ` shortcut, which would return True.
-    """
-    monkeypatch.setenv("AGENT_ID", "")
-    assert is_hosted() is False
-
-
-def test_t_3759_4_whitespace_only_is_local(monkeypatch):
-    """T-3759-4: whitespace-only AGENT_ID → is_hosted() False.
-
-    Forces `.strip()` semantics — matches legacy `_is_managed_deployment()`.
-    """
-    monkeypatch.setenv("AGENT_ID", "   ")
-    assert is_hosted() is False
-
-
-# --- T-3759-5 / T-3759-6: is_local() complements is_hosted() ----------------
-
-
-def test_t_3759_5_is_local_false_when_hosted(monkeypatch):
-    """T-3759-5: hosted → is_local() False."""
-    monkeypatch.setenv("AGENT_ID", "agent-002")
-    assert is_local() is False
-
-
-def test_t_3759_6_is_local_true_when_local(monkeypatch):
-    """T-3759-6: local → is_local() True."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
     assert is_local() is True
 
 
-# --- T-3759-7 / T-3759-8: deployment_mode() string token ---------------------
+@pytest.mark.parametrize("truthy", ["1", "true", "TRUE", "yes", "on", "  true  "])
+def test_truthy_values_are_hosted(monkeypatch, truthy):
+    """Truthy ALMANAK_IS_HOSTED → is_hosted() True."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", truthy)
+    assert is_hosted() is True
+    assert is_local() is False
 
 
-def test_t_3759_7_deployment_mode_hosted(monkeypatch):
-    """T-3759-7: hosted → deployment_mode() == 'hosted'."""
-    monkeypatch.setenv("AGENT_ID", "agent-003")
+@pytest.mark.parametrize("falsey", ["", "  ", "0", "false", "no", "off", "garbage"])
+def test_falsey_values_are_local(monkeypatch, falsey):
+    """Empty / whitespace / 0 / false / unknown ALMANAK_IS_HOSTED → local."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", falsey)
+    assert is_hosted() is False
+    assert is_local() is True
+
+
+# --- deployment_mode() string token -----------------------------------------
+
+
+def test_deployment_mode_hosted(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-3")
     assert deployment_mode() == "hosted"
 
 
-def test_t_3759_8_deployment_mode_local(monkeypatch):
-    """T-3759-8: local → deployment_mode() == 'local'."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+def test_deployment_mode_local(monkeypatch):
+    _clear(monkeypatch)
     assert deployment_mode() == "local"
 
 
-# --- agent_id() value-resolution tests ---------------------------------------
+# --- deployment_id() value resolution ---------------------------------------
 
 
-def test_agent_id_returns_stripped_value(monkeypatch):
-    """agent_id() returns the env value, stripped, when set."""
-    monkeypatch.setenv("AGENT_ID", "  agent-007  ")
-    assert agent_id() == "agent-007"
+def test_deployment_id_hosted_returns_value(monkeypatch):
+    """Hosted: deployment_id() returns the stripped ALMANAK_DEPLOYMENT_ID."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "  agent-007  ")
+    assert deployment_id() == "agent-007"
 
 
-def test_agent_id_returns_none_when_unset(monkeypatch):
-    """agent_id() returns None when env is unset."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
-    assert agent_id() is None
+def test_deployment_id_hosted_blank_raises_fatal(monkeypatch):
+    """Hosted + blank ALMANAK_DEPLOYMENT_ID ⇒ FatalBootError."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "   ")
+    with pytest.raises(FatalBootError):
+        deployment_id()
 
 
-def test_agent_id_returns_none_when_empty(monkeypatch):
-    """agent_id() returns None for empty/whitespace values."""
-    monkeypatch.setenv("AGENT_ID", "  ")
-    assert agent_id() is None
+def test_deployment_id_hosted_unset_raises_fatal(monkeypatch):
+    """Hosted + unset ALMANAK_DEPLOYMENT_ID ⇒ FatalBootError."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    with pytest.raises(FatalBootError):
+        deployment_id()
 
 
-# --- T-3759-9: existing _is_managed_deployment delegates --------------------
+def test_deployment_id_local_returns_none(monkeypatch):
+    """Local: deployment_id() returns None (id derived from wallet+chain)."""
+    _clear(monkeypatch)
+    assert deployment_id() is None
 
 
-def test_t_3759_9_strategy_runner_delegates(monkeypatch):
-    """T-3759-9: StrategyRunner._is_managed_deployment delegates to is_hosted().
+def test_deployment_id_local_ignores_stray_id(monkeypatch):
+    """Local: a stray ALMANAK_DEPLOYMENT_ID is ignored (returns None)."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "platform-uuid-1234")
+    assert deployment_id() is None
 
-    Verifies the runner-side helper is wired through the central function,
-    not duplicating its own AGENT_ID check.
-    """
+
+# --- StrategyRunner delegates to is_hosted() --------------------------------
+
+
+def test_strategy_runner_delegates(monkeypatch):
+    """StrategyRunner._is_managed_deployment delegates to is_hosted()."""
     from unittest.mock import MagicMock, patch
 
-    monkeypatch.setenv("AGENT_ID", "agent-test-9")
+    _clear(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test-9")
     runner = MagicMock()
     from almanak.framework.runner.strategy_runner import StrategyRunner
 
-    # Call the method directly on the class without going through __init__
-    result = StrategyRunner._is_managed_deployment(runner)
-    assert result is True
+    assert StrategyRunner._is_managed_deployment(runner) is True
 
-    monkeypatch.delenv("AGENT_ID", raising=False)
-    result = StrategyRunner._is_managed_deployment(runner)
-    assert result is False
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    assert StrategyRunner._is_managed_deployment(runner) is False
 
-    # And confirm: the helper imports `is_hosted` (not a copy of the env-read).
     with patch("almanak.framework.deployment.is_hosted", return_value=True) as mock_hosted:
         StrategyRunner._is_managed_deployment(runner)
         mock_hosted.assert_called_once()
 
 
-# --- T-3759-10: codebase-wide callsite coverage guard -----------------------
+# --- codebase-wide callsite coverage guard ----------------------------------
 
 
 def _repo_root() -> Path:
@@ -143,20 +141,18 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def test_t_3759_10_no_direct_agent_id_reads_outside_helper():
-    """T-3759-10: zero direct `os.environ.get("AGENT_ID")` outside the helper.
+def test_no_direct_mode_env_reads_outside_helper():
+    """Zero direct reads of the mode env vars outside `mode.py`.
 
-    Anti-gaming guard: the whole point of §A is centralization. Without this
-    test, future PRs can re-scatter the check. The only file permitted to
-    read AGENT_ID directly is `almanak/framework/deployment.py`.
-
-    Test fixtures, conftest, and tests themselves are excluded — they may
-    legitimately need to set/inspect the env var.
+    `ALMANAK_IS_HOSTED` and `ALMANAK_DEPLOYMENT_ID` are read only by
+    `almanak/framework/deployment/mode.py`. Every other code path consumes
+    `is_hosted()` / `is_local()` / `deployment_id()` / `deployment_mode()`.
     """
     root = _repo_root()
-    pattern = re.compile(r'os\.environ\.get\(\s*[\'"]AGENT_ID[\'"]')
+    pattern = re.compile(
+        r'os\.environ(?:\.get)?\(\s*[\'"](?:ALMANAK_IS_HOSTED|ALMANAK_DEPLOYMENT_ID)[\'"]'
+    )
 
-    # Use git ls-files to enumerate tracked Python files under production paths.
     completed = subprocess.run(
         ["git", "ls-files", "--", "*.py"],
         cwd=root,
@@ -184,27 +180,26 @@ def test_t_3759_10_no_direct_agent_id_reads_outside_helper():
             offenders.append(rel_str)
 
     assert not offenders, (
-        "Found direct `os.environ.get(\"AGENT_ID\")` in production code outside "
-        "`almanak/framework/deployment/mode.py`. Use `framework.deployment.is_hosted()` "
-        "or `agent_id()` instead.\nOffenders:\n  - "
-        + "\n  - ".join(offenders)
+        "Found direct reads of ALMANAK_IS_HOSTED / ALMANAK_DEPLOYMENT_ID in "
+        "production code outside `almanak/framework/deployment/mode.py`. Use "
+        "`framework.deployment.is_hosted()` / `deployment_id()` instead.\n"
+        "Offenders:\n  - " + "\n  - ".join(offenders)
     )
 
 
-# --- Sanity: the helper itself is allowed to read the env var --------------
+def test_helper_module_reads_each_env_var_once():
+    """`mode.py` reads each mode env var through the single `_raw` helper.
 
-
-def test_helper_module_is_the_one_that_reads_env_directly():
-    """The helper module IS allowed to read the env var. Sanity-check the file
-    contains exactly one such call so we don't accidentally regress to multiple
-    reads even within the helper.
+    `_raw` is the one `os.environ.get(...)` call; the var names appear as
+    string literals passed to it.
     """
     helper_path = _repo_root() / "almanak/framework/deployment/mode.py"
     content = helper_path.read_text(encoding="utf-8")
-    matches = re.findall(r'os\.environ\.get\(\s*[\'"]AGENT_ID[\'"]', content)
-    assert len(matches) == 1, (
-        f"Expected exactly one direct AGENT_ID read in mode.py, found {len(matches)}"
-    )
+    # Exactly one os.environ.get call (inside _raw).
+    env_gets = re.findall(r"os\.environ\.get\(", content)
+    assert len(env_gets) == 1, f"Expected one os.environ.get in mode.py, found {len(env_gets)}"
+    assert '"ALMANAK_IS_HOSTED"' in content
+    assert '"ALMANAK_DEPLOYMENT_ID"' in content
 
 
 if __name__ == "__main__":

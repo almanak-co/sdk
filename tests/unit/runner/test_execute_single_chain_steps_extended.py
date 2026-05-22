@@ -74,7 +74,7 @@ def _make_runner(
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.generate_teardown_intents.side_effect = NotImplementedError
@@ -88,7 +88,7 @@ def _make_state(strategy: MagicMock, *, intent=None) -> SingleChainExecutionStat
         strategy=strategy,
         intent=intent,
         start_time=datetime.now(UTC),
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
     )
 
 
@@ -413,7 +413,7 @@ class TestSingleChainHandleSuccess:
         state.last_execution_result = ExecutionResult(
             success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
         )
-        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
 
         with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
             MockEnricher.return_value.enrich.return_value = state.last_execution_result
@@ -438,7 +438,7 @@ class TestSingleChainHandleSuccess:
         state.last_execution_result = ExecutionResult(
             success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
         )
-        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
 
         with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
             MockEnricher.return_value.enrich.side_effect = RuntimeError("enricher bug")
@@ -468,7 +468,7 @@ class TestSingleChainHandleSuccess:
             success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
         )
         state.last_execution_result.swap_amounts = SimpleNamespace(slippage_bps=500, token_in="USDC", token_out="ETH")
-        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
 
         with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
             MockEnricher.return_value.enrich.return_value = state.last_execution_result
@@ -506,7 +506,7 @@ class TestSingleChainHandleSuccess:
         state.last_execution_result = ExecutionResult(
             success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
         )
-        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
 
         with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
             MockEnricher.return_value.enrich.return_value = state.last_execution_result
@@ -535,7 +535,7 @@ class TestSingleChainHandleSuccess:
         state.last_execution_result = ExecutionResult(
             success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
         )
-        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
 
         with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
             MockEnricher.return_value.enrich.return_value = state.last_execution_result
@@ -756,7 +756,7 @@ class TestSingleChainExecuteOnchain:
             return_value=ExecutionResult(success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC))
         )
 
-        execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
         step_result = SimpleNamespace(action_bundle=MagicMock())
         result = await runner._single_chain_execute_onchain(state, step_result, execution_context, single_chain_orch)
 
@@ -775,7 +775,7 @@ class TestSingleChainExecuteOnchain:
         single_chain_orch.tx_risk_config = None
         single_chain_orch.execute = AsyncMock(return_value=ExecutionResult(success=True, phase=ExecutionPhase.COMPLETE))
 
-        execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
         await runner._single_chain_execute_onchain(
             state,
             SimpleNamespace(action_bundle=MagicMock()),
@@ -800,7 +800,7 @@ class TestSingleChainExecuteOnchain:
         )
         single_chain_orch.execute = AsyncMock(return_value=ExecutionResult(success=True, phase=ExecutionPhase.COMPLETE))
 
-        execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+        execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
         await runner._single_chain_execute_onchain(
             state,
             SimpleNamespace(action_bundle=MagicMock()),

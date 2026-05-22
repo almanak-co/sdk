@@ -35,7 +35,7 @@ from almanak.framework.runner.strategy_runner import (
 def _make_strategy(decide_return=None, decide_side_effect=None):
     """Create a mock strategy."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -81,7 +81,7 @@ def _make_breaker():
         max_cumulative_loss_usd=Decimal("1000"),
         cooldown_seconds=2,
     )
-    return CircuitBreaker(strategy_id="test_strategy", config=config)
+    return CircuitBreaker(deployment_id="test_strategy", config=config)
 
 
 # =============================================================================

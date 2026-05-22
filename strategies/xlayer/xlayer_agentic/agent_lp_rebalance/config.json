@@ -8,7 +8,7 @@
     "rebalance_threshold_pct": "0.05",
     "interval_seconds": 1800,
     "max_tool_rounds": 12,
-    "strategy_id": "agent-xlayer-lp-rebalance",
+    "deployment_id": "agent-xlayer-lp-rebalance",
     "anvil_funding": {
         "OKB": 100,
         "WOKB": 10,

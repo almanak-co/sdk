@@ -96,12 +96,12 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     """
     buy_token = config["buy_token"]
     sell_token = config["sell_token"]
-    strategy_id = config.get("strategy_id", "agent-swap-eth-usdc")
+    deployment_id = config.get("deployment_id", "agent-swap-eth-usdc")
 
     return MockLLMClient([
         # Round 1: load state + get price + get balances + get RSI (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
+            _mock_tool_call("load_agent_state", {"deployment_id": deployment_id}),
             _mock_tool_call("get_price", {"token": buy_token, "chain": "arbitrum"}),
             _mock_tool_call("get_balance", {"token": buy_token, "chain": "arbitrum"}),
             _mock_tool_call("get_balance", {"token": sell_token, "chain": "arbitrum"}),
@@ -124,7 +124,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
         # Round 3: save state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "last_action": "buy",
                     "rsi_at_trade": 25,
@@ -133,7 +133,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
                 },
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": f"RSI=25 (oversold). Bought {config['trade_size_usd']} USD of {buy_token} at $1850.",
             }),
         ),
@@ -172,7 +172,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-swap-eth-usdc"),
+            deployment_id=config.get("deployment_id", "agent-swap-eth-usdc"),
             default_chain=config.get("chain", "arbitrum"),
         )
 
@@ -202,7 +202,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 10),
-                strategy_id=config.get("strategy_id", "agent-swap-eth-usdc"),
+                deployment_id=config.get("deployment_id", "agent-swap-eth-usdc"),
             )
             logger.info("Agent result: %s", result)
         finally:

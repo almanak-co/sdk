@@ -108,7 +108,6 @@ def _call_builder(
         intent=intent,
         result=result,
         deployment_id=deployment_id,
-        strategy_id="strat-1",
         cycle_id="cycle-001",
         execution_mode="paper",
         chain=chain,
@@ -309,7 +308,7 @@ class TestPtSellGuards:
         result = _make_sell_result()
         ev = build_pendle_pt_sell_accounting_event(
             intent=intent, result=result,
-            deployment_id="d", strategy_id="s", cycle_id="c",
+            deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
             basis_store=_make_basis_store(),
         )

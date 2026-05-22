@@ -153,16 +153,16 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
 
 **Causas y soluciones:**
 
-1. **strategy_id incorrecto**
+1. **deployment_id incorrecto**
    ```python
-   # Asegurar un strategy_id consistente
+   # Asegurar un deployment_id consistente
    state = GatewayStateManager(gateway_client)
 
    # Guardar
-   await state.save(strategy_id="my-strategy", data=data)
+   await state.save(deployment_id="my-strategy", data=data)
 
    # Cargar con el mismo ID
-   data = await state.load(strategy_id="my-strategy")  # ¡Mismo ID!
+   data = await state.load(deployment_id="my-strategy")  # ¡Mismo ID!
    ```
 
 2. **Límite de tamaño de estado excedido**

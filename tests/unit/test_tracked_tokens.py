@@ -20,7 +20,7 @@ class PoolConfig:
     range_width_pct: Decimal = Decimal("0.20")
     amount0: Decimal = Decimal("0.001")
     amount1: Decimal = Decimal("3")
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "arbitrum"
 
@@ -44,7 +44,7 @@ class SwapConfig:
     base_token: str = "WETH"
     quote_token: str = "USDC"
     trade_amount: str = "100"
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "arbitrum"
 
@@ -66,7 +66,7 @@ class LendingConfig:
     """Config with collateral_token/borrow_token fields (lending strategies)."""
     collateral_token: str = "wstETH"
     borrow_token: str = "USDC"
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "arbitrum"
 
@@ -87,7 +87,7 @@ class FromToConfig:
     """Config with from_token/to_token fields (simple swap strategies)."""
     from_token: str = "WETH"
     to_token: str = "USDC"
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "arbitrum"
 
@@ -107,7 +107,7 @@ class FromToConfig:
 class EmptyConfig:
     """Config with no token-related fields."""
     interval: int = 60
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "arbitrum"
 
@@ -132,7 +132,7 @@ class _ConcreteStrategy(IntentStrategy):
 
     def get_open_positions(self):
         from almanak.framework.teardown.models import TeardownPositionSummary
-        return TeardownPositionSummary.empty(getattr(self, "_strategy_id", "test"))
+        return TeardownPositionSummary.empty(getattr(self, "_deployment_id", "test"))
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []
@@ -143,7 +143,7 @@ def _make_strategy(config):
     strategy = object.__new__(_ConcreteStrategy)
     strategy.config = config
     strategy._chain = getattr(config, "chain", "arbitrum")
-    strategy._strategy_id = getattr(config, "strategy_id", "test")
+    strategy._deployment_id = getattr(config, "deployment_id", "test")
     return strategy
 
 
@@ -202,7 +202,7 @@ class TestDeriveTokensFromConfig:
         class DupConfig:
             base_token: str = "USDC"
             quote_token: str = "USDC"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "arbitrum"
             def to_dict(self):
                 return {"base_token": self.base_token, "quote_token": self.quote_token}
@@ -268,7 +268,7 @@ class TestDeriveTokensFromConfig:
             market: str = "usdc_e"
             collateral_token: str = "WETH"
             borrow_token: str = "USDC"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "polygon"
             def to_dict(self):
                 return {
@@ -291,7 +291,7 @@ class TestDeriveTokensFromConfig:
         class CompoundV3SimpleConfig:
             market: str = "usdc"
             base_token: str = "USDC"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "arbitrum"
             def to_dict(self):
                 return {"market": self.market, "base_token": self.base_token}
@@ -307,7 +307,7 @@ class TestDeriveTokensFromConfig:
         @dataclass
         class MarketPoolConfig:
             market: str = "WETH/USDC"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "arbitrum"
             def to_dict(self):
                 return {"market": self.market}
@@ -329,7 +329,7 @@ class TestDeriveTokensFromConfig:
         @dataclass
         class PerpMarketConfig:
             market: str = "BTC/USD"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "bsc"
             def to_dict(self):
                 return {"market": self.market}
@@ -390,7 +390,7 @@ class TestGetTrackedTokens:
         class NullConfig:
             base_token: str = "WETH"
             quote_token: str | None = None
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             chain: str = "arbitrum"
             def to_dict(self):
                 return {"base_token": self.base_token, "quote_token": self.quote_token}
@@ -536,7 +536,7 @@ class TestVib3937NativeTokenInWalletSnapshot:
             range_width_pct: Decimal = Decimal("0.20")
             amount0: Decimal = Decimal("0.001")
             amount1: Decimal = Decimal("3")
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             strategy_name: str = "test"
             chain: str = "arbitrum"
 

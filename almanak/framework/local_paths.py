@@ -24,7 +24,7 @@ The cwd-relative ``./almanak_state.db`` legacy default is **removed**. It
 was the proximate cause of April 29's silent accounting failure — 10
 strategies launched from the same cwd colliding on a single DB file.
 
-Hosted mode (``AGENT_ID`` set) has no local DB; calling these helpers in
+Hosted mode (``ALMANAK_IS_HOSTED`` set) has no local DB; calling these helpers in
 hosted mode is a programmer error and raises :class:`LocalPathError`.
 """
 
@@ -259,7 +259,7 @@ def _ensure_local() -> None:
 
     if is_hosted():
         raise LocalPathError(
-            "local-path helper called in hosted mode (AGENT_ID set). "
+            "local-path helper called in hosted mode (ALMANAK_IS_HOSTED set). "
             "Hosted mode uses Postgres via ALMANAK_GATEWAY_DATABASE_URL."
         )
 

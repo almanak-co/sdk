@@ -250,7 +250,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"State: {self._previous_stable_state} -> {new_state}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"old_state": self._previous_stable_state, "new_state": new_state},
             )
         )
@@ -459,7 +459,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"{intent_type} successful -> state={self._loop_state}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"intent_type": intent_type, "new_state": self._loop_state},
                 )
             )
@@ -592,7 +592,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id="traderjoe_leveraged_lp",
+            deployment_id="traderjoe_leveraged_lp",
             timestamp=datetime.now(UTC),
             positions=positions,
         )

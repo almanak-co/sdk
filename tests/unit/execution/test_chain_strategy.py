@@ -66,13 +66,13 @@ class TestEvmExecutionStrategy:
 
         strategy = EvmExecutionStrategy(orchestrator=mock_orch)
         bundle = {"actions": []}
-        outcome = await strategy.execute_actions([bundle], {"strategy_id": "test", "dry_run": True})
+        outcome = await strategy.execute_actions([bundle], {"deployment_id": "test", "dry_run": True})
 
         assert outcome.success is True
         assert outcome.tx_ids == ["0xaaa"]
         mock_orch.execute.assert_awaited_once_with(
             action_bundle=bundle,
-            strategy_id="test",
+            deployment_id="test",
             intent_id="",
             dry_run=True,
             simulation_enabled=True,

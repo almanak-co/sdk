@@ -75,7 +75,6 @@ def _make_ledger_entry(
     return LedgerEntry(
         id=id_,
         cycle_id="cycle-1",
-        strategy_id="test-strat",
         deployment_id=deployment_id,
         execution_mode="live",
         timestamp=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),

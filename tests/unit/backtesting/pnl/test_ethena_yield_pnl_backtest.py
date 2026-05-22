@@ -41,7 +41,7 @@ def _make_strategy(
     strat.max_slippage_pct = max_slippage_pct
     strat.force_action = force_action.lower()
     strat._chain = "ethereum"
-    strat._strategy_id = "test_ethena_pnl"
+    strat._deployment_id = "test_ethena_pnl"
     strat._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strat._swapped = False
     strat._swapped_amount = Decimal("0")

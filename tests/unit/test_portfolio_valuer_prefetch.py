@@ -20,16 +20,13 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
-
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
 
 def _accounting_event(position_key: str, event_type: str = "SUPPLY") -> dict:
     return {
         "id": f"id-{position_key}-{event_type}",
-        "deployment_id": "d1",
-        "strategy_id": "s1",
+        "deployment_id": "s1",
         "cycle_id": "cyc",
         "execution_mode": "live",
         "timestamp": 1_712_000_000,
@@ -56,11 +53,13 @@ def _wire_store(events: list[dict]) -> MagicMock:
 class TestPortfolioValuerPrefetch:
     def test_prefetch_populates_cache_grouped_by_position_key(self) -> None:
         """Cache is a dict keyed by position_key with the event dicts as values."""
-        store = _wire_store([
-            _accounting_event("aave-usdc"),
-            _accounting_event("aave-usdc", "BORROW"),
-            _accounting_event("yearn-vault-1", "VAULT_DEPOSIT"),
-        ])
+        store = _wire_store(
+            [
+                _accounting_event("aave-usdc"),
+                _accounting_event("aave-usdc", "BORROW"),
+                _accounting_event("yearn-vault-1", "VAULT_DEPOSIT"),
+            ]
+        )
         v = PortfolioValuer()
         v.set_accounting_context(store, "d1")
 
@@ -174,8 +173,8 @@ class TestPortfolioValuerPrefetch:
         store.get_accounting_events_sync = MagicMock(
             return_value=[
                 _accounting_event("k1"),
-                None,           # corrupt row
-                "not-a-dict",   # corrupt row
+                None,  # corrupt row
+                "not-a-dict",  # corrupt row
                 _accounting_event("k2"),
             ]
         )
@@ -216,10 +215,12 @@ class TestPortfolioValuerPrefetchClearsCache:
 
     def test_repeated_prefetch_replaces_cache_atomically(self) -> None:
         store = MagicMock()
-        store.get_accounting_events_sync = MagicMock(side_effect=[
-            [_accounting_event("k1")],
-            [_accounting_event("k2")],
-        ])
+        store.get_accounting_events_sync = MagicMock(
+            side_effect=[
+                [_accounting_event("k1")],
+                [_accounting_event("k2")],
+            ]
+        )
         v = PortfolioValuer()
         v.set_accounting_context(store, "d1")
 
@@ -247,8 +248,8 @@ class TestPortfolioValuerCacheBackwardsCompat:
         otherwise the enricher exits at the no-key branch and never
         reaches the empty-cache lookup we're trying to exercise.
         """
-        from almanak.framework.valuation.portfolio_valuer import PositionValue
         from almanak.framework.teardown.models import PositionType
+        from almanak.framework.valuation.portfolio_valuer import PositionValue
 
         v = PortfolioValuer()
         v.set_accounting_context(_wire_store([]), "d1")

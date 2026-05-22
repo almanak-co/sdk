@@ -24,7 +24,7 @@ class _MinimalStrategy(IntentStrategy):
     def __init__(self) -> None:  # type: ignore[override]
         # Bypass IntentStrategy.__init__ — we only test state-loading logic.
         self._state_manager = None
-        self._strategy_id = ""
+        self._deployment_id = ""
         self._state_version = 0
 
     def decide(self, market):  # type: ignore[override]
@@ -63,21 +63,21 @@ class TestLoadStateAsync:
         self.strategy = _MinimalStrategy()
 
     # ------------------------------------------------------------------
-    # Guard: no state manager / no strategy_id
+    # Guard: no state manager / no deployment_id
     # ------------------------------------------------------------------
 
     def test_returns_false_when_no_state_manager(self) -> None:
         self.strategy._state_manager = None
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
         result = asyncio.run(self.strategy.load_state_async())
         assert result is False
         # Guard must fire before any I/O — no state manager means nothing is awaited.
 
-    def test_returns_false_when_no_strategy_id(self) -> None:
+    def test_returns_false_when_no_deployment_id(self) -> None:
         mock_manager = MagicMock()
         mock_manager.load_state = AsyncMock()
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = ""
+        self.strategy._deployment_id = ""
         result = asyncio.run(self.strategy.load_state_async())
         assert result is False
         mock_manager.load_state.assert_not_called()
@@ -94,7 +94,7 @@ class TestLoadStateAsync:
         mock_manager.load_state = AsyncMock(return_value=state_data)
 
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
 
         result = asyncio.run(self.strategy.load_state_async())
 
@@ -112,7 +112,7 @@ class TestLoadStateAsync:
         mock_manager.load_state = AsyncMock(return_value=None)
 
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
 
         result = asyncio.run(self.strategy.load_state_async())
         assert result is False
@@ -123,7 +123,7 @@ class TestLoadStateAsync:
         mock_manager.load_state = AsyncMock(return_value=state_data)
 
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
 
         result = asyncio.run(self.strategy.load_state_async())
         assert result is False
@@ -134,7 +134,7 @@ class TestLoadStateAsync:
         mock_manager.load_state = AsyncMock(side_effect=Exception("State not found"))
 
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
 
         with patch("almanak.framework.strategies.intent_strategy.logger") as mock_log:
             result = asyncio.run(self.strategy.load_state_async())
@@ -150,7 +150,7 @@ class TestLoadStateAsync:
         mock_manager.load_state = AsyncMock(side_effect=RuntimeError("network timeout"))
 
         self.strategy._state_manager = mock_manager
-        self.strategy._strategy_id = "my-strategy"
+        self.strategy._deployment_id = "my-strategy"
 
         with patch("almanak.framework.strategies.intent_strategy.logger") as mock_log:
             result = asyncio.run(self.strategy.load_state_async())

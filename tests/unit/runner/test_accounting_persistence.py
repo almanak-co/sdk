@@ -36,7 +36,7 @@ from almanak.framework.state.exceptions import AccountingPersistenceError
 
 class _Strategy:
     def __init__(self, sid: str = "s1", chain: str = "arbitrum") -> None:
-        self.strategy_id = sid
+        self.deployment_id = sid
         self.chain = chain
         self.wallet_address = "0x" + "0" * 40
 
@@ -66,7 +66,7 @@ async def test_write_ledger_entry_live_mode_propagates_failure() -> None:
     """Live mode: backend raise must propagate as AccountingPersistenceError."""
     state_mgr = MagicMock()
     state_mgr.save_ledger_entry = AsyncMock(
-        side_effect=AccountingPersistenceError(write_kind="ledger", strategy_id="s1")
+        side_effect=AccountingPersistenceError(write_kind="ledger", deployment_id="s1")
     )
     runner = _Runner(state_manager=state_mgr, config=RunnerConfig(dry_run=False))
 
@@ -81,7 +81,7 @@ async def test_write_ledger_entry_dry_run_swallows_and_logs_error(caplog: pytest
 
     state_mgr = MagicMock()
     state_mgr.save_ledger_entry = AsyncMock(
-        side_effect=AccountingPersistenceError(write_kind="ledger", strategy_id="s1")
+        side_effect=AccountingPersistenceError(write_kind="ledger", deployment_id="s1")
     )
     runner = _Runner(state_manager=state_mgr, config=RunnerConfig(dry_run=True))
 
@@ -102,7 +102,7 @@ async def test_write_ledger_entry_paper_mode_swallows_and_logs_error(
     """
     state_mgr = MagicMock()
     state_mgr.save_ledger_entry = AsyncMock(
-        side_effect=AccountingPersistenceError(write_kind="ledger", strategy_id="s1")
+        side_effect=AccountingPersistenceError(write_kind="ledger", deployment_id="s1")
     )
     cfg = RunnerConfig(dry_run=False)
     cfg.paper_mode = True  # type: ignore[attr-defined]
@@ -136,12 +136,12 @@ async def test_state_manager_save_ledger_entry_propagates() -> None:
     mgr._warm = warm
 
     entry = MagicMock()
-    entry.strategy_id = "s1"
+    entry.deployment_id = "s1"
 
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await mgr.save_ledger_entry(entry)
     assert excinfo.value.write_kind == "ledger"
-    assert excinfo.value.strategy_id == "s1"
+    assert excinfo.value.deployment_id == "s1"
     # cause preserved for forensic logs
     assert isinstance(excinfo.value.__cause__, RuntimeError)
 
@@ -163,22 +163,21 @@ async def test_state_manager_save_portfolio_metrics_false_raises() -> None:
     mgr._warm = warm
 
     metrics = MagicMock()
-    metrics.strategy_id = "s1"
+    metrics.deployment_id = "s1"
 
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await mgr.save_portfolio_metrics(metrics)
     assert excinfo.value.write_kind == "metrics"
-    assert excinfo.value.strategy_id == "s1"
+    assert excinfo.value.deployment_id == "s1"
     assert "returned False" in str(excinfo.value)
 
 
-def _ledger_entry(strategy_id: str = "s1") -> LedgerEntry:
+def _ledger_entry(deployment_id: str = "s1") -> LedgerEntry:
     """Build a valid LedgerEntry for gateway client tests."""
     return LedgerEntry(
         id="entry-1",
         cycle_id="c1",
-        strategy_id=strategy_id,
-        deployment_id="d1",
+        deployment_id=deployment_id,
         execution_mode="live",
         timestamp=datetime.now(UTC),
         intent_type="SWAP",
@@ -210,8 +209,7 @@ async def test_gateway_state_manager_ledger_rpc_success() -> None:
     client.state.SaveLedgerEntry.assert_called_once()
     req = client.state.SaveLedgerEntry.call_args.args[0]
     assert req.id == "entry-1"
-    assert req.strategy_id == "s1"
-    assert req.deployment_id == "d1"
+    assert req.deployment_id == "s1"
     assert req.execution_mode == "live"
     assert req.intent_type == "SWAP"
     assert req.gas_used == 21000
@@ -236,7 +234,7 @@ async def test_gateway_state_manager_ledger_rpc_failure_raises() -> None:
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await gsm.save_ledger_entry(_ledger_entry())
     assert excinfo.value.write_kind == "ledger"
-    assert excinfo.value.strategy_id == "s1"
+    assert excinfo.value.deployment_id == "s1"
     assert "db down" in str(excinfo.value)
 
 
@@ -329,7 +327,7 @@ def _make_gateway_state_manager(response_success: bool, error_msg: str = "boom")
 
 def _snapshot_stub():
     snap = MagicMock()
-    snap.strategy_id = "s1"
+    snap.deployment_id = "s1"
     snap.timestamp = datetime.now(UTC)
     snap.iteration_number = 1
     snap.total_value_usd = Decimal("100")
@@ -356,7 +354,7 @@ async def test_gateway_save_portfolio_snapshot_raises_when_response_not_success(
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await mgr.save_portfolio_snapshot(_snapshot_stub())
     assert excinfo.value.write_kind == "snapshot"
-    assert excinfo.value.strategy_id == "s1"
+    assert excinfo.value.deployment_id == "s1"
 
 
 @pytest.mark.asyncio
@@ -376,13 +374,12 @@ async def test_gateway_save_portfolio_snapshot_raises_on_rpc_exception() -> None
 
 def _metrics_stub():
     m = MagicMock()
-    m.strategy_id = "s1"
+    m.deployment_id = "s1"
     m.timestamp = datetime.now(UTC)
     m.initial_value_usd = Decimal("100")
     m.deposits_usd = Decimal("0")
     m.withdrawals_usd = Decimal("0")
     m.gas_spent_usd = Decimal("0")
-    m.deployment_id = "d1"
     m.cycle_id = "c1"
     m.execution_mode = "live"
     m.is_complete = True
@@ -395,7 +392,7 @@ async def test_gateway_save_portfolio_metrics_raises_when_response_not_success()
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await mgr.save_portfolio_metrics(_metrics_stub())
     assert excinfo.value.write_kind == "metrics"
-    assert excinfo.value.strategy_id == "s1"
+    assert excinfo.value.deployment_id == "s1"
 
 
 @pytest.mark.asyncio
@@ -423,7 +420,7 @@ async def test_alert_accounting_failure_dispatches_critical_card() -> None:
         alert_manager=alert,
         config=RunnerConfig(enable_alerting=True),
     )
-    err = AccountingPersistenceError(write_kind="snapshot", strategy_id="s1")
+    err = AccountingPersistenceError(write_kind="snapshot", deployment_id="s1")
     await runner._alert_accounting_failure(_Strategy(), err)
 
     assert alert.send_alert.await_count == 1
@@ -445,7 +442,7 @@ async def test_alert_accounting_failure_no_op_when_alerting_disabled() -> None:
         alert_manager=alert,
         config=RunnerConfig(enable_alerting=False),
     )
-    await runner._alert_accounting_failure(_Strategy(), AccountingPersistenceError("ledger", "s1"))
+    await runner._alert_accounting_failure(_Strategy(), AccountingPersistenceError("ledger", deployment_id="s1"))
     assert alert.send_alert.await_count == 0
 
 
@@ -480,7 +477,7 @@ def test_iteration_status_accounting_failed_is_not_success() -> None:
     """ACCOUNTING_FAILED must be treated as a failure for consecutive-error tracking."""
     from almanak.framework.runner.runner_models import IterationResult
 
-    result = IterationResult(status=IterationStatus.ACCOUNTING_FAILED, strategy_id="s1")
+    result = IterationResult(status=IterationStatus.ACCOUNTING_FAILED, deployment_id="s1")
     assert result.success is False
 
 
@@ -507,8 +504,8 @@ async def _exercise_snapshot_handler(runner: _Runner):
     from almanak.framework.runner.runner_models import IterationResult
 
     snapshot_start = datetime.now(UTC)
-    strategy_id = "s1"
-    strategy = _Strategy(sid=strategy_id)
+    deployment_id = "s1"
+    strategy = _Strategy(sid=deployment_id)
     try:
         await runner._capture_portfolio_snapshot(strategy=strategy, iteration_number=1)
     except AccountingPersistenceError as acc_err:
@@ -517,7 +514,7 @@ async def _exercise_snapshot_handler(runner: _Runner):
             return IterationResult(
                 status=IterationStatus.ACCOUNTING_FAILED,
                 error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=runner._calculate_duration_ms(snapshot_start),
             )
         # Non-live: log + swallow (run_loop logs at ERROR; tests assert via caplog).
@@ -543,7 +540,7 @@ async def test_snapshot_acc_error_escalates_in_live_mode() -> None:
     )
     runner.config.enable_alerting = True  # type: ignore[attr-defined]
     runner._capture_portfolio_snapshot = AsyncMock(  # type: ignore[method-assign]
-        side_effect=AccountingPersistenceError(write_kind="snapshot", strategy_id="s1")
+        side_effect=AccountingPersistenceError(write_kind="snapshot", deployment_id="s1")
     )
 
     result = await _exercise_snapshot_handler(runner)
@@ -574,7 +571,7 @@ async def test_snapshot_acc_error_swallowed_in_paper_mode() -> None:
         config=cfg,
     )
     runner._capture_portfolio_snapshot = AsyncMock(  # type: ignore[method-assign]
-        side_effect=AccountingPersistenceError(write_kind="snapshot", strategy_id="s1")
+        side_effect=AccountingPersistenceError(write_kind="snapshot", deployment_id="s1")
     )
 
     result = await _exercise_snapshot_handler(runner)
@@ -594,8 +591,7 @@ def test_gateway_state_manager_get_accounting_events_sync_happy_path() -> None:
 
     proto_event = gateway_pb2.AccountingEvent(
         id="aaa",
-        deployment_id="d1",
-        strategy_id="s1",
+        deployment_id="s1",
         cycle_id="cyc",
         execution_mode="live",
         timestamp=1_712_000_000,
@@ -627,8 +623,8 @@ def test_gateway_state_manager_get_accounting_events_sync_happy_path() -> None:
     # SQLite contract that FIFOBasisStore.reconstruct_from_events expects.
     assert rows[0]["timestamp"] == "2024-04-01T19:33:20+00:00"
 
-    # Wire request: position_key forwarded; deployment_id used as wire strategy_id
-    # placeholder (gateway prefers AGENT_ID env in hosted, ignores in local).
+    # Wire request: position_key forwarded; deployment_id used as the canonical
+    # wire identity.
     req = client.state.GetAccountingEvents.call_args.args[0]
     assert req.deployment_id == "d1"
     assert req.position_key == "aave-usdc"
@@ -688,7 +684,6 @@ def test_gateway_state_manager_get_accounting_events_sync_dict_shape_parity() ->
     expected_keys = {
         "id",
         "deployment_id",
-        "strategy_id",
         "cycle_id",
         "execution_mode",
         "timestamp",

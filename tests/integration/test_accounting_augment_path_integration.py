@@ -47,8 +47,7 @@ from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 def _identity(execution_mode: str = "live") -> AccountingIdentity:
     return AccountingIdentity(
         id="test-augment-path-1",
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cyc-1",
         execution_mode=execution_mode,
         timestamp=datetime.now(UTC),

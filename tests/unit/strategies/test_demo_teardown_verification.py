@@ -41,7 +41,7 @@ def _make_morpho_strategy() -> MorphoUniV3LeveragedLPStrategy:
         return_value=None,
     ):
         s = MorphoUniV3LeveragedLPStrategy.__new__(MorphoUniV3LeveragedLPStrategy)
-        s._strategy_id = "test_morpho"
+        s._deployment_id = "test_morpho"
         s.STRATEGY_NAME = "demo_morpho_univ3_leveraged_lp"
         s.name = "demo_morpho_univ3_leveraged_lp"
         s._chain = "ethereum"
@@ -69,7 +69,7 @@ def _make_balancer_strategy() -> BalancerFlashArbStrategy:
         return_value=None,
     ):
         s = BalancerFlashArbStrategy.__new__(BalancerFlashArbStrategy)
-        s._strategy_id = "test_balancer"
+        s._deployment_id = "test_balancer"
         s.STRATEGY_NAME = "demo_balancer_flash_arb"
         s.name = "demo_balancer_flash_arb"
         s._chain = "arbitrum"
@@ -90,7 +90,7 @@ def _make_lido_strategy(receive_wrapped: bool = True) -> LidoStakerStrategy:
         return_value=None,
     ):
         s = LidoStakerStrategy.__new__(LidoStakerStrategy)
-        s._strategy_id = "test_lido"
+        s._deployment_id = "test_lido"
         s.STRATEGY_NAME = "lido_staker"
         s.name = "lido_staker"
         s._chain = "ethereum"

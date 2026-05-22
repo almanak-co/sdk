@@ -504,7 +504,7 @@ class AlmanakRSIStrategy(IntentStrategy):
         )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "almanak_rsi"),
+            deployment_id=getattr(self, "deployment_id", "almanak_rsi"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

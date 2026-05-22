@@ -47,7 +47,7 @@ class TestPaperTraderConfigForOptimism:
         config = PaperTraderConfig(
             chain="optimism",
             rpc_url="https://example.com/rpc",
-            strategy_id="demo_uniswap_paper_trade_optimism",
+            deployment_id="demo_uniswap_paper_trade_optimism",
             initial_eth=Decimal("10"),
             initial_tokens={"USDC": Decimal("10000"), "WETH": Decimal("1")},
             tick_interval_seconds=60,
@@ -55,7 +55,7 @@ class TestPaperTraderConfigForOptimism:
             anvil_port=8546,
         )
         assert config.chain == "optimism"
-        assert config.strategy_id == "demo_uniswap_paper_trade_optimism"
+        assert config.deployment_id == "demo_uniswap_paper_trade_optimism"
         assert config.initial_tokens["USDC"] == Decimal("10000")
         assert config.max_ticks == 5
         assert config.tick_interval_seconds == 60
@@ -65,7 +65,7 @@ class TestPaperTraderConfigForOptimism:
         config = PaperTraderConfig(
             chain="optimism",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
         )
         assert config.chain_id == 10  # Optimism mainnet chain ID
 
@@ -74,7 +74,7 @@ class TestPaperTraderConfigForOptimism:
         config = PaperTraderConfig(
             chain="optimism",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
             tick_interval_seconds=60,
             max_ticks=10,
         )
@@ -85,7 +85,7 @@ class TestPaperTraderConfigForOptimism:
         config = PaperTraderConfig(
             chain="optimism",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
             anvil_port=9999,
         )
         assert "9999" in config.fork_rpc_url

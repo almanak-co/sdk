@@ -327,7 +327,7 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
                 details={"pool": self.pool},
             ))
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "probe_avalanche_lp_lifecycle"),
+            deployment_id=getattr(self, "deployment_id", "probe_avalanche_lp_lifecycle"),
             timestamp=datetime.now(UTC), positions=positions,
         )
 

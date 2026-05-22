@@ -106,7 +106,6 @@ def _make_temp_store() -> tuple[SQLiteStore, str]:
 
 def _make_identity(
     deployment_id: str = "test-deploy",
-    strategy_id: str = "test-strat",
     chain: str = "arbitrum",
     protocol: str = "test",
     tx_hash: str = "0xdeadbeef",
@@ -114,7 +113,6 @@ def _make_identity(
     return AccountingIdentity(
         id=str(uuid.uuid4()),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=str(uuid.uuid4()),
         execution_mode="live",
         timestamp=datetime.now(UTC),
@@ -126,7 +124,7 @@ def _make_identity(
     )
 
 
-def _make_mock_snapshot(token_prices: dict[str, str], strategy_id: str = "test-deploy") -> PortfolioSnapshot:
+def _make_mock_snapshot(token_prices: dict[str, str], deployment_id: str = "test-deploy") -> PortfolioSnapshot:
     """Create a minimal PortfolioSnapshot with known token prices.
 
     token_prices should be a flat map: {"WETH": "3000", "USDC": "1.00"}.
@@ -134,7 +132,7 @@ def _make_mock_snapshot(token_prices: dict[str, str], strategy_id: str = "test-d
     """
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         total_value_usd=Decimal("10000"),
         available_cash_usd=Decimal("0"),
         positions=[],
@@ -362,7 +360,6 @@ class TestAccountingModels:
         live_identity = AccountingIdentity(
             id=identity.id,
             deployment_id=identity.deployment_id,
-            strategy_id=identity.strategy_id,
             cycle_id=identity.cycle_id,
             execution_mode="live",
             timestamp=identity.timestamp,
@@ -835,7 +832,7 @@ class TestLPAccountingE2E:
             token1_addr = (CHAIN_CONFIG.get("tokens", {}).get("USDC") or "").lower()
             snap = _make_mock_snapshot(
                 {token0_addr: str(weth_price), token1_addr: str(usdc_price)},
-                strategy_id=deployment_id,
+                deployment_id=deployment_id,
             )
             await store.save_portfolio_snapshot(snap)
 
@@ -977,7 +974,7 @@ class TestLPAccountingE2E:
             # Update close-time snapshot — also keyed by address so IL math matches
             snap2 = _make_mock_snapshot(
                 {token0_addr: str(weth_price), token1_addr: str(usdc_price)},
-                strategy_id=deployment_id,
+                deployment_id=deployment_id,
             )
             await store.save_portfolio_snapshot(snap2)
 
@@ -1272,7 +1269,6 @@ class TestLendingAccountingE2E:
             identity = AccountingIdentity(
                 id=str(uuid.uuid4()),
                 deployment_id=deployment_id,
-                strategy_id="test-strat",
                 cycle_id="cycle-borrow",
                 execution_mode="live",
                 timestamp=datetime.now(UTC),
@@ -1475,8 +1471,7 @@ class TestLendingAccountingVIB3418:
         event = build_lending_accounting_event(
             intent=intent,
             result=result,
-            deployment_id="d1",
-            strategy_id="s1",
+            deployment_id="s1",
             cycle_id="c1",
             execution_mode="dry_run",
             chain="arbitrum",
@@ -1501,8 +1496,7 @@ class TestLendingAccountingVIB3418:
         event = build_lending_accounting_event(
             intent=intent,
             result=result,
-            deployment_id="d1",
-            strategy_id="s1",
+            deployment_id="s1",
             cycle_id="c1",
             execution_mode="dry_run",
             chain="arbitrum",
@@ -1542,7 +1536,6 @@ class TestLendingAccountingVIB3418:
             intent=intent,
             result=result,
             deployment_id="test-deploy",
-            strategy_id="test-strat",
             cycle_id="c1",
             execution_mode="dry_run",
             chain="arbitrum",
@@ -1601,7 +1594,6 @@ class TestLendingAccountingVIB3418:
             intent=intent,
             result=result,
             deployment_id=deployment_id,
-            strategy_id="s1",
             cycle_id="c1",
             execution_mode="dry_run",
             chain="arbitrum",
@@ -1647,8 +1639,7 @@ class TestLendingAccountingVIB3418:
         event = build_lending_accounting_event(
             intent=intent,
             result=result,
-            deployment_id="d1",
-            strategy_id="s1",
+            deployment_id="s1",
             cycle_id="c1",
             execution_mode="dry_run",
             chain="arbitrum",
@@ -1921,7 +1912,6 @@ class TestLendingAccountingVIB3418:
             intent=borrow_intent,
             result=borrow_result,
             deployment_id="test-deploy-vib3418",
-            strategy_id="test-strat",
             cycle_id="c1",
             execution_mode="dry_run",
             chain=CHAIN_NAME,
@@ -1970,7 +1960,6 @@ class TestLendingAccountingVIB3418:
             intent=repay_intent,
             result=repay_result,
             deployment_id="test-deploy-vib3418",
-            strategy_id="test-strat",
             cycle_id="c2",
             execution_mode="dry_run",
             chain=CHAIN_NAME,
@@ -2309,7 +2298,6 @@ class TestPositionPnLVIB3424:
                 intent=intent,
                 result=result,
                 deployment_id=deploy_id,
-                strategy_id="strat-1",
                 cycle_id="cyc-1",
                 execution_mode="live",
                 chain="arbitrum",
@@ -2395,7 +2383,6 @@ class TestPositionPnLVIB3424:
                     intent=intent,
                     result=result,
                     deployment_id=deploy_id,
-                    strategy_id="strat-1",
                     cycle_id="cyc-1",
                     execution_mode="live",
                     chain=chain,
@@ -2601,8 +2588,10 @@ class TestPositionPnLVIB3424:
                 tx_hash="0xsupply", gas_cost_eth=None,
             )
             supply_ev = build_lending_accounting_event(
-                intent=supply_intent, result=supply_result,
-                deployment_id=deploy_id, strategy_id="s", cycle_id="c",
+                intent=supply_intent,
+                result=supply_result,
+                deployment_id=deploy_id,
+                cycle_id="c",
                 execution_mode="live", chain=chain, wallet_address=wallet,
                 gateway_client=None, basis_store=basis_store,
                 price_oracle={"USDC": Decimal("1.0")},
@@ -2620,8 +2609,10 @@ class TestPositionPnLVIB3424:
                 tx_hash="0xborrow", gas_cost_eth=None,
             )
             borrow_ev = build_lending_accounting_event(
-                intent=borrow_intent, result=borrow_result,
-                deployment_id=deploy_id, strategy_id="s", cycle_id="c",
+                intent=borrow_intent,
+                result=borrow_result,
+                deployment_id=deploy_id,
+                cycle_id="c",
                 execution_mode="live", chain=chain, wallet_address=wallet,
                 gateway_client=None, basis_store=basis_store,
                 price_oracle={"USDC": Decimal("1.0")},

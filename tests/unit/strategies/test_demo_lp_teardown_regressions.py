@@ -19,7 +19,7 @@ def test_traderjoe_lp_tracks_bin_ids_from_extracted_data() -> None:
     strategy._position_bin_ids = []
     strategy.pool = "WAVAX/USDC/20"
     strategy.bin_step = 20
-    strategy._strategy_id = "test-traderjoe"
+    strategy._deployment_id = "test-traderjoe"
 
     result = SimpleNamespace(bin_ids=None, extracted_data={"bin_ids": [1, 2, 3]})
 

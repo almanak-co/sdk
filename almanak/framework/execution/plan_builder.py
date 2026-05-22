@@ -6,7 +6,7 @@ into PlanBundle/PlanStep structures for execution via PlanExecutor.
 Example:
     from almanak.framework.execution.plan_builder import PlanBuilder
 
-    builder = PlanBuilder(strategy_id="my-strategy")
+    builder = PlanBuilder(deployment_id="my-strategy")
 
     # Build plan from intents
     plan = builder.build_plan_from_intents(intents)
@@ -223,7 +223,7 @@ class PlanBuilder:
     that can be executed by PlanExecutor with proper state tracking.
 
     Example:
-        builder = PlanBuilder(strategy_id="leverage-loop")
+        builder = PlanBuilder(deployment_id="leverage-loop")
         plan = builder.build_plan_from_intents([
             Intent.swap(...),
             Intent.supply(...),
@@ -233,18 +233,18 @@ class PlanBuilder:
 
     def __init__(
         self,
-        strategy_id: str | None = None,
+        deployment_id: str | None = None,
         default_chain: str = "arbitrum",
         max_retries: int = 3,
     ) -> None:
         """Initialize the plan builder.
 
         Args:
-            strategy_id: Strategy identifier for the plan
+            deployment_id: Deployment identifier for the plan
             default_chain: Default chain for intents without explicit chain
             max_retries: Default max retries for each step
         """
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._default_chain = default_chain
         self._max_retries = max_retries
 
@@ -269,7 +269,7 @@ class PlanBuilder:
             return PlanBundle(
                 plan_id=self._generate_plan_id(),
                 steps=[],
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 description=description or "Empty plan",
             )
 
@@ -288,7 +288,7 @@ class PlanBuilder:
         plan = PlanBundle(
             plan_id=self._generate_plan_id(),
             steps=steps,
-            strategy_id=self._strategy_id,
+            deployment_id=self._deployment_id,
             description=description or self._generate_plan_description(intents),
         )
 
@@ -356,7 +356,7 @@ class PlanBuilder:
         """Generate a unique plan ID."""
         timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         unique_id = uuid.uuid4().hex[:8]
-        prefix = self._strategy_id[:10] if self._strategy_id else "plan"
+        prefix = self._deployment_id[:10] if self._deployment_id else "plan"
         return f"{prefix}-{timestamp}-{unique_id}"
 
     def _generate_plan_description(self, intents: Sequence[AnyIntent]) -> str:
@@ -387,9 +387,10 @@ class PlanBuilder:
         return f"{type_str} on {chain_str}"
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def build_plan_from_decide_result(
     decide_result: AnyIntent | IntentSequence | list | None,
-    strategy_id: str | None = None,
+    deployment_id: str | None = None,
     default_chain: str = "arbitrum",
 ) -> PlanBundle | None:
     """Build a plan from a strategy's decide() result.
@@ -402,7 +403,7 @@ def build_plan_from_decide_result(
 
     Args:
         decide_result: Result from strategy.decide()
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         default_chain: Default chain for intents
 
     Returns:
@@ -412,7 +413,7 @@ def build_plan_from_decide_result(
         return None
 
     builder = PlanBuilder(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         default_chain=default_chain,
     )
 

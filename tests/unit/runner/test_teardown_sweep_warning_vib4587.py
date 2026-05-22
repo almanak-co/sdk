@@ -270,7 +270,7 @@ class TestSweepWarningRunnerHelpersBinding:
         helpers = build_runner_helpers(runner)
         assert helpers.has_sweep_warning, "expected warn_sweep_non_strategy_balance to be bound"
 
-        strategy = SimpleNamespace(deployment_id="LoopStrat:abc", strategy_id="LoopStrat")
+        strategy = SimpleNamespace(deployment_id="LoopStrat")
         with caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"):
             helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
                 strategy,
@@ -280,4 +280,4 @@ class TestSweepWarningRunnerHelpersBinding:
             )
         records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert records, "expected WARNING via runner_helpers binding"
-        accounting_sm.get_accounting_events_sync.assert_called_once_with("LoopStrat:abc")
+        accounting_sm.get_accounting_events_sync.assert_called_once_with("LoopStrat")

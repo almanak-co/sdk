@@ -399,7 +399,7 @@ class TenProtocolsDemo:
 
             # Execute the ActionBundle
             context = ExecutionContext(
-                strategy_id="demo_10_protocols",
+                deployment_id="demo_10_protocols",
                 intent_id=f"{name}_{int(time.time())}",
                 chain=self.config.chain,
                 wallet_address=self.config.wallet_address,

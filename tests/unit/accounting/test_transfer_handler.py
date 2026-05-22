@@ -33,8 +33,7 @@ from almanak.framework.primitives.types import AccountingCategory
 def _identity() -> AccountingIdentity:
     return AccountingIdentity(
         id="evt-id",
-        deployment_id="dep",
-        strategy_id="strat",
+        deployment_id="strat",
         cycle_id="cyc",
         execution_mode="live",
         timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -154,7 +153,7 @@ def test_handler_emits_pending_for_default_ledger_row() -> None:
     ledger = {
         "id": "led",
         "deployment_id": "dep",
-        "strategy_id": "strat",
+        "deployment_id": "strat",
         "cycle_id": "cyc",
         "execution_mode": "live",
         "chain": "arbitrum",
@@ -359,7 +358,7 @@ def test_end_to_end_fake_bridge_produces_transfer_event() -> None:
     ledger = {
         "id": "led",
         "deployment_id": "dep",
-        "strategy_id": "strat",
+        "deployment_id": "strat",
         "cycle_id": "cyc",
         "execution_mode": "live",
         "chain": "arbitrum",

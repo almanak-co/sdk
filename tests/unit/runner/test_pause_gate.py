@@ -53,7 +53,7 @@ async def test_run_iteration_returns_hold_when_paused() -> None:
         state_manager=state_manager,
     )
 
-    strategy = SimpleNamespace(strategy_id="test_strategy")
+    strategy = SimpleNamespace(deployment_id="test_strategy")
     result = await runner.run_iteration(strategy)
 
     assert result.status == IterationStatus.HOLD

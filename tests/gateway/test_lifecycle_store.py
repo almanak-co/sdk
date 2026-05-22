@@ -1,4 +1,4 @@
-"""Tests for SQLiteLifecycleStore and PostgresLifecycleStore agent ID resolution.
+"""Tests for SQLiteLifecycleStore and the lifecycle-store factory.
 
 Tests cover:
 - State CRUD: write/read, error state, upsert, not found, heartbeat count,
@@ -10,11 +10,13 @@ Tests cover:
 - Thread safety: concurrent heartbeats, concurrent state writes
 - Factory: create sqlite store, create postgres without plugin raises,
   singleton returns same instance, reset clears singleton
-- Agent ID resolution: AGENT_ID env override, fallback, blank/whitespace handling
+
+VIB-4722 removed the hosted-env rewrite (``_resolve_deployment_id``) from
+``PostgresLifecycleStore``: ``deployment_id`` is the single canonical
+identity and the lifecycle store keys on it verbatim, with no translation.
 """
 
 import threading
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -51,7 +53,7 @@ class TestSQLiteLifecycleStoreState:
         store.write_state("agent-1", "RUNNING")
         state = store.read_state("agent-1")
         assert state is not None
-        assert state.agent_id == "agent-1"
+        assert state.deployment_id == "agent-1"
         assert state.state == "RUNNING"
         assert state.error_message is None
 
@@ -170,7 +172,7 @@ class TestSQLiteLifecycleStoreCommands:
         """Verify all fields are correctly stored and retrieved."""
         store.write_command("agent-1", "STOP", "dashboard-user@test.com")
         cmd = store.read_pending_command("agent-1")
-        assert cmd.agent_id == "agent-1"
+        assert cmd.deployment_id == "agent-1"
         assert cmd.command == "STOP"
         assert cmd.issued_by == "dashboard-user@test.com"
         assert cmd.issued_at is not None
@@ -253,10 +255,10 @@ class TestSQLiteLifecycleStoreThreadSafety:
         """Multiple threads writing state concurrently."""
         errors = []
 
-        def state_writer(agent_id, states):
+        def state_writer(deployment_id, states):
             try:
                 for s in states:
-                    store.write_state(agent_id, s)
+                    store.write_state(deployment_id, s)
             except Exception as e:
                 errors.append(e)
 
@@ -301,41 +303,11 @@ class TestLifecycleFactory:
         assert store1 is not store2
 
 
-class TestPostgresAgentIdResolution:
-    """Regression tests for the AGENT_ID env-var resolution used by PostgresLifecycleStore.
-
-    The logic under test is a pure function (env var lookup + strip + fallback).
-    We replicate it here so the test suite stays independent of the platform plugin.
-    If the contract changes in the plugin, these tests should be updated to match.
-    """
-
-    @staticmethod
-    def _resolve_agent_id(agent_id: str) -> str:
-        """Mirror of PostgresLifecycleStore._resolve_agent_id for testing."""
-        import os
-
-        env_agent_id = os.environ.get("AGENT_ID")
-        if env_agent_id is None:
-            return agent_id
-        resolved = env_agent_id.strip()
-        return resolved or agent_id
-
-    def test_no_env_var_passes_through(self, monkeypatch):
-        monkeypatch.delenv("AGENT_ID", raising=False)
-        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
-
-    def test_env_var_overrides(self, monkeypatch):
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        assert self._resolve_agent_id("MyStrategy") == "platform-uuid-1234"
-
-    def test_empty_string_falls_back(self, monkeypatch):
-        monkeypatch.setenv("AGENT_ID", "")
-        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
-
-    def test_whitespace_only_falls_back(self, monkeypatch):
-        monkeypatch.setenv("AGENT_ID", "   ")
-        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
-
-    def test_env_var_with_whitespace_is_stripped(self, monkeypatch):
-        monkeypatch.setenv("AGENT_ID", "  uuid-with-spaces  ")
-        assert self._resolve_agent_id("MyStrategy") == "uuid-with-spaces"
+# VIB-4722 removed ``PostgresLifecycleStore._resolve_deployment_id``: the
+# lifecycle store keys on the canonical ``deployment_id`` verbatim with no
+# hosted-env rewrite. The former ``TestPostgresAgentIdResolution``
+# regression class characterized that deleted helper and was removed with it.
+# ``PostgresLifecycleStore`` lives in the ``almanak_platform`` plugin, which
+# is not importable from the SDK test env, so there is no in-SDK assertion
+# to make here — the contract is enforced by the plugin's own tests and by
+# the SQL using the ``deployment_id`` column directly.

@@ -54,7 +54,7 @@ def _make_snap(
         pos.value_usd = None  # type: ignore[assignment]
     snap = PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id="UnitGuard:t",
+        deployment_id="UnitGuard:t",
         total_value_usd=val if val is not None else Decimal("0"),
         available_cash_usd=Decimal("0"),
         value_confidence=initial_confidence if initial_confidence is not None else ValueConfidence.HIGH,
@@ -120,7 +120,7 @@ def test_synth_guard_empty_positions_preserves_high() -> None:
     """A HIGH snapshot with no positions must not be degraded."""
     snap = PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id="UnitGuard:empty",
+        deployment_id="UnitGuard:empty",
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("0"),
         value_confidence=ValueConfidence.HIGH,

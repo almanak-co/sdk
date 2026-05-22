@@ -79,7 +79,7 @@ class OperatorCard:
     understand what happened, what's at risk, and what actions they can take.
 
     Attributes:
-        strategy_id: Unique identifier for the strategy
+        deployment_id: Unique identifier for the strategy
         timestamp: When this card was generated
         event_type: Type of event (STUCK, ERROR, ALERT, WARNING)
         reason: Classification of why this happened (StuckReason enum)
@@ -92,7 +92,7 @@ class OperatorCard:
         available_actions: List of available actions for this situation
     """
 
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     event_type: EventType
     reason: StuckReason
@@ -106,8 +106,8 @@ class OperatorCard:
 
     def __post_init__(self) -> None:
         """Validate the operator card after initialization."""
-        if not self.strategy_id:
-            raise ValueError("strategy_id is required")
+        if not self.deployment_id:
+            raise ValueError("deployment_id is required")
         if not self.suggested_actions:
             raise ValueError("At least one suggested action is required")
         if not self.available_actions:
@@ -137,7 +137,7 @@ class OperatorCard:
     def to_dict(self) -> dict[str, Any]:
         """Convert the operator card to a dictionary for serialization."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat(),
             "event_type": self.event_type.value,
             "reason": self.reason.value,

@@ -45,7 +45,7 @@ def _make_runner() -> StrategyRunner:
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.config = {}
     strategy._wallet_activity_provider = None
     return strategy
@@ -54,7 +54,7 @@ def _make_strategy() -> MagicMock:
 def _make_result(status: IterationStatus = IterationStatus.SUCCESS) -> IterationResult:
     return IterationResult(
         status=status,
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         duration_ms=10,
     )
 

@@ -38,7 +38,7 @@ _TEARDOWN_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._chec
 def _make_strategy(decide_side_effect=None):
     """Create a mock strategy."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -60,7 +60,7 @@ def _make_breaker(max_failures=3):
         max_cumulative_loss_usd=Decimal("1000"),
         cooldown_seconds=3600,
     )
-    return CircuitBreaker(strategy_id="test_strategy", config=config)
+    return CircuitBreaker(deployment_id="test_strategy", config=config)
 
 
 def _make_runner(circuit_breaker=None, emergency_manager=None):
@@ -126,7 +126,7 @@ class TestEmergencyTrigger:
     @patch(_TEARDOWN_PATCH, return_value=None)
     @patch(_PAUSE_PATCH, new_callable=AsyncMock, return_value=(False, None))
     async def test_emergency_receives_strategy_context(self, _mock_pause, _mock_teardown):
-        """Emergency stop should receive strategy_id, chain, and error details."""
+        """Emergency stop should receive deployment_id, chain, and error details."""
         breaker = _make_breaker(max_failures=2)
         em = MagicMock()
         em.emergency_stop_async = AsyncMock()
@@ -137,7 +137,7 @@ class TestEmergencyTrigger:
         await runner.run_loop(strategy, max_iterations=2)
 
         call_kwargs = em.emergency_stop_async.call_args[1]
-        assert call_kwargs["strategy_id"] == "test_strategy"
+        assert call_kwargs["deployment_id"] == "test_strategy"
         assert call_kwargs["chain"] == "arbitrum"
         assert "slippage too high" in call_kwargs["reason"]
         assert call_kwargs["trigger_context"]["consecutive_failures"] == 2

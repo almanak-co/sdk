@@ -13,13 +13,18 @@ classes have been deleted. Gateway-side timeline events are tested in
 """
 
 import os
+import sqlite3
 import tempfile
 from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
 
-from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+from almanak.framework.state.backends.sqlite import (
+    SQLiteConfig,
+    SQLiteStore,
+    _convert_dual_identity_tables_to_deployment_id,
+)
 from almanak.framework.state.state_manager import StateConflictError, StateData
 
 # Mark all tests in this module as async
@@ -79,7 +84,7 @@ async def file_store(file_config):
 def sample_state():
     """Create a sample state for testing."""
     return StateData(
-        strategy_id="test-strategy-1",
+        deployment_id="test-strategy-1",
         version=1,
         state={"key": "value", "nested": {"a": 1, "b": 2}},
         schema_version=1,
@@ -147,6 +152,82 @@ class TestSQLiteConfig:
 class TestSQLiteStoreInit:
     """Tests for SQLiteStore initialization."""
 
+    async def test_dual_identity_conversion_preserves_already_converted_plain_deployment_id(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                CREATE TABLE portfolio_snapshots (
+                    id INTEGER PRIMARY KEY,
+                    deployment_id TEXT,
+                    total_value_usd TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO portfolio_snapshots (deployment_id, total_value_usd) VALUES (?, ?)",
+                ("deploy-1", "123.45"),
+            )
+
+            _convert_dual_identity_tables_to_deployment_id(conn)
+
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(portfolio_snapshots)").fetchall()}
+            row = conn.execute("SELECT deployment_id, total_value_usd FROM portfolio_snapshots").fetchone()
+
+            assert "deployment_id" in columns
+            assert "strategy_id" not in columns
+            assert row["deployment_id"] == "deploy-1"
+            assert row["total_value_usd"] == "123.45"
+        finally:
+            conn.close()
+
+    async def test_initialize_migrates_legacy_clob_orders_before_deployment_index(self, temp_db_path):
+        conn = sqlite3.connect(temp_db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE clob_orders (
+                    order_id TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    token_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    size TEXT NOT NULL,
+                    filled_size TEXT NOT NULL DEFAULT '0',
+                    average_fill_price TEXT,
+                    fills TEXT NOT NULL DEFAULT '[]',
+                    order_type TEXT NOT NULL DEFAULT 'GTC',
+                    intent_id TEXT,
+                    error TEXT,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    submitted_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        store = SQLiteStore(SQLiteConfig(db_path=temp_db_path))
+        await store.initialize()
+        try:
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(clob_orders)").fetchall()  # type: ignore[union-attr]
+            }
+            indexes = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA index_list(clob_orders)").fetchall()  # type: ignore[union-attr]
+            }
+
+            assert "deployment_id" in columns
+            assert "idx_clob_orders_deployment_order" in indexes
+        finally:
+            await store.close()
+
     async def test_initialize_memory_db(self, memory_config):
         """Test initialization with in-memory database."""
         store = SQLiteStore(memory_config)
@@ -203,9 +284,9 @@ class TestStateOperations:
         """Test saving and retrieving state."""
         await memory_store.save(sample_state)
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is not None
-        assert loaded.strategy_id == sample_state.strategy_id
+        assert loaded.deployment_id == sample_state.deployment_id
         assert loaded.version == sample_state.version
         assert loaded.state == sample_state.state
         assert loaded.schema_version == sample_state.schema_version
@@ -225,7 +306,7 @@ class TestStateOperations:
         sample_state.version = 2
         await memory_store.save(sample_state)
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is not None
         assert loaded.version == 2
         assert loaded.state["key"] == "new_value"
@@ -234,10 +315,10 @@ class TestStateOperations:
         """Test deleting state."""
         await memory_store.save(sample_state)
 
-        deleted = await memory_store.delete(sample_state.strategy_id)
+        deleted = await memory_store.delete(sample_state.deployment_id)
         assert deleted is True
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is None
 
     async def test_delete_nonexistent_state(self, memory_store):
@@ -247,7 +328,7 @@ class TestStateOperations:
 
     async def test_multiple_strategies(self, memory_store):
         """Test managing multiple strategies."""
-        states = [StateData(strategy_id=f"strategy-{i}", version=1, state={"index": i}) for i in range(5)]
+        states = [StateData(deployment_id=f"strategy-{i}", version=1, state={"index": i}) for i in range(5)]
 
         for state in states:
             await memory_store.save(state)
@@ -258,13 +339,13 @@ class TestStateOperations:
             assert loaded is not None
             assert loaded.state["index"] == i
 
-    async def test_get_all_strategy_ids(self, memory_store):
-        """Test getting all strategy IDs."""
+    async def test_get_all_deployment_ids(self, memory_store):
+        """Test getting all deployment IDs."""
         for i in range(3):
-            state = StateData(strategy_id=f"strat-{i:03d}", version=1, state={"index": i})
+            state = StateData(deployment_id=f"strat-{i:03d}", version=1, state={"index": i})
             await memory_store.save(state)
 
-        ids = await memory_store.get_all_strategy_ids()
+        ids = await memory_store.get_all_deployment_ids()
         assert len(ids) == 3
         assert ids == ["strat-000", "strat-001", "strat-002"]  # Sorted
 
@@ -287,7 +368,7 @@ class TestCASOperations:
         result = await memory_store.save(sample_state, expected_version=1)
         assert result is True
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is not None
         assert loaded.version == 2
         assert loaded.state["key"] == "updated"
@@ -303,7 +384,7 @@ class TestCASOperations:
         with pytest.raises(StateConflictError) as exc_info:
             await memory_store.save(sample_state, expected_version=99)
 
-        assert exc_info.value.strategy_id == sample_state.strategy_id
+        assert exc_info.value.deployment_id == sample_state.deployment_id
         assert exc_info.value.expected_version == 99
         assert exc_info.value.actual_version == 1
 
@@ -316,7 +397,7 @@ class TestCASOperations:
             sample_state.version = i + 1
             await memory_store.save(sample_state, expected_version=i)
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is not None
         assert loaded.version == 5
         assert loaded.state["iteration"] == 4
@@ -326,8 +407,8 @@ class TestCASOperations:
         await memory_store.save(sample_state)
 
         # Simulate two concurrent readers
-        reader1 = await memory_store.get(sample_state.strategy_id)
-        reader2 = await memory_store.get(sample_state.strategy_id)
+        reader1 = await memory_store.get(sample_state.deployment_id)
+        reader2 = await memory_store.get(sample_state.deployment_id)
 
         assert reader1 is not None
         assert reader2 is not None
@@ -343,7 +424,6 @@ class TestCASOperations:
 
         with pytest.raises(StateConflictError):
             await memory_store.save(reader2, expected_version=1)
-
 
 
 class TestMaintenance:
@@ -364,7 +444,7 @@ class TestMaintenance:
     async def test_vacuum(self, memory_store, sample_state):
         """Test VACUUM operation."""
         await memory_store.save(sample_state)
-        await memory_store.delete(sample_state.strategy_id)
+        await memory_store.delete(sample_state.deployment_id)
 
         # Should not raise
         await memory_store.vacuum()
@@ -396,7 +476,7 @@ class TestFilePersistence:
         # Second store
         store2 = SQLiteStore(file_config)
         await store2.initialize()
-        loaded = await store2.get(sample_state.strategy_id)
+        loaded = await store2.get(sample_state.deployment_id)
         await store2.close()
 
         assert loaded is not None
@@ -409,7 +489,7 @@ class TestFilePersistence:
         await store.initialize()
 
         # Write something to trigger WAL
-        state = StateData(strategy_id="test", version=1, state={"key": "value"})
+        state = StateData(deployment_id="test", version=1, state={"key": "value"})
         await store.save(state)
 
         # WAL file should exist (or be empty after checkpoint)
@@ -431,7 +511,7 @@ class TestFilePersistence:
                 """
                 CREATE TABLE timeline_events (
                     id INTEGER PRIMARY KEY,
-                    strategy_id TEXT,
+                    deployment_id TEXT,
                     timestamp TEXT,
                     event_type TEXT,
                     description TEXT
@@ -439,8 +519,7 @@ class TestFilePersistence:
                 """
             )
             legacy_conn.execute(
-                "INSERT INTO timeline_events (strategy_id, timestamp, event_type, description) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO timeline_events (deployment_id, timestamp, event_type, description) VALUES (?, ?, ?, ?)",
                 ("legacy_strategy", "2026-01-01T00:00:00Z", "TRADE", "old data"),
             )
             legacy_conn.commit()
@@ -453,9 +532,7 @@ class TestFilePersistence:
 
         # Confirm the migration dropped the table.
         with sqlite3.connect(str(temp_db_path)) as conn:
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'"
-            )
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'")
             assert cursor.fetchone() is None, "legacy timeline_events table must be dropped on upgrade"
 
     async def test_legacy_timeline_events_drop_is_idempotent(self, temp_db_path):
@@ -474,9 +551,7 @@ class TestFilePersistence:
         await store2.close()
 
         with sqlite3.connect(str(temp_db_path)) as conn:
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'"
-            )
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'")
             assert cursor.fetchone() is None
 
 
@@ -490,7 +565,7 @@ class TestEdgeCases:
 
     async def test_empty_state(self, memory_store):
         """Test saving state with empty state dict."""
-        state = StateData(strategy_id="empty", version=1, state={})
+        state = StateData(deployment_id="empty", version=1, state={})
         await memory_store.save(state)
 
         loaded = await memory_store.get("empty")
@@ -500,7 +575,7 @@ class TestEdgeCases:
     async def test_large_state(self, memory_store):
         """Test saving state with large data."""
         large_data = {"key_" + str(i): "value_" * 100 for i in range(100)}
-        state = StateData(strategy_id="large", version=1, state=large_data)
+        state = StateData(deployment_id="large", version=1, state=large_data)
         await memory_store.save(state)
 
         loaded = await memory_store.get("large")
@@ -510,7 +585,7 @@ class TestEdgeCases:
     async def test_special_characters_in_state(self, memory_store):
         """Test state with special characters."""
         state = StateData(
-            strategy_id="special",
+            deployment_id="special",
             version=1,
             state={
                 "unicode": "Hello\n\t\r",
@@ -528,7 +603,7 @@ class TestEdgeCases:
     async def test_nested_state(self, memory_store):
         """Test state with deep nesting."""
         nested = {"level1": {"level2": {"level3": {"level4": {"value": 42}}}}}
-        state = StateData(strategy_id="nested", version=1, state=nested)
+        state = StateData(deployment_id="nested", version=1, state=nested)
         await memory_store.save(state)
 
         loaded = await memory_store.get("nested")
@@ -539,7 +614,7 @@ class TestEdgeCases:
         """Test checksum is calculated and stored."""
         await memory_store.save(sample_state)
 
-        loaded = await memory_store.get(sample_state.strategy_id)
+        loaded = await memory_store.get(sample_state.deployment_id)
         assert loaded is not None
         assert loaded.checksum != ""
         assert loaded.verify_checksum()
@@ -587,6 +662,7 @@ class TestClobOrderOperations:
             order_type="GTC",
             intent_id="intent-abc",
             metadata={"source": "test"},
+            deployment_id="deployment:test-clob",
         )
 
     @pytest.fixture
@@ -622,13 +698,17 @@ class TestClobOrderOperations:
             ],
             order_type="GTC",
             intent_id="intent-def",
+            deployment_id="deployment:test-clob",
         )
 
     async def test_save_and_get_clob_order(self, memory_store, sample_clob_order):
         """Test saving and retrieving a CLOB order."""
         await memory_store.save_clob_order(sample_clob_order)
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is not None
         assert loaded.order_id == sample_clob_order.order_id
         assert loaded.market_id == sample_clob_order.market_id
@@ -641,12 +721,23 @@ class TestClobOrderOperations:
         assert loaded.order_type == sample_clob_order.order_type
         assert loaded.intent_id == sample_clob_order.intent_id
         assert loaded.metadata == sample_clob_order.metadata
+        assert loaded.deployment_id == sample_clob_order.deployment_id
+        scoped = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
+        assert scoped is not None
+        assert scoped.order_id == sample_clob_order.order_id
+        assert await memory_store.get_clob_order(sample_clob_order.order_id, deployment_id="deployment:other") is None
 
     async def test_save_clob_order_with_fills(self, memory_store, sample_clob_order_with_fills):
         """Test saving order with fills preserves fill data."""
         await memory_store.save_clob_order(sample_clob_order_with_fills)
 
-        loaded = await memory_store.get_clob_order(sample_clob_order_with_fills.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order_with_fills.order_id,
+            deployment_id=sample_clob_order_with_fills.deployment_id,
+        )
         assert loaded is not None
         assert loaded.filled_size == sample_clob_order_with_fills.filled_size
         assert loaded.average_fill_price == sample_clob_order_with_fills.average_fill_price
@@ -659,7 +750,7 @@ class TestClobOrderOperations:
 
     async def test_get_nonexistent_clob_order(self, memory_store):
         """Test getting nonexistent order returns None."""
-        loaded = await memory_store.get_clob_order("nonexistent-order")
+        loaded = await memory_store.get_clob_order("nonexistent-order", deployment_id="deployment:test-clob")
         assert loaded is None
 
     async def test_update_clob_order(self, memory_store, sample_clob_order):
@@ -675,10 +766,48 @@ class TestClobOrderOperations:
         sample_clob_order.filled_size = Decimal("25")
         await memory_store.save_clob_order(sample_clob_order)
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is not None
         assert loaded.status == ClobOrderStatus.PARTIALLY_FILLED
         assert loaded.filled_size == Decimal("25")
+        assert loaded.deployment_id == sample_clob_order.deployment_id
+
+    async def test_save_clob_order_does_not_repair_legacy_blank_deployment_id(self, memory_store, sample_clob_order):
+        """Saving a stamped order does not match or rewrite a legacy blank row."""
+        memory_store._conn.execute(  # type: ignore[union-attr]
+            """
+            INSERT INTO clob_orders
+            (deployment_id, order_id, market_id, token_id, side, status,
+             price, size, filled_size, order_type, fills, metadata,
+             submitted_at, updated_at)
+            VALUES ('', ?, 'old-market', 'old-token', 'BUY', 'live',
+                    '0.10', '1', '0', 'GTC', '[]', '{}', ?, ?)
+            """,
+            (
+                sample_clob_order.order_id,
+                sample_clob_order.submitted_at.isoformat(),
+                sample_clob_order.updated_at.isoformat(),
+            ),
+        )
+        memory_store._conn.commit()  # type: ignore[union-attr]
+
+        await memory_store.save_clob_order(sample_clob_order)
+
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
+        assert loaded is not None
+        assert loaded.deployment_id == sample_clob_order.deployment_id
+        assert loaded.market_id == sample_clob_order.market_id
+        legacy = memory_store._conn.execute(  # type: ignore[union-attr]
+            "SELECT COUNT(*) AS n FROM clob_orders WHERE order_id = ? AND deployment_id = ''",
+            (sample_clob_order.order_id,),
+        ).fetchone()
+        assert legacy["n"] == 1
 
     async def test_update_clob_order_status(self, memory_store, sample_clob_order):
         """Test updating order status via update_clob_order_status."""
@@ -703,10 +832,14 @@ class TestClobOrderOperations:
             fills=[new_fill],
             filled_size="50",
             average_fill_price="0.55",
+            deployment_id=sample_clob_order.deployment_id,
         )
         assert updated is True
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is not None
         assert loaded.status == ClobOrderStatus.PARTIALLY_FILLED
         assert loaded.filled_size == Decimal("50")
@@ -721,6 +854,7 @@ class TestClobOrderOperations:
         updated = await memory_store.update_clob_order_status(
             order_id="nonexistent",
             status=ClobOrderStatus.CANCELLED,
+            deployment_id="deployment:test-clob",
         )
         assert updated is False
 
@@ -733,6 +867,7 @@ class TestClobOrderOperations:
         # Create orders with different statuses
         orders = [
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-live",
                 market_id="market-1",
                 token_id="token-1",
@@ -742,6 +877,7 @@ class TestClobOrderOperations:
                 size=Decimal("100"),
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-partial",
                 market_id="market-1",
                 token_id="token-1",
@@ -752,6 +888,7 @@ class TestClobOrderOperations:
                 filled_size=Decimal("50"),
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-matched",
                 market_id="market-1",
                 token_id="token-1",
@@ -762,6 +899,7 @@ class TestClobOrderOperations:
                 filled_size=Decimal("100"),
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-cancelled",
                 market_id="market-2",
                 token_id="token-2",
@@ -776,7 +914,7 @@ class TestClobOrderOperations:
             await memory_store.save_clob_order(order)
 
         # Get all open orders
-        open_orders = await memory_store.get_open_clob_orders()
+        open_orders = await memory_store.get_open_clob_orders(deployment_id="deployment:test-clob")
         assert len(open_orders) == 2
         open_ids = {o.order_id for o in open_orders}
         assert "order-live" in open_ids
@@ -792,6 +930,7 @@ class TestClobOrderOperations:
 
         orders = [
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-m1-1",
                 market_id="market-1",
                 token_id="token-1",
@@ -801,6 +940,7 @@ class TestClobOrderOperations:
                 size=Decimal("100"),
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-m1-2",
                 market_id="market-1",
                 token_id="token-1",
@@ -810,6 +950,7 @@ class TestClobOrderOperations:
                 size=Decimal("100"),
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-m2-1",
                 market_id="market-2",
                 token_id="token-2",
@@ -824,13 +965,19 @@ class TestClobOrderOperations:
             await memory_store.save_clob_order(order)
 
         # Get open orders for market-1 only
-        m1_orders = await memory_store.get_open_clob_orders(market_id="market-1")
+        m1_orders = await memory_store.get_open_clob_orders(
+            market_id="market-1",
+            deployment_id="deployment:test-clob",
+        )
         assert len(m1_orders) == 2
         for order in m1_orders:
             assert order.market_id == "market-1"
 
         # Get open orders for market-2 only
-        m2_orders = await memory_store.get_open_clob_orders(market_id="market-2")
+        m2_orders = await memory_store.get_open_clob_orders(
+            market_id="market-2",
+            deployment_id="deployment:test-clob",
+        )
         assert len(m2_orders) == 1
         assert m2_orders[0].market_id == "market-2"
 
@@ -838,15 +985,21 @@ class TestClobOrderOperations:
         """Test deleting a CLOB order."""
         await memory_store.save_clob_order(sample_clob_order)
 
-        deleted = await memory_store.delete_clob_order(sample_clob_order.order_id)
+        deleted = await memory_store.delete_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert deleted is True
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is None
 
     async def test_delete_nonexistent_clob_order(self, memory_store):
         """Test deleting nonexistent order returns False."""
-        deleted = await memory_store.delete_clob_order("nonexistent")
+        deleted = await memory_store.delete_clob_order("nonexistent", deployment_id="deployment:test-clob")
         assert deleted is False
 
     async def test_get_clob_orders_by_intent(self, memory_store):
@@ -857,6 +1010,7 @@ class TestClobOrderOperations:
 
         orders = [
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-1",
                 market_id="market-1",
                 token_id="token-1",
@@ -867,6 +1021,7 @@ class TestClobOrderOperations:
                 intent_id="intent-abc",
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-2",
                 market_id="market-1",
                 token_id="token-1",
@@ -877,6 +1032,7 @@ class TestClobOrderOperations:
                 intent_id="intent-abc",
             ),
             ClobOrderState(
+                deployment_id="deployment:test-clob",
                 order_id="order-3",
                 market_id="market-2",
                 token_id="token-2",
@@ -892,7 +1048,10 @@ class TestClobOrderOperations:
             await memory_store.save_clob_order(order)
 
         # Get orders for intent-abc
-        abc_orders = await memory_store.get_clob_orders_by_intent("intent-abc")
+        abc_orders = await memory_store.get_clob_orders_by_intent(
+            "intent-abc",
+            deployment_id="deployment:test-clob",
+        )
         assert len(abc_orders) == 2
         for order in abc_orders:
             assert order.intent_id == "intent-abc"
@@ -905,7 +1064,10 @@ class TestClobOrderOperations:
         sample_clob_order.error = "Insufficient balance"
         await memory_store.save_clob_order(sample_clob_order)
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is not None
         assert loaded.status == ClobOrderStatus.FAILED
         assert loaded.error == "Insufficient balance"
@@ -920,10 +1082,22 @@ class TestClobOrderOperations:
             order_id=sample_clob_order.order_id,
             status=ClobOrderStatus.FAILED,
             error="API rate limit exceeded",
+            deployment_id=sample_clob_order.deployment_id,
         )
         assert updated is True
+        assert (
+            await memory_store.update_clob_order_status(
+                order_id=sample_clob_order.order_id,
+                status=ClobOrderStatus.LIVE,
+                deployment_id="deployment:other",
+            )
+            is False
+        )
 
-        loaded = await memory_store.get_clob_order(sample_clob_order.order_id)
+        loaded = await memory_store.get_clob_order(
+            sample_clob_order.order_id,
+            deployment_id=sample_clob_order.deployment_id,
+        )
         assert loaded is not None
         assert loaded.status == ClobOrderStatus.FAILED
         assert loaded.error == "API rate limit exceeded"

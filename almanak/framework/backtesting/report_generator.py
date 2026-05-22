@@ -169,7 +169,7 @@ def _prepare_result_dict(result: "BacktestResult") -> dict[str, Any]:
         Dictionary with result values for template rendering
     """
     return {
-        "strategy_id": result.strategy_id,
+        "deployment_id": result.deployment_id,
         "engine": result.engine,
         "chain": result.chain if result.chain else "unknown",
         "start_time": result.start_time,

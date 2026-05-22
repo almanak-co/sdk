@@ -95,7 +95,7 @@ class TestMultiChainSwapStrategy(IntentStrategy):
         from almanak.framework.teardown import TeardownPositionSummary
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=[],
         )

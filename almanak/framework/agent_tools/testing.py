@@ -175,26 +175,26 @@ class _MockStateService:
 
     def __init__(self, parent: MockGatewayClient) -> None:
         self._parent = parent
-        self._store: dict[str, tuple[bytes, int]] = {}  # strategy_id -> (data, version)
+        self._store: dict[str, tuple[bytes, int]] = {}  # deployment_id -> (data, version)
 
     def SaveState(self, request: Any, **kwargs: Any) -> Any:
-        strategy_id = getattr(request, "strategy_id", "default")
+        deployment_id = getattr(request, "deployment_id", "default")
         data = getattr(request, "data", b"{}")
-        _, version = self._store.get(strategy_id, (b"{}", 0))
+        _, version = self._store.get(deployment_id, (b"{}", 0))
         new_version = version + 1
-        self._store[strategy_id] = (data, new_version)
+        self._store[deployment_id] = (data, new_version)
         resp = _StubResponse(success=True, new_version=new_version, checksum="mock_checksum")
-        self._parent._record("SaveState", {"strategy_id": strategy_id}, resp)
+        self._parent._record("SaveState", {"deployment_id": deployment_id}, resp)
         return resp
 
     def LoadState(self, request: Any, **kwargs: Any) -> Any:
-        strategy_id = getattr(request, "strategy_id", "default")
-        stored = self._store.get(strategy_id)
+        deployment_id = getattr(request, "deployment_id", "default")
+        stored = self._store.get(deployment_id)
         if stored is None:
             raise _MockRpcError(grpc.StatusCode.NOT_FOUND, "state not found")
         data, version = stored
         resp = _StubResponse(data=data, version=version)
-        self._parent._record("LoadState", {"strategy_id": strategy_id}, resp)
+        self._parent._record("LoadState", {"deployment_id": deployment_id}, resp)
         return resp
 
 

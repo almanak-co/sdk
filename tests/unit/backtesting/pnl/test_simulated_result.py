@@ -246,7 +246,7 @@ class _StatefulLPStrategy:
     decide_calls: int = 0
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "stateful_lp_test"
 
     def decide(self, _market: Any) -> _LPOpenIntent | None:
@@ -326,7 +326,7 @@ async def test_pnl_backtest_callback_result_is_simulated_execution_result() -> N
         decide_calls: int = 0
 
         @property
-        def strategy_id(self) -> str:
+        def deployment_id(self) -> str:
             return "capture"
 
         def decide(self, _market: Any) -> _LPOpenIntent | None:
@@ -401,7 +401,7 @@ async def test_pnl_backtest_swap_callback_reaches_strategy() -> None:
         decide_calls: int = 0
 
         @property
-        def strategy_id(self) -> str:
+        def deployment_id(self) -> str:
             return "swap_capture"
 
         def decide(self, _market: Any) -> _SwapIntent | None:

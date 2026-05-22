@@ -127,7 +127,7 @@ def test_call_strategy_action_rest_400_includes_detail(monkeypatch: pytest.Monke
     assert result == {"success": False, "error": "invalid gas price"}
 
 
-def test_call_strategy_action_rest_404_uses_strategy_id_in_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_call_strategy_action_rest_404_uses_deployment_id_in_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """404 surfaces a friendly strategy-not-found error."""
     monkeypatch.setenv("ALMANAK_DASHBOARD_API_KEY", "test-api-key")
     with patch(f"{MODULE}.requests.post", return_value=_mock_response(404)):

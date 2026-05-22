@@ -361,7 +361,7 @@ class SMACrossoverPerpStrategy:
         self._liquidation_calculator = LiquidationCalculator()
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "sma_perp_visual_test_strategy"
 
     def _calculate_liquidation_price(

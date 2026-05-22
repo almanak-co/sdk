@@ -178,7 +178,7 @@ class TestValidateTransactionsNoGasCheck:
         from almanak.framework.execution.orchestrator import ExecutionContext
 
         context = ExecutionContext(
-            strategy_id="test",
+            deployment_id="test",
             intent_id="test",
             chain="arbitrum",
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
@@ -242,7 +242,7 @@ class TestExecuteBlocksOnGasCap:
         from almanak.framework.execution.orchestrator import ExecutionContext
 
         context = ExecutionContext(
-            strategy_id="test",
+            deployment_id="test",
             intent_id="test",
             chain="arbitrum",
             wallet_address=orchestrator.signer.address,

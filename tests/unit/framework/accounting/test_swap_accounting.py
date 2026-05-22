@@ -31,7 +31,7 @@ from almanak.framework.accounting.models import AccountingConfidence, SwapAccoun
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DEPLOYMENT_ID = "dep-swap-test"
-_STRATEGY_ID = "strat-swap-test"
+_DEPLOYMENT_ID = "strat-swap-test"
 _CYCLE_ID = "cycle-1"
 _WALLET = "0xabcdef1234567890abcdef1234567890abcdef12"
 _CHAIN = "arbitrum"
@@ -47,7 +47,7 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -79,7 +79,7 @@ def _make_ledger_row(
     lid = ledger_entry_id or str(uuid.uuid4())
     return {
         "id": lid,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",
@@ -468,8 +468,7 @@ class TestSwapPayloadRoundtrip:
 
         identity = AccountingIdentity(
             id="test-id",
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-1",
             execution_mode="live",
             timestamp=datetime.now(UTC),
@@ -529,8 +528,7 @@ class TestSwapPayloadRoundtrip:
 
         identity = AccountingIdentity(
             id="test-id-unmeasured",
-            deployment_id="dep-1",
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             cycle_id="cycle-1",
             execution_mode="live",
             timestamp=datetime.now(UTC),

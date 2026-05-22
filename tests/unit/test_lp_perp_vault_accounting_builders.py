@@ -6,7 +6,6 @@ import json
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -44,14 +43,13 @@ def _make_result(tx_hash: str = "0xtxhash", lp_open_data=None, lp_close_data=Non
     return result
 
 
-_COMMON_KWARGS = dict(
-    deployment_id="deploy-1",
-    strategy_id="strat-1",
-    cycle_id="cycle-1",
-    execution_mode="paper",
-    chain="base",
-    wallet_address="0xwallet",
-)
+_COMMON_KWARGS = {
+    "deployment_id": "strat-1",
+    "cycle_id": "cycle-1",
+    "execution_mode": "paper",
+    "chain": "base",
+    "wallet_address": "0xwallet",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +131,7 @@ class TestLPAccountingBuilder:
         event = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
 
         assert event is not None
-        assert event.identity.deployment_id == "deploy-1"
-        assert event.identity.strategy_id == "strat-1"
+        assert event.identity.deployment_id == "strat-1"
         assert event.identity.chain == "base"
 
     def test_token0_token1_parsed_from_pool_string_when_bare_attrs_missing(self) -> None:
@@ -247,7 +244,9 @@ class TestLPAccountingBuilder:
         intent.token_b_decimals = None
 
         price_oracle = {"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")}
-        event = build_lp_accounting_event(intent=intent, result=_make_result(lp_open_data=lp_open), price_oracle=price_oracle, **_COMMON_KWARGS)
+        event = build_lp_accounting_event(
+            intent=intent, result=_make_result(lp_open_data=lp_open), price_oracle=price_oracle, **_COMMON_KWARGS
+        )
 
         assert event is not None
         assert event.cost_basis_usd is None  # assumed decimals → skip cost basis

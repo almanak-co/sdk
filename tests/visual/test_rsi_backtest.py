@@ -290,7 +290,7 @@ class RSIStrategy:
         self._in_position = False
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "rsi_visual_test_strategy"
 
     def _calculate_rsi(self) -> float | None:

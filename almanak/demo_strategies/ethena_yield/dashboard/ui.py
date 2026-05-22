@@ -19,7 +19,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -34,7 +34,7 @@ def render_custom_dashboard(
     - Cooldown status (not started / active with countdown / ready to claim)
     """
     st.title("Ethena Yield Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values
@@ -42,7 +42,7 @@ def render_custom_dashboard(
     swap_usdc_to_usde = strategy_config.get("swap_usdc_to_usde", False)
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown("**Protocol:** Ethena")
     st.markdown("**Chain:** Ethereum")
     st.markdown(f"**Min Stake Amount:** {float(min_stake_amount):,.0f} USDe")
@@ -74,8 +74,8 @@ def render_custom_dashboard(
     st.subheader("Risk Information")
     _render_risk_info()
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_staking_position(session_state: dict[str, Any]) -> None:

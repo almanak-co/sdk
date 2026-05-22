@@ -18,7 +18,7 @@ def _request(max_gas_price_gwei: int) -> gateway_pb2.ExecuteRequest:
         action_bundle=json.dumps({"intent_type": "swap", "transactions": []}).encode("utf-8"),
         dry_run=True,
         simulation_enabled=False,
-        strategy_id="s1",
+        deployment_id="s1",
         intent_id="i1",
         chain="arbitrum",
         wallet_address="0x1234567890123456789012345678901234567890",

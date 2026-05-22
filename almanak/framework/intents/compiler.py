@@ -2239,7 +2239,7 @@ class IntentCompiler:
         EnsoService gRPC (API key stays in the gateway). Falls back to
         the direct EnsoClient for local development without a gateway.
 
-        In deployed/managed mode (AGENT_ID set), the gateway is mandatory
+        In deployed/managed mode (ALMANAK_IS_HOSTED set), the gateway is mandatory
         and no fallback to direct HTTP is attempted.
 
         Args:

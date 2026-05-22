@@ -60,7 +60,7 @@ class _StubInner:
 
 @dataclass
 class _Config:
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "ethereum"
 
@@ -98,7 +98,7 @@ def _make_strategy_with_deduper() -> tuple[_Strat, DedupingOHLCVProvider]:
     # need a fully-formed strategy.
     s._chain = "ethereum"
     s._wallet_address = "0x" + "0" * 40
-    s._strategy_id = "test"
+    s._deployment_id = "test"
     s._price_oracle = None
     s._rsi_provider = None
     s._balance_provider = None

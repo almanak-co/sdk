@@ -249,7 +249,7 @@ class CrisisBacktestResult:
             f"  Sharpe Ratio: {self.result.metrics.sharpe_ratio:.3f}\n"
             f"  Total Trades: {self.result.metrics.total_trades}\n"
             f"\n"
-            f"Strategy: {self.result.strategy_id}"
+            f"Strategy: {self.result.deployment_id}"
         )
 
 

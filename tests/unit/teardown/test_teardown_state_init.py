@@ -54,9 +54,9 @@ def _has_teardown_requests_table(db_path: Path) -> bool:
         return cursor.fetchone() is not None
 
 
-def _make_request(strategy_id: str = "alm-2705-test") -> TeardownRequest:
+def _make_request(deployment_id: str = "alm-2705-test") -> TeardownRequest:
     return TeardownRequest(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         mode=TeardownMode.SOFT,
         reason="alm-2705-test",
         requested_by="test",
@@ -241,8 +241,13 @@ class _StubStrategy:
 
     STRATEGY_NAME = "alm-2705-stub"
 
-    def __init__(self, strategy_id: str | None = "alm-2705-stub") -> None:
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str | None = "alm-2705-stub") -> None:
+        self._deployment_id = deployment_id
+
+    def _require_deployment_id(self, operation: str) -> str:  # noqa: ARG002
+        if not self._deployment_id:
+            raise RuntimeError("deployment_id required")
+        return self._deployment_id
 
 
 def _check_teardown_request_for(stub: _StubStrategy):
@@ -274,7 +279,7 @@ def _should_teardown_for(stub: _StubStrategy) -> bool:
 @pytest.fixture
 def _local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``is_hosted()`` False so the real teardown channel is exercised."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
 
 
 @pytest.fixture
@@ -472,14 +477,15 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         loud log noise. Stub the factory with a manager that reports "no
         active request" and assert that contract.
         """
-        monkeypatch.setenv("AGENT_ID", "alm-2705-hosted-stub")
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "alm-2705-hosted-stub")
 
         # Wire a stub gateway-equivalent manager so the factory does not
         # require a live gRPC connection.
         import almanak.framework.teardown as teardown_pkg
 
         class _StubManager:
-            def acknowledge_request(self, strategy_id: str):  # noqa: ARG002
+            def acknowledge_request(self, deployment_id: str):  # noqa: ARG002
                 return None
 
         factory = MagicMock(return_value=_StubManager())
@@ -509,7 +515,7 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         from almanak.framework.teardown import get_teardown_state_manager
 
         mgr = get_teardown_state_manager()
-        mgr.create_request(_make_request(strategy_id="alm-2705-stub"))
+        mgr.create_request(_make_request(deployment_id="alm-2705-stub"))
 
         stub = _StubStrategy()
         result = _acknowledge_teardown_request_for(stub)
@@ -567,7 +573,7 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
     ) -> None:
         """sqlite3.OperationalError on the ack path must surface as the
         grep-able ``teardown.ack_request_failed`` ERROR with the full
-        ``strategy_id`` / ``strategy_class`` / ``error`` triage tuple.
+        ``deployment_id`` / ``strategy_class`` / ``error`` triage tuple.
         """
 
         def always_fail(path):  # noqa: ANN001
@@ -584,7 +590,7 @@ class TestAcknowledgeTeardownRequestExceptionNarrowing:
         assert loud, "expected ERROR-level structured log marker for ack-path init failure"
         assert any(r.levelno == logging.ERROR for r in loud)
         # Triage tuple must be present so future incidents are grep-able.
-        assert any("strategy_id=" in r.getMessage() for r in loud)
+        assert any("deployment_id=" in r.getMessage() for r in loud)
         assert any("strategy_class=" in r.getMessage() for r in loud)
 
     def test_unexpected_exception_logs_typed_warning(

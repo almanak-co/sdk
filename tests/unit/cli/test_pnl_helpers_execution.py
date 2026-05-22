@@ -92,7 +92,7 @@ def _make_result_with_equity(
     ]
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo",
+        deployment_id="demo",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
         metrics=BacktestMetrics(

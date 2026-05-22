@@ -50,7 +50,7 @@ class TestPIDFile:
         """Test that acquire creates a PID file with current PID."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         result = pid_file.acquire()
@@ -64,7 +64,7 @@ class TestPIDFile:
         """Test that acquire fails if another process holds the lock."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Write a fake PID that "appears" to be running
@@ -73,7 +73,7 @@ class TestPIDFile:
         # Create a new PIDFile instance trying to acquire
         pid_file2 = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         result = pid_file2.acquire()
@@ -83,7 +83,7 @@ class TestPIDFile:
         """Test that acquire removes stale PID files from dead processes."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Write a PID that doesn't exist (99999999)
@@ -99,7 +99,7 @@ class TestPIDFile:
         """Test that release removes the PID file."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
         pid_file.acquire()
         assert pid_file.path.exists()
@@ -112,7 +112,7 @@ class TestPIDFile:
         """Test that release only removes PID file if owned by current process."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Write a different PID
@@ -128,7 +128,7 @@ class TestPIDFile:
         """Test is_running returns True for running process."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
         pid_file.path.parent.mkdir(parents=True, exist_ok=True)
         pid_file.path.write_text(str(os.getpid()))
@@ -139,7 +139,7 @@ class TestPIDFile:
         """Test is_running returns False when no PID file exists."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         assert pid_file.is_running() is False
@@ -148,7 +148,7 @@ class TestPIDFile:
         """Test is_running returns False for dead process."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
         pid_file.path.parent.mkdir(parents=True, exist_ok=True)
         pid_file.path.write_text("99999999")
@@ -159,7 +159,7 @@ class TestPIDFile:
         """Test get_pid returns the PID from file."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
         pid_file.path.parent.mkdir(parents=True, exist_ok=True)
         pid_file.path.write_text("12345")
@@ -170,7 +170,7 @@ class TestPIDFile:
         """Test get_pid returns None when no file exists."""
         pid_file = PIDFile(
             path=tmp_path / "test.pid",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         assert pid_file.get_pid() is None
@@ -212,7 +212,7 @@ class TestTradeHistoryWriter:
         """Test writing a trade to JSONL file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         trade = self._create_sample_trade()
@@ -229,7 +229,7 @@ class TestTradeHistoryWriter:
         """Test writing multiple trades appends to file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         for i in range(3):
@@ -245,7 +245,7 @@ class TestTradeHistoryWriter:
         """Test writing an error to JSONL file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         error = self._create_sample_error()
@@ -261,7 +261,7 @@ class TestTradeHistoryWriter:
         """Test reading all trades and errors from file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Write trades and errors
@@ -282,7 +282,7 @@ class TestTradeHistoryWriter:
         """Test counting trades in history file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         for i in range(5):
@@ -295,7 +295,7 @@ class TestTradeHistoryWriter:
         """Test truncating trade history file."""
         writer = TradeHistoryWriter(
             path=tmp_path / "trades.jsonl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         trade = self._create_sample_trade()
@@ -313,7 +313,7 @@ class TestPaperTraderState:
     def create_sample_state(self):
         """Create a sample state for testing."""
         return PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC),
             tick_count=10,
@@ -333,7 +333,7 @@ class TestPaperTraderState:
 
         data = state.to_dict()
 
-        assert data["strategy_id"] == "test_strategy"
+        assert data["deployment_id"] == "test_strategy"
         assert data["tick_count"] == 10
         assert data["current_balances"]["ETH"] == "5.0"
         assert data["status"] == "running"
@@ -345,7 +345,7 @@ class TestPaperTraderState:
 
         restored = PaperTraderState.from_dict(data)
 
-        assert restored.strategy_id == state.strategy_id
+        assert restored.deployment_id == state.deployment_id
         assert restored.tick_count == state.tick_count
         assert restored.current_balances == state.current_balances
         assert restored.status == state.status
@@ -373,7 +373,7 @@ class TestPaperTraderState:
         state.save(state_file)
         loaded = PaperTraderState.load(state_file)
 
-        assert loaded.strategy_id == state.strategy_id
+        assert loaded.deployment_id == state.deployment_id
         assert loaded.tick_count == state.tick_count
 
     def test_can_resume_running(self):
@@ -461,7 +461,7 @@ class TestBackgroundStatus:
         status = BackgroundStatus(
             is_running=True,
             pid=12345,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             tick_count=100,
             trade_count=50,
@@ -475,7 +475,7 @@ class TestBackgroundStatus:
 
         assert data["is_running"] is True
         assert data["pid"] == 12345
-        assert data["strategy_id"] == "test_strategy"
+        assert data["deployment_id"] == "test_strategy"
         assert data["tick_count"] == 100
 
 
@@ -487,7 +487,7 @@ class TestBackgroundPaperTrader:
         return PaperTraderConfig(
             chain="arbitrum",
             rpc_url="http://localhost:8545",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             initial_eth=Decimal("1.0"),
             initial_tokens={"USDC": Decimal("1000")},
         )
@@ -533,7 +533,7 @@ class TestBackgroundPaperTrader:
         status = bg_trader.get_status()
 
         assert status.is_running is False
-        assert status.strategy_id == "test_strategy"
+        assert status.deployment_id == "test_strategy"
 
     def test_get_status_with_state(self, tmp_path):
         """Test get_status with saved state."""
@@ -545,7 +545,7 @@ class TestBackgroundPaperTrader:
 
         # Save a state file
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC),
             tick_count=100,
@@ -691,7 +691,7 @@ class TestBackgroundPaperTrader:
 
         # Create a state file
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC),
             tick_count=10,
@@ -744,7 +744,7 @@ class TestGracefulShutdown:
         """Test that state is saved when shutdown is requested."""
         # Create initial state
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC) - timedelta(minutes=5),
             tick_count=50,
@@ -772,7 +772,7 @@ class TestGracefulShutdown:
     def test_stopped_status_persisted_through_save_load(self, tmp_path):
         """Test that 'stopped' status is correctly persisted through save/load cycle."""
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC),
             tick_count=100,
@@ -795,7 +795,7 @@ class TestGracefulShutdown:
     def test_status_set_to_completed_on_normal_exit(self, tmp_path):
         """Test status is 'completed' when no shutdown was requested."""
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=datetime.now(UTC),
             last_save=datetime.now(UTC),
             tick_count=100,
@@ -832,7 +832,7 @@ class TestBatch1Fixes:
         defaults = {
             "chain": "arbitrum",
             "rpc_url": "https://arb-mainnet.g.alchemy.com/v2/test-key",
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "tick_interval_seconds": 60,
             "max_ticks": 10,
         }
@@ -847,7 +847,7 @@ class TestBatch1Fixes:
         # Create a valid state file so resume doesn't fail on missing state
         now = datetime.now(UTC)
         state = PaperTraderState(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             session_start=now,
             last_save=now,
             tick_count=5,

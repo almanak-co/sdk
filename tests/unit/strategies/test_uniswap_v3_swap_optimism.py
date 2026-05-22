@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "optimism"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-uniswap-v3-swap-optimism"
+    strat._deployment_id = "test-uniswap-v3-swap-optimism"
     strat.trade_size_usd = Decimal("10")
     strat.max_slippage = Decimal("0.01")
     strat.base_token = "WETH"

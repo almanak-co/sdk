@@ -19,7 +19,6 @@ Covers the deterministic-first resolution order:
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 import pytest
@@ -46,7 +45,7 @@ def isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", lambda: fake_home)
     # VIB-3761: clear all path env vars so the resolver returns the
     # per-user utility default, which lands under our fake home.
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
     monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
     monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
@@ -109,7 +108,7 @@ def test_find_state_db_deployment_lookup_wins_over_cwd_legacy(isolated_cwd: Path
 
 def test_find_state_db_deployment_id_lookup_preferred_over_base_name(isolated_cwd: Path) -> None:
     """Exact deployment-id match wins over base-strategy-name match."""
-    strategy_id = "AaveYieldStrategy:abc123"
+    deployment_id = "AaveYieldStrategy:abc123"
     home_state = isolated_cwd / "home" / ".almanak" / "state"
     home_state.mkdir(parents=True)
     # Base-name match (lower priority).
@@ -117,11 +116,11 @@ def test_find_state_db_deployment_id_lookup_preferred_over_base_name(isolated_cw
     base_dir.mkdir()
     (base_dir / "state.db").touch()
     # Deployment-id match (higher priority).
-    deployment_dir = home_state / strategy_id
+    deployment_dir = home_state / deployment_id
     deployment_dir.mkdir()
     (deployment_dir / "state.db").touch()
 
-    result = _find_state_db(strategy_id)
+    result = _find_state_db(deployment_id)
 
     # The deployment-id path wins.
     assert result == str(deployment_dir / "state.db")
@@ -129,14 +128,14 @@ def test_find_state_db_deployment_id_lookup_preferred_over_base_name(isolated_cw
 
 def test_find_state_db_base_name_lookup_used_when_only_base_exists(isolated_cwd: Path) -> None:
     """When only the base-name directory exists, it is returned as a fallback."""
-    strategy_id = "AaveYieldStrategy:abc123"
+    deployment_id = "AaveYieldStrategy:abc123"
     home_state = isolated_cwd / "home" / ".almanak" / "state"
     home_state.mkdir(parents=True)
     base_dir = home_state / "AaveYieldStrategy"
     base_dir.mkdir()
     (base_dir / "state.db").touch()
 
-    result = _find_state_db(strategy_id)
+    result = _find_state_db(deployment_id)
 
     assert result == str(base_dir / "state.db")
 
@@ -168,15 +167,15 @@ def test_find_state_db_no_candidates_returns_none(isolated_cwd: Path) -> None:
     assert _find_state_db("AaveYieldStrategy:abc123") is None
 
 
-def test_find_state_db_strategy_id_without_colon_uses_id_as_deployment_folder(
+def test_find_state_db_deployment_id_without_colon_uses_id_as_deployment_folder(
     isolated_cwd: Path,
 ) -> None:
-    """Legacy strategy ids (no deployment suffix) still resolve via the canonical folder."""
-    strategy_id = "AaveYieldStrategy"  # No colon.
-    home_state = isolated_cwd / "home" / ".almanak" / "state" / strategy_id
+    """Legacy deployment ids (no deployment suffix) still resolve via the canonical folder."""
+    deployment_id = "AaveYieldStrategy"  # No colon.
+    home_state = isolated_cwd / "home" / ".almanak" / "state" / deployment_id
     home_state.mkdir(parents=True)
     (home_state / "state.db").touch()
 
-    result = _find_state_db(strategy_id)
+    result = _find_state_db(deployment_id)
 
     assert result == str(home_state / "state.db")

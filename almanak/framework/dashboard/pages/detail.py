@@ -96,11 +96,11 @@ def _coerce_float(value: object) -> float | None:
         return None
 
 
-def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def call_strategy_action(deployment_id: str, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Call a strategy action API endpoint.
 
     Args:
-        strategy_id: The strategy ID
+        deployment_id: The deployment ID
         action: The action name (pause, resume, bump-gas, cancel-tx)
         payload: Optional request payload
 
@@ -119,7 +119,7 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
             else f"{gateway_action.title()} requested from dashboard detail page"
         )
         try:
-            success = execute_strategy_action(strategy_id, gateway_action, reason)
+            success = execute_strategy_action(deployment_id, gateway_action, reason)
             if success:
                 return {"success": True, "message": f"{gateway_action.title()} request submitted"}
             return {"success": False, "error": f"Gateway rejected {gateway_action.title()} request"}
@@ -142,7 +142,7 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
             ),
         }
 
-    url = f"{API_BASE_URL}/api/strategies/{strategy_id}/{action}"
+    url = f"{API_BASE_URL}/api/strategies/{deployment_id}/{action}"
     headers = {"Content-Type": "application/json", "X-API-Key": dashboard_secret.get_secret_value()}
 
     try:
@@ -156,7 +156,7 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:
-            return {"success": False, "error": f"Strategy {strategy_id} not found"}
+            return {"success": False, "error": f"Strategy {deployment_id} not found"}
         elif response.status_code == 400:
             error_detail = response.json().get("detail", "Bad request")
             return {"success": False, "error": error_detail}
@@ -1213,7 +1213,7 @@ def _fetch_registry_handles(db_path: str, deployment_id: str) -> dict[str, str]:
     return out
 
 
-def _find_state_db(strategy_id: str) -> str | None:
+def _find_state_db(deployment_id: str) -> str | None:
     """Find the SQLite state DB for a strategy.
 
     Resolution order (deterministic-first, issue #1713 + VIB-3761):
@@ -1225,7 +1225,7 @@ def _find_state_db(strategy_id: str) -> str | None:
        ``ALMANAK_GATEWAY_DB_PATH``, and falls back to the per-user
        utility directory. The cwd-relative ``./almanak_state.db`` legacy
        default is removed (April 29 silent-failure root cause).
-    2. Deployment-id lookup: ``~/.almanak/state/<strategy_id>/state.db`` and
+    2. Deployment-id lookup: ``~/.almanak/state/<deployment_id>/state.db`` and
        ``~/.almanak/state/<base_name>/state.db``.
     3. Legacy flat locations: ``~/.almanak/state/state.db`` and
        ``./.almanak/state.db``.
@@ -1252,10 +1252,10 @@ def _find_state_db(strategy_id: str) -> str | None:
     #    that id over anything derived from the base strategy name.
     home = os.path.expanduser("~")
     deployment_candidates: list[str] = [
-        os.path.join(home, ".almanak", "state", strategy_id, "state.db"),
+        os.path.join(home, ".almanak", "state", deployment_id, "state.db"),
     ]
-    if ":" in strategy_id:
-        base_name = strategy_id.split(":", 1)[0]
+    if ":" in deployment_id:
+        base_name = deployment_id.split(":", 1)[0]
         deployment_candidates.append(
             os.path.join(home, ".almanak", "state", base_name, "state.db"),
         )
@@ -1277,8 +1277,8 @@ def _find_state_db(strategy_id: str) -> str | None:
         logger.warning(
             "Multiple legacy state DB candidates matched for strategy %s: %s. "
             "Returning the first match (%s). Set ALMANAK_STATE_DB to disambiguate "
-            "or migrate the DB to ~/.almanak/state/<strategy_id>/state.db.",
-            strategy_id,
+            "or migrate the DB to ~/.almanak/state/<deployment_id>/state.db.",
+            deployment_id,
             matches,
             matches[0],
         )
@@ -1480,10 +1480,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     Args:
         strategies: List of all strategy data objects
     """
-    # Get strategy ID from query params
-    strategy_id = st.query_params.get("strategy_id")
+    # Get deployment ID from query params
+    deployment_id = st.query_params.get("deployment_id")
 
-    if not strategy_id:
+    if not deployment_id:
         maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to view details.")
         st.markdown("### Or select a strategy here:")
@@ -1496,7 +1496,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 key="detail_strategy_selector",
             )
             if st.button("View Details", use_container_width=True):
-                st.query_params["strategy_id"] = strategies[selected_idx].id
+                st.query_params["deployment_id"] = strategies[selected_idx].id
                 st.rerun()
         else:
             st.warning("No strategies found. Make sure you have strategies running or check your state database.")
@@ -1504,10 +1504,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 st.query_params["page"] = "overview"
         return
 
-    strategy = next((s for s in strategies if s.id == strategy_id), None)
+    strategy = next((s for s in strategies if s.id == deployment_id), None)
 
     if not strategy:
-        st.error(f"Strategy {strategy_id} not found.")
+        st.error(f"Strategy {deployment_id} not found.")
         if st.button("Go to Overview"):
             st.query_params["page"] = "overview"
         return
@@ -1516,7 +1516,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     from almanak.framework.dashboard.data_source import GatewayConnectionError, get_strategy_details
 
     try:
-        detailed = get_strategy_details(strategy_id)
+        detailed = get_strategy_details(deployment_id)
         if detailed is not None:
             strategy = detailed
     except GatewayConnectionError:
@@ -1525,8 +1525,8 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     # Back button
     if st.button("← Back to Overview"):
         st.query_params["page"] = "overview"
-        if "strategy_id" in st.query_params:
-            del st.query_params["strategy_id"]
+        if "deployment_id" in st.query_params:
+            del st.query_params["deployment_id"]
 
     # Ensure we have a strategy object
     if not strategy:

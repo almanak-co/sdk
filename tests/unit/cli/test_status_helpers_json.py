@@ -33,7 +33,7 @@ from almanak.framework.cli import status_helpers
 def _make_summary(**overrides: Any) -> SimpleNamespace:
     """Build a minimal `StrategySummary`-like object."""
     defaults = {
-        "strategy_id": "demo",
+        "deployment_id": "demo",
         "name": "Demo Strategy",
         "status": "RUNNING",
         "chain": "arbitrum",
@@ -189,7 +189,7 @@ def test_fetch_strategy_details_happy_path() -> None:
     assert client.disconnect_called == 1
     # Request was built with the exact fields
     req = client.dashboard.last_request
-    assert req.strategy_id == "my_strategy"
+    assert req.deployment_id == "my_strategy"
     assert req.include_timeline is True
     assert req.include_pnl_history is False
     assert req.timeline_limit == 10
@@ -236,7 +236,7 @@ def test_render_json_summary_minimal() -> None:
     """All summary fields are emitted with correct values."""
     s = _make_summary()
     out = status_helpers._render_json_summary(s)
-    assert out["strategy_id"] == "demo"
+    assert out["deployment_id"] == "demo"
     assert out["name"] == "Demo Strategy"
     assert out["status"] == "RUNNING"
     assert out["chain"] == "arbitrum"
@@ -491,7 +491,7 @@ def test_render_json_chain_health_maps_fields() -> None:
 def test_render_json_operator_card_maps_fields() -> None:
     """Operator card emits severity/reason/risk_description/suggested_actions."""
     oc = SimpleNamespace(
-        strategy_id="demo",
+        deployment_id="demo",
         severity="HIGH",
         reason="Stuck iteration",
         risk_description="Strategy has not iterated in 1h",
@@ -527,7 +527,7 @@ def test_render_details_as_json_summary_only() -> None:
     assert "chain_health" not in data
     assert "operator_card" not in data
     # summary fields present
-    assert data["strategy_id"] == "demo"
+    assert data["deployment_id"] == "demo"
     assert data["pnl_since_deploy_usd"] is None
 
 
@@ -596,12 +596,12 @@ def test_render_details_as_json_operator_card_included_when_present() -> None:
 
     After the #1704 fix, presence is determined by
     `parent.HasField("operator_card")` (or, for duck-typed fakes,
-    `details.operator_card is not None`). An empty-string `strategy_id` is
+    `details.operator_card is not None`). An empty-string `deployment_id` is
     no longer used as a presence sentinel: a card with an intentionally
-    empty `strategy_id` MUST still render.
+    empty `deployment_id` MUST still render.
     """
     oc_empty_sid = SimpleNamespace(
-        strategy_id="",  # explicitly empty — must still render (#1704)
+        deployment_id="",  # explicitly empty — must still render (#1704)
         severity="HIGH",
         reason="x",
         risk_description="y",
@@ -610,13 +610,13 @@ def test_render_details_as_json_operator_card_included_when_present() -> None:
     details = _make_details(operator_card=oc_empty_sid)
     data = json.loads(status_helpers._render_details_as_json(details))
     assert "operator_card" in data, (
-        "empty-string strategy_id must not suppress the operator card (#1704)"
+        "empty-string deployment_id must not suppress the operator card (#1704)"
     )
     assert data["operator_card"]["severity"] == "HIGH"
 
     # And a fully-populated card likewise renders.
     oc_full = SimpleNamespace(
-        strategy_id="demo",
+        deployment_id="demo",
         severity="HIGH",
         reason="Stuck",
         risk_description="Risk",
@@ -657,7 +657,7 @@ def test_render_details_as_json_operator_card_hasfield_respected() -> None:
     # Build a proto-like `details` where operator_card attr exists but
     # HasField returns False (matches proto3 default-instance behavior).
     oc = SimpleNamespace(
-        strategy_id="anything",  # irrelevant — HasField is authoritative
+        deployment_id="anything",  # irrelevant — HasField is authoritative
         severity="HIGH",
         reason="",
         risk_description="",
@@ -685,7 +685,7 @@ def test_render_details_as_json_indent_is_2() -> None:
     details = _make_details()
     out_str = status_helpers._render_details_as_json(details)
     # indented output contains a newline followed by 2 spaces before the first key
-    assert '\n  "strategy_id"' in out_str
+    assert '\n  "deployment_id"' in out_str
 
 
 def test_render_details_as_json_kitchen_sink() -> None:
@@ -710,7 +710,7 @@ def test_render_details_as_json_kitchen_sink() -> None:
         )
     }
     oc = SimpleNamespace(
-        strategy_id="demo",
+        deployment_id="demo",
         severity="CRITICAL",
         reason="r",
         risk_description="rd",
@@ -906,7 +906,7 @@ def test_render_json_chain_health_empty_returns_empty_dict() -> None:
 def test_render_json_operator_card_suggested_actions_empty_list() -> None:
     """Empty `suggested_actions` list stays as an empty list in the JSON."""
     oc = SimpleNamespace(
-        strategy_id="demo",
+        deployment_id="demo",
         severity="LOW",
         reason="FYI",
         risk_description="",
@@ -921,7 +921,7 @@ def test_render_json_operator_card_suggested_actions_empty_list() -> None:
 def test_render_json_operator_card_suggested_actions_list_coerced() -> None:
     """RepeatedScalarContainer-like inputs are coerced to plain list."""
     oc = SimpleNamespace(
-        strategy_id="demo",
+        deployment_id="demo",
         severity="MEDIUM",
         reason="Watch",
         risk_description="",
@@ -946,18 +946,18 @@ def test_render_details_as_json_position_falsy_skips_render() -> None:
     assert "position" not in data
 
 
-def test_render_details_as_json_operator_card_truthy_no_strategy_id() -> None:
-    """Operator card with empty `strategy_id` MUST render when present (#1704).
+def test_render_details_as_json_operator_card_truthy_no_deployment_id() -> None:
+    """Operator card with empty `deployment_id` MUST render when present (#1704).
 
     Previously this test asserted the buggy behavior: an empty-string
-    `strategy_id` suppressed the entire card (proto3 empty-string-as-falsy
+    `deployment_id` suppressed the entire card (proto3 empty-string-as-falsy
     used as presence sentinel). The #1704 fix switches presence to the
     parent's `HasField("operator_card")` (with a `is not None` fallback for
-    test fakes), so an intentionally-empty `strategy_id` no longer hides
+    test fakes), so an intentionally-empty `deployment_id` no longer hides
     the card.
     """
     oc = SimpleNamespace(
-        strategy_id="",  # empty but card IS present -> must render
+        deployment_id="",  # empty but card IS present -> must render
         severity="HIGH",
         reason="present-but-unset",
         risk_description="",
@@ -984,4 +984,4 @@ def test_render_details_as_json_is_valid_json() -> None:
     assert isinstance(out_str, str)
     # Round-trip parse -- no exception = valid JSON
     data = json.loads(out_str)
-    assert data["strategy_id"] == "demo"
+    assert data["deployment_id"] == "demo"

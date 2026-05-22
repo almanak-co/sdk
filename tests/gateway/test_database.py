@@ -47,10 +47,10 @@ class TestStripSchemaParam:
 
 
 class TestPostgresSchema:
-    def test_strategy_state_uses_agent_id_primary_key(self):
+    def test_strategy_state_uses_deployment_id_primary_key(self):
         start = POSTGRES_SCHEMA.index("CREATE TABLE IF NOT EXISTS strategy_state")
         end = POSTGRES_SCHEMA.index(");", start)
         ddl = POSTGRES_SCHEMA[start:end]
 
-        assert re.search(r"\bagent_id\s+TEXT\s+PRIMARY\s+KEY\b", ddl)
-        assert not re.search(r"\bstrategy_id\s+UUID\s+PRIMARY\s+KEY\b", ddl)
+        assert re.search(r"\bdeployment_id\s+TEXT\s+PRIMARY\s+KEY\b", ddl)
+        assert not re.search(r"\bdeployment_id\s+UUID\s+PRIMARY\s+KEY\b", ddl)

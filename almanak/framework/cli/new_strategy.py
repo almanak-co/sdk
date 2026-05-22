@@ -1191,7 +1191,7 @@ def _get_template_teardown(
         # Blank template: no positions tracked by default.
         # Add PositionInfo entries here as you implement your strategy logic.
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=[],
         )
@@ -1239,7 +1239,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1304,7 +1304,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1406,7 +1406,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1579,7 +1579,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1663,7 +1663,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1730,7 +1730,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1848,7 +1848,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1915,7 +1915,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -1989,7 +1989,7 @@ def _get_template_teardown(
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )
@@ -2037,7 +2037,7 @@ def _get_template_teardown(
         from datetime import UTC, datetime
         from almanak.framework.teardown import TeardownPositionSummary
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
             timestamp=datetime.now(UTC),
             positions=[],
         )
@@ -3687,7 +3687,7 @@ def config() -> dict:
         with open(config_path) as f:
             return json.load(f)
     return {{
-        "strategy_id": "test-strategy-001",
+        "deployment_id": "test-strategy-001",
         "chain": "{chain.value}",
     }}
 
@@ -4426,7 +4426,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -4434,16 +4434,16 @@ def render_custom_dashboard(
     """Render the {display_doc} custom dashboard.
 
     Args:
-        strategy_id: Stable identifier for this deployment.
+        deployment_id: Stable identifier for this deployment.
         strategy_config: Snapshot of the strategy's runtime config.
         api_client: Gateway-backed API client (read-only).
         session_state: Shared Streamlit session state.
     """
     st.title({title_literal})
-    st.markdown(f"**Strategy ID:** `{{strategy_id}}`")
+    st.markdown(f"**Deployment ID:** `{{deployment_id}}`")
 
     # 1. PnL eyeball — am I making or losing money? (top of dashboard)
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     # 2. TODO(strategy author): replace this placeholder with your own
     # metrics, charts, and tables — LP range plots, health-factor
@@ -4458,8 +4458,8 @@ def render_custom_dashboard(
     # 3. Audit — life-to-date costs + transaction-level detail (bottom)
     st.divider()
     st.markdown("## Audit")
-    render_cost_stack_section(strategy_id, heading="")
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id, heading="")
+    render_trade_tape_section(deployment_id)
 '''
 
 
@@ -4532,7 +4532,7 @@ def _format_fee_tier(value: Any) -> str:
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -4559,7 +4559,7 @@ def render_custom_dashboard(
 
     # Pass api_client through so the LP template renders the gateway-backed
     # Positions registry + Position Lifecycle sections.
-    render_lp_dashboard(strategy_id, strategy_config, session_state, config, api_client=api_client)
+    render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)
 '''
 
 
@@ -4597,7 +4597,7 @@ from almanak.framework.dashboard.templates import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -4608,7 +4608,7 @@ def render_custom_dashboard(
         chain=str(strategy_config.get("chain", "arbitrum")),
     )
 
-    render_lending_dashboard(strategy_id, strategy_config, session_state, config)
+    render_lending_dashboard(deployment_id, strategy_config, session_state, config)
 '''
 
 
@@ -4645,7 +4645,7 @@ from almanak.framework.dashboard.templates import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -4656,7 +4656,7 @@ def render_custom_dashboard(
         chain=str(strategy_config.get("chain", "arbitrum")),
     )
 
-    render_perp_dashboard(strategy_id, strategy_config, session_state, config)
+    render_perp_dashboard(deployment_id, strategy_config, session_state, config)
 '''
 
 
@@ -4695,7 +4695,7 @@ from almanak.framework.dashboard.templates import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -4716,7 +4716,7 @@ def render_custom_dashboard(
         config=config,
     )
 
-    render_ta_dashboard(strategy_id, strategy_config, session_state, config)
+    render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 '''
 
 

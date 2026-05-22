@@ -167,7 +167,7 @@ class TestTokenBalancePriceUsd:
         """price_usd survives to_dict/from_dict."""
         snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 3, 27, 12, 0, 0, tzinfo=UTC),
-            strategy_id="test-strat",
+            deployment_id="test-strat",
             total_value_usd=Decimal("5000"),
             available_cash_usd=Decimal("5000"),
             value_confidence=ValueConfidence.HIGH,
@@ -193,7 +193,7 @@ class TestTokenBalancePriceUsd:
         """Null price_usd round-trips correctly."""
         snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 3, 27, 12, 0, 0, tzinfo=UTC),
-            strategy_id="test-strat",
+            deployment_id="test-strat",
             total_value_usd=Decimal("1000"),
             available_cash_usd=Decimal("1000"),
             wallet_balances=[
@@ -213,7 +213,7 @@ class TestTokenBalancePriceUsd:
 
 
 def _make_strategy(
-    strategy_id="test-strat",
+    deployment_id="test-strat",
     chain="arbitrum",
     wallet_address="0x1234567890123456789012345678901234567890",
     tracked_tokens=None,
@@ -221,20 +221,20 @@ def _make_strategy(
 ):
     """Create a mock strategy with the StrategyLike protocol."""
     strategy = MagicMock()
-    type(strategy).strategy_id = PropertyMock(return_value=strategy_id)
+    type(strategy).deployment_id = PropertyMock(return_value=deployment_id)
     type(strategy).chain = PropertyMock(return_value=chain)
     type(strategy).wallet_address = PropertyMock(return_value=wallet_address)
     strategy._get_tracked_tokens.return_value = tracked_tokens if tracked_tokens is not None else ["ETH", "USDC"]
 
     if positions is not None:
         strategy.get_open_positions.return_value = TeardownPositionSummary(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )
     elif hasattr(strategy, "get_open_positions"):
         strategy.get_open_positions.return_value = TeardownPositionSummary(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=datetime.now(UTC),
             positions=[],
         )
@@ -284,7 +284,7 @@ class TestPortfolioValuer:
         assert snapshot.available_cash_usd == Decimal("12000")
         assert snapshot.wallet_total_value_usd == Decimal("12000")  # 2*3500 + 5000*1
         assert snapshot.value_confidence == ValueConfidence.HIGH
-        assert snapshot.strategy_id == "test-strat"
+        assert snapshot.deployment_id == "test-strat"
         assert snapshot.chain == "arbitrum"
         assert snapshot.iteration_number == 5
         assert len(snapshot.wallet_balances) == 2
@@ -477,7 +477,7 @@ class TestPortfolioValuer:
 
         assert restored.total_value_usd == snapshot.total_value_usd
         assert restored.available_cash_usd == snapshot.available_cash_usd
-        assert restored.strategy_id == snapshot.strategy_id
+        assert restored.deployment_id == snapshot.deployment_id
         assert restored.chain == snapshot.chain
         assert restored.iteration_number == 10
         assert len(restored.wallet_balances) == len(snapshot.wallet_balances)
@@ -492,7 +492,7 @@ class TestPortfolioValuer:
         """Persisted positions payload supports metadata envelope without breaking round-trip."""
         snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
-            strategy_id="test-strat",
+            deployment_id="test-strat",
             total_value_usd=Decimal("4.70"),
             available_cash_usd=Decimal("0"),
             positions=[],
@@ -773,10 +773,10 @@ class TestPortfolioValuerEdgeCases:
         assert snapshot.value_confidence == ValueConfidence.ESTIMATED
 
     def test_strategy_accessor_failure_returns_unavailable(self):
-        """If strategy.strategy_id raises, returns UNAVAILABLE (not exception)."""
+        """If strategy.deployment_id raises, returns UNAVAILABLE (not exception)."""
         valuer = PortfolioValuer()
         strategy = MagicMock()
-        type(strategy).strategy_id = PropertyMock(side_effect=RuntimeError("broken"))
+        type(strategy).deployment_id = PropertyMock(side_effect=RuntimeError("broken"))
         type(strategy).chain = PropertyMock(return_value="arbitrum")
         strategy._get_tracked_tokens.return_value = ["ETH"]
         market = _make_market(prices={"ETH": Decimal("3500")}, balances={"ETH": Decimal("1")})
@@ -981,7 +981,7 @@ class TestDeployedCapitalUsd:
         """deployed_capital_usd is preserved through to_dict / from_dict."""
         snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC),
-            strategy_id="test-strat",
+            deployment_id="test-strat",
             total_value_usd=Decimal("33000"),
             available_cash_usd=Decimal("33000"),
             deployed_capital_usd=Decimal("1000"),
@@ -996,7 +996,7 @@ class TestDeployedCapitalUsd:
         """Snapshots without deployed_capital_usd key deserialize with 0."""
         data = {
             "timestamp": datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC).isoformat(),
-            "strategy_id": "old-strat",
+            "deployment_id": "old-strat",
             "total_value_usd": "5000",
             "available_cash_usd": "5000",
             "value_confidence": "HIGH",
@@ -1024,7 +1024,7 @@ class TestDeployedCapitalUsd:
         # zero total_value_usd (simulates a gateway-side balance query failure).
         framework_snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC),
-            strategy_id="test-strat",
+            deployment_id="test-strat",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
             deployed_capital_usd=Decimal("1000"),
@@ -1072,7 +1072,7 @@ class TestDeployedCapitalUsd:
 
         framework_snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
-            strategy_id="future-dex-strat",
+            deployment_id="future-dex-strat",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
             deployed_capital_usd=Decimal("0"),
@@ -1169,7 +1169,7 @@ class TestDeployedCapitalUsd:
         for input_confidence in (ValueConfidence.HIGH, ValueConfidence.ESTIMATED):
             framework_snapshot = PortfolioSnapshot(
                 timestamp=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
-                strategy_id="strat",
+                deployment_id="strat",
                 total_value_usd=Decimal("0"),
                 available_cash_usd=Decimal("0"),
                 deployed_capital_usd=Decimal("0"),

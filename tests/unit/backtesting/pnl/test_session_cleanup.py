@@ -81,7 +81,7 @@ async def test_close_called_on_run_backtest_exception():
     mock_config.end_time = datetime(2024, 1, 31, tzinfo=UTC)
     mock_config.initial_capital_usd = 10000.0
     mock_strategy = MagicMock()
-    mock_strategy.strategy_id = "test"
+    mock_strategy.deployment_id = "test"
 
     with pytest.raises(ValueError, match="Data quality gate failed"):
         await bt.backtest(mock_strategy, mock_config)

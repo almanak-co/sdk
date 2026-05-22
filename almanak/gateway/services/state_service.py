@@ -33,9 +33,8 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
-    resolve_agent_id,
+    validate_deployment_id,
     validate_state_size,
-    validate_strategy_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,18 +115,19 @@ def _row_timestamp_epoch(row: dict[str, Any]) -> int:
         return 0
 
 
+# crap-allowlist: VIB-4722 only collapsed accounting event identity mapping to deployment_id.
 def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
     """Convert one Postgres asyncpg.Record to the proto wire shape.
 
     The PG SELECT casts ``payload_json::text`` so we get a str (not a dict)
     and re-encode as UTF-8 bytes to match the SaveAccountingEventRequest
-    contract. ``agent_id`` is mapped back to wire field ``strategy_id``.
+    contract. VIB-4721/4722: ``accounting_events`` has a single identity
+    column, ``deployment_id``.
     """
     payload_text = row["payload_text"] or "{}"
     return gateway_pb2.AccountingEvent(
         id=row["id"] or "",
         deployment_id=row["deployment_id"] or "",
-        strategy_id=row["agent_id"] or "",
         cycle_id=row["cycle_id"] or "",
         execution_mode=row["execution_mode"] or "",
         timestamp=int(row["ts_epoch"] or 0),
@@ -232,8 +232,8 @@ def _wrap_pg_persistence_error(exc: BaseException, ledger_id: str) -> gateway_pb
 def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.AccountingEvent:
     """Convert one SQLite row dict to the proto wire shape.
 
-    SQLite uses ``strategy_id`` as the column name (not ``agent_id``) per
-    the convention in sqlite.py. Timestamps are ISO strings.
+    SQLite uses ``deployment_id`` as the canonical identity column. Timestamps
+    are ISO strings.
     """
     payload_text = row.get("payload_json") or "{}"
     if isinstance(payload_text, bytes):
@@ -241,7 +241,6 @@ def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.Accounti
     return gateway_pb2.AccountingEvent(
         id=row.get("id") or "",
         deployment_id=row.get("deployment_id") or "",
-        strategy_id=row.get("strategy_id") or row.get("agent_id") or "",
         cycle_id=row.get("cycle_id") or "",
         execution_mode=row.get("execution_mode") or "",
         timestamp=_row_timestamp_epoch(row),
@@ -336,39 +335,31 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Load strategy state from persistence.
 
         Args:
-            request: Load request with strategy_id
+            request: Load request with deployment_id
             context: gRPC context
 
         Returns:
             StateData with state bytes, version, checksum
         """
-        # Validate strategy_id format BEFORE initialization
+        # Validate deployment_id format BEFORE initialization
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.StateData()
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        original_strategy_id = strategy_id
-        strategy_id = resolve_agent_id(strategy_id)
-
+        # One identity (blueprint 29 §4): the caller passes the canonical
+        # deployment_id; the gateway filters it directly with no translation.
         await self._ensure_initialized()
         assert self._state_manager is not None
 
         try:
-            state = await self._state_manager.load_state(strategy_id)
-
-            # Fallback: if AGENT_ID resolved to a different key and no state was
-            # found, try the original strategy_id.  This bridges legacy warm state
-            # written under the SDK key before this normalization was deployed.
-            if state is None and strategy_id != original_strategy_id:
-                state = await self._state_manager.load_state(original_strategy_id)
+            state = await self._state_manager.load_state(deployment_id)
 
             if state is None:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details(f"State not found for strategy: {strategy_id}")
+                context.set_details(f"State not found for strategy: {deployment_id}")
                 return gateway_pb2.StateData()
 
             # Serialize state dict to JSON bytes
@@ -381,7 +372,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             loaded_from_str = state.loaded_from.name.lower() if state.loaded_from else "warm"
 
             return gateway_pb2.StateData(
-                strategy_id=state.strategy_id,
+                deployment_id=state.deployment_id,
                 version=state.version,
                 data=state_bytes,
                 schema_version=state.schema_version,
@@ -393,10 +384,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         except StateNotFoundError:
             # New strategy with no state yet - this is expected
             context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(f"State not found for strategy: {strategy_id}")
+            context.set_details(f"State not found for strategy: {deployment_id}")
             return gateway_pb2.StateData()
         except Exception as e:
-            logger.error(f"LoadState failed for {strategy_id}: {e}")
+            logger.error(f"LoadState failed for {deployment_id}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.StateData()
@@ -409,7 +400,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Save strategy state with optimistic locking.
 
         Args:
-            request: Save request with strategy_id, expected_version, data
+            request: Save request with deployment_id, expected_version, data
             context: gRPC context
 
         Returns:
@@ -417,15 +408,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """
         # Validate inputs BEFORE initialization
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SaveStateResponse(success=False, error=str(e))
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
-
+        # One identity (blueprint 29 §4): the validated deployment_id IS the
+        # canonical deployment_id; no gateway-side translation.
         try:
             validate_state_size(request.data)
         except ValidationError as e:
@@ -443,7 +433,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             # Create state data object
             state = FrameworkStateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=request.expected_version,
                 state=state_dict,
                 schema_version=request.schema_version or 1,
@@ -463,7 +453,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"SaveState failed for {strategy_id}: {error_msg}")
+            logger.error(f"SaveState failed for {deployment_id}: {error_msg}")
 
             # Check for version conflict
             if "version" in error_msg.lower() or "conflict" in error_msg.lower():
@@ -482,40 +472,38 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Delete strategy state.
 
         Args:
-            request: Delete request with strategy_id
+            request: Delete request with deployment_id
             context: gRPC context
 
         Returns:
             DeleteStateResponse with success status
         """
-        # Validate strategy_id format BEFORE initialization
+        # Validate deployment_id format BEFORE initialization
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.DeleteStateResponse(success=False, error=str(e))
 
-        # In deployed mode, use platform AGENT_ID for consistent data access
-        strategy_id = resolve_agent_id(strategy_id)
-
+        # One identity (blueprint 29 §4): no gateway-side translation.
         await self._ensure_initialized()
         assert self._state_manager is not None
 
         try:
-            success = await self._state_manager.delete_state(strategy_id)
+            success = await self._state_manager.delete_state(deployment_id)
 
             if not success:
                 return gateway_pb2.DeleteStateResponse(
                     success=False,
-                    error=f"State not found for strategy: {strategy_id}",
+                    error=f"State not found for strategy: {deployment_id}",
                 )
 
             return gateway_pb2.DeleteStateResponse(success=True)
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"DeleteState failed for {strategy_id}: {error_msg}")
+            logger.error(f"DeleteState failed for {deployment_id}: {error_msg}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(error_msg)
             return gateway_pb2.DeleteStateResponse(success=False, error=error_msg)
@@ -609,30 +597,26 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return "positions_json must be a list or {positions: list, metadata: object}"
         return None
 
-    # VIB-4095 (3.4) — Phase 4 identity columns
-    # (deployment_id/cycle_id/execution_mode) are persisted in hosted
-    # Postgres, mirroring the metrics-database schema for portfolio_metrics.
-    # ON CONFLICT preserves any existing non-empty identity (asymmetric
-    # write — once stamped, never blanked by a subsequent unstamped write).
+    # VIB-4721/4722 — deployment_id is the sole identity column on
+    # portfolio_snapshots (the old identity column was DROPPED by the
+    # metrics-database migration). It is part of the (deployment_id,
+    # timestamp) unique constraint and NOT NULL, so it is always the
+    # caller-supplied canonical id — no asymmetric "preserve once stamped"
+    # CASE logic is needed for it. cycle_id/execution_mode remain optional
+    # Phase-4 columns and keep the once-stamped-never-blanked guard.
     _SAVE_SNAPSHOT_PG_SQL = """
         INSERT INTO portfolio_snapshots (
-            agent_id, timestamp, iteration_number, total_value_usd,
+            deployment_id, timestamp, iteration_number, total_value_usd,
             available_cash_usd, value_confidence, positions_json, chain, created_at,
-            deployment_id, cycle_id, execution_mode
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
-        ON CONFLICT (agent_id, timestamp) DO UPDATE SET
+            cycle_id, execution_mode
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+        ON CONFLICT (deployment_id, timestamp) DO UPDATE SET
             iteration_number = EXCLUDED.iteration_number,
             total_value_usd = EXCLUDED.total_value_usd,
             available_cash_usd = EXCLUDED.available_cash_usd,
             value_confidence = EXCLUDED.value_confidence,
             positions_json = EXCLUDED.positions_json,
             chain = EXCLUDED.chain,
-            deployment_id = CASE
-                WHEN portfolio_snapshots.deployment_id IS NULL
-                  OR portfolio_snapshots.deployment_id = ''
-                THEN EXCLUDED.deployment_id
-                ELSE portfolio_snapshots.deployment_id
-            END,
             cycle_id = CASE
                 WHEN portfolio_snapshots.cycle_id IS NULL
                   OR portfolio_snapshots.cycle_id = ''
@@ -650,7 +634,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     async def _save_snapshot_postgres(
         self,
-        strategy_id: str,
+        deployment_id: str,
         ts: datetime,
         now: datetime,
         request: gateway_pb2.SaveSnapshotRequest,
@@ -658,7 +642,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Run the snapshot upsert against Postgres and return the row id."""
         row = await self._snapshot_fetchrow(
             self._SAVE_SNAPSHOT_PG_SQL,
-            strategy_id,
+            deployment_id,
             ts,
             request.iteration_number,
             request.total_value_usd,
@@ -667,7 +651,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             request.positions_json.decode("utf-8") if request.positions_json else "[]",
             request.chain,
             now,
-            request.deployment_id or "",
             request.cycle_id or "",
             request.execution_mode or "",
         )
@@ -675,7 +658,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     @staticmethod
     def _build_sqlite_snapshot(
-        strategy_id: str,
+        deployment_id: str,
         ts: datetime,
         request: gateway_pb2.SaveSnapshotRequest,
     ):
@@ -689,7 +672,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         snapshot = PortfolioSnapshot(
             timestamp=ts,
-            strategy_id=strategy_id,
             total_value_usd=Decimal(request.total_value_usd or "0"),
             available_cash_usd=Decimal(request.available_cash_usd or "0"),
             value_confidence=ValueConfidence(request.value_confidence or "HIGH"),
@@ -699,7 +681,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # (VIB-4096 / 3.5) on the rebuilt object. Source: framework
             # client (3.3) populated the proto from runner-stamped snapshot
             # fields (3.8).
-            deployment_id=request.deployment_id or "",
+            deployment_id=request.deployment_id or deployment_id or "",
             cycle_id=request.cycle_id or "",
             execution_mode=request.execution_mode or "",
         )
@@ -732,7 +714,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     async def _save_snapshot_sqlite(
         self,
-        strategy_id: str,
+        deployment_id: str,
         ts: datetime,
         request: gateway_pb2.SaveSnapshotRequest,
     ) -> int:
@@ -741,7 +723,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         assert self._state_manager is not None
         warm = self._state_manager.warm_backend
         assert warm is not None
-        snapshot = self._build_sqlite_snapshot(strategy_id, ts, request)
+        snapshot = self._build_sqlite_snapshot(deployment_id, ts, request)
         return await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]
 
     async def SavePortfolioSnapshot(
@@ -751,7 +733,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     ) -> gateway_pb2.SaveSnapshotResponse:
         """Save a portfolio snapshot to the portfolio_snapshots table."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -763,19 +745,18 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details(payload_error)
             return gateway_pb2.SaveSnapshotResponse(success=False, error=payload_error)
 
-        strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
         ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
 
         backend_label = "Postgres" if self._snapshot_pool is not None else "SQLite"
         try:
             if self._snapshot_pool is not None:
-                snapshot_id = await self._save_snapshot_postgres(strategy_id, ts, datetime.now(UTC), request)
+                snapshot_id = await self._save_snapshot_postgres(deployment_id, ts, datetime.now(UTC), request)
             else:
-                snapshot_id = await self._save_snapshot_sqlite(strategy_id, ts, request)
+                snapshot_id = await self._save_snapshot_sqlite(deployment_id, ts, request)
             return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
         except Exception as e:
-            logger.error(f"SavePortfolioSnapshot ({backend_label}) failed for {strategy_id}: {e}")
+            logger.error(f"SavePortfolioSnapshot ({backend_label}) failed for {deployment_id}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
@@ -793,13 +774,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         delegation path; no inline SQL or backend branching.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SnapshotData(found=False)
-
-        strategy_id = resolve_agent_id(strategy_id)
 
         try:
             await self._ensure_initialized()
@@ -807,12 +786,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             warm = self._state_manager.warm_backend
             if warm is None or not hasattr(warm, "get_latest_snapshot"):
                 return gateway_pb2.SnapshotData(found=False)
-            snapshot = await warm.get_latest_snapshot(strategy_id)
+            snapshot = await warm.get_latest_snapshot(deployment_id)
             if snapshot is None:
                 return gateway_pb2.SnapshotData(found=False)
             return self._snapshot_to_proto(snapshot)
         except Exception as e:
-            logger.error(f"GetLatestSnapshot failed for {strategy_id}: {e}")
+            logger.error(f"GetLatestSnapshot failed for {deployment_id}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SnapshotData(found=False)
@@ -827,13 +806,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         See :meth:`GetLatestSnapshot` for the dedup rationale (VIB-3933 Phase 2).
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SnapshotList()
 
-        strategy_id = resolve_agent_id(strategy_id)
         since = datetime.fromtimestamp(request.since, tz=UTC)
         limit = min(request.limit if request.limit > 0 else 168, MAX_SNAPSHOTS)
 
@@ -843,10 +821,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             warm = self._state_manager.warm_backend
             if warm is None or not hasattr(warm, "get_snapshots_since"):
                 return gateway_pb2.SnapshotList()
-            snapshots = await warm.get_snapshots_since(strategy_id, since, limit)
+            snapshots = await warm.get_snapshots_since(deployment_id, since, limit)
             return gateway_pb2.SnapshotList(snapshots=[self._snapshot_to_proto(s) for s in snapshots])
         except Exception as e:
-            logger.error(f"GetSnapshotsSince failed for {strategy_id}: {e}")
+            logger.error(f"GetSnapshotsSince failed for {deployment_id}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SnapshotList()
@@ -856,7 +834,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Convert a PortfolioSnapshot to a SnapshotData protobuf message."""
         positions_bytes = json.dumps(snapshot.to_positions_payload()).encode("utf-8")
         return gateway_pb2.SnapshotData(
-            strategy_id=snapshot.strategy_id,
             timestamp=int(snapshot.timestamp.timestamp()),
             iteration_number=snapshot.iteration_number,
             total_value_usd=str(snapshot.total_value_usd),
@@ -866,7 +843,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             chain=snapshot.chain or "",
             found=True,
             # VIB-4097 (3.6) — Phase 4 identity on the read response.
-            deployment_id=getattr(snapshot, "deployment_id", "") or "",
+            deployment_id=snapshot.deployment_id,
             cycle_id=getattr(snapshot, "cycle_id", "") or "",
             execution_mode=getattr(snapshot, "execution_mode", "") or "",
         )
@@ -885,7 +862,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         Orchestrates three phases decomposed into
         :mod:`._save_metrics_helpers`:
 
-        1. ``validate_strategy_id`` + ``resolve_agent_id`` (local, small).
+        1. ``validate_deployment_id`` (local, small).
         2. :func:`parse_metrics_inputs` — decimals + timestamp validation.
         3. Branch on ``_snapshot_pool``: PostgreSQL UPSERT or SQLite warm-
            backend delegation.
@@ -900,16 +877,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SaveMetricsResponse(success=False, error=str(e))
 
-        strategy_id = resolve_agent_id(strategy_id)
-
         try:
-            inputs = parse_metrics_inputs(request, strategy_id)
+            inputs = parse_metrics_inputs(request, deployment_id)
         except MetricsValidationError as exc:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(exc.message)
@@ -958,16 +933,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             await self._ensure_initialized()
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
-            total_value_usd = await resolve_total_value_usd(warm, inputs.strategy_id)
+            total_value_usd = await resolve_total_value_usd(warm, inputs.deployment_id)
 
             await self._snapshot_fetchrow(
                 PG_UPSERT_QUERY,
                 *build_pg_upsert_args(inputs, request, now, total_value_usd),
             )
-            logger.debug("Portfolio metrics saved for strategy=%s", inputs.strategy_id)
+            logger.debug("Portfolio metrics saved for strategy=%s", inputs.deployment_id)
             return gateway_pb2.SaveMetricsResponse(success=True)
         except Exception as e:
-            logger.error("SavePortfolioMetrics failed for %s: %s", inputs.strategy_id, e)
+            logger.error("SavePortfolioMetrics failed for %s: %s", inputs.deployment_id, e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
@@ -997,13 +972,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
 
-            total_value_usd = await resolve_total_value_usd(warm, inputs.strategy_id)
+            total_value_usd = await resolve_total_value_usd(warm, inputs.deployment_id)
             metrics = build_portfolio_metrics(inputs, request, total_value_usd)
 
             if warm and hasattr(warm, "save_portfolio_metrics"):
                 result = await warm.save_portfolio_metrics(metrics)
                 if result:
-                    logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", inputs.strategy_id)
+                    logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", inputs.deployment_id)
                     return gateway_pb2.SaveMetricsResponse(success=True)
                 return gateway_pb2.SaveMetricsResponse(
                     success=False, error="Backend save_portfolio_metrics returned False"
@@ -1013,11 +988,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 success=False, error="No warm backend with portfolio metrics support"
             )
         except Exception as e:
-            logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", inputs.strategy_id, e)
+            logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", inputs.deployment_id, e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing metrics RPC.
     async def GetPortfolioMetrics(
         self,
         request: gateway_pb2.GetMetricsRequest,
@@ -1025,13 +1001,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     ) -> gateway_pb2.PortfolioMetricsData:
         """Get portfolio metrics for a strategy."""
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PortfolioMetricsData(found=False)
 
-        strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
 
         if self._snapshot_pool is not None:
@@ -1039,20 +1014,19 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 row = await self._snapshot_fetchrow(
                     """
-                    SELECT agent_id, initial_value_usd, initial_timestamp,
+                    SELECT initial_value_usd, initial_timestamp,
                            deposits_usd, withdrawals_usd, gas_spent_usd,
                            deployment_id, cycle_id, execution_mode, is_complete,
                            updated_at
                     FROM portfolio_metrics
-                    WHERE agent_id = $1
+                    WHERE deployment_id = $1
                     """,
-                    strategy_id,
+                    deployment_id,
                 )
                 if row is None:
                     return gateway_pb2.PortfolioMetricsData(found=False)
 
                 return gateway_pb2.PortfolioMetricsData(
-                    strategy_id=row["agent_id"],
                     initial_value_usd=row["initial_value_usd"],
                     initial_timestamp=int(row["initial_timestamp"].timestamp()),
                     deposits_usd=row["deposits_usd"] or "0",
@@ -1066,7 +1040,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     is_complete=bool(row["is_complete"]) if row["is_complete"] is not None else True,
                 )
             except Exception as e:
-                logger.error("GetPortfolioMetrics failed for %s: %s", strategy_id, e)
+                logger.error("GetPortfolioMetrics failed for %s: %s", deployment_id, e)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.PortfolioMetricsData(found=False)
@@ -1078,12 +1052,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
                 warm = self._state_manager.warm_backend
                 if warm and hasattr(warm, "get_portfolio_metrics"):
-                    metrics = await warm.get_portfolio_metrics(strategy_id)
+                    metrics = await warm.get_portfolio_metrics(deployment_id)
                     if metrics is None:
                         return gateway_pb2.PortfolioMetricsData(found=False)
 
                     return gateway_pb2.PortfolioMetricsData(
-                        strategy_id=metrics.strategy_id,
                         initial_value_usd=str(metrics.initial_value_usd),
                         initial_timestamp=int(metrics.timestamp.timestamp()),
                         deposits_usd=str(metrics.deposits_usd),
@@ -1091,7 +1064,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         gas_spent_usd=str(metrics.gas_spent_usd),
                         updated_at=int(metrics.timestamp.timestamp()),
                         found=True,
-                        deployment_id=getattr(metrics, "deployment_id", "") or "",
+                        deployment_id=metrics.deployment_id,
                         cycle_id=getattr(metrics, "cycle_id", "") or "",
                         execution_mode=getattr(metrics, "execution_mode", "") or "",
                         is_complete=getattr(metrics, "is_complete", True),
@@ -1099,7 +1072,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
                 return gateway_pb2.PortfolioMetricsData(found=False)
             except Exception as e:
-                logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", strategy_id, e)
+                logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", deployment_id, e)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.PortfolioMetricsData(found=False)
@@ -1129,7 +1102,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         from the wire bind to NULL.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -1163,7 +1136,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("timestamp must be positive")
             return gateway_pb2.SaveLedgerEntryResponse(success=False, error="timestamp must be positive")
 
-        strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
 
         try:
@@ -1238,16 +1210,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await self._snapshot_execute(
                     """
                     INSERT INTO transaction_ledger (
-                        id, cycle_id, agent_id, deployment_id, execution_mode,
+                        id, cycle_id, deployment_id, execution_mode,
                         timestamp, intent_type,
                         token_in, amount_in, token_out, amount_out,
                         effective_price, slippage_bps, gas_used, gas_usd,
                         tx_hash, chain, protocol, success, error,
                         extracted_data_json, price_inputs_json, pre_state_json, post_state_json
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                        $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                        $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                        $20::jsonb, $21::jsonb, $22::jsonb, $23::jsonb
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         cycle_id = EXCLUDED.cycle_id,
@@ -1275,7 +1247,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     """,
                     entry_id,
                     request.cycle_id,
-                    strategy_id,
                     deployment_id,
                     request.execution_mode,
                     ts,
@@ -1300,7 +1271,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 )
                 return gateway_pb2.SaveLedgerEntryResponse(success=True)
             except Exception as e:
-                logger.error("SaveLedgerEntry failed for %s (id=%s): %s", strategy_id, request.id, e)
+                logger.error("SaveLedgerEntry failed for %s (id=%s): %s", deployment_id, request.id, e)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.SaveLedgerEntryResponse(success=False, error="internal server error")
@@ -1312,7 +1283,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 warm = self._state_manager.warm_backend
                 if warm is None or not hasattr(warm, "save_ledger_entry"):
                     error = "warm backend does not support save_ledger_entry"
-                    logger.error("SaveLedgerEntry (SQLite) unsupported for %s: %s", strategy_id, error)
+                    logger.error("SaveLedgerEntry (SQLite) unsupported for %s: %s", deployment_id, error)
                     context.set_code(grpc.StatusCode.UNIMPLEMENTED)
                     context.set_details(error)
                     return gateway_pb2.SaveLedgerEntryResponse(success=False, error=error)
@@ -1342,7 +1313,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 entry = LedgerEntry(
                     id=entry_id,
                     cycle_id=request.cycle_id,
-                    strategy_id=strategy_id,
                     deployment_id=deployment_id,
                     execution_mode=request.execution_mode,
                     timestamp=ts,
@@ -1368,7 +1338,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await warm.save_ledger_entry(entry)
                 return gateway_pb2.SaveLedgerEntryResponse(success=True)
             except Exception as e:
-                logger.error("SaveLedgerEntry (SQLite) failed for %s (id=%s): %s", strategy_id, request.id, e)
+                logger.error("SaveLedgerEntry (SQLite) failed for %s (id=%s): %s", deployment_id, request.id, e)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.SaveLedgerEntryResponse(success=False, error="internal server error")
@@ -1390,7 +1360,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         Non-blocking in non-live modes: on DB failure returns success=false.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -1444,8 +1414,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("payload_json must be valid UTF-8")
             return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json must be valid UTF-8")
 
-        strategy_id = resolve_agent_id(strategy_id)
-
         try:
             json.loads(payload_str)
         except json.JSONDecodeError:
@@ -1477,8 +1445,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         if self._snapshot_pool is not None:
             # PostgreSQL mode (deployed). VIB-3503 Part 2a: persist the typed
             # accounting event row to the metrics-database accounting_events
-            # table. The PG schema column is `agent_id` (resolved above via
-            # resolve_agent_id); the wire field stays `strategy_id`. UPSERT
+            # table. VIB-4721/4722: the PG schema now carries a single
+            # identity column, `deployment_id`; it is written the canonical deployment id with no
+            # gateway-side translation (blueprint 29 §4-5). UPSERT
             # by `id` is exercised by retries -- the UUIDv5 id is deterministic
             # in (deployment, cycle, intent_type, tx, position) so re-delivery
             # of the same event collapses to one row. Per ticket spec
@@ -1488,17 +1457,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await self._snapshot_execute(
                     """
                     INSERT INTO accounting_events (
-                        id, deployment_id, agent_id, cycle_id, execution_mode,
+                        id, deployment_id, cycle_id, execution_mode,
                         timestamp, chain, protocol, wallet_address, event_type,
                         position_key, ledger_entry_id, tx_hash, confidence,
                         payload_json, schema_version
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15::jsonb, $16
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                        $10, $11, $12, $13, $14::jsonb, $15
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         deployment_id   = EXCLUDED.deployment_id,
-                        agent_id        = EXCLUDED.agent_id,
                         cycle_id        = EXCLUDED.cycle_id,
                         execution_mode  = EXCLUDED.execution_mode,
                         timestamp       = EXCLUDED.timestamp,
@@ -1515,7 +1483,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     """,
                     event_id,
                     deployment_id,
-                    strategy_id,
                     request.cycle_id,
                     request.execution_mode,
                     ts,
@@ -1534,7 +1501,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     "Accounting event saved (Postgres) id=%s, type=%s, agent=%s",
                     event_id,
                     request.event_type,
-                    strategy_id,
+                    deployment_id,
                 )
                 return gateway_pb2.SaveAccountingEventResponse(success=True)
             except Exception as e:
@@ -1563,7 +1530,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             identity = AccountingIdentity(
                 id=event_id,
                 deployment_id=deployment_id,
-                strategy_id=strategy_id,
                 cycle_id=request.cycle_id,
                 execution_mode=request.execution_mode,
                 timestamp=ts,
@@ -1610,7 +1576,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     "Accounting event saved (SQLite) id=%s, type=%s, strategy=%s",
                     event_id,
                     request.event_type,
-                    strategy_id,
+                    deployment_id,
                 )
             return gateway_pb2.SaveAccountingEventResponse(success=bool(result))
         except Exception as e:
@@ -1780,8 +1746,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         valid_confidences = frozenset(get_args(ConfidenceLiteral))
 
         for idx, proto_row in enumerate(rows):
-            if not (proto_row.strategy_id or "").strip():
-                return f"rows[{idx}].strategy_id is required"
+            if not (proto_row.deployment_id or "").strip():
+                return f"rows[{idx}].deployment_id is required"
             if not (proto_row.deployment_id or "").strip():
                 return f"rows[{idx}].deployment_id is required"
             if proto_row.position_type not in valid_position_types:
@@ -1838,7 +1804,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         runner_state.py:480.
 
         Boundary validation matches :meth:`SavePositionEvent` — reject
-        blank snapshot_id / per-row strategy_id / per-row deployment_id /
+        blank snapshot_id / per-row deployment_id / per-row position_id /
         unknown position_type values rather than persisting corrupt rows.
         """
         if request.snapshot_id <= 0:
@@ -1919,21 +1885,19 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             warm_rows: list[PositionStateRow] = []
             for idx, proto_row in enumerate(request.rows):
-                # Strip + validate + resolve identifiers per row (CodeRabbit
-                # P3 + Claude pr-auditor P3, 2026-05-17). validate_strategy_id
-                # blocks 1MB strings / control chars; resolve_agent_id
-                # normalises to platform AGENT_ID on hosted so Track-C rows
-                # share the 1:1 identity invariant the rest of the Save*
-                # handlers honour (blueprints/06-state-management.md §1:1).
+                # Strip + validate identifiers per row (CodeRabbit
+                # P3 + Claude pr-auditor P3, 2026-05-17). validate_deployment_id
+                # blocks 1MB strings / control chars. Per blueprint 29 §4 the
+                # gateway does NOT translate identity — the caller passes the
+                # canonical deployment_id and it is used directly.
                 # captured_at is already ISO-8601 valid per the boundary
                 # validator above — re-parse here just to build the typed value.
-                stripped_strategy_id = (proto_row.strategy_id or "").strip()
                 stripped_deployment_id = (proto_row.deployment_id or "").strip()
                 stripped_position_id = (proto_row.position_id or "").strip()
-                # validate_strategy_id covers character class + length limits
-                # for strategy_id and deployment_id (which share the same
-                # strict shape — see blueprints/06-state-management.md
-                # §"Strategy-ID conventions"). position_id is intentionally
+                # validate_deployment_id covers character class + length limits
+                # for the canonical deployment id (see
+                # blueprints/06-state-management.md §"Deployment-ID
+                # conventions"). position_id is intentionally
                 # free-form: the Track-C materializer's fallback id is
                 # ``"{protocol}:{chain}:{label}"`` which can contain spaces
                 # via the human-readable label (e.g.
@@ -1942,21 +1906,18 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 # and embedded control characters — the symmetric security-
                 # boundary concern (CodeRabbit P3, 2026-05-17 second-round).
                 try:
-                    validate_strategy_id(stripped_strategy_id, f"rows[{idx}].strategy_id")
-                    validate_strategy_id(stripped_deployment_id, f"rows[{idx}].deployment_id")
+                    validate_deployment_id(stripped_deployment_id, f"rows[{idx}].deployment_id")
                 except Exception as ve:  # noqa: BLE001 — surface as INVALID_ARGUMENT
                     err = f"rows[{idx}] identifier rejected: {ve}"
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                     context.set_details(err)
                     return gateway_pb2.SavePositionStateSnapshotsResponse(success=False, error=err)
-                resolved_strategy_id = resolve_agent_id(stripped_strategy_id)
                 captured_at = datetime.fromisoformat(proto_row.captured_at.strip())
 
                 try:
                     warm_rows.append(
                         PositionStateRow(
                             snapshot_id=None,  # warm backend stamps from request.snapshot_id
-                            strategy_id=resolved_strategy_id,
                             deployment_id=stripped_deployment_id,
                             cycle_id=proto_row.cycle_id,
                             timestamp=captured_at,
@@ -2028,8 +1989,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         than raising, so a transient gRPC blip degrades attribution (loud
         warning in pnl_attributor) instead of halting the runner.
         """
+        # Validate the wire deployment_id for the input contract; the warm
+        # backend keys on deployment_id (blueprint 29 §4 — no translation),
+        # so the validated value itself is not used downstream.
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -2047,14 +2011,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("position_id is required")
             return gateway_pb2.GetPositionHistoryResponse(events=[])
 
-        # ``strategy_id`` is validated above so we don't break the wire
+        # ``deployment_id`` is validated above so we don't break the wire
         # contract, but the warm backend's ``get_position_history`` keys on
-        # ``deployment_id`` (the runner-stable id), so we don't pass it
-        # through.  Identity normalisation via ``resolve_agent_id`` stays
-        # consistent with sibling RPCs in case future PG-direct branches
-        # land here.
-        _ = resolve_agent_id(strategy_id)
-
+        # ``deployment_id`` (the canonical runner-stable id), so only
+        # ``deployment_id`` is passed through. Per blueprint 29 §4 there is
+        # no gateway-side identity translation.
         try:
             await self._ensure_initialized()
             assert self._state_manager is not None
@@ -2181,6 +2142,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # Read accounting events RPC (VIB-3503 Part 2c)
     # =========================================================================
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing accounting-events RPC.
     async def GetAccountingEvents(
         self,
         request: gateway_pb2.GetAccountingEventsRequest,
@@ -2205,7 +2167,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         from the opening event forward.
         """
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            validate_deployment_id(request.deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -2233,28 +2195,25 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("since_timestamp must be >= 0")
             return gateway_pb2.GetAccountingEventsResponse(events=[])
 
-        strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
 
         if self._snapshot_pool is not None:
             try:
                 rows = await self._snapshot_fetch(
                     """
-                    SELECT id, deployment_id, agent_id, cycle_id, execution_mode,
+                    SELECT id, deployment_id, cycle_id, execution_mode,
                            EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
                            chain, protocol, wallet_address, event_type,
                            position_key, ledger_entry_id, tx_hash, confidence,
                            payload_json::text AS payload_text, schema_version
                     FROM accounting_events
-                    WHERE agent_id = $1
-                      AND deployment_id = $2
-                      AND ($3 = '' OR position_key = $3)
-                      AND ($4 = '' OR event_type = $4)
-                      AND ($5 = 0 OR timestamp >= to_timestamp($5))
+                    WHERE deployment_id = $1
+                      AND ($2 = '' OR position_key = $2)
+                      AND ($3 = '' OR event_type = $3)
+                      AND ($4 = 0 OR timestamp >= to_timestamp($4))
                     ORDER BY timestamp ASC
-                    LIMIT NULLIF($6, 0)
+                    LIMIT NULLIF($5, 0)
                     """,
-                    strategy_id,
                     deployment_id,
                     request.position_key,
                     request.event_type,
@@ -2264,7 +2223,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 events = [_pg_row_to_accounting_event(r) for r in rows]
                 return gateway_pb2.GetAccountingEventsResponse(events=events)
             except Exception as e:
-                logger.warning("GetAccountingEvents PG failed for agent=%s: %s", strategy_id, e)
+                logger.warning("GetAccountingEvents PG failed for deployment=%s: %s", deployment_id, e)
                 return gateway_pb2.GetAccountingEventsResponse(events=[])
 
         # SQLite mode (local dev) — delegate to the warm backend's sync primitive.
@@ -2308,9 +2267,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """Convert a PG asyncpg.Record from accounting_outbox to the proto shape.
 
         Column-name translation (PG vs SQLite vs wire):
-        - PG ``agent_id`` ↔ SQLite ``strategy_id`` ↔ wire ``strategy_id``
-          (same identity, different column names — agent_id is the deployed
-          ``resolve_agent_id()`` form, strategy_id is the local form).
+        - VIB-4721/4722: ``accounting_outbox`` has a single identity column,
+          ``deployment_id`` (one canonical id, resolved once at boot, no
+          gateway-side translation).
         - PG ``ledger_entry_id`` is also the primary key; we mirror it into
           the proto's ``id`` field so AccountingProcessor.drain_one can treat
           PG and SQLite rows identically.
@@ -2325,7 +2284,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return gateway_pb2.OutboxEntry(
             id=ledger_id,
             deployment_id=row.get("deployment_id") or "",
-            strategy_id=row.get("agent_id") or "",
             cycle_id=row.get("cycle_id") or "",
             ledger_entry_id=ledger_id,
             intent_type=row.get("intent_type") or "",
@@ -2343,7 +2301,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return gateway_pb2.OutboxEntry(
             id=row.get("id") or "",
             deployment_id=row.get("deployment_id") or "",
-            strategy_id=row.get("strategy_id") or "",
             cycle_id=row.get("cycle_id") or "",
             ledger_entry_id=row.get("ledger_entry_id") or "",
             intent_type=row.get("intent_type") or "",
@@ -2379,14 +2336,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("deployment_id is required")
             return gateway_pb2.SaveOutboxEntryResponse(success=False, error="deployment_id is required")
 
-        strategy_id_raw = (request.strategy_id or "").strip()
+        deployment_id_raw = (request.deployment_id or "").strip()
         try:
-            strategy_id = validate_strategy_id(strategy_id_raw)
+            deployment_id = validate_deployment_id(deployment_id_raw)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SaveOutboxEntryResponse(success=False, error=str(e))
-        strategy_id = resolve_agent_id(strategy_id)
 
         await self._ensure_snapshot_pool()
 
@@ -2395,14 +2351,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await self._snapshot_execute(
                     """
                     INSERT INTO accounting_outbox
-                        (ledger_entry_id, agent_id, deployment_id, intent_type,
+                        (ledger_entry_id, deployment_id, intent_type,
                          cycle_id, wallet_address, position_key, market_id,
                          status, retry_count)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
                     ON CONFLICT (ledger_entry_id) DO NOTHING
                     """,
                     ledger_entry_id,
-                    strategy_id,
                     deployment_id,
                     request.intent_type or "",
                     request.cycle_id or "",
@@ -2427,7 +2382,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             await warm.save_outbox_entry(
                 outbox_id=request.outbox_id or ledger_entry_id,
                 deployment_id=deployment_id,
-                strategy_id=strategy_id,
                 cycle_id=request.cycle_id or "",
                 ledger_entry_id=ledger_entry_id,
                 intent_type=request.intent_type or "",
@@ -2459,7 +2413,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 row = await self._snapshot_fetchrow(
                     """
-                    SELECT ledger_entry_id, agent_id, deployment_id, intent_type,
+                    SELECT ledger_entry_id, deployment_id, intent_type,
                            cycle_id, wallet_address, position_key, market_id,
                            status, retry_count, last_error, created_at, processed_at
                     FROM accounting_outbox
@@ -2512,7 +2466,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 rows = await self._snapshot_fetch(
                     """
-                    SELECT ledger_entry_id, agent_id, deployment_id, intent_type,
+                    SELECT ledger_entry_id, deployment_id, intent_type,
                            cycle_id, wallet_address, position_key, market_id,
                            status, retry_count, last_error, created_at, processed_at
                     FROM accounting_outbox
@@ -2670,6 +2624,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("internal server error")
             return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
 
+    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing ledger-entry RPC.
     async def GetLedgerEntry(
         self,
         request: gateway_pb2.GetLedgerEntryRequest,
@@ -2692,7 +2647,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 row = await self._snapshot_fetchrow(
                     """
-                    SELECT id, cycle_id, agent_id, deployment_id, execution_mode,
+                    SELECT id, cycle_id, deployment_id, execution_mode,
                            EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
                            intent_type, token_in, amount_in, token_out, amount_out,
                            effective_price, slippage_bps, gas_used, gas_usd,
@@ -2717,7 +2672,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 entry = gateway_pb2.LedgerEntryData(
                     id=row["id"] or "",
                     cycle_id=row["cycle_id"] or "",
-                    strategy_id=row["agent_id"] or "",
                     deployment_id=row["deployment_id"] or "",
                     execution_mode=row["execution_mode"] or "",
                     timestamp=int(row["ts_epoch"] or 0),
@@ -2778,7 +2732,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             entry = gateway_pb2.LedgerEntryData(
                 id=row.get("id") or "",
                 cycle_id=row.get("cycle_id") or "",
-                strategy_id=row.get("strategy_id") or row.get("agent_id") or "",
                 deployment_id=row.get("deployment_id") or "",
                 execution_mode=row.get("execution_mode") or "",
                 timestamp=ts_epoch,
@@ -2817,10 +2770,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     ) -> gateway_pb2.SumLedgerGasUsdResponse:
         """Return Σ transaction_ledger.gas_usd for portfolio metrics.
 
-        Hosted Postgres stores the strategy identity in ``agent_id``. The wire
-        request still carries ``strategy_id`` for local parity, so the gateway
-        resolves it through ``AGENT_ID`` before using the legacy empty
-        ``deployment_id`` fallback.
+        One identity (blueprint 29 §4): ``transaction_ledger`` keys on the
+        single ``deployment_id`` column on both backends; the gateway filters
+        the caller-supplied ``deployment_id`` directly with no translation.
         """
         deployment_id = (request.deployment_id or "").strip()
         if not deployment_id:
@@ -2829,20 +2781,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return gateway_pb2.SumLedgerGasUsdResponse(success=False, error="deployment_id is required")
 
         try:
-            deployment_id = validate_strategy_id(deployment_id, field="deployment_id")
+            deployment_id = validate_deployment_id(deployment_id, field="deployment_id")
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=str(e))
-
-        fallback_strategy_id = (request.strategy_id or deployment_id).strip()
-        try:
-            fallback_strategy_id = validate_strategy_id(fallback_strategy_id)
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=str(e))
-        agent_id = resolve_agent_id(fallback_strategy_id)
 
         await self._ensure_snapshot_pool()
 
@@ -2861,19 +2804,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         0
                     ) AS total
                     FROM transaction_ledger
-                    WHERE agent_id = $2
-                      AND (deployment_id = $1 OR deployment_id = '')
+                    WHERE deployment_id = $1
                     """,
                     deployment_id,
-                    agent_id,
                 )
                 total = Decimal(str((row or {"total": 0})["total"] or 0))
                 return gateway_pb2.SumLedgerGasUsdResponse(success=True, gas_usd_total=str(total))
             except Exception as e:
                 logger.error(
-                    "SumLedgerGasUsd PG failed for deployment_id=%s agent_id=%s: %s",
+                    "SumLedgerGasUsd PG failed for deployment_id=%s: %s",
                     deployment_id,
-                    agent_id,
                     e,
                 )
                 context.set_code(grpc.StatusCode.INTERNAL)
@@ -2891,7 +2831,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 context.set_details(error)
                 return gateway_pb2.SumLedgerGasUsdResponse(success=False, error=error)
 
-            total = await warm.sum_ledger_gas_usd(deployment_id, fallback_strategy_id)
+            total = await warm.sum_ledger_gas_usd(deployment_id)
             return gateway_pb2.SumLedgerGasUsdResponse(success=True, gas_usd_total=str(total))
         except Exception as e:
             logger.error("SumLedgerGasUsd SQLite failed for deployment_id=%s: %s", deployment_id, e)
@@ -3848,13 +3788,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     ) -> tuple[str, str, str, datetime] | gateway_pb2.SaveLedgerAndRegistryResponse:
         """Validate request invariants, mirroring SaveLedgerEntry.
 
-        Returns either the validated tuple ``(strategy_id, deployment_id,
-        ledger_id, ts)`` or an error response (with gRPC context already
-        marked). Enforces:
+        Returns either the validated tuple ``(deployment_id, registry_deployment_id,
+        ledger_id, ts)`` or an error response (with gRPC context already marked). Enforces:
           * ``ledger.id`` is a non-empty UUID
           * ``deployment_id`` is non-blank
-          * ``strategy_id`` matches the gateway format (validate +
-            resolve_agent_id, identical to SaveLedgerEntry)
+          * ``deployment_id`` matches the gateway format (validate only —
+            no identity translation, identical to SaveLedgerEntry)
           * ``timestamp`` is in range
         CodeRabbit (PR #2230) flagged that the atomic RPC bypassed these
         invariants; this closes the gap symmetrically with the legacy path.
@@ -3876,12 +3815,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             )
 
         try:
-            strategy_id = validate_strategy_id(request.strategy_id)
+            deployment_id = validate_deployment_id(request.deployment_id)
         except ValidationError as exc:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(exc))
             return gateway_pb2.SaveLedgerAndRegistryResponse(success=False, error=str(exc), error_class="ValueError")
-        strategy_id = resolve_agent_id(strategy_id)
 
         deployment_id = request.deployment_id.strip() if request.deployment_id else ""
         if not deployment_id:
@@ -3906,7 +3844,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 success=False, error="timestamp out of range", error_class="ValueError"
             )
 
-        return strategy_id, deployment_id, ledger_id, ts
+        return deployment_id, deployment_id, ledger_id, ts
 
     @staticmethod
     def _decode_registry_payload(
@@ -3945,13 +3883,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     def _build_ledger_entry_from_request(
         request: gateway_pb2.SaveLedgerAndRegistryRequest,
         ledger_id: str,
-        strategy_id: str,
         deployment_id: str,
         ts: datetime,
     ) -> Any:
         """Reconstruct the ``LedgerEntry`` dataclass from the proto request.
 
-        Field order mirrors :meth:`SaveLedgerEntry`. ``strategy_id`` and
+        Field order mirrors :meth:`SaveLedgerEntry`. ``deployment_id`` and
         ``deployment_id`` come from the validated, resolved values rather
         than the raw request to keep both paths in lockstep.
         """
@@ -3963,7 +3900,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return LedgerEntry(
             id=ledger_id,
             cycle_id=request.cycle_id,
-            strategy_id=strategy_id,
             deployment_id=deployment_id,
             execution_mode=request.execution_mode,
             timestamp=ts,
@@ -4274,7 +4210,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         await conn.execute(
                             """
                             INSERT INTO transaction_ledger (
-                                id, cycle_id, agent_id, deployment_id, execution_mode,
+                                id, cycle_id, deployment_id, execution_mode,
                                 timestamp, intent_type,
                                 token_in, amount_in, token_out, amount_out,
                                 effective_price, slippage_bps, gas_used, gas_usd,
@@ -4282,9 +4218,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                                 extracted_data_json, price_inputs_json,
                                 pre_state_json, post_state_json
                             ) VALUES (
-                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                                $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                                $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                                $20::jsonb, $21::jsonb, $22::jsonb, $23::jsonb
                             )
                             ON CONFLICT (id) DO UPDATE SET
                                 cycle_id = EXCLUDED.cycle_id,
@@ -4312,7 +4248,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                             """,
                             ledger.id,
                             ledger.cycle_id,
-                            ledger.strategy_id,
                             getattr(ledger, "deployment_id", "") or "",
                             getattr(ledger, "execution_mode", "") or "",
                             ledger.timestamp,
@@ -4544,14 +4479,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         runner's existing fail-closed pipeline handles each one correctly.
 
         Input validation mirrors :meth:`SaveLedgerEntry` (UUID, non-blank
-        deployment_id, strategy_id format, positive timestamp). Helpers
+        non-blank deployment_id, valid deployment_id format, positive timestamp). Helpers
         live alongside the handler so the success path stays a thin
         orchestrator under the CRAP threshold.
         """
         validated = self._validate_save_ledger_and_registry_request(request, context)
         if isinstance(validated, gateway_pb2.SaveLedgerAndRegistryResponse):
             return validated
-        strategy_id, deployment_id, ledger_id, ts = validated
+        deployment_id, _, ledger_id, ts = validated
 
         payload = self._decode_registry_payload(request, context)
         if isinstance(payload, gateway_pb2.SaveLedgerAndRegistryResponse):
@@ -4570,7 +4505,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             )
 
         try:
-            ledger = self._build_ledger_entry_from_request(request, ledger_id, strategy_id, deployment_id, ts)
+            ledger = self._build_ledger_entry_from_request(request, ledger_id, deployment_id, ts)
             registry = self._build_registry_row_from_request(request, deployment_id, payload, context)
             if isinstance(registry, gateway_pb2.SaveLedgerAndRegistryResponse):
                 return registry

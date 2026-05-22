@@ -24,7 +24,7 @@ from almanak.framework.dashboard.templates import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -45,4 +45,4 @@ def render_custom_dashboard(
         config=config,
     )
 
-    render_ta_dashboard(strategy_id, strategy_config, session_state, config)
+    render_ta_dashboard(deployment_id, strategy_config, session_state, config)

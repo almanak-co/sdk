@@ -268,7 +268,7 @@ class PendleYTYieldStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "pendle_yt_yield"),
+            deployment_id=getattr(self, "deployment_id", "pendle_yt_yield"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

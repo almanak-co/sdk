@@ -198,7 +198,7 @@ class TestDataSourceConversion:
         }
 
         summary = StrategySummary(
-            strategy_id="test", name="Test", status="PAPER_TRADING",
+            deployment_id="test", name="Test", status="PAPER_TRADING",
             chain="arbitrum", protocol="Uniswap V3",
             total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"),
             last_action_at=None, attention_required=False, attention_reason="",
@@ -220,7 +220,7 @@ class TestDataSourceConversion:
         from almanak.framework.dashboard.gateway_client import StrategySummary
 
         summary = StrategySummary(
-            strategy_id="test", name="Test", status="RUNNING",
+            deployment_id="test", name="Test", status="RUNNING",
             chain="arbitrum", protocol="",
             total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"),
             last_action_at=None, attention_required=False, attention_reason="",
@@ -233,7 +233,7 @@ class TestDataSourceConversion:
         from almanak.framework.dashboard.gateway_client import StrategySummary
 
         summary = StrategySummary(
-            strategy_id="test", name="Test", status="PAPER_TRADING",
+            deployment_id="test", name="Test", status="PAPER_TRADING",
             chain="arbitrum", protocol="",
             total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"),
             last_action_at=None, attention_required=False, attention_reason="",
@@ -251,7 +251,7 @@ class TestDataSourceConversion:
         }
 
         summary = StrategySummary(
-            strategy_id="test", name="Test", status="PAPER_TRADING",
+            deployment_id="test", name="Test", status="PAPER_TRADING",
             chain="arbitrum", protocol="",
             total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"),
             last_action_at=None, attention_required=False, attention_reason="",
@@ -289,7 +289,7 @@ class TestProtoFields:
         """Verify data survives serialize -> deserialize."""
         from almanak.gateway.proto import gateway_pb2
         msg = gateway_pb2.StrategySummary(
-            strategy_id="paper:test",
+            deployment_id="paper:test",
             name="Test (Paper)",
             status="PAPER_TRADING",
             execution_mode="paper",
@@ -308,9 +308,9 @@ class TestProtoFields:
 
 
 class TestGatewayPaperSessionDiscovery:
-    def _make_state_file(self, tmpdir: Path, strategy_id: str, **overrides) -> Path:
+    def _make_state_file(self, tmpdir: Path, deployment_id: str, **overrides) -> Path:
         data = {
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "session_start": "2026-04-01T10:00:00+00:00",
             "last_save": datetime.now(tz=UTC).isoformat(),
             "tick_count": 50,
@@ -328,7 +328,7 @@ class TestGatewayPaperSessionDiscovery:
             "ticks_with_fork": 45, "ticks_with_indicators": 40, "ticks_with_action": 10,
         }
         data.update(overrides)
-        state_file = tmpdir / f"{strategy_id}.state.json"
+        state_file = tmpdir / f"{deployment_id}.state.json"
         state_file.write_text(json.dumps(data))
         return state_file
 
@@ -348,7 +348,7 @@ class TestGatewayPaperSessionDiscovery:
 
         assert len(sessions) == 1
         session = sessions[0]
-        assert session["strategy_id"] == "paper:test_strategy"
+        assert session["deployment_id"] == "paper:test_strategy"
         assert session["status"] == "PAPER_TRADING"
         assert session["execution_mode"] == "paper"
         assert session["chain"] == "arbitrum"
@@ -443,7 +443,7 @@ class TestGatewayPaperSessionDiscovery:
             sessions = self._make_servicer()._discover_paper_sessions()
 
         assert len(sessions) == 1
-        assert sessions[0]["strategy_id"] == "paper:healthy_strat"
+        assert sessions[0]["deployment_id"] == "paper:healthy_strat"
 
     def test_equity_curve_downsampling(self, tmp_path):
         paper_dir = tmp_path / ".almanak" / "paper"
@@ -482,24 +482,24 @@ class TestGatewayPaperSessionDiscovery:
         assert len(sessions) == 1
         assert sessions[0]["status"] == "INACTIVE"
 
-    def test_null_strategy_id_falls_back_to_state_file_stem(self, tmp_path):
-        """``strategy_id: null`` in JSON must fall back to the state-file stem.
+    def test_null_deployment_id_falls_back_to_state_file_stem(self, tmp_path):
+        """``deployment_id: null`` in JSON must fall back to the state-file stem.
 
-        ``data.get("strategy_id", default)`` only returns the default when the
-        key is *absent*. With ``"strategy_id": null`` the key is present, so the
-        helper returned ``None`` — and downstream ``strategy_id.replace(...)``
+        ``data.get("deployment_id", default)`` only returns the default when the
+        key is *absent*. With ``"deployment_id": null`` the key is present, so the
+        helper returned ``None`` — and downstream ``deployment_id.replace(...)``
         / ``_derive_protocol_from_config`` would crash, aborting the whole
         paper-session list discovery.
         """
         paper_dir = tmp_path / ".almanak" / "paper"
         paper_dir.mkdir(parents=True)
-        # ``_make_state_file`` takes ``strategy_id`` as a positional that drives
+        # ``_make_state_file`` takes ``deployment_id`` as a positional that drives
         # both the file content AND the file stem; overwrite just the content
         # field afterwards so the stem stays ``null_strat`` and the JSON has
-        # ``"strategy_id": null``.
+        # ``"deployment_id": null``.
         state_file = self._make_state_file(paper_dir, "null_strat")
         payload = json.loads(state_file.read_text())
-        payload["strategy_id"] = None
+        payload["deployment_id"] = None
         state_file.write_text(json.dumps(payload))
 
         with patch.object(Path, "home", return_value=tmp_path):
@@ -507,7 +507,7 @@ class TestGatewayPaperSessionDiscovery:
 
         assert len(sessions) == 1
         # Falls back to ``state_file.stem.replace(".state", "")``.
-        assert sessions[0]["strategy_id"] == "paper:null_strat"
+        assert sessions[0]["deployment_id"] == "paper:null_strat"
 
     def test_non_string_chain_and_protocol_fall_back_to_defaults(self, tmp_path):
         """Non-string ``chain`` / ``protocol`` must coerce to defaults, not crash.

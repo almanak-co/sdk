@@ -190,7 +190,7 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description="Opening new V4 LP position",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"action": "opening_v4_position"},
             )
         )
@@ -279,7 +279,7 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"V4 LP position opened on {self.pool}"
                     + (f" (ID: {position_id})" if position_id else ""),
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "position_id": str(position_id) if position_id else None},
                 )
             )
@@ -357,7 +357,7 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_uniswap_v4_lp"),
+            deployment_id=getattr(self, "deployment_id", "demo_uniswap_v4_lp"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

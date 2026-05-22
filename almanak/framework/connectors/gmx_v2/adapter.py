@@ -1325,7 +1325,7 @@ class GMXv2Adapter:
     def get_positions_as_teardown_summary(
         self,
         rpc_url: str | None = None,
-        strategy_id: str = "",
+        deployment_id: str = "",
         gateway_client: "GatewayClient | None" = None,
     ) -> "TeardownPositionSummary":
         """Read on-chain positions and return as TeardownPositionSummary.
@@ -1336,7 +1336,7 @@ class GMXv2Adapter:
 
         Args:
             rpc_url: DEPRECATED — RPC endpoint URL. Prefer gateway_client.
-            strategy_id: Strategy identifier for the summary
+            deployment_id: Deployment identifier for the summary
             gateway_client: Gateway client for routing eth_call through the
                 gateway. Preferred over rpc_url.
 
@@ -1381,7 +1381,7 @@ class GMXv2Adapter:
             )
 
         return TeardownPositionSummary(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=datetime.now(UTC),
             positions=position_infos,
         )

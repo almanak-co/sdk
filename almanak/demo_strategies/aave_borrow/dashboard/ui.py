@@ -39,7 +39,7 @@ def _placeholder_token_price(token_key: str) -> Decimal:
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -54,7 +54,7 @@ def render_custom_dashboard(
     - Liquidation threshold
     """
     st.title("Aave Borrow Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -67,7 +67,7 @@ def render_custom_dashboard(
     target_ltv_pct = Decimal(str(strategy_config.get("target_ltv_pct", "60")))
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Collateral:** {collateral_token}")
     st.markdown(f"**Borrow Asset:** {borrow_token}")
     st.markdown("**Chain:** Arbitrum")
@@ -97,8 +97,8 @@ def render_custom_dashboard(
     st.subheader("Liquidation Risk")
     _render_liquidation_risk(session_state, collateral_token)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_position_overview(

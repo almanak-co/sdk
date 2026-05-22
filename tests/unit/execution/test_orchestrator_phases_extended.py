@@ -91,7 +91,7 @@ def _make_state(
         metadata=metadata or {},
     )
     context = ExecutionContext(
-        strategy_id="test",
+        deployment_id="test",
         intent_id="test-intent",
         chain="arbitrum",
         wallet_address=orchestrator.signer.address,
@@ -143,7 +143,7 @@ class TestInitPipelineState:
     def test_provided_context_missing_fields_populated(self, orchestrator):
         # wallet_address and chain empty -> fill from orchestrator defaults
         bundle = ActionBundle(intent_type="HOLD", transactions=[])
-        context = ExecutionContext(strategy_id="my-strat")
+        context = ExecutionContext(deployment_id="my-strat")
         context.wallet_address = ""
         context.chain = ""
 
@@ -151,12 +151,12 @@ class TestInitPipelineState:
 
         assert state.context.wallet_address == orchestrator.signer.address
         assert state.context.chain == "arbitrum"
-        assert state.context.strategy_id == "my-strat"
+        assert state.context.deployment_id == "my-strat"
 
     def test_provided_context_non_empty_fields_preserved(self, orchestrator):
         bundle = ActionBundle(intent_type="SWAP", transactions=[])
         context = ExecutionContext(
-            strategy_id="foo",
+            deployment_id="foo",
             wallet_address="0xDEADBEEF",
             chain="base",
             intent_description="already set",
@@ -170,7 +170,7 @@ class TestInitPipelineState:
 
     def test_result_correlation_id_matches_context(self, orchestrator):
         bundle = ActionBundle(intent_type="SWAP", transactions=[])
-        context = ExecutionContext(strategy_id="foo", correlation_id="fixed-corr-id")
+        context = ExecutionContext(deployment_id="foo", correlation_id="fixed-corr-id")
         state = orchestrator._init_pipeline_state(bundle, context)
 
         assert state.result.correlation_id == "fixed-corr-id"

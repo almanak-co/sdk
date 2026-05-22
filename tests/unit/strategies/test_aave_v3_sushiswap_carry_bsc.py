@@ -42,7 +42,7 @@ def strategy(config):
     strat.config = config
     strat._chain = "bsc"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aave-sushi-bsc"
+    strat._deployment_id = "test-aave-sushi-bsc"
 
     strat.collateral_token = config["collateral_token"]
     strat.collateral_amount = Decimal(config["collateral_amount"])

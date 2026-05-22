@@ -185,7 +185,7 @@ class SparkLendingLifecycleStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"State: {old_state} -> {new_state}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"old_state": old_state, "new_state": new_state},
             )
         )
@@ -301,7 +301,7 @@ class SparkLendingLifecycleStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"{intent_type} succeeded on Spark Ethereum",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": intent_type.lower(), "state": self._state},
                 )
             )
@@ -378,7 +378,7 @@ class SparkLendingLifecycleStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

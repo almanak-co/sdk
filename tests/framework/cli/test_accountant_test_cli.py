@@ -24,8 +24,7 @@ def _make_minimal_passing_lp_db() -> Path:
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
-            deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, protocol TEXT, success INTEGER,
@@ -42,26 +41,26 @@ def _make_minimal_passing_lp_db() -> Path:
             tx_hash TEXT, ledger_entry_id TEXT
         );
         CREATE TABLE accounting_events (
-            id TEXT, cycle_id TEXT, deployment_id TEXT, strategy_id TEXT,
+            id TEXT, cycle_id TEXT, deployment_id TEXT,
             timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
             position_key TEXT, ledger_entry_id TEXT, tx_hash TEXT,
             confidence TEXT, payload_json TEXT
         );
         CREATE TABLE portfolio_snapshots (
-            id INTEGER PRIMARY KEY, strategy_id TEXT, deployment_id TEXT,
+            id INTEGER PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, total_value_usd TEXT, available_cash_usd TEXT,
             deployed_capital_usd TEXT, value_confidence TEXT,
             iteration_number INTEGER, timestamp TEXT, chain TEXT
         );
         CREATE TABLE portfolio_metrics (
-            strategy_id TEXT, initial_value_usd TEXT, total_value_usd TEXT,
-            cycle_id TEXT, deployment_id TEXT, is_complete INTEGER
+            deployment_id TEXT, initial_value_usd TEXT, total_value_usd TEXT,
+            cycle_id TEXT, is_complete INTEGER
         );
         """
     )
     cur.execute(
         "INSERT INTO transaction_ledger VALUES ('led-1', 'cyc-1', 'lp-test', "
-        "'lp-test', 'live', '2026-05-01T00:00:00Z', 'LP_OPEN', 'WETH', '0.001', "
+        "'live', '2026-05-01T00:00:00Z', 'LP_OPEN', 'WETH', '0.001', "
         "'USDC', '3.0', 500000, '0.05', '0xdeadbeef', 'arbitrum', 'uniswap_v3', 1, "
         "'{}', "
         "'{\"WETH\": {\"price_usd\": \"3000\", \"oracle_source\": \"chainlink\"}, "
@@ -74,7 +73,7 @@ def _make_minimal_passing_lp_db() -> Path:
         "100, 200, '1234567', '0', '0', '0xdeadbeef', 'led-1')"
     )
     cur.execute(
-        "INSERT INTO accounting_events VALUES ('ae-1', 'cyc-1', 'lp-test', 'lp-test', "
+        "INSERT INTO accounting_events VALUES ('ae-1', 'cyc-1', 'lp-test', "
         "'2026-05-01T00:00:00Z', 'arbitrum', 'uniswap_v3', 'LP_OPEN', 'pos-1', "
         "'led-1', '0xdeadbeef', 'HIGH', "
         "'{\"event_type\": \"LP_OPEN\", \"protocol\": \"uniswap_v3\", "
@@ -86,15 +85,15 @@ def _make_minimal_passing_lp_db() -> Path:
     )
     for i, val in enumerate(["10.0", "10.0001", "10.0002"]):
         cur.execute(
-            "INSERT INTO portfolio_snapshots (strategy_id, deployment_id, cycle_id, "
+            "INSERT INTO portfolio_snapshots (deployment_id, cycle_id, "
             "total_value_usd, available_cash_usd, deployed_capital_usd, "
             "value_confidence, iteration_number, timestamp, chain) "
-            "VALUES ('lp-test', 'lp-test', 'cyc-1', ?, '0', ?, 'HIGH', ?, ?, 'arbitrum')",
+            "VALUES ('lp-test', 'cyc-1', ?, '0', ?, 'HIGH', ?, ?, 'arbitrum')",
             (val, val, i, f"2026-05-01T00:0{i}:00Z"),
         )
     cur.execute(
         "INSERT INTO portfolio_metrics VALUES ('lp-test', '10.0', '10.0002', "
-        "'cyc-1', 'lp-test', 0)"
+        "'cyc-1', 0)"
     )
     conn.commit()
     conn.close()
@@ -189,7 +188,7 @@ def test_default_mode_fails_when_cells_fail():
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT, cycle_id TEXT, strategy_id TEXT, deployment_id TEXT,
+            id TEXT, cycle_id TEXT, deployment_id TEXT,
             execution_mode TEXT, timestamp TEXT, intent_type TEXT,
             gas_used INTEGER, gas_usd TEXT, tx_hash TEXT, chain TEXT,
             protocol TEXT, success INTEGER, extracted_data_json TEXT,
@@ -199,7 +198,7 @@ def test_default_mode_fails_when_cells_fail():
         CREATE TABLE position_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, payload_json TEXT, confidence TEXT);
         CREATE TABLE portfolio_snapshots (id INTEGER, total_value_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT);
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     cur.execute(

@@ -20,7 +20,7 @@ Usage:
 
     # Create deployment manager
     canary = CanaryDeployment(
-        strategy_id="my_strategy",
+        deployment_id="my_strategy",
         stable_version_id="v_stable",
         canary_version_id="v_canary",
         config=config,
@@ -338,7 +338,7 @@ class CanaryState:
 
     Attributes:
         deployment_id: Unique identifier for this deployment
-        strategy_id: Strategy being deployed
+        deployment_id: Strategy being deployed
         stable_version_id: ID of the stable version
         canary_version_id: ID of the canary version
         status: Current deployment status
@@ -352,7 +352,6 @@ class CanaryState:
     """
 
     deployment_id: str
-    strategy_id: str
     stable_version_id: str
     canary_version_id: str
     status: CanaryStatus = CanaryStatus.PENDING
@@ -368,7 +367,7 @@ class CanaryState:
         """Generate deployment ID if not provided."""
         if not self.deployment_id:
             ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-            self.deployment_id = f"canary_{self.strategy_id}_{ts}"
+            self.deployment_id = f"canary_{self.deployment_id}_{ts}"
 
     @property
     def canary_capital_usd(self) -> Decimal:
@@ -404,7 +403,6 @@ class CanaryState:
         """Convert to dictionary for serialization."""
         return {
             "deployment_id": self.deployment_id,
-            "strategy_id": self.strategy_id,
             "stable_version_id": self.stable_version_id,
             "canary_version_id": self.canary_version_id,
             "status": self.status.value,
@@ -435,7 +433,6 @@ class CanaryState:
 
         return cls(
             deployment_id=data["deployment_id"],
-            strategy_id=data["strategy_id"],
             stable_version_id=data["stable_version_id"],
             canary_version_id=data["canary_version_id"],
             status=CanaryStatus(data["status"]),
@@ -519,7 +516,7 @@ class CanaryDeployment:
     4. Auto-promote or auto-rollback based on criteria
 
     Attributes:
-        strategy_id: ID of the strategy being deployed
+        deployment_id: ID of the strategy being deployed
         stable_version_id: ID of the current stable version
         canary_version_id: ID of the new canary version
         state: Current deployment state
@@ -528,7 +525,7 @@ class CanaryDeployment:
 
     def __init__(
         self,
-        strategy_id: str,
+        deployment_id: str,
         stable_version_id: str,
         canary_version_id: str,
         config: CanaryConfig | None = None,
@@ -541,7 +538,7 @@ class CanaryDeployment:
         """Initialize the canary deployment manager.
 
         Args:
-            strategy_id: ID of the strategy being deployed
+            deployment_id: ID of the strategy being deployed
             stable_version_id: ID of the current stable version
             canary_version_id: ID of the new canary version
             config: Deployment configuration (uses defaults if not provided)
@@ -551,7 +548,7 @@ class CanaryDeployment:
             metrics_provider: Function to fetch metrics for a version
             chain: Blockchain network for event emission
         """
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self.stable_version_id = stable_version_id
         self.canary_version_id = canary_version_id
         self.config = config or CanaryConfig()
@@ -565,8 +562,7 @@ class CanaryDeployment:
 
         # Initialize state
         self.state = CanaryState(
-            deployment_id="",  # Will be generated in __post_init__
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             stable_version_id=stable_version_id,
             canary_version_id=canary_version_id,
             config=self.config,
@@ -576,7 +572,7 @@ class CanaryDeployment:
         self._monitoring_task: asyncio.Task[None] | None = None
 
         logger.info(
-            f"CanaryDeployment initialized for strategy {strategy_id}: "
+            f"CanaryDeployment initialized for strategy {deployment_id}: "
             f"stable={stable_version_id}, canary={canary_version_id}"
         )
 
@@ -1256,7 +1252,7 @@ class CanaryDeployment:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.CUSTOM,
             description=description,
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             chain=self._chain,
             details={
                 "canary_event_type": event_type.value,
@@ -1288,7 +1284,6 @@ class CanaryDeployment:
 
         return {
             "deployment_id": self.state.deployment_id,
-            "strategy_id": self.strategy_id,
             "status": self.state.status.value,
             "observation_remaining_seconds": self.state.observation_remaining_seconds,
             "canary_metrics": self.state.canary_metrics.to_dict() if self.state.canary_metrics else None,
@@ -1303,7 +1298,7 @@ class CanaryDeployment:
             Dictionary containing full deployment state
         """
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "stable_version_id": self.stable_version_id,
             "canary_version_id": self.canary_version_id,
             "config": self.config.to_dict(),
@@ -1333,7 +1328,7 @@ class CanaryDeployment:
             CanaryDeployment instance with restored state
         """
         deployment = cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             stable_version_id=data["stable_version_id"],
             canary_version_id=data["canary_version_id"],
             config=CanaryConfig.from_dict(data.get("config", {})),

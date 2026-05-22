@@ -27,7 +27,7 @@ Usage:
     config = PaperTraderConfig(
         chain="arbitrum",
         rpc_url="https://arb1.arbitrum.io/rpc",
-        strategy_id="my_strategy",
+        deployment_id="my_strategy",
         tick_interval_seconds=60,
     )
     trader = PaperTrader(fork_manager, portfolio_tracker, config)

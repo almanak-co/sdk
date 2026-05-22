@@ -280,7 +280,7 @@ class EthenaPTLeverageStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
                 description=f"Flash loan entry: {capital} {self.borrow_token} at {self.target_leverage}x",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "pt_leverage_entry",
                     "capital": str(capital),
@@ -314,7 +314,7 @@ class EthenaPTLeverageStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
                 description=f"Flash loan exit: unwinding {self._total_pt_collateral} {self.pt_token}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "pt_leverage_exit",
                     "collateral": str(self._total_pt_collateral),
@@ -421,7 +421,7 @@ class EthenaPTLeverageStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Phase: {old.upper()} -> {new.upper()}",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"old_phase": old, "new_phase": new},
             )
         )
@@ -607,7 +607,7 @@ class EthenaPTLeverageStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

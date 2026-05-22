@@ -37,19 +37,19 @@ def servicer(tmp_path: Path) -> TeardownServiceServicer:
 @pytest.mark.asyncio
 async def test_teardown_service_request_lifecycle(servicer: TeardownServiceServicer) -> None:
     ctx = _Context()
-    request = TeardownRequest(strategy_id="agent-1", mode=TeardownMode.HARD)
+    request = TeardownRequest(deployment_id="agent-1", mode=TeardownMode.HARD)
 
     created = await servicer.CreateTeardownRequest(
         gateway_pb2.CreateTeardownRequestRequest(request_json=teardown_request_to_json(request)),
         ctx,
     )
-    active = await servicer.GetActiveTeardownRequest(gateway_pb2.GetActiveTeardownRequestRequest(strategy_id="agent-1"), ctx)
+    active = await servicer.GetActiveTeardownRequest(gateway_pb2.GetActiveTeardownRequestRequest(deployment_id="agent-1"), ctx)
     started = await servicer.MarkTeardownStarted(
-        gateway_pb2.MarkTeardownStartedRequest(strategy_id="agent-1", total_positions=3),
+        gateway_pb2.MarkTeardownStartedRequest(deployment_id="agent-1", total_positions=3),
         ctx,
     )
     completed = await servicer.MarkTeardownCompleted(
-        gateway_pb2.MarkTeardownCompletedRequest(strategy_id="agent-1", result_json='{"intents": 3}'),
+        gateway_pb2.MarkTeardownCompletedRequest(deployment_id="agent-1", result_json='{"intents": 3}'),
         ctx,
     )
 
@@ -66,7 +66,7 @@ async def test_teardown_service_state_and_approval_lifecycle(servicer: TeardownS
     now = datetime.now(UTC)
     state = TeardownState(
         teardown_id="td-1",
-        strategy_id="agent-1",
+        deployment_id="agent-1",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=1,
@@ -80,11 +80,11 @@ async def test_teardown_service_state_and_approval_lifecycle(servicer: TeardownS
         gateway_pb2.SaveTeardownStateRequest(state_json=teardown_state_to_json(state)),
         ctx,
     )
-    loaded = await servicer.LoadTeardownState(gateway_pb2.LoadTeardownStateRequest(strategy_id="agent-1"), ctx)
+    loaded = await servicer.LoadTeardownState(gateway_pb2.LoadTeardownStateRequest(deployment_id="agent-1"), ctx)
     created = await servicer.CreateApprovalRequest(
         gateway_pb2.CreateApprovalRequestRequest(
             teardown_id="td-1",
-            strategy_id="agent-1",
+            deployment_id="agent-1",
             level="level_3",
             request_json='{"why": "slippage"}',
             expires_at=(now + timedelta(minutes=5)).isoformat(),
@@ -93,7 +93,7 @@ async def test_teardown_service_state_and_approval_lifecycle(servicer: TeardownS
     )
     wrote = await servicer.WriteApprovalResponseByStrategy(
         gateway_pb2.WriteApprovalResponseByStrategyRequest(
-            strategy_id="agent-1",
+            deployment_id="agent-1",
             response_json='{"approved": true}',
         ),
         ctx,
@@ -129,13 +129,13 @@ async def test_teardown_service_returns_invalid_argument_for_malformed_payloads(
 
     progress_ctx = _Context()
     progress = await servicer.UpdateTeardownProgress(
-        gateway_pb2.UpdateTeardownProgressRequest(strategy_id="agent-1", current_phase="bogus"),
+        gateway_pb2.UpdateTeardownProgressRequest(deployment_id="agent-1", current_phase="bogus"),
         progress_ctx,
     )
 
     completed_ctx = _Context()
     completed = await servicer.MarkTeardownCompleted(
-        gateway_pb2.MarkTeardownCompletedRequest(strategy_id="agent-1", result_json="{not-json"),
+        gateway_pb2.MarkTeardownCompletedRequest(deployment_id="agent-1", result_json="{not-json"),
         completed_ctx,
     )
 

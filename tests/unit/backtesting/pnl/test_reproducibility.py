@@ -78,13 +78,13 @@ class DeterministicStrategy:
     reproducibility across runs.
     """
 
-    def __init__(self, strategy_id: str = "test_reproducibility"):
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "test_reproducibility"):
+        self._deployment_id = deployment_id
         self.decide_call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> MockSwapIntent | None:
         """Return a swap intent on odd ticks, None on even ticks."""

@@ -39,7 +39,7 @@ class TestDashboardDataClient:
     def test_get_strategies_delegates_to_gw(self, client, mock_gw):
         mock_gw.list_strategies.return_value = [
             StrategySummary(
-                strategy_id="s1",
+                deployment_id="s1",
                 name="Test",
                 status="RUNNING",
                 chain="arbitrum",
@@ -55,13 +55,13 @@ class TestDashboardDataClient:
 
         result = client.get_strategies()
         assert len(result) == 1
-        assert result[0].strategy_id == "s1"
+        assert result[0].deployment_id == "s1"
         mock_gw.list_strategies.assert_called_once()
 
     def test_get_strategy_detail_delegates(self, client, mock_gw):
         mock_gw.get_strategy_details.return_value = StrategyDetails(
             summary=StrategySummary(
-                strategy_id="s1",
+                deployment_id="s1",
                 name="Test",
                 status="RUNNING",
                 chain="base",
@@ -77,7 +77,7 @@ class TestDashboardDataClient:
         )
 
         detail = client.get_strategy_detail("s1")
-        assert detail.summary.strategy_id == "s1"
+        assert detail.summary.deployment_id == "s1"
         mock_gw.get_strategy_details.assert_called_once()
 
     def test_get_timeline_delegates(self, client, mock_gw):
@@ -96,7 +96,7 @@ class TestDashboardDataClient:
     def test_get_pnl_history(self, client, mock_gw):
         mock_gw.get_strategy_details.return_value = StrategyDetails(
             summary=StrategySummary(
-                strategy_id="s1",
+                deployment_id="s1",
                 name="T",
                 status="RUNNING",
                 chain="",
@@ -126,7 +126,7 @@ class TestDashboardDataClient:
     def test_get_portfolio_metrics(self, client, mock_gw):
         mock_gw.get_strategy_details.return_value = StrategyDetails(
             summary=StrategySummary(
-                strategy_id="s1",
+                deployment_id="s1",
                 name="T",
                 status="RUNNING",
                 chain="",
@@ -155,7 +155,7 @@ class TestTradeRecord:
     def test_to_dict(self):
         trade = TradeRecord(
             id="t1",
-            strategy_id="s1",
+            deployment_id="s1",
             timestamp=datetime(2026, 4, 5, tzinfo=UTC),
             intent_type="SWAP",
             token_in="USDC",

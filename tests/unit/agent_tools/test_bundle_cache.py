@@ -155,7 +155,7 @@ class TestDiskFormat:
         assert payload["schema_version"] == 2
         assert payload["chain"] == "arbitrum"
         assert "wallet_address" in payload
-        assert "strategy_id" in payload
+        assert "deployment_id" in payload
         # Bundle bytes are base64-encoded so binary protobuf can round-trip.
         assert base64.b64decode(payload["bundle_b64"]) == b'{"actions":[]}'
         assert payload["args"] == {"intent_type": "swap"}
@@ -194,7 +194,7 @@ class TestDiskFormat:
             {"ttl_seconds": -1},
             {"ttl_seconds": "15m"},
             {"wallet_address": 123},  # non-string
-            {"strategy_id": []},
+            {"deployment_id": []},
         ],
     )
     def test_malformed_field_types_are_treated_as_corrupt(self, cache, cache_dir, mutation):
@@ -290,12 +290,12 @@ class TestIdentityBinding:
             b"payload",
             {"intent_type": "swap"},
             wallet_address="0xAbCdEf0123456789aBcDeF0123456789AbCdef01",
-            strategy_id="demo_strategy",
+            deployment_id="demo_strategy",
         )
         entry = cache.get("bundle-id")
         assert entry is not None
         assert entry.wallet_address == "0xAbCdEf0123456789aBcDeF0123456789AbCdef01"
-        assert entry.strategy_id == "demo_strategy"
+        assert entry.deployment_id == "demo_strategy"
 
     def test_identity_survives_disk_roundtrip(self, cache_dir):
         first = BundleCache(cache_dir=cache_dir)
@@ -305,14 +305,14 @@ class TestIdentityBinding:
             b"payload",
             {},
             wallet_address="0xABC",
-            strategy_id="my_strat",
+            deployment_id="my_strat",
         )
         # Simulate a fresh process.
         second = BundleCache(cache_dir=cache_dir)
         entry = second.get("bundle-id")
         assert entry is not None
         assert entry.wallet_address == "0xABC"
-        assert entry.strategy_id == "my_strat"
+        assert entry.deployment_id == "my_strat"
 
     def test_legacy_v1_file_is_treated_as_corrupt(self, cache, cache_dir):
         # If an attacker (or an older almanak-sdk build) drops a v1 file, the

@@ -313,7 +313,7 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
 
     # Return default minimal config
     return {
-        "strategy_id": f"backtest-{strategy_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "deployment_id": f"backtest-{strategy_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "wallet_address": "0x" + "0" * 40,  # Placeholder
     }
 
@@ -442,21 +442,21 @@ def generate_combinations(params: list[SweepParameter]) -> list[dict[str, str]]:
 PAPER_STATE_DIR = Path.home() / ".almanak" / "paper_sessions"
 
 
-def get_paper_state_file(strategy_id: str) -> Path:
+def get_paper_state_file(deployment_id: str) -> Path:
     """Get the state file path for a paper trading session.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
 
     Returns:
         Path to the session state file
     """
     PAPER_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return PAPER_STATE_DIR / f"{strategy_id}.json"
+    return PAPER_STATE_DIR / f"{deployment_id}.json"
 
 
 def save_paper_session_state(
-    strategy_id: str,
+    deployment_id: str,
     pid: int,
     config: PaperTraderConfig,
     start_time: datetime,
@@ -464,14 +464,14 @@ def save_paper_session_state(
     """Save paper trading session state to disk.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         pid: Process ID of the background session
         config: PaperTraderConfig used for the session
         start_time: Session start time
     """
-    state_file = get_paper_state_file(strategy_id)
+    state_file = get_paper_state_file(deployment_id)
     state = {
-        "strategy_id": strategy_id,
+        "deployment_id": deployment_id,
         "pid": pid,
         "config": config.to_dict(),
         "start_time": start_time.isoformat(),
@@ -481,16 +481,16 @@ def save_paper_session_state(
         json.dump(state, f, indent=2)
 
 
-def load_paper_session_state(strategy_id: str) -> dict[str, Any] | None:
+def load_paper_session_state(deployment_id: str) -> dict[str, Any] | None:
     """Load paper trading session state from disk.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
 
     Returns:
         Session state dictionary or None if not found
     """
-    state_file = get_paper_state_file(strategy_id)
+    state_file = get_paper_state_file(deployment_id)
     if not state_file.exists():
         return None
     try:
@@ -501,15 +501,15 @@ def load_paper_session_state(strategy_id: str) -> dict[str, Any] | None:
         return None
 
 
-def update_paper_session_status(strategy_id: str, status: str, summary: dict[str, Any] | None = None) -> None:
+def update_paper_session_status(deployment_id: str, status: str, summary: dict[str, Any] | None = None) -> None:
     """Update paper trading session status.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         status: New status (running, stopped, completed, error)
         summary: Optional session summary data
     """
-    state_file = get_paper_state_file(strategy_id)
+    state_file = get_paper_state_file(deployment_id)
     if not state_file.exists():
         return
     try:
@@ -525,13 +525,13 @@ def update_paper_session_status(strategy_id: str, status: str, summary: dict[str
         pass
 
 
-def delete_paper_session_state(strategy_id: str) -> None:
+def delete_paper_session_state(deployment_id: str) -> None:
     """Delete paper trading session state file.
 
     Args:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
     """
-    state_file = get_paper_state_file(strategy_id)
+    state_file = get_paper_state_file(deployment_id)
     if state_file.exists():
         state_file.unlink()
 

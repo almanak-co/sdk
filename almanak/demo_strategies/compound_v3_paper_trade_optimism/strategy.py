@@ -201,7 +201,7 @@ class CompoundV3PaperTradeOptimismStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Supplied {self.supply_amount} {self.supply_token} to Compound V3 (Optimism)",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "action": "supply",
                         "token": self.supply_token,
@@ -220,7 +220,7 @@ class CompoundV3PaperTradeOptimismStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Withdrew {self.supply_token} from Compound V3 (Optimism)",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "withdraw", "token": self.supply_token, "chain": "optimism"},
                 )
             )
@@ -271,7 +271,7 @@ class CompoundV3PaperTradeOptimismStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

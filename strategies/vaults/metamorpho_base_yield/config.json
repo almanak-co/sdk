@@ -1,5 +1,5 @@
 {
-    "strategy_id": "metamorpho_base_yield",
+    "deployment_id": "metamorpho_base_yield",
     "strategy_name": "metamorpho_base_yield",
     "description": "MetaMorpho ERC-4626 yield strategy on Base - deposits USDC into Moonwell Flagship USDC vault for optimized lending yield across Morpho Blue markets on Base",
     "vault_address": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",

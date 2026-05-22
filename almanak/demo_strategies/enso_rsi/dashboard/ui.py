@@ -18,7 +18,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -33,7 +33,7 @@ def render_custom_dashboard(
     - Cumulative PnL
     """
     st.title("Enso RSI Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values
@@ -44,7 +44,7 @@ def render_custom_dashboard(
     rsi_period = strategy_config.get("rsi_period", 14)
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Trading Pair:** {base_token}/{quote_token}")
     st.markdown("**Aggregator:** Enso")
     st.markdown("**Indicator:** RSI Mean Reversion")
@@ -65,7 +65,7 @@ def render_custom_dashboard(
 
     # Trade History section
     st.subheader("Recent Trades")
-    _render_trade_history(api_client, strategy_id)
+    _render_trade_history(api_client, deployment_id)
 
     st.divider()
 
@@ -73,8 +73,8 @@ def render_custom_dashboard(
     st.subheader("Performance")
     _render_pnl(session_state)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_rsi_indicator(
@@ -169,12 +169,12 @@ def _render_current_position(session_state: dict[str, Any], base_token: str, quo
         )
 
 
-def _render_trade_history(api_client: Any, strategy_id: str) -> None:
+def _render_trade_history(api_client: Any, deployment_id: str) -> None:
     """Render recent trade history."""
     trades = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=10)
+            events = api_client.get_timeline(deployment_id, limit=10)
             trades = [e for e in events if e.get("event_type") in ["SWAP", "swap"]]
         except Exception:
             pass

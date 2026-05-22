@@ -49,13 +49,13 @@ class MockStrategy:
 
     def __init__(
         self,
-        strategy_id: str = "test_strategy",
+        deployment_id: str = "test_strategy",
         chain: str = "arbitrum",
         wallet_address: str = "0x1234567890123456789012345678901234567890",
         decide_returns: Any | None = None,
         decide_raises: Exception | None = None,
     ) -> None:
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._chain = chain
         self._wallet_address = wallet_address
         self._decide_returns = decide_returns
@@ -63,8 +63,8 @@ class MockStrategy:
         self.decide_call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     @property
     def chain(self) -> str:
@@ -231,14 +231,14 @@ class MockStateManager:
     async def close(self) -> None:
         self.closed = True
 
-    async def load_state(self, strategy_id: str) -> StateData:
-        if strategy_id not in self._states:
-            self._states[strategy_id] = StateData(
-                strategy_id=strategy_id,
+    async def load_state(self, deployment_id: str) -> StateData:
+        if deployment_id not in self._states:
+            self._states[deployment_id] = StateData(
+                deployment_id=deployment_id,
                 version=1,
                 state={},
             )
-        return self._states[strategy_id]
+        return self._states[deployment_id]
 
     async def save_state(
         self,
@@ -246,12 +246,12 @@ class MockStateManager:
         expected_version: int | None = None,
     ) -> StateData:
         state.version += 1
-        self._states[state.strategy_id] = state
+        self._states[state.deployment_id] = state
         return state
 
-    async def delete_state(self, strategy_id: str) -> bool:
-        if strategy_id in self._states:
-            del self._states[strategy_id]
+    async def delete_state(self, deployment_id: str) -> bool:
+        if deployment_id in self._states:
+            del self._states[deployment_id]
             return True
         return False
 
@@ -263,11 +263,11 @@ class MockStateManager:
         return len(self._snapshots)
 
     async def save_portfolio_metrics(self, metrics: Any) -> bool:
-        self._metrics[getattr(metrics, "strategy_id", "")] = metrics
+        self._metrics[getattr(metrics, "deployment_id", "")] = metrics
         return True
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> Any:
-        return self._metrics.get(strategy_id)
+    async def get_portfolio_metrics(self, deployment_id: str) -> Any:
+        return self._metrics.get(deployment_id)
 
     def get_accounting_events_sync(
         self,

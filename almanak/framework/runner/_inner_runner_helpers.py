@@ -266,7 +266,7 @@ async def execute_bundle_phase(
                 action_bundle=compile_resp.action_bundle,
                 dry_run=dry_run,
                 simulation_enabled=simulate,
-                strategy_id=service._strategy_id,
+                deployment_id=service._deployment_id,
                 chain=chain,
                 wallet_address=wallet,
             )

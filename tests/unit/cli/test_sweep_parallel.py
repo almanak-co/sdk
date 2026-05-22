@@ -59,7 +59,7 @@ def mock_backtest_result() -> BacktestResult:
     """Create a mock backtest result."""
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 7, tzinfo=UTC),
         trades=[],
@@ -238,7 +238,7 @@ class TestParallelSerialEquivalence:
         """Test that run_sweep_backtest returns a SweepResult."""
         # Create a mock strategy class
         class MockStrategy:
-            strategy_id = "mock"
+            deployment_id = "mock"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

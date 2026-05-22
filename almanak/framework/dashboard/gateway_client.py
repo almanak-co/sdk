@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class StrategySummary:
     """Summary of a strategy for dashboard display."""
 
-    strategy_id: str
+    deployment_id: str
     name: str
     status: str
     chain: str
@@ -107,7 +107,7 @@ class LedgerTradeRecord:
 
     id: str
     cycle_id: str
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime | None
     intent_type: str
     token_in: str
@@ -136,7 +136,7 @@ class ActivityFeedItem:
 
     kind: str  # "TIMELINE_EVENT" | "LEDGER_ENTRY"
     timestamp: datetime | None
-    strategy_id: str
+    deployment_id: str
     cycle_id: str
     timeline_event: TimelineEvent | None = None
     ledger_entry: LedgerTradeRecord | None = None
@@ -543,7 +543,7 @@ class GatewayDashboardClient:
 
     def get_strategy_details(
         self,
-        strategy_id: str,
+        deployment_id: str,
         include_timeline: bool = True,
         include_pnl_history: bool = False,
         timeline_limit: int = 20,
@@ -551,7 +551,7 @@ class GatewayDashboardClient:
         """Get detailed information about a strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             include_timeline: Include recent timeline events
             include_pnl_history: Include PnL history for charts
             timeline_limit: Maximum number of timeline events
@@ -562,7 +562,7 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.GetStrategyDetailsRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             include_timeline=include_timeline,
             include_pnl_history=include_pnl_history,
             timeline_limit=timeline_limit,
@@ -578,14 +578,14 @@ class GatewayDashboardClient:
 
     def get_timeline(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int = 50,
         event_type_filter: str | None = None,
     ) -> list[TimelineEvent]:
         """Get timeline events for a strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             limit: Maximum number of events to return
             event_type_filter: Filter by event type
 
@@ -595,7 +595,7 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.GetTimelineRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             limit=limit,
             event_type_filter=event_type_filter or "",
         )
@@ -608,18 +608,18 @@ class GatewayDashboardClient:
 
         return [self._convert_timeline_event(e) for e in response.events]
 
-    def get_strategy_config(self, strategy_id: str) -> dict[str, Any]:
+    def get_strategy_config(self, deployment_id: str) -> dict[str, Any]:
         """Get strategy configuration.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
 
         Returns:
             Configuration dictionary
         """
         client = self._ensure_connected()
 
-        request = gateway_pb2.GetStrategyConfigRequest(strategy_id=strategy_id)
+        request = gateway_pb2.GetStrategyConfigRequest(deployment_id=deployment_id)
 
         try:
             response = client.dashboard.GetStrategyConfig(request)
@@ -631,19 +631,19 @@ class GatewayDashboardClient:
             try:
                 return json.loads(response.config_json)
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to decode strategy config JSON for {strategy_id}: {e}")
+                logger.warning(f"Failed to decode strategy config JSON for {deployment_id}: {e}")
                 return {}
         return {}
 
     def get_strategy_state(
         self,
-        strategy_id: str,
+        deployment_id: str,
         fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Get current strategy state.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             fields: Optional list of specific fields to return
 
         Returns:
@@ -652,7 +652,7 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.GetStrategyStateRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             fields=fields or [],
         )
 
@@ -666,13 +666,13 @@ class GatewayDashboardClient:
             try:
                 return json.loads(response.state_json)
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to decode strategy state JSON for {strategy_id}: {e}")
+                logger.warning(f"Failed to decode strategy state JSON for {deployment_id}: {e}")
                 return {}
         return {}
 
     def execute_action(
         self,
-        strategy_id: str,
+        deployment_id: str,
         action: str,
         reason: str,
         params: dict[str, str] | None = None,
@@ -680,7 +680,7 @@ class GatewayDashboardClient:
         """Execute operator action (pause, resume, etc.).
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             action: Action to execute ("PAUSE", "RESUME", etc.)
             reason: Reason for the action (required for audit)
             params: Optional action-specific parameters
@@ -691,7 +691,7 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.ExecuteActionRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             action=action,
             reason=reason,
             params=params or {},
@@ -706,11 +706,11 @@ class GatewayDashboardClient:
             logger.exception("Failed to execute action")
             return False
 
-    def archive_strategy_instance(self, strategy_id: str, reason: str = "") -> bool:
+    def archive_strategy_instance(self, deployment_id: str, reason: str = "") -> bool:
         """Archive a strategy instance (hidden from dashboard, data retained).
 
         Args:
-            strategy_id: Strategy instance ID to archive.
+            deployment_id: Strategy instance ID to archive.
             reason: Reason for archiving (for audit).
 
         Returns:
@@ -719,24 +719,24 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.ArchiveInstanceRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             reason=reason,
         )
 
         try:
             response = client.dashboard.ArchiveStrategyInstance(request)
             if not response.success:
-                logger.warning(f"Archive failed for {strategy_id}: {response.error}")
+                logger.warning(f"Archive failed for {deployment_id}: {response.error}")
             return response.success
         except Exception:
             logger.exception("Failed to archive strategy instance")
             return False
 
-    def purge_strategy_instance(self, strategy_id: str, reason: str) -> bool:
+    def purge_strategy_instance(self, deployment_id: str, reason: str) -> bool:
         """Purge a strategy instance and all its events (permanent delete).
 
         Args:
-            strategy_id: Strategy instance ID to purge.
+            deployment_id: Strategy instance ID to purge.
             reason: Reason for purging (required for audit trail).
 
         Returns:
@@ -751,14 +751,14 @@ class GatewayDashboardClient:
         client = self._ensure_connected()
 
         request = gateway_pb2.PurgeInstanceRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             reason=reason,
         )
 
         try:
             response = client.dashboard.PurgeStrategyInstance(request)
             if not response.success:
-                logger.warning(f"Purge failed for {strategy_id}: {response.error}")
+                logger.warning(f"Purge failed for {deployment_id}: {response.error}")
             return response.success
         except Exception:
             logger.exception("Failed to purge strategy instance")
@@ -770,7 +770,7 @@ class GatewayDashboardClient:
 
     def get_transaction_ledger(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime | None = None,
         intent_type: str | None = None,
         limit: int = 100,
@@ -778,7 +778,7 @@ class GatewayDashboardClient:
         """Get trade records from the transaction ledger.
 
         Args:
-            strategy_id: Strategy to query.
+            deployment_id: Strategy to query.
             since: Only entries after this timestamp.
             intent_type: Filter by intent type (e.g. "SWAP", "BORROW").
             limit: Maximum entries to return.
@@ -790,7 +790,7 @@ class GatewayDashboardClient:
 
         since_ts = int(since.timestamp()) if since else 0
         request = gateway_pb2.GetTransactionLedgerRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             since_timestamp=since_ts,
             intent_type_filter=intent_type or "",
             limit=limit,
@@ -799,10 +799,10 @@ class GatewayDashboardClient:
 
         return [self._convert_ledger_trade_record(entry) for entry in response.entries]
 
-    def get_pnl_summary(self, strategy_id: str) -> "PnLSummary":
+    def get_pnl_summary(self, deployment_id: str) -> "PnLSummary":
         """5-second-eyeball card via gateway (VIB-3969)."""
         client = self._ensure_connected()
-        request = gateway_pb2.GetPnLSummaryRequest(strategy_id=strategy_id)
+        request = gateway_pb2.GetPnLSummaryRequest(deployment_id=deployment_id)
         try:
             response = client.dashboard.GetPnLSummary(request)
         except grpc.RpcError as e:
@@ -810,10 +810,10 @@ class GatewayDashboardClient:
             raise GatewayConnectionError(f"Failed to get PnL summary: {e}") from e
         return _convert_pnl_summary(response)
 
-    def get_cost_stack(self, strategy_id: str) -> "CostStackInfo":
+    def get_cost_stack(self, deployment_id: str) -> "CostStackInfo":
         """Life-to-date cost / earn decomposition via gateway (VIB-3969)."""
         client = self._ensure_connected()
-        request = gateway_pb2.GetCostStackRequest(strategy_id=strategy_id)
+        request = gateway_pb2.GetCostStackRequest(deployment_id=deployment_id)
         try:
             response = client.dashboard.GetCostStack(request)
         except grpc.RpcError as e:
@@ -821,12 +821,12 @@ class GatewayDashboardClient:
             raise GatewayConnectionError(f"Failed to get cost stack: {e}") from e
         return _convert_cost_stack(response)
 
-    def get_audit_posture(self, strategy_id: str) -> "AuditPosture":
+    def get_audit_posture(self, deployment_id: str) -> "AuditPosture":
         """Reconciliation + audit-trail completeness + Accountant Test
         posture via gateway (VIB-3969). Server-computed only — never
         reconstruct G6 from sub-fields client-side."""
         client = self._ensure_connected()
-        request = gateway_pb2.GetAuditPostureRequest(strategy_id=strategy_id)
+        request = gateway_pb2.GetAuditPostureRequest(deployment_id=deployment_id)
         try:
             response = client.dashboard.GetAuditPosture(request)
         except grpc.RpcError as e:
@@ -836,14 +836,14 @@ class GatewayDashboardClient:
 
     def get_trade_tape(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int = 50,
         before: datetime | None = None,
     ) -> "TradeTapeResponse":
         """Get the joined trade-tape view (one row per intent)."""
         client = self._ensure_connected()
         request = gateway_pb2.GetTradeTapeRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             limit=limit,
             before_timestamp=int(before.timestamp()) if before else 0,
         )
@@ -853,7 +853,7 @@ class GatewayDashboardClient:
 
     def get_activity_feed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         limit: int = 50,
         before: datetime | None = None,
         event_type: str | None = None,
@@ -868,7 +868,7 @@ class GatewayDashboardClient:
         `get_transaction_ledger()` client-side; they will drift.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
             limit: Page size (server caps at 200).
             before: Cursor — only items at or before this timestamp.
             event_type: Optional timeline-side event-type filter.
@@ -879,7 +879,7 @@ class GatewayDashboardClient:
         """
         client = self._ensure_connected()
         request = gateway_pb2.GetActivityFeedRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             limit=limit,
             before_timestamp=int(before.timestamp()) if before else 0,
             before_id=before_id,
@@ -922,7 +922,7 @@ class GatewayDashboardClient:
                 ActivityFeedItem(
                     kind=kind,
                     timestamp=datetime.fromtimestamp(proto.timestamp, tz=UTC) if proto.timestamp else None,
-                    strategy_id=proto.strategy_id,
+                    deployment_id=proto.deployment_id,
                     cycle_id=proto.cycle_id,
                     timeline_event=timeline_event,
                     ledger_entry=ledger_entry,
@@ -943,7 +943,7 @@ class GatewayDashboardClient:
     def _convert_summary(self, proto: gateway_pb2.StrategySummary) -> StrategySummary:
         """Convert protobuf StrategySummary to dataclass."""
         return StrategySummary(
-            strategy_id=proto.strategy_id,
+            deployment_id=proto.deployment_id,
             name=proto.name,
             status=proto.status,
             chain=proto.chain,
@@ -1031,7 +1031,7 @@ class GatewayDashboardClient:
         return LedgerTradeRecord(
             id=entry.id,
             cycle_id=entry.cycle_id,
-            strategy_id=entry.strategy_id,
+            deployment_id=entry.deployment_id,
             timestamp=datetime.fromtimestamp(entry.timestamp, tz=UTC) if entry.timestamp else None,
             intent_type=entry.intent_type,
             token_in=entry.token_in,

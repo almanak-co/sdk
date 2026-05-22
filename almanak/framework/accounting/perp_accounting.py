@@ -114,7 +114,6 @@ def build_perp_accounting_event(
     intent: Any,
     result: Any,
     deployment_id: str,
-    strategy_id: str,
     cycle_id: str,
     execution_mode: str,
     chain: str,
@@ -161,7 +160,6 @@ def build_perp_accounting_event(
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         timestamp=now,

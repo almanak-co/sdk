@@ -56,18 +56,17 @@ def ctx() -> MagicMock:
 
 
 def _row(**overrides) -> gateway_pb2.PositionStateSnapshotRow:
-    defaults = dict(
-        strategy_id=_VALID_STRATEGY,
-        deployment_id=_VALID_DEPLOYMENT,
-        cycle_id=_VALID_CYCLE,
-        captured_at=_VALID_CAPTURED_AT,
-        position_id=_VALID_POSITION_ID,
-        position_type="LENDING",
-        value_confidence="HIGH",
-        schema_version=1,
-        formula_version=1,
-        matching_policy_version=1,
-    )
+    defaults = {
+        "deployment_id": _VALID_DEPLOYMENT,
+        "cycle_id": _VALID_CYCLE,
+        "captured_at": _VALID_CAPTURED_AT,
+        "position_id": _VALID_POSITION_ID,
+        "position_type": "LENDING",
+        "value_confidence": "HIGH",
+        "schema_version": 1,
+        "formula_version": 1,
+        "matching_policy_version": 1,
+    }
     defaults.update(overrides)
     return gateway_pb2.PositionStateSnapshotRow(**defaults)
 
@@ -104,15 +103,6 @@ class TestValidation:
         assert resp.success is True
         assert resp.rows_written == 0
         ctx.set_code.assert_not_called()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("blank", ["", "  ", "\t"])
-    async def test_blank_per_row_strategy_id_rejected(self, service, ctx, blank):
-        req = _request(_row(strategy_id=blank))
-        resp = await service.SavePositionStateSnapshots(req, ctx)
-        assert resp.success is False
-        assert "strategy_id" in resp.error
-        ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("blank", ["", "  ", "\t"])

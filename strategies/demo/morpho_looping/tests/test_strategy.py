@@ -67,7 +67,7 @@ def create_strategy(config: dict | None = None) -> MorphoLoopingStrategy:
     strategy.config = default_config
     strategy._chain = "ethereum"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
-    strategy._strategy_id = "test-morpho-looping"
+    strategy._deployment_id = "test-morpho-looping"
 
     strategy.market_id = default_config["market_id"]
     strategy.collateral_token = default_config["collateral_token"]

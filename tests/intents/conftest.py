@@ -243,7 +243,6 @@ async def _persist_and_drain_for_intent_test(
     *,
     state_manager: Any,
     accounting_processor: AccountingProcessor,
-    strategy_id: str,
     deployment_id: str,
     cycle_id: str,
     execution_mode: str,
@@ -274,7 +273,7 @@ async def _persist_and_drain_for_intent_test(
     _maybe_enrich_with_slot0(result, chain=chain, eth_call_reader=eth_call_reader)
 
     entry = build_ledger_entry(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         cycle_id=cycle_id,
         intent=intent,
         result=result,
@@ -285,7 +284,6 @@ async def _persist_and_drain_for_intent_test(
         pre_state=pre_state,
         post_state=post_state,
     )
-    entry.deployment_id = deployment_id
     entry.execution_mode = execution_mode
     await _maybe_await(state_manager.save_ledger_entry(entry))
 
@@ -301,7 +299,6 @@ async def _persist_and_drain_for_intent_test(
     outbox_id = await write_outbox_entry(
         state_manager,
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         ledger_entry_id=entry.id,
         intent_type=_intent_type_str(intent),
@@ -323,7 +320,6 @@ async def assert_accounting_persisted(
     expected_event_type: str,
     price_oracle: dict[str, Decimal] | None = None,
     deployment_id: str = "layer5-intent-test",
-    strategy_id: str = "layer5-intent-test",
     cycle_id: str = "layer5-cycle",
     execution_mode: str = "paper",
     eth_call_reader: Any | None = None,
@@ -338,7 +334,6 @@ async def assert_accounting_persisted(
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
         accounting_processor=harness.processor,
-        strategy_id=strategy_id,
         deployment_id=deployment_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
@@ -382,7 +377,6 @@ async def assert_accounting_persisted_or_gap(
     gap_xfail_reason: str,
     price_oracle: dict[str, Decimal] | None = None,
     deployment_id: str = "layer5-intent-test",
-    strategy_id: str = "layer5-intent-test",
     cycle_id: str = "layer5-cycle",
     execution_mode: str = "paper",
     eth_call_reader: Any | None = None,
@@ -412,7 +406,6 @@ async def assert_accounting_persisted_or_gap(
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
         accounting_processor=harness.processor,
-        strategy_id=strategy_id,
         deployment_id=deployment_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
@@ -472,7 +465,6 @@ async def assert_no_accounting_on_failure(
     wallet_address: str = "",
     price_oracle: dict[str, Decimal] | None = None,
     deployment_id: str = "layer5-intent-test",
-    strategy_id: str = "layer5-intent-test",
     cycle_id: str = "layer5-cycle",
     execution_mode: str = "paper",
     eth_call_reader: Any | None = None,
@@ -494,7 +486,6 @@ async def assert_no_accounting_on_failure(
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
         accounting_processor=harness.processor,
-        strategy_id=strategy_id,
         deployment_id=deployment_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,

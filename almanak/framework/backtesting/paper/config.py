@@ -16,7 +16,7 @@ Examples:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="my_strategy",
+            deployment_id="my_strategy",
         )
 
     Custom configuration with initial balances and tick settings:
@@ -24,7 +24,7 @@ Examples:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="momentum_v1",
+            deployment_id="momentum_v1",
             initial_eth=Decimal("20"),
             initial_tokens={"USDC": Decimal("50000"), "WETH": Decimal("5")},
             tick_interval_seconds=30,
@@ -40,7 +40,7 @@ Examples:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY",
-            strategy_id="production_strategy",
+            deployment_id="production_strategy",
             initial_tokens={"USDC": Decimal("100000")},
             price_source="auto",  # Use Chainlink -> TWAP -> CoinGecko fallback
             strict_price_mode=True,  # Fail if no real price available
@@ -89,7 +89,7 @@ class PaperTraderConfig:
     Attributes:
         chain: Blockchain to paper trade on (e.g., "arbitrum", "ethereum")
         rpc_url: Archive RPC URL to fork from (Alchemy, Infura, etc.)
-        strategy_id: Identifier of the strategy being tested
+        deployment_id: Identifier of the strategy being tested
         initial_eth: Initial ETH balance for the paper wallet (default: 10)
         initial_tokens: Dict of token symbol to amount for initial balances
         tick_interval_seconds: Time between trading ticks in seconds (default: 60)
@@ -108,7 +108,7 @@ class PaperTraderConfig:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
-            strategy_id="momentum_v1",
+            deployment_id="momentum_v1",
             initial_eth=Decimal("10"),
             initial_tokens={"USDC": Decimal("10000")},
         )
@@ -119,7 +119,7 @@ class PaperTraderConfig:
     # Required fields
     chain: str
     rpc_url: str
-    strategy_id: str
+    deployment_id: str
 
     # Initial balances
     initial_eth: Decimal = Decimal("10")
@@ -246,6 +246,7 @@ class PaperTraderConfig:
     Will be removed in a future version.
     """
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def __post_init__(self) -> None:  # noqa: C901
         """Validate configuration after initialization."""
         # Chain validation
@@ -261,9 +262,9 @@ class PaperTraderConfig:
         if not self.rpc_url.startswith(("http://", "https://", "ws://", "wss://")):
             raise ValueError(f"rpc_url must be a valid URL, got: {self.rpc_url[:50]}...")
 
-        # Strategy ID validation
-        if not self.strategy_id:
-            raise ValueError("strategy_id cannot be empty")
+        # Deployment ID validation
+        if not self.deployment_id:
+            raise ValueError("deployment_id cannot be empty")
 
         # Initial ETH validation
         if self.initial_eth < Decimal("0"):
@@ -413,7 +414,7 @@ class PaperTraderConfig:
             "chain": self.chain,
             "chain_id": self.chain_id,
             "rpc_url": self._mask_url(self.rpc_url),
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "initial_eth": str(self.initial_eth),
             "initial_tokens": {k: str(v) for k, v in self.initial_tokens.items()},
             "bootstrap": {
@@ -488,7 +489,7 @@ class PaperTraderConfig:
         return cls(
             chain=data["chain"],
             rpc_url=data["rpc_url"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             initial_eth=initial_eth,
             initial_tokens=initial_tokens,
             bootstrap=bootstrap,
@@ -542,7 +543,7 @@ class PaperTraderConfig:
         return (
             f"PaperTraderConfig("
             f"chain={self.chain}, "
-            f"strategy={self.strategy_id}, "
+            f"strategy={self.deployment_id}, "
             f"eth={self.initial_eth}, "
             f"tokens={len(self.initial_tokens)}, "
             f"interval={self.tick_interval_seconds}s, "

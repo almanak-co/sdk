@@ -72,7 +72,7 @@ class TestIsMultiChainStrategy:
             pass
 
         # No chains in config dict, but dataclass default has 3 chains
-        assert is_multi_chain_strategy(FakeStrategy, config={"strategy_id": "test"}) is True
+        assert is_multi_chain_strategy(FakeStrategy, config={"deployment_id": "test"}) is True
 
     def test_dataclass_config_single_chain_not_multi(self):
         """Strategy with dataclass config having chains default of 1 is NOT multi-chain."""
@@ -86,7 +86,7 @@ class TestIsMultiChainStrategy:
         class FakeStrategy(IntentStrategy[SingleChainConfig]):
             pass
 
-        assert is_multi_chain_strategy(FakeStrategy, config={"strategy_id": "test"}) is False
+        assert is_multi_chain_strategy(FakeStrategy, config={"deployment_id": "test"}) is False
 
     def test_legacy_supported_chains_multi(self):
         """Strategy with legacy SUPPORTED_CHAINS = ["base", "arbitrum"] is multi-chain."""

@@ -54,7 +54,7 @@ class LedgerEntry:
     Attributes:
         id: Unique entry identifier (UUID).
         cycle_id: Correlation ID for the decide->execute cycle.
-        strategy_id: Strategy that produced this trade.
+        deployment_id: Deployment that produced this trade.
         timestamp: When the trade was executed.
         intent_type: Intent type (SWAP, LP_OPEN, BORROW, etc.).
         token_in: Input token symbol or address.
@@ -74,8 +74,7 @@ class LedgerEntry:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cycle_id: str = ""
-    strategy_id: str = ""
-    deployment_id: str = ""  # Phase 4: canonical identity key (VIB-2835)
+    deployment_id: str = ""
     execution_mode: str = ""  # Phase 4: "live", "paper", "dry_run" (VIB-2837)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     intent_type: str = ""
@@ -114,8 +113,7 @@ class LedgerEntry:
         return cls(
             id=data.get("id", str(uuid.uuid4())),
             cycle_id=data.get("cycle_id", ""),
-            strategy_id=data.get("strategy_id", ""),
-            deployment_id=data.get("deployment_id", ""),
+            deployment_id=data["deployment_id"],
             execution_mode=data.get("execution_mode", ""),
             timestamp=ts,
             intent_type=data.get("intent_type", ""),
@@ -706,7 +704,7 @@ def _build_extracted_data_json(result: Any) -> str:
 
 def build_ledger_entry(
     *,
-    strategy_id: str,
+    deployment_id: str,
     cycle_id: str,
     intent: Any,
     result: Any,
@@ -785,10 +783,10 @@ def build_ledger_entry(
         if not oracle_has_native:
             logger.warning(
                 "ledger gas_usd unavailable: chain=%s native_token=%s missing from price_oracle "
-                "(strategy_id=%s, cycle_id=%s); transaction_ledger.gas_usd will be empty for this row",
+                "(deployment_id=%s, cycle_id=%s); transaction_ledger.gas_usd will be empty for this row",
                 chain,
                 native_symbol,
-                strategy_id,
+                deployment_id,
                 cycle_id,
             )
     final_error = _coalesce_error(success, error, result)
@@ -839,7 +837,7 @@ def build_ledger_entry(
 
     entry = LedgerEntry(
         cycle_id=cycle_id,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         intent_type=intent_type,
         token_in=token_in,
         amount_in=amount_in,

@@ -637,7 +637,7 @@ def migrate_state_data(
     if result.success:
         # Create new StateData with migrated state
         migrated_state_data = StateData(
-            strategy_id=state_data.strategy_id,
+            deployment_id=state_data.deployment_id,
             version=state_data.version,
             state=result.state,
             schema_version=result.to_version,

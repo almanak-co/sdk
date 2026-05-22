@@ -162,7 +162,7 @@ AGENT_LLM_API_KEY=sk-... python examples/agentic/defai_vault_lp/run.py
     "cooldown_seconds": 0,            // Min seconds between trades
     "max_trades_per_hour": 30         // Rate limit
   },
-  "strategy_id": "defai-vault-lp",    // State persistence key
+  "deployment_id": "defai-vault-lp",    // State persistence key
   "max_tool_rounds": 15,              // Max LLM rounds per iteration
   "interval_seconds": 120             // Loop interval (continuous mode)
 }

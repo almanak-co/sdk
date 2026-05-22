@@ -46,14 +46,14 @@ class CopySignalEngine:
         max_age_seconds: int = 300,
         retention_days: int = 7,
         price_fn: Callable[[str, str], Decimal | None] | None = None,
-        strategy_id: str = "",
+        deployment_id: str = "",
         strict_token_resolution: bool = False,
     ) -> None:
         self._registry = registry
         self._max_age_seconds = max_age_seconds
         self._retention_days = retention_days
         self._price_fn = price_fn
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._strict_token_resolution = strict_token_resolution
         self._seen_event_ids: dict[str, int] = {}
         self._parser_cache: dict[str, Any] = {}
@@ -726,7 +726,7 @@ class CopySignalEngine:
                     description=(
                         f"Leader signal: {signal.action_type} on {signal.protocol} ({signal.leader_address[:10]}...)"
                     ),
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     chain=signal.chain,
                     details={
                         "event_id": signal.event_id,
@@ -749,7 +749,7 @@ class CopySignalEngine:
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LEADER_SIGNAL_SKIPPED,
                     description=f"Leader signal skipped: {reason} ({event.event_id})",
-                    strategy_id=self._strategy_id,
+                    deployment_id=self._deployment_id,
                     chain=event.chain,
                     details={
                         "event_id": event.event_id,

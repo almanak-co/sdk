@@ -62,7 +62,7 @@ def _make_rsi_backtest_result(
     """Create a BacktestResult representative of an RSI swap strategy."""
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="uniswap_v3_pnl_backtest_arbitrum",
+        deployment_id="uniswap_v3_pnl_backtest_arbitrum",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 3, 1, tzinfo=UTC),
         trades=[],
@@ -123,7 +123,7 @@ class TestPnLBacktestRSIExecution:
         captured_configs: list[dict] = []
 
         class TrackingRSIStrategy:
-            strategy_id = "uniswap_v3_pnl_backtest_arbitrum"
+            deployment_id = "uniswap_v3_pnl_backtest_arbitrum"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -163,7 +163,7 @@ class TestPnLBacktestRSIExecution:
         """Verify metrics extraction works for RSI swap backtest."""
 
         class SimpleRSIStrategy:
-            strategy_id = "uniswap_v3_pnl_backtest_arbitrum"
+            deployment_id = "uniswap_v3_pnl_backtest_arbitrum"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

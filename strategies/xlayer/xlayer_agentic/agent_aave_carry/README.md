@@ -242,7 +242,7 @@ OpenAI tool manifest only contains the 10 tools above.
     "interest_rate_mode": "variable",
     "interval_seconds": 120,
     "max_tool_rounds": 12,
-    "strategy_id": "agent-xlayer-aave-carry",
+    "deployment_id": "agent-xlayer-aave-carry",
     "skip_llm_enabled": true,
     "skip_llm_when_hf_above": "2.0",
     "anvil_funding": {
@@ -261,7 +261,7 @@ OpenAI tool manifest only contains the 10 tools above.
 | `interest_rate_mode` | Must be `"variable"` — Aave V3 deprecated stable rate. |
 | `interval_seconds` | Loop period in non-`--once` mode. |
 | `max_tool_rounds` | Safety cap on tool calls per iteration — prevents runaway LLM loops. |
-| `strategy_id` | Opaque id used for state persistence. |
+| `deployment_id` | Opaque id used for state persistence. |
 | `collateral_factor` | On-chain LTV for the supply token on Aave V3.6 X-Layer (0.70 for USDT0). Used by the pre-LLM health-factor guard. |
 | `skip_llm_enabled` | When `true`, a deterministic health-factor check can skip the LLM call if the position is healthy. Saves API cost. |
 | `skip_llm_when_hf_above` | HF threshold above which the LLM is skipped entirely (position is comfortable). |
@@ -295,7 +295,7 @@ OpenAI tool manifest only contains the 10 tools above.
 8. **Circuit breaker** — consecutive tool errors halt the agent loop.
 9. **Structured error envelopes** — the LLM never sees raw gRPC
    exceptions, only typed `ToolError` objects with `recoverable` flags.
-10. **Auditability** — every decision is tagged with `strategy_id` and
+10. **Auditability** — every decision is tagged with `deployment_id` and
    written to the `ObserveService` audit trail via
    `record_agent_decision`.
 

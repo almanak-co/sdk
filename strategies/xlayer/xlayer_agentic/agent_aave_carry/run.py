@@ -102,7 +102,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     supply_token = config.get("supply_token", "USDT0")
     borrow_token = config.get("borrow_token", "USDG")
     supply_amount = config.get("initial_supply_amount", "4.0")
-    strategy_id = config.get("strategy_id", "agent-xlayer-aave-carry")
+    deployment_id = config.get("deployment_id", "agent-xlayer-aave-carry")
     chain = config.get("chain", "xlayer")
     # 50% LTV on $4 stablecoin collateral -> ~$2 borrow
     ltv_target = Decimal(str(config.get("ltv_target", "0.5")))
@@ -111,7 +111,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     return MockLLMClient([
         # Round 1: load state + balances + prices (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
+            _mock_tool_call("load_agent_state", {"deployment_id": deployment_id}),
             _mock_tool_call("get_balance", {"token": supply_token, "chain": chain}),
             _mock_tool_call("get_price", {"token": supply_token, "chain": chain}),
             _mock_tool_call("get_price", {"token": borrow_token, "chain": chain}),
@@ -140,7 +140,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
         # Round 4: persist state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "phase": "carry_open",
                     "supplied": supply_amount,
@@ -151,7 +151,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
                 },
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": (
                     f"Supplied {supply_amount} {supply_token} to Aave V3.6 X-Layer "
                     f"and borrowed {borrow_amount} {borrow_token} at {int(ltv_target * 100)}% LTV."
@@ -194,7 +194,7 @@ def should_skip_llm(gateway: GatewayClient, config: dict) -> tuple[bool, str]:
         return False, "skip_llm disabled in config"
 
     threshold = Decimal(str(config.get("skip_llm_when_hf_above", "2.0")))
-    strategy_id = config.get("strategy_id", "agent-xlayer-aave-carry")
+    deployment_id = config.get("deployment_id", "agent-xlayer-aave-carry")
     chain = config.get("chain", "xlayer")
     supply_token = config.get("supply_token", "USDT0")
     borrow_token = config.get("borrow_token", "USDG")
@@ -208,7 +208,7 @@ def should_skip_llm(gateway: GatewayClient, config: dict) -> tuple[bool, str]:
 
         # 1. Load saved state -- if no carry is open, we need the LLM
         state_resp = gateway.state.LoadState(
-            gateway_pb2.LoadStateRequest(strategy_id=strategy_id)
+            gateway_pb2.LoadStateRequest(deployment_id=deployment_id)
         )
         state = json.loads(state_resp.data) if state_resp.data else {}
         if state.get("phase") != "carry_open":
@@ -254,7 +254,7 @@ def should_skip_llm(gateway: GatewayClient, config: dict) -> tuple[bool, str]:
 
 async def run_once(config: dict, *, use_mock: bool = False) -> None:
     """Run a single iteration of the agentic Aave carry."""
-    strategy_id = config.get("strategy_id", "agent-xlayer-aave-carry")
+    deployment_id = config.get("deployment_id", "agent-xlayer-aave-carry")
 
     # 0. Validate LLM config before anything else (fail-fast)
     if not use_mock:
@@ -283,7 +283,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 logger.info(
                     "Telemetry: strategy=%s rounds=0 input_tokens=0 output_tokens=0 "
                     "tool_calls=0 tools=0 decision=hold_skip skip_reason=%s",
-                    strategy_id, reason,
+                    deployment_id, reason,
                 )
                 return
 
@@ -295,7 +295,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             default_chain=config.get("chain", "xlayer"),
         )
 
@@ -326,7 +326,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 12),
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
             )
             logger.info("Agent result: %s", result)
         finally:

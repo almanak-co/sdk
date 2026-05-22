@@ -78,7 +78,7 @@ class EscalationState:
     """Tracks the escalation state for a single alert.
 
     Attributes:
-        strategy_id: The strategy this escalation is for
+        deployment_id: The strategy this escalation is for
         alert_id: Unique identifier for this alert instance
         card: The OperatorCard that triggered escalation
         created_at: When the alert was first raised
@@ -90,7 +90,7 @@ class EscalationState:
         channels_notified: Channels that have been notified at each level
     """
 
-    strategy_id: str
+    deployment_id: str
     alert_id: str
     card: OperatorCard
     created_at: datetime
@@ -126,7 +126,7 @@ class EscalationState:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "alert_id": self.alert_id,
             "card": self.card.to_dict(),
             "created_at": self.created_at.isoformat(),
@@ -208,11 +208,11 @@ class EscalationPolicy:
         self.emergency_pause_callback = emergency_pause_callback
         self.thresholds = custom_thresholds or ESCALATION_THRESHOLDS
 
-    def _generate_alert_id(self, strategy_id: str, card: OperatorCard) -> str:
+    def _generate_alert_id(self, deployment_id: str, card: OperatorCard) -> str:
         """Generate a unique alert ID for tracking.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             card: The OperatorCard
 
         Returns:
@@ -220,11 +220,10 @@ class EscalationPolicy:
         """
         # Use strategy + event type + reason for uniqueness
         # This allows multiple different alerts for the same strategy
-        return f"{strategy_id}:{card.event_type.value}:{card.reason.value}"
+        return f"{deployment_id}:{card.event_type.value}:{card.reason.value}"
 
     def start_escalation(
         self,
-        strategy_id: str,
         card: OperatorCard,
         current_time: datetime | None = None,
     ) -> EscalationState:
@@ -233,7 +232,7 @@ class EscalationPolicy:
         If an escalation already exists for this alert, returns the existing one.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             card: The OperatorCard that triggered the alert
             current_time: Current time (defaults to now)
 
@@ -243,7 +242,8 @@ class EscalationPolicy:
         if current_time is None:
             current_time = datetime.now(UTC)
 
-        alert_id = self._generate_alert_id(strategy_id, card)
+        deployment_id = card.deployment_id
+        alert_id = self._generate_alert_id(deployment_id, card)
 
         # Check if escalation already exists
         if alert_id in self.escalations:
@@ -254,7 +254,7 @@ class EscalationPolicy:
 
         # Create new escalation state
         state = EscalationState(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             alert_id=alert_id,
             card=card,
             created_at=current_time,
@@ -264,7 +264,7 @@ class EscalationPolicy:
         )
 
         self.escalations[alert_id] = state
-        logger.info(f"Started escalation for {strategy_id}: alert_id={alert_id}, severity={card.severity.value}")
+        logger.info(f"Started escalation for {deployment_id}: alert_id={alert_id}, severity={card.severity.value}")
 
         return state
 
@@ -307,16 +307,17 @@ class EscalationPolicy:
 
         return True
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def acknowledge_by_strategy(
         self,
-        strategy_id: str,
+        deployment_id: str,
         acknowledged_by: str = "operator",
         current_time: datetime | None = None,
     ) -> int:
         """Acknowledge all active alerts for a strategy.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             acknowledged_by: Who is acknowledging
             current_time: Current time (defaults to now)
 
@@ -328,11 +329,11 @@ class EscalationPolicy:
 
         count = 0
         for alert_id, state in self.escalations.items():
-            if state.strategy_id == strategy_id and state.is_active():
+            if state.deployment_id == deployment_id and state.is_active():
                 if self.acknowledge(alert_id, acknowledged_by, current_time):
                     count += 1
 
-        logger.info(f"Acknowledged {count} alerts for strategy {strategy_id}")
+        logger.info(f"Acknowledged {count} alerts for strategy {deployment_id}")
         return count
 
     def resolve(
@@ -499,6 +500,7 @@ class EscalationPolicy:
             message=(f"Escalated from level {old_level.value} to {target_level.value} after {elapsed:.0f} seconds"),
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def process_escalation(
         self,
         alert_id: str,
@@ -531,7 +533,7 @@ class EscalationPolicy:
         # Execute Level 4 actions
         if result.trigger_auto_remediation and self.auto_remediation_callback:
             try:
-                success = self.auto_remediation_callback(state.strategy_id, state.card)
+                success = self.auto_remediation_callback(state.deployment_id, state.card)
                 if success:
                     state.status = EscalationStatus.AUTO_REMEDIATED
                     logger.info(f"Auto-remediation executed for {alert_id}")
@@ -546,7 +548,7 @@ class EscalationPolicy:
 
         if result.trigger_emergency_pause and self.emergency_pause_callback:
             try:
-                success = self.emergency_pause_callback(state.strategy_id, state.card)
+                success = self.emergency_pause_callback(state.deployment_id, state.card)
                 if success:
                     state.status = EscalationStatus.EMERGENCY_PAUSED
                     logger.info(f"Emergency pause executed for {alert_id}")
@@ -636,16 +638,16 @@ class EscalationPolicy:
         """
         return [state for state in self.escalations.values() if state.is_active()]
 
-    def get_escalations_for_strategy(self, strategy_id: str) -> list[EscalationState]:
+    def get_escalations_for_strategy(self, deployment_id: str) -> list[EscalationState]:
         """Get all escalations for a strategy.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
 
         Returns:
             List of EscalationState objects for the strategy
         """
-        return [state for state in self.escalations.values() if state.strategy_id == strategy_id]
+        return [state for state in self.escalations.values() if state.deployment_id == deployment_id]
 
     def clear_resolved_escalations(self, max_age_seconds: int = 86400) -> int:
         """Clear old resolved escalations to prevent memory buildup.

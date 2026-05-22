@@ -196,7 +196,7 @@ class TestExecuteSimulationFailure:
         orchestrator._validate_transactions = AsyncMock(return_value=RiskGuardResult(passed=True, violations=[]))
         orchestrator._preflight_balance_check = AsyncMock(return_value=None)
         # Enable simulation
-        ctx = ExecutionContext(strategy_id="t", simulation_enabled=True)
+        ctx = ExecutionContext(deployment_id="t", simulation_enabled=True)
         orchestrator.simulator.simulate = AsyncMock(
             return_value=SimulationResult(success=False, simulated=True, revert_reason="ERC20: insufficient")
         )
@@ -270,7 +270,7 @@ class TestEmitEventNoneDetails:
         details,
         expected_fragment,
     ):
-        ctx = ExecutionContext(strategy_id="t", correlation_id="corr")
+        ctx = ExecutionContext(deployment_id="t", correlation_id="corr")
         with patch("almanak.framework.execution.orchestrator.add_event") as add_event_mock:
             orchestrator._emit_event(event_type, ctx, details)
 
@@ -428,7 +428,7 @@ class TestExecuteHappyPath:
         bundle = ActionBundle(intent_type="SWAP", transactions=[{"to": "0x0", "data": "0x", "value": 0}])
         _wire_for_happy_path(orchestrator, tx_count=1)
 
-        ctx = ExecutionContext(strategy_id="t", dry_run=True)
+        ctx = ExecutionContext(deployment_id="t", dry_run=True)
         result = await orchestrator.execute(bundle, ctx)
 
         assert result.success is True

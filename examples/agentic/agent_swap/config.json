@@ -9,5 +9,5 @@
     "rsi_overbought": 70,
     "interval_seconds": 60,
     "max_tool_rounds": 10,
-    "strategy_id": "agent-swap-eth-usdc"
+    "deployment_id": "agent-swap-eth-usdc"
 }

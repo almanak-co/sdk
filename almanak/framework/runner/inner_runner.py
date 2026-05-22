@@ -17,7 +17,7 @@ Example:
         gateway_client=client,
         chain="arbitrum",
         wallet_address="0x...",
-        strategy_id="my-strategy",
+        deployment_id="my-strategy",
     )
 
     result = await service.execute_intent(
@@ -179,7 +179,7 @@ class IntentExecutionService:
         gateway_client: Connected GatewayClient instance.
         chain: Target blockchain (e.g., "arbitrum").
         wallet_address: Wallet address for execution.
-        strategy_id: Strategy identifier for audit trail.
+        deployment_id: Deployment identifier for audit trail.
         retry_policy: Retry configuration. Uses safe defaults if not provided.
         on_sadflow: Optional callback invoked on execution failures.
             Receives a SadflowEvent with failure context.
@@ -191,14 +191,14 @@ class IntentExecutionService:
         *,
         chain: str = "arbitrum",
         wallet_address: str = "",
-        strategy_id: str = "",
+        deployment_id: str = "",
         retry_policy: RetryPolicy | None = None,
         on_sadflow: Any | None = None,
     ) -> None:
         self._client = gateway_client
         self._chain = chain
         self._wallet_address = wallet_address
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._retry_policy = retry_policy or RetryPolicy()
         self._on_sadflow = on_sadflow
 
@@ -493,7 +493,7 @@ class IntentExecutionService:
             # Build ExecutionContext
             effective_protocol = protocol or self._infer_protocol(intent_type, intent_params)
             context = ExecutionContext(
-                strategy_id=self._strategy_id,
+                deployment_id=self._deployment_id,
                 chain=chain,
                 wallet_address=wallet_address,
                 protocol=effective_protocol,

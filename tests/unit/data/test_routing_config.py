@@ -185,7 +185,7 @@ class TestDataRoutingConfig:
 
     def test_from_strategy_config_with_overrides(self) -> None:
         strategy_config: dict[str, Any] = {
-            "strategy_id": "test",
+            "deployment_id": "test",
             "data_overrides": {
                 "ohlcv": {"primary": "geckoterminal", "fallback": ["defillama"], "timeout_ms": 4000},
                 "pool_price": "thegraph",
@@ -204,7 +204,7 @@ class TestDataRoutingConfig:
         assert "twap" in config.routes
 
     def test_from_strategy_config_without_overrides(self) -> None:
-        config = DataRoutingConfig.from_strategy_config({"strategy_id": "test"})
+        config = DataRoutingConfig.from_strategy_config({"deployment_id": "test"})
         # All defaults present
         for data_type in _DEFAULT_ROUTING:
             assert data_type in config.routes

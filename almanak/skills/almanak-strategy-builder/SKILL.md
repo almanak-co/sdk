@@ -1813,7 +1813,7 @@ def get_open_positions(self):
         logger.warning("Unable to fetch balances for teardown position summary")
 
     return TeardownPositionSummary(
-        strategy_id=getattr(self, "strategy_id", "my_strategy"),
+        deployment_id=getattr(self, "deployment_id", "my_strategy"),
         timestamp=datetime.now(UTC),
         positions=positions,
     )
@@ -1822,7 +1822,7 @@ def get_open_positions(self):
 **PositionType** values (close in this priority order):
 `PERP` > `BORROW` > `SUPPLY` > `LP` > `STAKE` > `PREDICTION` > `CEX` > `TOKEN`
 
-For strategies with no positions, return `TeardownPositionSummary.empty(self.strategy_id)`.
+For strategies with no positions, return `TeardownPositionSummary.empty(self.deployment_id)`.
 
 #### `generate_teardown_intents()`
 
@@ -1873,7 +1873,7 @@ def get_open_positions(self):
             details={"asset": self.collateral_token, "amount": str(self._supplied_amount)},
         ))
     return TeardownPositionSummary(
-        strategy_id=self.strategy_id, timestamp=datetime.now(UTC), positions=positions,
+        deployment_id=self.deployment_id, timestamp=datetime.now(UTC), positions=positions,
     )
 
 def generate_teardown_intents(self, mode, market=None) -> list[Intent]:

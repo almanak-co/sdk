@@ -46,18 +46,17 @@ class RunContext:
 class IdentityInfo:
     """Output of `_resolve_identity`.
 
-    deployment_id: stable primary key for all state tables.
+    deployment_id: stable primary key for all deployment-scoped tables —
+        hosted ⇒ `ALMANAK_DEPLOYMENT_ID`; local ⇒ `deployment:{sha256(...)}`
+        (blueprint 29 §2).
     run_id: per-process ephemeral UUID for forensics.
-    strategy_name: the normalized display/config name used to resolve the
-        deployment identity.
-    migrated: True if `SQLiteStore.backfill_deployment_id` rewrote rows from
-        the old bare-name identity to the new deployment_id.
+    strategy_name: the normalized display/config name (NOT an input to the
+        deployment-id hash — blueprint 29 §1).
     """
 
     deployment_id: str
     run_id: str
     strategy_name: str
-    migrated: bool
 
 
 @dataclass(frozen=True)
@@ -103,7 +102,7 @@ class RuntimeBootstrap:
     resolved_network: str
     runtime_config: Any
     chain_wallets: Any
-    strategy_id: str
+    deployment_id: str
     run_id: str
 
 

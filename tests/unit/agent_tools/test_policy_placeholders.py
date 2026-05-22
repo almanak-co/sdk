@@ -141,7 +141,7 @@ class TestD1_2_SimulateIntentRefusesEachPlaceholder:
             MockGatewayClient(MockGatewayConfig()),
             policy=AgentPolicy(allowed_chains={"arbitrum"}),
             wallet_address=wallet,
-            strategy_id="vib-4167-test",
+            deployment_id="vib-4167-test",
             bundle_cache=bundle_cache,
         )
 
@@ -156,7 +156,7 @@ class TestD1_2_SimulateIntentRefusesEachPlaceholder:
                 "chain": "arbitrum",
             },
             wallet_address=wallet,
-            strategy_id="vib-4167-test",
+            deployment_id="vib-4167-test",
         )
 
         result = await executor.execute(
@@ -373,7 +373,7 @@ class TestD1_6_ExecuteCompiledBundleRefusesCachedPlaceholderViaExecutor:
             MockGatewayClient(MockGatewayConfig()),
             policy=AgentPolicy(allowed_chains={"arbitrum"}),
             wallet_address=wallet,
-            strategy_id="vib-4167-test",
+            deployment_id="vib-4167-test",
             bundle_cache=bundle_cache,
         )
 
@@ -388,7 +388,7 @@ class TestD1_6_ExecuteCompiledBundleRefusesCachedPlaceholderViaExecutor:
                 "chain": "arbitrum",
             },
             wallet_address=wallet,
-            strategy_id="vib-4167-test",
+            deployment_id="vib-4167-test",
         )
 
         result = await executor.execute(

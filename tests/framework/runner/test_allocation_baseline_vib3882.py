@@ -32,7 +32,7 @@ class _StubSnapshot:
     """Minimal stand-in for PortfolioSnapshot — only carries the fields
     `_build_metrics_for_snapshot` reads."""
 
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     total_value_usd: Decimal
     available_cash_usd: Decimal
@@ -46,7 +46,7 @@ class _StubStateManager:
     def __init__(self) -> None:
         self.saved: list[Any] = []
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> Any:
+    async def get_portfolio_metrics(self, deployment_id: str) -> Any:
         return None  # bootstrap path
 
 
@@ -79,7 +79,7 @@ def stub_runner() -> _StubRunner:
 def fresh_snapshot(value_confidence_high: Any) -> _StubSnapshot:
     """A snapshot with cash > 0 and positions = 0 — pre-deployment shape."""
     return _StubSnapshot(
-        strategy_id="strat-h1",
+        deployment_id="strat-h1",
         timestamp=datetime.now(tz=UTC),
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("19.26"),  # the May 2 wallet baseline
@@ -103,7 +103,7 @@ def _make_strategy(total_value_usd: Any) -> Any:
             return None
 
     cfg = SimpleNamespace(
-        strategy_id="strat-h1",
+        deployment_id="strat-h1",
         chain="arbitrum",
         total_value_usd=total_value_usd,
     )
@@ -204,7 +204,7 @@ async def test_baseline_allocation_overrides_high_wallet_balance(
     from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
     snapshot = _StubSnapshot(
-        strategy_id="strat-h1",
+        deployment_id="strat-h1",
         timestamp=datetime.now(tz=UTC),
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("1000.00"),

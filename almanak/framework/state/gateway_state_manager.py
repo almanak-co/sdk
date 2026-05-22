@@ -77,7 +77,7 @@ def _apply_synth_position_guard(snapshot: "PortfolioSnapshot") -> None:
             logger.warning(
                 "snapshot for %s carries HIGH+measured-zero-basis "
                 "position (value_usd=%s, cost_basis_usd=%s) — degrading to ESTIMATED",
-                snapshot.strategy_id,
+                snapshot.deployment_id,
                 v,
                 cb,
             )
@@ -126,11 +126,11 @@ class GatewayStateManager:
         """Close the state manager."""
         logger.debug("Gateway state manager closed")
 
-    async def load_state(self, strategy_id: str) -> StateData | None:
+    async def load_state(self, deployment_id: str) -> StateData | None:
         """Load strategy state from gateway.
 
         Args:
-            strategy_id: Unique strategy identifier
+            deployment_id: Unique deployment identifier
 
         Returns:
             StateData if found, None if not found
@@ -139,17 +139,17 @@ class GatewayStateManager:
             StateError: If gateway request fails
         """
         try:
-            request = gateway_pb2.LoadStateRequest(strategy_id=strategy_id)
+            request = gateway_pb2.LoadStateRequest(deployment_id=deployment_id)
             response = self._client.state.LoadState(request, timeout=self._timeout)
 
-            if not response.strategy_id:
+            if not response.deployment_id:
                 return None
 
             # Deserialize state from JSON bytes
             state_dict = json.loads(response.data.decode("utf-8"))
 
             return StateData(
-                strategy_id=response.strategy_id,
+                deployment_id=response.deployment_id,
                 version=response.version,
                 state=state_dict,
                 schema_version=response.schema_version,
@@ -165,9 +165,10 @@ class GatewayStateManager:
             if "NOT_FOUND" in error_msg:
                 return None
 
-            logger.error(f"Gateway load state failed for {strategy_id}: {error_msg}")
+            logger.error(f"Gateway load state failed for {deployment_id}: {error_msg}")
             raise
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def save_state(self, state: StateData, expected_version: int | None = None) -> StateData:
         """Save strategy state through gateway.
 
@@ -190,7 +191,7 @@ class GatewayStateManager:
             state_bytes = json.dumps(state.state, default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveStateRequest(
-                strategy_id=state.strategy_id,
+                deployment_id=state.deployment_id,
                 expected_version=expected_version or 0,
                 data=state_bytes,
                 schema_version=state.schema_version,
@@ -205,7 +206,7 @@ class GatewayStateManager:
                     from almanak.framework.state.state_manager import StateConflictError
 
                     raise StateConflictError(
-                        strategy_id=state.strategy_id,
+                        deployment_id=state.deployment_id,
                         expected_version=expected_version or 0,
                         actual_version=response.new_version,
                     )
@@ -214,7 +215,7 @@ class GatewayStateManager:
 
             # Return updated state with new version
             return StateData(
-                strategy_id=state.strategy_id,
+                deployment_id=state.deployment_id,
                 version=response.new_version,
                 state=state.state,
                 schema_version=state.schema_version,
@@ -225,38 +226,38 @@ class GatewayStateManager:
         except Exception as e:
             if "StateConflictError" in type(e).__name__:
                 raise
-            logger.error(f"Gateway save state failed for {state.strategy_id}: {e}")
+            logger.error(f"Gateway save state failed for {state.deployment_id}: {e}")
             raise
 
-    async def delete_state(self, strategy_id: str) -> bool:
+    async def delete_state(self, deployment_id: str) -> bool:
         """Delete strategy state through gateway.
 
         Args:
-            strategy_id: Unique strategy identifier
+            deployment_id: Unique deployment identifier
 
         Returns:
             True if deleted, False if not found
         """
         try:
-            request = gateway_pb2.DeleteStateRequest(strategy_id=strategy_id)
+            request = gateway_pb2.DeleteStateRequest(deployment_id=deployment_id)
             response = self._client.state.DeleteState(request, timeout=self._timeout)
 
             return response.success
 
         except Exception as e:
-            logger.error(f"Gateway delete state failed for {strategy_id}: {e}")
+            logger.error(f"Gateway delete state failed for {deployment_id}: {e}")
             raise
 
-    def invalidate_hot_cache(self, strategy_id: str | None = None) -> None:
+    def invalidate_hot_cache(self, deployment_id: str | None = None) -> None:
         """Invalidate hot cache.
 
         For the gateway-backed version, this is a no-op since caching
         is handled in the gateway.
 
         Args:
-            strategy_id: Strategy to invalidate, or None for all
+            deployment_id: Strategy to invalidate, or None for all
         """
-        logger.debug(f"Cache invalidation requested for {strategy_id or 'all'} (no-op)")
+        logger.debug(f"Cache invalidation requested for {deployment_id or 'all'} (no-op)")
 
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
         """Save portfolio snapshot via gateway gRPC → PostgreSQL.
@@ -309,7 +310,6 @@ class GatewayStateManager:
             positions_bytes = json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveSnapshotRequest(
-                strategy_id=snapshot.strategy_id,
                 timestamp=int(snapshot.timestamp.timestamp()),
                 iteration_number=snapshot.iteration_number,
                 total_value_usd=str(snapshot.total_value_usd),
@@ -333,13 +333,13 @@ class GatewayStateManager:
                 logger.error("SavePortfolioSnapshot failed: %s", response.error)
                 raise AccountingPersistenceError(
                     write_kind=AccountingWriteKind.SNAPSHOT,
-                    strategy_id=snapshot.strategy_id,
+                    deployment_id=snapshot.deployment_id,
                     message=f"SavePortfolioSnapshot failed: {response.error}",
                 )
 
             logger.debug(
                 "Portfolio snapshot saved via gateway: strategy=%s, value=$%.2f, confidence=%s",
-                snapshot.strategy_id,
+                snapshot.deployment_id,
                 snapshot.total_value_usd,
                 snapshot.value_confidence.value,
             )
@@ -350,14 +350,14 @@ class GatewayStateManager:
             logger.exception("Failed to save portfolio snapshot via gateway")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.SNAPSHOT,
-                strategy_id=getattr(snapshot, "strategy_id", "") or "",
+                deployment_id=getattr(snapshot, "deployment_id", "") or "",
                 cause=e,
             ) from e
 
-    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+    async def get_latest_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
         """Get most recent portfolio snapshot via gateway gRPC."""
         try:
-            request = gateway_pb2.GetLatestSnapshotRequest(strategy_id=strategy_id)
+            request = gateway_pb2.GetLatestSnapshotRequest(deployment_id=deployment_id)
             response = self._client.state.GetLatestSnapshot(request, timeout=self._timeout)
 
             if not response.found:
@@ -369,12 +369,12 @@ class GatewayStateManager:
             return None
 
     async def get_snapshots_since(
-        self, strategy_id: str, since: datetime, limit: int = 168
+        self, deployment_id: str, since: datetime, limit: int = 168
     ) -> list["PortfolioSnapshot"]:
         """Get portfolio snapshots since a given time via gateway gRPC."""
         try:
             request = gateway_pb2.GetSnapshotsSinceRequest(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 since=int(since.timestamp()),
                 limit=limit,
             )
@@ -398,7 +398,6 @@ class GatewayStateManager:
             request = gateway_pb2.SaveLedgerEntryRequest(
                 id=getattr(entry, "id", "") or "",
                 cycle_id=getattr(entry, "cycle_id", "") or "",
-                strategy_id=getattr(entry, "strategy_id", "") or "",
                 deployment_id=getattr(entry, "deployment_id", "") or "",
                 execution_mode=getattr(entry, "execution_mode", "") or "",
                 timestamp=int(entry.timestamp.timestamp()),
@@ -432,13 +431,13 @@ class GatewayStateManager:
                 logger.error("SaveLedgerEntry failed: %s", response.error)
                 raise AccountingPersistenceError(
                     write_kind=AccountingWriteKind.LEDGER,
-                    strategy_id=getattr(entry, "strategy_id", "") or "",
+                    deployment_id=getattr(entry, "deployment_id", "") or "",
                     message=f"SaveLedgerEntry failed: {response.error}",
                 )
 
             logger.debug(
                 "Ledger entry saved via gateway: strategy=%s, id=%s, intent=%s, success=%s",
-                getattr(entry, "strategy_id", ""),
+                getattr(entry, "deployment_id", ""),
                 getattr(entry, "id", ""),
                 getattr(entry, "intent_type", ""),
                 getattr(entry, "success", True),
@@ -449,19 +448,17 @@ class GatewayStateManager:
             logger.exception("Failed to save ledger entry via gateway")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.LEDGER,
-                strategy_id=getattr(entry, "strategy_id", "") or "",
+                deployment_id=getattr(entry, "deployment_id", "") or "",
                 cause=e,
             ) from e
 
     async def sum_ledger_gas_usd(
         self,
         deployment_id: str,
-        strategy_id: str | None = None,
     ) -> Decimal:
         """Σ transaction_ledger.gas_usd via gateway gRPC (VIB-4247)."""
         request = gateway_pb2.SumLedgerGasUsdRequest(
             deployment_id=deployment_id,
-            strategy_id=strategy_id or "",
         )
         try:
             response = self._client.state.SumLedgerGasUsd(request, timeout=self._timeout)
@@ -471,14 +468,14 @@ class GatewayStateManager:
                 raise NotImplementedError("gateway does not implement SumLedgerGasUsd") from exc
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id or deployment_id,
+                deployment_id=deployment_id,
                 message=f"SumLedgerGasUsd RPC failed for {deployment_id}",
                 cause=exc,
             ) from exc
         except Exception as exc:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id or deployment_id,
+                deployment_id=deployment_id,
                 message=f"SumLedgerGasUsd RPC failed for {deployment_id}",
                 cause=exc,
             ) from exc
@@ -486,7 +483,7 @@ class GatewayStateManager:
         if not response.success:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id or deployment_id,
+                deployment_id=deployment_id,
                 message=f"SumLedgerGasUsd failed for {deployment_id}: {response.error or 'unknown error'}",
             )
 
@@ -495,7 +492,7 @@ class GatewayStateManager:
         except Exception as exc:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id or deployment_id,
+                deployment_id=deployment_id,
                 message=f"SumLedgerGasUsd returned invalid Decimal for {deployment_id}",
                 cause=exc,
             ) from exc
@@ -511,7 +508,6 @@ class GatewayStateManager:
         """
         try:
             request = gateway_pb2.SaveMetricsRequest(
-                strategy_id=metrics.strategy_id,
                 initial_value_usd=str(metrics.initial_value_usd),
                 initial_timestamp=int(metrics.timestamp.timestamp()),
                 deposits_usd=str(metrics.deposits_usd),
@@ -531,11 +527,11 @@ class GatewayStateManager:
                 logger.error("SavePortfolioMetrics failed: %s", response.error)
                 raise AccountingPersistenceError(
                     write_kind=AccountingWriteKind.METRICS,
-                    strategy_id=metrics.strategy_id,
+                    deployment_id=metrics.deployment_id,
                     message=f"SavePortfolioMetrics failed: {response.error}",
                 )
 
-            logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.strategy_id)
+            logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.deployment_id)
             return True
         except AccountingPersistenceError:
             raise
@@ -543,15 +539,15 @@ class GatewayStateManager:
             logger.exception("Failed to save portfolio metrics via gateway")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=getattr(metrics, "strategy_id", "") or "",
+                deployment_id=getattr(metrics, "deployment_id", "") or "",
                 cause=e,
             ) from e
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+    async def get_portfolio_metrics(self, deployment_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics via gateway gRPC.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             PortfolioMetrics or None if not found.
@@ -561,14 +557,13 @@ class GatewayStateManager:
         from almanak.framework.portfolio.models import PortfolioMetrics
 
         try:
-            request = gateway_pb2.GetMetricsRequest(strategy_id=strategy_id)
+            request = gateway_pb2.GetMetricsRequest(deployment_id=deployment_id)
             response = self._client.state.GetPortfolioMetrics(request, timeout=self._timeout)
 
             if not response.found:
                 return None
 
             return PortfolioMetrics(
-                strategy_id=response.strategy_id,
                 timestamp=datetime.fromtimestamp(response.updated_at, tz=UTC)
                 if response.updated_at
                 else datetime.now(UTC),
@@ -604,7 +599,6 @@ class GatewayStateManager:
 
         snapshot_dict = {
             "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
-            "strategy_id": data.strategy_id,
             "total_value_usd": data.total_value_usd or "0",
             "available_cash_usd": data.available_cash_usd or "0",
             "value_confidence": data.value_confidence or "HIGH",
@@ -615,9 +609,6 @@ class GatewayStateManager:
             "chain": data.chain or "",
             "iteration_number": data.iteration_number,
             "snapshot_metadata": snapshot_metadata,
-            # VIB-4097 (3.6) — Phase 4 identity. Older gateways that
-            # pre-date VIB-4093 / 3.2 send default ``""`` for these
-            # fields; the model accepts that.
             "deployment_id": getattr(data, "deployment_id", "") or "",
             "cycle_id": getattr(data, "cycle_id", "") or "",
             "execution_mode": getattr(data, "execution_mode", "") or "",
@@ -682,7 +673,6 @@ class GatewayStateManager:
             request = gateway_pb2.SaveAccountingEventRequest(
                 id=identity.id,
                 deployment_id=identity.deployment_id,
-                strategy_id=identity.strategy_id,
                 cycle_id=identity.cycle_id,
                 execution_mode=identity.execution_mode,
                 timestamp=int(identity.timestamp.timestamp()),
@@ -701,20 +691,20 @@ class GatewayStateManager:
             if not response.success:
                 logger.warning(
                     "SaveAccountingEvent failed: strategy=%s, id=%s, error=%s",
-                    identity.strategy_id,
+                    identity.deployment_id,
                     identity.id,
                     response.error,
                 )
                 if is_live:
                     raise AccountingPersistenceError(
                         write_kind=AccountingWriteKind.LEDGER,
-                        strategy_id=identity.strategy_id,
+                        deployment_id=identity.deployment_id,
                         message=f"SaveAccountingEvent failed: {response.error}",
                     )
                 return False
             logger.debug(
                 "Accounting event saved via gateway: strategy=%s, id=%s, type=%s",
-                identity.strategy_id,
+                identity.deployment_id,
                 identity.id,
                 getattr(event, "event_type", ""),
             )
@@ -726,7 +716,7 @@ class GatewayStateManager:
             if is_live:
                 raise AccountingPersistenceError(
                     write_kind=AccountingWriteKind.LEDGER,
-                    strategy_id=getattr(identity, "strategy_id", ""),
+                    deployment_id=getattr(identity, "deployment_id", ""),
                     cause=e,
                 ) from e
             return False
@@ -768,7 +758,6 @@ class GatewayStateManager:
 
         try:
             request = gateway_pb2.GetPositionHistoryRequest(
-                strategy_id=deployment_id,
                 deployment_id=deployment_id,
                 position_id=position_id,
             )
@@ -953,7 +942,6 @@ class GatewayStateManager:
         16-branch optional-field setter ladder.
         """
         proto_row = gateway_pb2.PositionStateSnapshotRow(
-            strategy_id=r.strategy_id,
             deployment_id=r.deployment_id,
             cycle_id=r.cycle_id,
             captured_at=r.timestamp.isoformat() if r.timestamp else "",
@@ -1414,7 +1402,6 @@ class GatewayStateManager:
         request = gateway_pb2.SaveLedgerAndRegistryRequest(
             id=ledger.id,
             cycle_id=ledger.cycle_id or "",
-            strategy_id=ledger.strategy_id or "",
             deployment_id=ledger.deployment_id or "",
             execution_mode=ledger.execution_mode or "",
             timestamp=int(ledger.timestamp.timestamp()),
@@ -1469,7 +1456,7 @@ class GatewayStateManager:
     def _raise_for_save_ledger_and_registry_response(
         response: Any,
         registry: Any,
-        strategy_id: str,
+        deployment_id: str,
     ) -> None:
         """Translate a non-success response to the right typed exception.
 
@@ -1496,7 +1483,7 @@ class GatewayStateManager:
             raise CutoverStorageNotSupported(f"GatewayStateManager.save_ledger_and_registry: {response.error}")
         raise AccountingPersistenceError(
             write_kind=AccountingWriteKind.ACCOUNTING,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             message=f"SaveLedgerAndRegistry failed via gateway: {response.error or response.error_class}",
         )
 
@@ -1524,7 +1511,7 @@ class GatewayStateManager:
         error translation live in :meth:`_build_save_ledger_and_registry_request`
         and :meth:`_raise_for_save_ledger_and_registry_response`.
         """
-        strategy_id = ledger.strategy_id or ""
+        deployment_id = ledger.deployment_id or ""
         request = self._build_save_ledger_and_registry_request(ledger, registry, handle, mode)
 
         try:
@@ -1536,12 +1523,12 @@ class GatewayStateManager:
             logger.debug(
                 "SaveLedgerAndRegistry ok: id=%s strategy=%s pih=%s",
                 ledger.id,
-                strategy_id,
+                deployment_id,
                 registry.physical_identity_hash,
             )
             return
 
-        self._raise_for_save_ledger_and_registry_response(response, registry, strategy_id)
+        self._raise_for_save_ledger_and_registry_response(response, registry, deployment_id)
 
     async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
         """Not wired for T22 — legacy-data backfill on the gateway lands with T19.
@@ -1570,7 +1557,6 @@ class GatewayStateManager:
         self,
         outbox_id: str,
         deployment_id: str,
-        strategy_id: str,
         cycle_id: str,
         ledger_entry_id: str,
         intent_type: str,
@@ -1587,7 +1573,6 @@ class GatewayStateManager:
         request = gateway_pb2.SaveOutboxEntryRequest(
             outbox_id=outbox_id,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             ledger_entry_id=ledger_entry_id,
             intent_type=intent_type,
@@ -1601,13 +1586,13 @@ class GatewayStateManager:
         except Exception as e:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.OUTBOX,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
         if not response.success:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.OUTBOX,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=Exception(response.error),
             )
 
@@ -1622,7 +1607,6 @@ class GatewayStateManager:
             return {
                 "id": e.id,
                 "deployment_id": e.deployment_id,
-                "strategy_id": e.strategy_id,
                 "cycle_id": e.cycle_id,
                 "ledger_entry_id": e.ledger_entry_id,
                 "intent_type": e.intent_type,
@@ -1650,7 +1634,6 @@ class GatewayStateManager:
                     {
                         "id": e.id,
                         "deployment_id": e.deployment_id,
-                        "strategy_id": e.strategy_id,
                         "cycle_id": e.cycle_id,
                         "ledger_entry_id": e.ledger_entry_id,
                         "intent_type": e.intent_type,
@@ -1714,7 +1697,6 @@ class GatewayStateManager:
             row: dict = {
                 "id": e.id,
                 "cycle_id": e.cycle_id,
-                "strategy_id": e.strategy_id,
                 "deployment_id": e.deployment_id,
                 "execution_mode": e.execution_mode,
                 # Category handlers parse timestamp as ISO string (ts_str.replace(...)).
@@ -1761,13 +1743,9 @@ class GatewayStateManager:
         Read-side fail-quiet: on gRPC error returns ``[]`` rather than
         raising. Stale PnL is preferred over halting snapshot building.
 
-        Note on ``strategy_id`` over the wire: the gRPC contract requires a
-        strategy_id field for format validation, but in hosted mode the
-        gateway always prefers the platform-injected ``AGENT_ID`` env var
-        when filtering, and in local SQLite mode the value is unused for
-        filtering. We pass ``deployment_id`` as the wire value because it
-        follows the same alphanumeric format and is always available at
-        the call site.
+        Note on ``deployment_id`` over the wire: the gRPC contract still
+        requires a deployment_id field for format validation. We pass
+        ``deployment_id`` as that wire value until the proto rename lands.
 
         Args:
             deployment_id: Strategy deployment identifier.
@@ -1784,7 +1762,6 @@ class GatewayStateManager:
             return []
         try:
             request = gateway_pb2.GetAccountingEventsRequest(
-                strategy_id=deployment_id,
                 deployment_id=deployment_id,
                 position_key=position_key or "",
             )
@@ -1879,7 +1856,6 @@ def _proto_event_to_dict(event: "gateway_pb2.AccountingEvent") -> dict:
     return {
         "id": event.id,
         "deployment_id": event.deployment_id,
-        "strategy_id": event.strategy_id,
         "cycle_id": event.cycle_id,
         "execution_mode": event.execution_mode,
         "timestamp": timestamp_iso,

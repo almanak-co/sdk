@@ -45,9 +45,8 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
-    resolve_agent_id,
     validate_chain,
-    validate_strategy_id,
+    validate_deployment_id,
 )
 
 if TYPE_CHECKING:
@@ -484,12 +483,13 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             context.set_details("deployment_id is required")
             return None
         try:
-            validate_strategy_id(deployment_id)
+            validate_deployment_id(deployment_id)
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"deployment_id invalid: {e}")
             return None
-        deployment_id = resolve_agent_id(deployment_id)
+        # One identity (blueprint 29 §4): the validated deployment_id is
+        # filtered directly — no gateway-side identity translation.
 
         chain = (request.chain or "").strip()
         if not chain:
@@ -1179,7 +1179,6 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
             sentinel_ledger = LedgerEntry(
                 id=f"reconciliation:{reconciliation_id}:{phantom['physical_identity_hash']}",
                 cycle_id=f"reconciliation:{reconciliation_id}",
-                strategy_id=deployment_id,
                 deployment_id=deployment_id,
                 execution_mode="reconciliation",
                 timestamp=datetime.now(UTC),

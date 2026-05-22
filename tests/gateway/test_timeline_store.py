@@ -8,18 +8,15 @@ Tests cover:
 - Clearing events
 - Persistence and reload from SQLite
 - Thread safety with concurrent operations
-- Deployed-mode AGENT_ID resolution
+- Deployed-mode identity pass-through
 """
 
-import os
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
-
-import pytest
 
 from almanak.gateway.timeline.store import (
     TimelineEvent,
@@ -36,7 +33,7 @@ class TestTimelineEvent:
         """Test creating a timeline event."""
         event = TimelineEvent(
             event_id="test-123",
-            strategy_id="my-strategy",
+            deployment_id="my-strategy",
             timestamp=datetime.now(UTC),
             event_type="TRADE",
             description="Swapped 100 USDC for ETH",
@@ -46,7 +43,7 @@ class TestTimelineEvent:
         )
 
         assert event.event_id == "test-123"
-        assert event.strategy_id == "my-strategy"
+        assert event.deployment_id == "my-strategy"
         assert event.event_type == "TRADE"
         assert event.tx_hash == "0x123abc"
         assert event.chain == "arbitrum"
@@ -57,7 +54,7 @@ class TestTimelineEvent:
         timestamp = datetime.now(UTC)
         event = TimelineEvent(
             event_id="test-123",
-            strategy_id="my-strategy",
+            deployment_id="my-strategy",
             timestamp=timestamp,
             event_type="TRADE",
             description="Test trade",
@@ -65,7 +62,7 @@ class TestTimelineEvent:
 
         data = event.to_dict()
         assert data["event_id"] == "test-123"
-        assert data["strategy_id"] == "my-strategy"
+        assert data["deployment_id"] == "my-strategy"
         assert data["timestamp"] == timestamp.isoformat()
         assert data["event_type"] == "TRADE"
         assert data["description"] == "Test trade"
@@ -77,7 +74,7 @@ class TestTimelineEvent:
         """Test creating event from dictionary."""
         data = {
             "event_id": "test-456",
-            "strategy_id": "other-strategy",
+            "deployment_id": "other-strategy",
             "timestamp": "2024-01-15T10:30:00+00:00",
             "event_type": "ERROR",
             "description": "Transaction failed",
@@ -88,7 +85,7 @@ class TestTimelineEvent:
 
         event = TimelineEvent.from_dict(data)
         assert event.event_id == "test-456"
-        assert event.strategy_id == "other-strategy"
+        assert event.deployment_id == "other-strategy"
         assert event.event_type == "ERROR"
         assert event.tx_hash == "0xabc"
         assert event.details["error"] == "Out of gas"
@@ -103,7 +100,7 @@ class TestTimelineStoreInMemory:
         store.initialize()
 
         # Should start empty
-        assert store.get_strategy_ids() == []
+        assert store.get_deployment_ids() == []
 
     def test_add_and_get_event(self):
         """Test adding and retrieving events."""
@@ -112,7 +109,7 @@ class TestTimelineStoreInMemory:
 
         event = TimelineEvent(
             event_id=str(uuid4()),
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             timestamp=datetime.now(UTC),
             event_type="TRADE",
             description="Test event",
@@ -135,21 +132,21 @@ class TestTimelineStoreInMemory:
         # Add events in random order
         event1 = TimelineEvent(
             event_id="1",
-            strategy_id="test",
+            deployment_id="test",
             timestamp=now - timedelta(hours=2),
             event_type="TRADE",
             description="Oldest",
         )
         event2 = TimelineEvent(
             event_id="2",
-            strategy_id="test",
+            deployment_id="test",
             timestamp=now,
             event_type="TRADE",
             description="Newest",
         )
         event3 = TimelineEvent(
             event_id="3",
-            strategy_id="test",
+            deployment_id="test",
             timestamp=now - timedelta(hours=1),
             event_type="TRADE",
             description="Middle",
@@ -173,7 +170,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Trade 1",
@@ -182,7 +179,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=datetime.now(UTC),
                 event_type="ERROR",
                 description="Error 1",
@@ -191,7 +188,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="3",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Trade 2",
@@ -216,7 +213,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=now - timedelta(hours=3),
                 event_type="TRADE",
                 description="Old event",
@@ -225,7 +222,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=now - timedelta(hours=1),
                 event_type="TRADE",
                 description="Recent event",
@@ -234,7 +231,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="3",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=now,
                 event_type="TRADE",
                 description="New event",
@@ -257,7 +254,7 @@ class TestTimelineStoreInMemory:
             store.add_event(
                 TimelineEvent(
                     event_id=str(i),
-                    strategy_id="test",
+                    deployment_id="test",
                     timestamp=datetime.now(UTC) - timedelta(minutes=i),
                     event_type="TRADE",
                     description=f"Event {i}",
@@ -278,7 +275,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="strategy-a",
+                deployment_id="strategy-a",
                 timestamp=now - timedelta(minutes=10),
                 event_type="TRADE",
                 description="Event A",
@@ -287,7 +284,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="strategy-b",
+                deployment_id="strategy-b",
                 timestamp=now - timedelta(minutes=5),
                 event_type="TRADE",
                 description="Event B",
@@ -296,7 +293,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="3",
-                strategy_id="strategy-a",
+                deployment_id="strategy-a",
                 timestamp=now,
                 event_type="TRADE",
                 description="Event A2",
@@ -310,15 +307,15 @@ class TestTimelineStoreInMemory:
         assert events[1].event_id == "2"
         assert events[2].event_id == "1"
 
-    def test_get_strategy_ids(self):
-        """Test getting list of strategy IDs."""
+    def test_get_deployment_ids(self):
+        """Test getting list of deployment IDs."""
         store = TimelineStore(db_path=None)
         store.initialize()
 
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="strategy-a",
+                deployment_id="strategy-a",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event A",
@@ -327,14 +324,14 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="strategy-b",
+                deployment_id="strategy-b",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event B",
             )
         )
 
-        ids = store.get_strategy_ids()
+        ids = store.get_deployment_ids()
         assert len(ids) == 2
         assert "strategy-a" in ids
         assert "strategy-b" in ids
@@ -347,7 +344,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="strategy-a",
+                deployment_id="strategy-a",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event A",
@@ -356,7 +353,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="strategy-b",
+                deployment_id="strategy-b",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event B",
@@ -376,7 +373,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="1",
-                strategy_id="strategy-a",
+                deployment_id="strategy-a",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event A",
@@ -385,7 +382,7 @@ class TestTimelineStoreInMemory:
         store.add_event(
             TimelineEvent(
                 event_id="2",
-                strategy_id="strategy-b",
+                deployment_id="strategy-b",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Event B",
@@ -394,7 +391,7 @@ class TestTimelineStoreInMemory:
 
         store.clear_events()
 
-        assert store.get_strategy_ids() == []
+        assert store.get_deployment_ids() == []
 
 
 class TestTimelineStoreSQLite:
@@ -420,7 +417,7 @@ class TestTimelineStoreSQLite:
 
             event = TimelineEvent(
                 event_id="persist-test",
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Persistent event",
@@ -451,7 +448,7 @@ class TestTimelineStoreSQLite:
             store.add_event(
                 TimelineEvent(
                     event_id="1",
-                    strategy_id="test",
+                    deployment_id="test",
                     timestamp=datetime.now(UTC),
                     event_type="TRADE",
                     description="Event 1",
@@ -483,7 +480,7 @@ class TestTimelineStoreThreadSafety:
                 for i in range(100):
                     event = TimelineEvent(
                         event_id=f"thread-{thread_id}-event-{i}",
-                        strategy_id="test",
+                        deployment_id="test",
                         timestamp=datetime.now(UTC),
                         event_type="TRADE",
                         description=f"Event from thread {thread_id}",
@@ -517,7 +514,7 @@ class TestTimelineStoreThreadSafety:
             store.add_event(
                 TimelineEvent(
                     event_id=f"initial-{i}",
-                    strategy_id="test",
+                    deployment_id="test",
                     timestamp=datetime.now(UTC),
                     event_type="TRADE",
                     description=f"Initial event {i}",
@@ -533,7 +530,7 @@ class TestTimelineStoreThreadSafety:
                     store.add_event(
                         TimelineEvent(
                             event_id=f"writer-{thread_id}-{i}",
-                            strategy_id="test",
+                            deployment_id="test",
                             timestamp=datetime.now(UTC),
                             event_type="TRADE",
                             description=f"Event from writer {thread_id}",
@@ -566,129 +563,106 @@ class TestTimelineStoreThreadSafety:
         assert all(count > 0 for count in read_counts)
 
 
-class TestTimelineStoreAgentIdResolution:
-    """Tests for deployed-mode AGENT_ID resolution.
+class TestTimelineStoreIdentityKeying:
+    """Tests that the TimelineStore keys events on the canonical identity.
 
-    In deployed mode (PostgreSQL backend), the TimelineStore resolves
-    SDK strategy_id to the platform AGENT_ID env var. This ensures
-    timeline data is keyed consistently with lifecycle tables.
+    Per blueprint 29 the TimelineStore performs NO identity translation on
+    either backend: ``event.deployment_id`` (already the canonical
+    ``deployment_id``) is the cache/DB key as-is. VIB-4722 removed the old
+    ``_resolve_deployment_id`` hosted-env rewrite path.
     """
 
-    def test_resolve_agent_id_passthrough_without_env(self):
-        """Without AGENT_ID env var, strategy_id is returned as-is."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("AGENT_ID", None)
-            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "uniswap_rsi:abc123"
+    def test_resolve_deployment_id_method_is_removed(self):
+        """The identity-translation helper no longer exists (blueprint 29)."""
+        assert not hasattr(TimelineStore, "_resolve_deployment_id")
 
-    def test_resolve_agent_id_with_env(self):
-        """With AGENT_ID env var, the platform ID is returned."""
-        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
-            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "platform-uuid-123"
+    def test_inmemory_store_keys_on_deployment_id(self):
+        """In-memory store caches under the event's deployment_id verbatim."""
+        store = TimelineStore(db_path=None)  # No database_url → in-memory
+        store.initialize()
 
-    def test_resolve_agent_id_blank_env_falls_back(self):
-        """With blank AGENT_ID env var, strategy_id is returned."""
-        with patch.dict(os.environ, {"AGENT_ID": "  "}):
-            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "uniswap_rsi:abc123"
+        event = TimelineEvent(
+            event_id="test-1",
+            deployment_id="deployment:abc123def456",
+            timestamp=datetime.now(UTC),
+            event_type="TRADE",
+            description="Test",
+        )
+        store.add_event(event)
 
-    def test_inmemory_store_ignores_agent_id(self):
-        """In-memory store (no PG) does NOT resolve AGENT_ID — local mode."""
-        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
-            store = TimelineStore(db_path=None)  # No database_url → not PG
+        assert "deployment:abc123def456" in store.get_deployment_ids()
+        assert len(store.get_events("deployment:abc123def456")) == 1
+
+    def test_sqlite_store_keys_on_deployment_id(self):
+        """SQLite store caches under the event's deployment_id verbatim."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "timeline.db"
+            store = TimelineStore(db_path=db_path)
             store.initialize()
 
             event = TimelineEvent(
                 event_id="test-1",
-                strategy_id="uniswap_rsi:abc123",
+                deployment_id="deployment:abc123def456",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Test",
             )
             store.add_event(event)
 
-            # In-memory store should cache under SDK strategy_id (no resolution)
-            assert "uniswap_rsi:abc123" in store.get_strategy_ids()
-            assert len(store.get_events("uniswap_rsi:abc123")) == 1
+            assert "deployment:abc123def456" in store.get_deployment_ids()
+            assert len(store.get_events("deployment:abc123def456")) == 1
 
-    def test_sqlite_store_ignores_agent_id(self):
-        """SQLite store does NOT resolve AGENT_ID — local mode."""
-        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "timeline.db"
-                store = TimelineStore(db_path=db_path)
-                store.initialize()
+    def test_postgres_backend_keys_on_deployment_id_no_translation(self):
+        """PostgreSQL backend keys the cache on deployment_id with NO rewrite.
 
-                event = TimelineEvent(
-                    event_id="test-1",
-                    strategy_id="uniswap_rsi:abc123",
-                    timestamp=datetime.now(UTC),
-                    event_type="TRADE",
-                    description="Test",
-                )
-                store.add_event(event)
-
-                # SQLite store should cache under SDK strategy_id (no resolution)
-                assert "uniswap_rsi:abc123" in store.get_strategy_ids()
-                assert len(store.get_events("uniswap_rsi:abc123")) == 1
-
-    def test_postgres_flag_enables_resolution_in_cache(self):
-        """When database_url is set, add_event resolves IDs for cache keys.
-
-        We can't actually connect to PostgreSQL in unit tests, so we test
-        that the resolution logic applies to cache operations by mocking
-        the PG persistence layer.
+        We cannot connect to PostgreSQL in unit tests, so the PG persist
+        call is mocked. The point of the test is the cache key: blueprint 29
+        forbids any identity translation, so the cache must be keyed by the
+        event's deployment_id exactly — the same as the local backends.
         """
-        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
-            store = TimelineStore(database_url="postgres://fake:5432/test")
-            # Manually mark as initialized and mock PG to avoid real connection
-            store._initialized = True
-            store._pg_pool = True  # Truthy sentinel — we'll mock the persist call
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._initialized = True
+        store._pg_pool = True  # Truthy sentinel — we'll mock the persist call
 
-            event = TimelineEvent(
-                event_id="test-1",
-                strategy_id="uniswap_rsi:abc123",
-                timestamp=datetime.now(UTC),
-                event_type="TRADE",
-                description="Test",
-            )
+        event = TimelineEvent(
+            event_id="test-1",
+            deployment_id="platform-agent-uuid-123",
+            timestamp=datetime.now(UTC),
+            event_type="TRADE",
+            description="Test",
+        )
 
-            # Mock PG persistence to avoid real DB call
-            with patch.object(store, "_persist_event_postgres"):
-                store.add_event(event)
+        with patch.object(store, "_persist_event_postgres"):
+            store.add_event(event)
 
-            # Cache should be keyed by resolved AGENT_ID, not SDK strategy_id
-            assert "platform-uuid-123" in store.get_strategy_ids()
-            assert "uniswap_rsi:abc123" not in store.get_strategy_ids()
+        # Cache is keyed by the event's deployment_id — no translation.
+        assert "platform-agent-uuid-123" in store.get_deployment_ids()
+        events = store.get_events("platform-agent-uuid-123")
+        assert len(events) == 1
+        assert events[0].event_id == "test-1"
 
-            # get_events with SDK ID should resolve to AGENT_ID and find data
-            events = store.get_events("uniswap_rsi:abc123")
-            assert len(events) == 1
-            assert events[0].event_id == "test-1"
+    def test_postgres_clear_events_keys_on_deployment_id(self):
+        """clear_events on the PG backend uses the deployment_id verbatim."""
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._initialized = True
+        store._pg_pool = True
 
-    def test_postgres_clear_events_resolves_id(self):
-        """clear_events resolves strategy_id when using PostgreSQL backend."""
-        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
-            store = TimelineStore(database_url="postgres://fake:5432/test")
-            store._initialized = True
-            store._pg_pool = True
+        event = TimelineEvent(
+            event_id="test-1",
+            deployment_id="platform-agent-uuid-123",
+            timestamp=datetime.now(UTC),
+            event_type="TRADE",
+            description="Test",
+        )
 
-            event = TimelineEvent(
-                event_id="test-1",
-                strategy_id="uniswap_rsi:abc123",
-                timestamp=datetime.now(UTC),
-                event_type="TRADE",
-                description="Test",
-            )
+        with patch.object(store, "_persist_event_postgres"):
+            store.add_event(event)
 
-            with patch.object(store, "_persist_event_postgres"):
-                store.add_event(event)
+        with patch.object(store, "_clear_events_postgres") as mock_clear:
+            store.clear_events("platform-agent-uuid-123")
+            mock_clear.assert_called_once_with("platform-agent-uuid-123")
 
-            # Clear by SDK ID should resolve and clear the AGENT_ID-keyed cache
-            with patch.object(store, "_clear_events_postgres") as mock_clear:
-                store.clear_events("uniswap_rsi:abc123")
-                # Should have been called with resolved ID
-                mock_clear.assert_called_once_with("platform-uuid-123")
-
-            assert store.get_events("uniswap_rsi:abc123") == []
+        assert store.get_events("platform-agent-uuid-123") == []
 
 
 class TestTimelineStoreSingleton:
@@ -711,7 +685,7 @@ class TestTimelineStoreSingleton:
         store1.add_event(
             TimelineEvent(
                 event_id="test",
-                strategy_id="test",
+                deployment_id="test",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Test",

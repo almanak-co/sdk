@@ -165,7 +165,7 @@ def _make_executor(
         mock_gateway,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy-integration",
+        deployment_id="test-strategy-integration",
     )
 
 

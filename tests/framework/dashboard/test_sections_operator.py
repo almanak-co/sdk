@@ -10,7 +10,7 @@ These tests cover the Preview → Apply → Refresh flow:
   clears the token too (consumed).
 * Each handler degrades to ``st.error`` rather than crashing on a
   ``DashboardClientError``.
-* ``st.session_state`` keys are namespaced by ``strategy_id`` so two
+* ``st.session_state`` keys are namespaced by ``deployment_id`` so two
   open tabs do not collide.
 """
 
@@ -259,7 +259,7 @@ class TestDoPreview:
         panel._do_preview("sid", fake_operator)
         assert panel._key(panel._APPLY_OUTCOME_KEY, "sid") not in st.session_state
 
-    def test_namespaced_by_strategy_id(self, fake_operator: MagicMock) -> None:
+    def test_namespaced_by_deployment_id(self, fake_operator: MagicMock) -> None:
         """Two strategies' previews coexist without overwriting each other."""
         import streamlit as st
 

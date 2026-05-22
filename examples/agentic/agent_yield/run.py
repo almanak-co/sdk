@@ -100,12 +100,12 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     """
     token = config.get("default_supply_token", "USDC")
     amount = config.get("default_supply_amount", "10")
-    strategy_id = config.get("strategy_id", "agent-yield")
+    deployment_id = config.get("deployment_id", "agent-yield")
 
     return MockLLMClient([
         # Round 1: load state + get price + get balance + RSI (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
+            _mock_tool_call("load_agent_state", {"deployment_id": deployment_id}),
             _mock_tool_call("get_price", {"token": "WAVAX"}),
             _mock_tool_call("get_balance", {"token": token}),
             _mock_tool_call("get_indicator", {"indicator": "rsi", "token": "WAVAX", "period": 14}),
@@ -121,11 +121,11 @@ def create_mock_llm(config: dict) -> MockLLMClient:
         # Round 3: save state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {"position": "supplied", "token": token, "amount": amount, "protocol": "aave_v3"},
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": f"Supplied {amount} {token} to Aave V3. USDC is a stablecoin with low risk. RSI neutral.",
             }),
         ),
@@ -162,7 +162,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-yield"),
+            deployment_id=config.get("deployment_id", "agent-yield"),
             default_chain=config.get("chain", "avalanche"),
         )
 
@@ -192,7 +192,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 10),
-                strategy_id=config.get("strategy_id", "agent-yield"),
+                deployment_id=config.get("deployment_id", "agent-yield"),
             )
             logger.info("Agent result: %s", result)
         finally:

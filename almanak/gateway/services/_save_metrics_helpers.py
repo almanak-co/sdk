@@ -3,7 +3,7 @@
 This module decomposes the large ``SavePortfolioMetrics`` RPC body into
 focused, testable phases:
 
-1. :func:`parse_metrics_inputs` — validates ``strategy_id``, the 4 currency
+1. :func:`parse_metrics_inputs` — validates ``deployment_id``, the 4 currency
    fields, and ``initial_timestamp``; raises :class:`MetricsValidationError`
    on bad input and returns a typed :class:`ParsedMetricsInputs` otherwise.
 2. :func:`build_pg_upsert_args` — builds the positional argument tuple for
@@ -74,7 +74,7 @@ class ParsedMetricsInputs:
     ``timestamp`` is tz-aware UTC.
     """
 
-    strategy_id: str  # post-validate_strategy_id (pre-resolve_agent_id)
+    deployment_id: str  # post-validate_deployment_id; the canonical deployment_id
     initial_value_usd: Decimal
     deposits_usd: Decimal
     withdrawals_usd: Decimal
@@ -84,18 +84,18 @@ class ParsedMetricsInputs:
 
 def parse_metrics_inputs(
     request: gateway_pb2.SaveMetricsRequest,
-    strategy_id: str,
+    deployment_id: str,
 ) -> ParsedMetricsInputs:
     """Parse + validate request fields into a typed bundle.
 
     Args:
         request: The incoming proto request. Only its primitive fields are
-            read (decimals, ``initial_timestamp``, ``strategy_id``).
-        strategy_id: The already-validated, agent-id-resolved strategy_id.
-            Passed in rather than re-derived here because ``validate_strategy_id``
-            and ``resolve_agent_id`` live in the validation module and already
-            handle their own error-path conversion to ``ValidationError`` in
-            the RPC.
+            read (decimals, ``initial_timestamp``, ``deployment_id``).
+        deployment_id: The already-validated deployment_id — the canonical
+            deployment_id (blueprint 29; no gateway-side translation).
+            Passed in rather than re-derived here because ``validate_deployment_id``
+            lives in the validation module and already handles its own
+            error-path conversion to ``ValidationError`` in the RPC.
 
     Raises:
         MetricsValidationError: with message matching the pre-refactor
@@ -123,7 +123,7 @@ def parse_metrics_inputs(
         raise MetricsValidationError("initial_timestamp is out of range") from exc
 
     return ParsedMetricsInputs(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         initial_value_usd=initial_value_usd,
         deposits_usd=deposits_usd,
         withdrawals_usd=withdrawals_usd,
@@ -146,25 +146,24 @@ def parse_metrics_inputs(
 # matching SQLite parity at sqlite.py:2253.
 PG_UPSERT_QUERY = """
                     INSERT INTO portfolio_metrics (
-                        agent_id, initial_value_usd, initial_timestamp,
+                        deployment_id, initial_value_usd, initial_timestamp,
                         deposits_usd, withdrawals_usd, gas_spent_usd,
-                        deployment_id, cycle_id, execution_mode, is_complete,
+                        cycle_id, execution_mode, is_complete,
                         updated_at, total_value_usd, positions_json
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
-                    ON CONFLICT (agent_id) DO UPDATE SET
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+                    ON CONFLICT (deployment_id) DO UPDATE SET
                         initial_value_usd = EXCLUDED.initial_value_usd,
                         initial_timestamp = EXCLUDED.initial_timestamp,
                         deposits_usd = EXCLUDED.deposits_usd,
                         withdrawals_usd = EXCLUDED.withdrawals_usd,
                         gas_spent_usd = EXCLUDED.gas_spent_usd,
-                        deployment_id = EXCLUDED.deployment_id,
                         cycle_id = EXCLUDED.cycle_id,
                         execution_mode = EXCLUDED.execution_mode,
                         is_complete = EXCLUDED.is_complete,
                         updated_at = EXCLUDED.updated_at,
                         total_value_usd = EXCLUDED.total_value_usd,
                         positions_json = EXCLUDED.positions_json
-                    RETURNING agent_id
+                    RETURNING deployment_id
                     """
 
 
@@ -177,8 +176,15 @@ def build_pg_upsert_args(
 ) -> tuple[Any, ...]:
     """Build the positional args tuple for the portfolio_metrics UPSERT.
 
-    Order matches ``$1..$13`` in :data:`PG_UPSERT_QUERY` exactly. Do NOT
+    Order matches ``$1..$12`` in :data:`PG_UPSERT_QUERY` exactly. Do NOT
     reorder.
+
+    VIB-4721/4722: ``portfolio_metrics`` now has a single identity column,
+    ``deployment_id`` (the primary key — the legacy ``deployment_id`` column was
+    DROPPED by the metrics-database migration). It is filled with the
+    caller-supplied canonical id (``inputs.deployment_id``, the validated wire
+    id) — no separate ``request.deployment_id`` write, no identity
+    translation (blueprint 29 §4-5).
 
     ``total_value_usd`` is sourced from the latest snapshot via
     :func:`resolve_total_value_usd` — the proto contract (VIB-2765) does not
@@ -189,13 +195,12 @@ def build_pg_upsert_args(
     ``"[]"`` and SQLite's writer pulls it via ``getattr``).
     """
     return (
-        inputs.strategy_id,
+        inputs.deployment_id,
         str(inputs.initial_value_usd),
         inputs.timestamp,
         str(inputs.deposits_usd),
         str(inputs.withdrawals_usd),
         str(inputs.gas_spent_usd),
-        request.deployment_id or "",
         request.cycle_id or "",
         request.execution_mode or "",
         request.is_complete,
@@ -210,7 +215,7 @@ def build_pg_upsert_args(
 # ---------------------------------------------------------------------------
 
 
-async def resolve_total_value_usd(warm_backend: Any, strategy_id: str) -> Decimal:
+async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Decimal:
     """Best-effort lookup of the latest snapshot's ``total_value_usd``.
 
     VIB-2765: the proto does NOT carry ``total_value_usd`` (it is derived
@@ -222,7 +227,7 @@ async def resolve_total_value_usd(warm_backend: Any, strategy_id: str) -> Decima
         warm_backend: ``StateManager.warm_backend`` — may be ``None`` or may
             lack ``get_latest_snapshot`` (the ``hasattr`` guard accommodates
             older warm backends that only implement ``save_portfolio_metrics``).
-        strategy_id: The (already agent-id-resolved) strategy id.
+        deployment_id: The already resolved deployment id.
 
     Returns:
         The latest snapshot's ``total_value_usd`` or ``Decimal("0")`` if
@@ -231,13 +236,13 @@ async def resolve_total_value_usd(warm_backend: Any, strategy_id: str) -> Decima
     total_value_usd = Decimal("0")
     try:
         if warm_backend and hasattr(warm_backend, "get_latest_snapshot"):
-            latest = await warm_backend.get_latest_snapshot(strategy_id)
+            latest = await warm_backend.get_latest_snapshot(deployment_id)
             if latest is not None:
                 total_value_usd = latest.total_value_usd
     except Exception as snap_err:  # noqa: BLE001 — must not abort the write
         logger.warning(
             "Could not resolve total_value_usd from snapshot for %s: %s",
-            strategy_id,
+            deployment_id,
             snap_err,
         )
     return total_value_usd
@@ -262,14 +267,13 @@ def build_portfolio_metrics(
     from almanak.framework.portfolio.models import PortfolioMetrics
 
     return PortfolioMetrics(
-        strategy_id=inputs.strategy_id,
         timestamp=inputs.timestamp,
         total_value_usd=total_value_usd,
         initial_value_usd=inputs.initial_value_usd,
         deposits_usd=inputs.deposits_usd,
         withdrawals_usd=inputs.withdrawals_usd,
         gas_spent_usd=inputs.gas_spent_usd,
-        deployment_id=request.deployment_id or "",
+        deployment_id=request.deployment_id or inputs.deployment_id,
         cycle_id=request.cycle_id or None,
         execution_mode=request.execution_mode or "",
         is_complete=request.is_complete,

@@ -233,7 +233,7 @@ class AutoRemediation:
 class OperatorCard:
     """Operator card for displaying issues requiring attention."""
 
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     reason: StuckReason
     severity: Severity
@@ -378,7 +378,7 @@ class ConfigHistoryEntry:
 class StrategyConfig:
     """Strategy configuration for the config editor."""
 
-    strategy_id: str
+    deployment_id: str
     strategy_name: str
     # Trading parameters
     max_slippage: Decimal

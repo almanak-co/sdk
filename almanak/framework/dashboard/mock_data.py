@@ -23,7 +23,7 @@ def generate_mock_pnl_history(days: int = 7, base_value: Decimal = Decimal("0"))
     return []
 
 
-def generate_mock_timeline_events(strategy_id: str) -> list[TimelineEvent]:
+def generate_mock_timeline_events(deployment_id: str) -> list[TimelineEvent]:
     return []
 
 
@@ -35,7 +35,7 @@ def generate_mock_position(strategy_type: str) -> PositionSummary:
     )
 
 
-def generate_mock_operator_card(_strategy_id: str, _reason: StuckReason, _severity: Severity) -> OperatorCard | None:
+def generate_mock_operator_card(_deployment_id: str, _reason: StuckReason, _severity: Severity) -> OperatorCard | None:
     return None
 
 
@@ -47,13 +47,13 @@ def generate_mock_multi_chain_strategy() -> Strategy | None:
     return None
 
 
-def generate_extended_timeline_events(strategy_id: str, page: int = 0, page_size: int = 20) -> list[TimelineEvent]:
+def generate_extended_timeline_events(deployment_id: str, page: int = 0, page_size: int = 20) -> list[TimelineEvent]:
     return []
 
 
-def generate_mock_strategy_config(strategy_id: str, strategy_name: str) -> StrategyConfig:
+def generate_mock_strategy_config(deployment_id: str, strategy_name: str) -> StrategyConfig:
     return StrategyConfig(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_name=strategy_name,
         max_slippage=Decimal("0.005"),
         trade_size_usd=Decimal("1000"),

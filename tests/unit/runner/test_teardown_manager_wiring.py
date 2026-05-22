@@ -35,7 +35,7 @@ from almanak.framework.teardown.models import (
 def _make_teardown_strategy():
     """Create a mock strategy that supports teardown."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -60,7 +60,7 @@ def _make_teardown_strategy():
     )
 
     strategy.get_open_positions.return_value = TeardownPositionSummary(
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         timestamp=datetime.now(UTC),
         positions=[
             PositionInfo(
@@ -102,7 +102,7 @@ def _make_successful_teardown_result():
     """Create a successful TeardownResult."""
     return TeardownResult(
         success=True,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         mode="graceful",
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -121,7 +121,7 @@ def _make_failed_teardown_result():
     """Create a failed TeardownResult."""
     return TeardownResult(
         success=False,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         mode="graceful",
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -168,7 +168,7 @@ class TestTeardownManagerRouting:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=None,
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 duration_ms=100,
             )
         )
@@ -198,7 +198,7 @@ class TestTeardownManagerRouting:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=None,
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 duration_ms=100,
             )
         )
@@ -229,7 +229,7 @@ class TestTeardownManagerRouting:
             return_value=IterationResult(
                 status=IterationStatus.STRATEGY_ERROR,
                 error="Slippage too high",
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 duration_ms=100,
             )
         )
@@ -267,7 +267,7 @@ class TestTeardownFallback:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=None,
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 duration_ms=100,
             )
         )

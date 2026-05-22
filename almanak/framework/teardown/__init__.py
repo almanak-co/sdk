@@ -18,11 +18,11 @@ Core invariants (never violated):
 
 Backend topology:
 
-- Local SDK: SQLite, keyed by ``TeardownRequest.strategy_id``.
+- Local SDK: SQLite, keyed by ``TeardownRequest.deployment_id``.
 - Hosted strategy runtime: gateway gRPC, with PostgreSQL access kept inside
   the gateway process.
-- Hosted gateway process: PostgreSQL, keyed by ``agent_id`` (mapped from
-  ``strategy_id`` at the write/read boundary in the Postgres backend).
+- Hosted gateway process: PostgreSQL, keyed by ``deployment_id`` (mapped from
+  ``deployment_id`` at the write/read boundary in the Postgres backend).
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ def create_teardown_state_manager(
         # than let writes land in a local SQLite file the runner never reads.
         # See VIB-4049 PR2 brief and CLAUDE.md "Schema-contract check at boot".
         raise RuntimeError(
-            f"{_DB_URL_ENV_VAR} is unset in hosted mode (AGENT_ID is set). "
+            f"{_DB_URL_ENV_VAR} is unset in hosted mode (ALMANAK_IS_HOSTED is set). "
             "The platform teardown backend requires a Postgres database URL — "
             "without it, teardown requests would silently disappear into a "
             "local SQLite file the runner never reads."
@@ -208,7 +208,7 @@ def create_teardown_state_adapter(
         # mode without a DB URL must abort, not silently fall back to a SQLite
         # approval channel no other process can see.
         raise RuntimeError(
-            f"{_DB_URL_ENV_VAR} is unset in hosted mode (AGENT_ID is set). "
+            f"{_DB_URL_ENV_VAR} is unset in hosted mode (ALMANAK_IS_HOSTED is set). "
             "The platform teardown state adapter requires a Postgres database "
             "URL — without it, slippage-escalation approval responses would "
             "land in a SQLite file invisible to the dashboard / CLI writer."

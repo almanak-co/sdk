@@ -12,15 +12,14 @@ from almanak.gateway.validation import (
     MAX_GRAPHQL_QUERY_LENGTH,
     MAX_STATE_SIZE_BYTES,
     ValidationError,
-    resolve_agent_id,
     validate_address,
     validate_batch_size,
     validate_chain,
+    validate_deployment_id,
     validate_graphql_query,
     validate_positive_int,
     validate_rpc_method,
     validate_state_size,
-    validate_strategy_id,
     validate_symbol,
     validate_token_id,
     validate_tx_hash,
@@ -98,11 +97,11 @@ class TestAddressValidation:
                 validate_address(attempt)
 
 
-class TestStrategyIdValidation:
-    """Tests for strategy ID validation."""
+class TestDeploymentIdValidation:
+    """Tests for deployment ID validation."""
 
-    def test_valid_strategy_ids(self):
-        """Test that valid strategy IDs pass validation."""
+    def test_valid_deployment_ids(self):
+        """Test that valid deployment IDs pass validation."""
         valid_ids = [
             "my-strategy",
             "strategy_123",
@@ -110,21 +109,23 @@ class TestStrategyIdValidation:
             "a" * 128,  # Max length
         ]
         for sid in valid_ids:
-            assert validate_strategy_id(sid) == sid
+            assert validate_deployment_id(sid) == sid
 
-    def test_invalid_strategy_id_format(self):
-        """Test that invalid strategy ID formats are rejected."""
+    def test_invalid_deployment_id_format(self):
+        """Test that invalid deployment ID formats are rejected."""
         invalid_ids = [
             "strategy with spaces",
+            " strategy",
+            "strategy ",
             "strategy.with.dots",
             "strategy/with/slashes",
             "a" * 129,  # Too long
         ]
         for sid in invalid_ids:
             with pytest.raises(ValidationError):
-                validate_strategy_id(sid)
+                validate_deployment_id(sid)
 
-    def test_path_traversal_strategy_id(self):
+    def test_path_traversal_deployment_id(self):
         """Test that path traversal attempts are rejected."""
         traversal_attempts = [
             "../../../etc/passwd",
@@ -133,9 +134,9 @@ class TestStrategyIdValidation:
         ]
         for attempt in traversal_attempts:
             with pytest.raises(ValidationError):
-                validate_strategy_id(attempt)
+                validate_deployment_id(attempt)
 
-    def test_sql_injection_strategy_id(self):
+    def test_sql_injection_deployment_id(self):
         """Test that SQL injection attempts are rejected."""
         injection_attempts = [
             "strategy'; DROP TABLE strategies; --",
@@ -144,7 +145,7 @@ class TestStrategyIdValidation:
         ]
         for attempt in injection_attempts:
             with pytest.raises(ValidationError):
-                validate_strategy_id(attempt)
+                validate_deployment_id(attempt)
 
 
 class TestRpcMethodValidation:
@@ -376,35 +377,7 @@ class TestPositiveIntValidation:
         assert "exceeds maximum" in str(exc.value)
 
 
-class TestResolveAgentId:
-    """Tests for resolve_agent_id — deployed-mode AGENT_ID normalization."""
-
-    def test_no_env_var_passes_through(self, monkeypatch):
-        """Without AGENT_ID env var, strategy_id passes through unchanged."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
-        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
-
-    def test_env_var_overrides(self, monkeypatch):
-        """When AGENT_ID is set, it replaces the strategy_id."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        assert resolve_agent_id("uniswap_rsi") == "platform-uuid-1234"
-
-    def test_empty_string_falls_back(self, monkeypatch):
-        """Empty AGENT_ID falls back to the original strategy_id."""
-        monkeypatch.setenv("AGENT_ID", "")
-        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
-
-    def test_whitespace_only_falls_back(self, monkeypatch):
-        """Whitespace-only AGENT_ID falls back to the original strategy_id."""
-        monkeypatch.setenv("AGENT_ID", "   ")
-        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
-
-    def test_env_var_with_whitespace_is_stripped(self, monkeypatch):
-        """AGENT_ID with surrounding whitespace is stripped."""
-        monkeypatch.setenv("AGENT_ID", "  uuid-with-spaces  ")
-        assert resolve_agent_id("uniswap_rsi") == "uuid-with-spaces"
-
-    def test_uuid_format_agent_id(self, monkeypatch):
-        """Typical deployed AGENT_ID is a UUID."""
-        monkeypatch.setenv("AGENT_ID", "abc-123-def-456")
-        assert resolve_agent_id("uniswap_rsi:a1b2c3") == "abc-123-def-456"
+# NOTE: ``resolve_deployment_id`` was removed in VIB-4722 — per blueprint 29 the
+# gateway no longer translates identity (the runner passes the canonical
+# ``deployment_id`` and every SQL filters it directly). The deployment-mode
+# env contract is covered by tests/unit/deployment/test_deployment.py.

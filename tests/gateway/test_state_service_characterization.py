@@ -1,7 +1,7 @@
 """Characterization tests for StateService — Phase 5b.
 
 Adds focused branch coverage on top of an already-substantial existing inventory
-(test_state_service_outbox_rpcs.py 561 lines, test_state_service_agent_id.py
+(test_state_service_outbox_rpcs.py 561 lines, test_state_service_deployment_id.py
 157 lines, test_save_portfolio_metrics_characterization.py 564 lines,
 test_get_position_history_rpc.py 679 lines, test_portfolio_metrics_rpc.py
 357 lines, test_accounting_position_event_rpcs.py 592 lines,
@@ -14,8 +14,8 @@ misplacement pattern. This PR targets the genuine remaining gaps:
 
   TestLoadState / TestSaveState / TestDeleteState (5b-1, 21 tests)
       The 3 core CRUD RPCs strategy containers hit every iteration. Branch
-      coverage on input validation, exception → status mapping, AGENT_ID
-      legacy-key fallback (deployed-mode path).
+      coverage on input validation, exception → status mapping, and the
+      removed legacy-key fallback.
 
   TestSavePortfolioSnapshot (8 tests)
       Largest single uncovered chunk in the file (~132 stmts at lines 557-688
@@ -51,7 +51,6 @@ from tests.gateway.grpc_harness import (
     make_grpc_context,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
@@ -63,11 +62,13 @@ def _make_settings(database_url: str | None = None, standalone: bool = False) ->
 
 
 @pytest.fixture(autouse=True)
-def _isolate_agent_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip AGENT_ID from os.environ so resolve_agent_id() passes through
-    the strategy_id unchanged in every test (unless a test sets it explicitly).
+def _isolate_deployment_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip the deployment-mode env vars so every test runs in a clean
+    local mode unless it sets them explicitly. The gateway no longer
+    translates identity (blueprint 29) — these are belt-and-braces.
     """
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
 
 
 @pytest.fixture
@@ -94,7 +95,7 @@ def service(state_manager: AsyncMock) -> StateServiceServicer:
 
 def _make_state_data_obj(
     *,
-    strategy_id: str = "strat-1",
+    deployment_id: str = "strat-1",
     version: int = 1,
     state: dict | None = None,
     schema_version: int = 1,
@@ -110,7 +111,7 @@ def _make_state_data_obj(
     ``"hot"`` / ``"warm"`` (issue #2053).
     """
     return SimpleNamespace(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         version=version,
         state=state if state is not None else {"foo": "bar"},
         schema_version=schema_version,
@@ -127,12 +128,15 @@ def _make_state_data_obj(
 
 class TestLoadState:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument_before_init(
-        self, service, state_manager, context,
+    async def test_invalid_deployment_id_returns_invalid_argument_before_init(
+        self,
+        service,
+        state_manager,
+        context,
     ):
         # Reset _initialized so we can assert the validation runs first.
         service._initialized = False
-        request = gateway_pb2.LoadStateRequest(strategy_id="has spaces!")
+        request = gateway_pb2.LoadStateRequest(deployment_id="has spaces!")
         response = await service.LoadState(request, context)
         assert response.data == b""
         context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -144,7 +148,7 @@ class TestLoadState:
     @pytest.mark.asyncio
     async def test_state_not_found_returns_not_found(self, service, state_manager, context):
         state_manager.load_state.return_value = None
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
         assert response.data == b""
         context.set_code.assert_called_once_with(grpc.StatusCode.NOT_FOUND)
@@ -152,16 +156,16 @@ class TestLoadState:
     @pytest.mark.asyncio
     async def test_happy_path_returns_serialised_state(self, service, state_manager, context):
         state_manager.load_state.return_value = _make_state_data_obj(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             version=42,
             state={"counter": 7, "name": "alice"},
             schema_version=2,
             checksum="deadbeef",
         )
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
 
-        assert response.strategy_id == "strat-1"
+        assert response.deployment_id == "strat-1"
         assert response.version == 42
         assert json.loads(response.data.decode()) == {"counter": 7, "name": "alice"}
         assert response.schema_version == 2
@@ -179,26 +183,29 @@ class TestLoadState:
         # StateTier member as well (issue #2053). Cheap guard against a
         # future enum rename that would silently change the wire value.
         state_manager.load_state.return_value = _make_state_data_obj(loaded_from=StateTier.HOT)
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
         assert response.loaded_from == "hot"
 
     @pytest.mark.asyncio
     async def test_loaded_from_falls_back_to_warm_when_none(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         state_manager.load_state.return_value = _make_state_data_obj(loaded_from=None)
         # Override the SimpleNamespace default to actually be None on the attribute.
         sd = state_manager.load_state.return_value
         sd.loaded_from = None
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
         assert response.loaded_from == "warm"
 
     @pytest.mark.asyncio
     async def test_state_not_found_error_returns_not_found(self, service, state_manager, context):
         state_manager.load_state.side_effect = StateNotFoundError("brand-new strategy")
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
         assert response.data == b""
         context.set_code.assert_called_once_with(grpc.StatusCode.NOT_FOUND)
@@ -206,7 +213,7 @@ class TestLoadState:
     @pytest.mark.asyncio
     async def test_unexpected_exception_returns_internal(self, service, state_manager, context):
         state_manager.load_state.side_effect = RuntimeError("db connection lost")
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.LoadStateRequest(deployment_id="strat-1")
         response = await service.LoadState(request, context)
         assert response.data == b""
         context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
@@ -215,28 +222,30 @@ class TestLoadState:
         assert "db connection lost" in details_args
 
     @pytest.mark.asyncio
-    async def test_agent_id_fallback_to_original_when_resolved_key_missing(
-        self, service, state_manager, context, monkeypatch,
+    async def test_load_state_filters_wire_id_directly_no_translation(
+        self,
+        service,
+        state_manager,
+        context,
     ):
-        """In deployed mode (AGENT_ID set), if the platform-resolved key has no
-        state, the servicer falls back to the original strategy_id — bridges
-        legacy state written before the AGENT_ID normalisation was deployed."""
-        monkeypatch.setenv("AGENT_ID", "platform-injected-agent-id")
-        # First call (with the resolved AGENT_ID) returns None; second (with original) hits.
-        legacy_state = _make_state_data_obj(strategy_id="strat-1", version=1)
-        state_manager.load_state.side_effect = [None, legacy_state]
+        """LoadState filters the caller-supplied id directly (blueprint 29 §4).
 
-        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        VIB-4722 removed the ``resolve_deployment_id`` rewrite and its
+        original-id fallback: ``load_state`` is called exactly once, with the
+        wire ``deployment_id`` (the canonical ``deployment_id``). There is no
+        second lookup — a zero-row read genuinely means no state.
+        """
+        state = _make_state_data_obj(deployment_id="deployment:abc123def456", version=1)
+        state_manager.load_state.side_effect = [state]
+
+        request = gateway_pb2.LoadStateRequest(deployment_id="deployment:abc123def456")
         response = await service.LoadState(request, context)
 
-        assert response.strategy_id == "strat-1"
+        assert response.deployment_id == "deployment:abc123def456"
         assert response.version == 1
-        # Both keys were tried in order: resolved AGENT_ID first, then original
-        # strategy_id as the legacy fallback.
-        assert state_manager.load_state.call_count == 2
-        calls = state_manager.load_state.call_args_list
-        assert calls[0].args[0] == "platform-injected-agent-id"
-        assert calls[1].args[0] == "strat-1"
+        # Exactly one lookup, with the wire id — no translation, no fallback.
+        assert state_manager.load_state.call_count == 1
+        assert state_manager.load_state.call_args_list[0].args[0] == "deployment:abc123def456"
         assert_set_code_not_called(context)
 
 
@@ -247,8 +256,8 @@ class TestLoadState:
 
 class TestSaveState:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, service, state_manager, context):
-        request = gateway_pb2.SaveStateRequest(strategy_id="bad id!", data=b"{}")
+    async def test_invalid_deployment_id_returns_invalid_argument(self, service, state_manager, context):
+        request = gateway_pb2.SaveStateRequest(deployment_id="bad id!", data=b"{}")
         response = await service.SaveState(request, context)
         assert_grpc_error(context, response, expected_status=grpc.StatusCode.INVALID_ARGUMENT)
         state_manager.save_state.assert_not_called()
@@ -256,18 +265,21 @@ class TestSaveState:
     @pytest.mark.asyncio
     async def test_oversize_state_returns_invalid_argument(self, service, state_manager, context):
         oversize = b"x" * (10 * 1024 * 1024 + 1)  # exceeds typical state-size cap
-        request = gateway_pb2.SaveStateRequest(strategy_id="strat-1", data=oversize)
+        request = gateway_pb2.SaveStateRequest(deployment_id="strat-1", data=oversize)
         response = await service.SaveState(request, context)
         assert_grpc_error(context, response, expected_status=grpc.StatusCode.INVALID_ARGUMENT)
         state_manager.save_state.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_happy_path_returns_new_version_and_checksum(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         state_manager.save_state.return_value = SimpleNamespace(version=42, checksum="newhash")
         request = gateway_pb2.SaveStateRequest(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             expected_version=41,
             data=json.dumps({"counter": 7}).encode(),
             schema_version=2,
@@ -284,7 +296,7 @@ class TestSaveState:
         call = state_manager.save_state.call_args
         state_arg = call.args[0]
         expected_version_arg = call.args[1]
-        assert state_arg.strategy_id == "strat-1"
+        assert state_arg.deployment_id == "strat-1"
         assert state_arg.version == 41
         assert state_arg.state == {"counter": 7}
         assert state_arg.schema_version == 2
@@ -293,12 +305,17 @@ class TestSaveState:
 
     @pytest.mark.asyncio
     async def test_expected_version_zero_passes_none_to_framework(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         """expected_version=0 means "new state, skip the optimistic check"."""
         state_manager.save_state.return_value = SimpleNamespace(version=1, checksum="h")
         request = gateway_pb2.SaveStateRequest(
-            strategy_id="strat-1", expected_version=0, data=b"{}",
+            deployment_id="strat-1",
+            expected_version=0,
+            data=b"{}",
         )
         await service.SaveState(request, context)
 
@@ -310,17 +327,22 @@ class TestSaveState:
         state_manager.save_state.return_value = SimpleNamespace(version=1, checksum="h")
         # Don't set schema_version on the request → proto defaults to 0 → servicer maps to 1.
         request = gateway_pb2.SaveStateRequest(
-            strategy_id="strat-1", expected_version=0, data=b"{}",
+            deployment_id="strat-1",
+            expected_version=0,
+            data=b"{}",
         )
         await service.SaveState(request, context)
         assert state_manager.save_state.call_args.args[0].schema_version == 1
 
     @pytest.mark.asyncio
     async def test_version_conflict_exception_returns_aborted(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         state_manager.save_state.side_effect = RuntimeError("version conflict: expected 5, got 6")
-        request = gateway_pb2.SaveStateRequest(strategy_id="strat-1", expected_version=5, data=b"{}")
+        request = gateway_pb2.SaveStateRequest(deployment_id="strat-1", expected_version=5, data=b"{}")
         response = await service.SaveState(request, context)
         assert_grpc_error(
             context,
@@ -331,11 +353,14 @@ class TestSaveState:
 
     @pytest.mark.asyncio
     async def test_conflict_keyword_alone_also_maps_to_aborted(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         # "conflict" keyword alone (without "version") still trips the ABORTED branch.
         state_manager.save_state.side_effect = RuntimeError("write conflict on row")
-        request = gateway_pb2.SaveStateRequest(strategy_id="strat-1", expected_version=5, data=b"{}")
+        request = gateway_pb2.SaveStateRequest(deployment_id="strat-1", expected_version=5, data=b"{}")
         response = await service.SaveState(request, context)
         assert_grpc_error(
             context,
@@ -347,7 +372,7 @@ class TestSaveState:
     @pytest.mark.asyncio
     async def test_other_exception_returns_internal(self, service, state_manager, context):
         state_manager.save_state.side_effect = RuntimeError("disk full")
-        request = gateway_pb2.SaveStateRequest(strategy_id="strat-1", expected_version=5, data=b"{}")
+        request = gateway_pb2.SaveStateRequest(deployment_id="strat-1", expected_version=5, data=b"{}")
         response = await service.SaveState(request, context)
         assert_grpc_error(
             context,
@@ -364,8 +389,8 @@ class TestSaveState:
 
 class TestDeleteState:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, service, state_manager, context):
-        request = gateway_pb2.DeleteStateRequest(strategy_id="bad id!")
+    async def test_invalid_deployment_id_returns_invalid_argument(self, service, state_manager, context):
+        request = gateway_pb2.DeleteStateRequest(deployment_id="bad id!")
         response = await service.DeleteState(request, context)
         assert_grpc_error(context, response, expected_status=grpc.StatusCode.INVALID_ARGUMENT)
         state_manager.delete_state.assert_not_called()
@@ -373,21 +398,24 @@ class TestDeleteState:
     @pytest.mark.asyncio
     async def test_happy_path_returns_success(self, service, state_manager, context):
         state_manager.delete_state.return_value = True
-        request = gateway_pb2.DeleteStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.DeleteStateRequest(deployment_id="strat-1")
         response = await service.DeleteState(request, context)
         assert response.success is True
         assert_set_code_not_called(context)
 
     @pytest.mark.asyncio
     async def test_state_not_found_returns_success_false_no_grpc_code(
-        self, service, state_manager, context,
+        self,
+        service,
+        state_manager,
+        context,
     ):
         """Not-found is a soft response — the servicer returns success=False
         in the proto but does NOT set a gRPC status code (that would surface
         as an exception on the client; semantically this is "nothing to delete",
         not an error)."""
         state_manager.delete_state.return_value = False
-        request = gateway_pb2.DeleteStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.DeleteStateRequest(deployment_id="strat-1")
         response = await service.DeleteState(request, context)
         assert response.success is False
         assert "not found" in response.error.lower()
@@ -396,7 +424,7 @@ class TestDeleteState:
     @pytest.mark.asyncio
     async def test_unexpected_exception_returns_internal(self, service, state_manager, context):
         state_manager.delete_state.side_effect = RuntimeError("db down")
-        request = gateway_pb2.DeleteStateRequest(strategy_id="strat-1")
+        request = gateway_pb2.DeleteStateRequest(deployment_id="strat-1")
         response = await service.DeleteState(request, context)
         assert_grpc_error(
             context,
@@ -476,7 +504,7 @@ def pg_service(state_manager: AsyncMock) -> StateServiceServicer:
 
 def _make_save_snapshot_request(
     *,
-    strategy_id: str = "strat-1",
+    deployment_id: str = "strat-1",
     timestamp: int = 1_725_000_000,
     iteration_number: int = 1,
     total_value_usd: str = "1000.00",
@@ -486,7 +514,7 @@ def _make_save_snapshot_request(
     chain: str = "arbitrum",
 ) -> gateway_pb2.SaveSnapshotRequest:
     return gateway_pb2.SaveSnapshotRequest(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         timestamp=timestamp,
         iteration_number=iteration_number,
         total_value_usd=total_value_usd,
@@ -504,8 +532,8 @@ def _make_save_snapshot_request(
 
 class TestSavePortfolioSnapshot:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
-        request = _make_save_snapshot_request(strategy_id="bad id!")
+    async def test_invalid_deployment_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
+        request = _make_save_snapshot_request(deployment_id="bad id!")
         response = await sqlite_service.SavePortfolioSnapshot(request, context)
         assert response.success is False
         context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -555,7 +583,10 @@ class TestSavePortfolioSnapshot:
 
     @pytest.mark.asyncio
     async def test_sqlite_backend_exception_returns_internal(
-        self, sqlite_service, warm_backend, context,
+        self,
+        sqlite_service,
+        warm_backend,
+        context,
     ):
         warm_backend.save_portfolio_snapshot.side_effect = RuntimeError("disk full")
         request = _make_save_snapshot_request()
@@ -575,7 +606,7 @@ class TestSavePortfolioSnapshot:
         assert response.success is True
         assert response.snapshot_id == 42
         fake.assert_awaited_once()
-        # Verify the INSERT was issued with strategy_id as agent_id (first param).
+        # Verify the INSERT was issued with deployment_id as deployment_id (first param).
         query = fake.call_args.args[0]
         assert "INSERT INTO portfolio_snapshots" in query
         assert "ON CONFLICT" in query
@@ -596,8 +627,8 @@ class TestSavePortfolioSnapshot:
 
 class TestGetLatestSnapshot:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="bad id!")
+    async def test_invalid_deployment_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="bad id!")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is False
         context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -606,7 +637,7 @@ class TestGetLatestSnapshot:
     @pytest.mark.asyncio
     async def test_sqlite_no_snapshot_returns_found_false(self, sqlite_service, warm_backend, context):
         warm_backend.get_latest_snapshot.return_value = None
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="strat-1")
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="strat-1")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is False
         assert_set_code_not_called(context)
@@ -616,9 +647,10 @@ class TestGetLatestSnapshot:
         from decimal import Decimal
 
         from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+
         snapshot = PortfolioSnapshot(
             timestamp=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             total_value_usd=Decimal("1234.56"),
             available_cash_usd=Decimal("500"),
             value_confidence=ValueConfidence.HIGH,
@@ -626,10 +658,10 @@ class TestGetLatestSnapshot:
             iteration_number=7,
         )
         warm_backend.get_latest_snapshot.return_value = snapshot
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="strat-1")
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="strat-1")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is True
-        assert response.strategy_id == "strat-1"
+        assert response.deployment_id == "strat-1"
         assert response.total_value_usd == "1234.56"
         assert response.iteration_number == 7
         assert response.chain == "arbitrum"
@@ -638,7 +670,7 @@ class TestGetLatestSnapshot:
     @pytest.mark.asyncio
     async def test_sqlite_exception_returns_internal(self, sqlite_service, warm_backend, context):
         warm_backend.get_latest_snapshot.side_effect = RuntimeError("db down")
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="strat-1")
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="strat-1")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is False
         context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
@@ -656,8 +688,8 @@ class TestGetLatestSnapshot:
 
 class TestGetSnapshotsSince:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="bad id!", since=0, limit=10)
+    async def test_invalid_deployment_id_returns_invalid_argument(self, sqlite_service, warm_backend, context):
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="bad id!", since=0, limit=10)
         response = await sqlite_service.GetSnapshotsSince(request, context)
         assert response.snapshots == []
         context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -665,7 +697,7 @@ class TestGetSnapshotsSince:
     @pytest.mark.asyncio
     async def test_default_limit_when_zero(self, sqlite_service, warm_backend, context):
         warm_backend.get_snapshots_since.return_value = []
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="strat-1", since=0, limit=0)
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="strat-1", since=0, limit=0)
         await sqlite_service.GetSnapshotsSince(request, context)
         # limit=0 → default of 168.
         call = warm_backend.get_snapshots_since.call_args
@@ -675,7 +707,7 @@ class TestGetSnapshotsSince:
     async def test_limit_capped_at_max_snapshots(self, sqlite_service, warm_backend, context):
         warm_backend.get_snapshots_since.return_value = []
         # Request 5000 → capped at MAX_SNAPSHOTS = 1000.
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="strat-1", since=0, limit=5000)
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="strat-1", since=0, limit=5000)
         await sqlite_service.GetSnapshotsSince(request, context)
         call = warm_backend.get_snapshots_since.call_args
         assert call.args[2] == 1000
@@ -685,10 +717,11 @@ class TestGetSnapshotsSince:
         from decimal import Decimal
 
         from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+
         warm_backend.get_snapshots_since.return_value = [
             PortfolioSnapshot(
                 timestamp=datetime(2026, 5, 4, 12, i, tzinfo=UTC),
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 total_value_usd=Decimal(str(1000 + i)),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.HIGH,
@@ -697,7 +730,7 @@ class TestGetSnapshotsSince:
             )
             for i in range(3)
         ]
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="strat-1", since=0, limit=10)
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="strat-1", since=0, limit=10)
         response = await sqlite_service.GetSnapshotsSince(request, context)
         assert len(response.snapshots) == 3
         assert response.snapshots[0].total_value_usd == "1000"
@@ -705,7 +738,7 @@ class TestGetSnapshotsSince:
     @pytest.mark.asyncio
     async def test_sqlite_exception_returns_empty(self, sqlite_service, warm_backend, context):
         warm_backend.get_snapshots_since.side_effect = RuntimeError("db down")
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="strat-1", since=0, limit=10)
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="strat-1", since=0, limit=10)
         response = await sqlite_service.GetSnapshotsSince(request, context)
         assert response.snapshots == []
         context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)

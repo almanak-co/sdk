@@ -30,7 +30,7 @@ SUPPORTED_CHAINS = ["arbitrum", "base", "optimism", "ethereum"]
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -45,7 +45,7 @@ def render_custom_dashboard(
     - Chain selector if deployed on multiple chains
     """
     st.title("Uniswap V3 Volatility-Adaptive LP Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -59,7 +59,7 @@ def render_custom_dashboard(
     fee_tier = pool_parts[2] if len(pool_parts) > 2 else "3000"
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1} ({int(fee_tier) / 10000:.2f}% fee tier)")
     st.markdown(f"**Base Range Width:** {float(Decimal(str(base_range_width_pct))) * 100:.1f}%")
 
@@ -91,10 +91,10 @@ def render_custom_dashboard(
 
     # Historical Adjustments Section
     st.subheader("Range Width Adjustment History")
-    _render_adjustment_history(api_client, strategy_id)
+    _render_adjustment_history(api_client, deployment_id)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_chain_selector(current_chain: str, session_state: dict[str, Any]) -> None:
@@ -323,12 +323,12 @@ def _render_range_width(session_state: dict[str, Any]) -> None:
         st.info("No active position to display range indicator")
 
 
-def _render_adjustment_history(api_client: Any, strategy_id: str) -> None:
+def _render_adjustment_history(api_client: Any, deployment_id: str) -> None:
     """Render historical range width adjustments."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=50)
+            events = api_client.get_timeline(deployment_id, limit=50)
         except Exception:
             pass
 

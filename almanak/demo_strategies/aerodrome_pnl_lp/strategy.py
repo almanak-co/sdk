@@ -302,7 +302,7 @@ class AerodromePnLLPStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_aerodrome_pnl_lp"),
+            deployment_id=getattr(self, "deployment_id", "demo_aerodrome_pnl_lp"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

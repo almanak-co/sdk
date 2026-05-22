@@ -16,7 +16,7 @@ from pydantic import BaseModel
 class RunningStrategy(BaseModel):
     """Info about a running strategy."""
 
-    strategy_id: str
+    deployment_id: str
     status: str  # "running", "paused", "stuck"
     started_at: str
     last_iteration_at: str | None = None
@@ -47,42 +47,42 @@ _running_strategies: dict[str, dict[str, Any]] = {}
 
 
 def register_running_strategy(
-    strategy_id: str,
+    deployment_id: str,
     status: str = "running",
 ) -> None:
     """Register a strategy as running (called by StrategyRunner).
 
     Args:
-        strategy_id: The strategy ID
+        deployment_id: The deployment ID
         status: Current status
     """
-    _running_strategies[strategy_id] = {
-        "strategy_id": strategy_id,
+    _running_strategies[deployment_id] = {
+        "deployment_id": deployment_id,
         "status": status,
         "started_at": datetime.now(UTC).isoformat(),
         "last_iteration_at": datetime.now(UTC).isoformat(),
     }
 
 
-def unregister_running_strategy(strategy_id: str) -> None:
+def unregister_running_strategy(deployment_id: str) -> None:
     """Unregister a strategy (called when runner stops).
 
     Args:
-        strategy_id: The strategy ID to unregister
+        deployment_id: The deployment ID to unregister
     """
-    _running_strategies.pop(strategy_id, None)
+    _running_strategies.pop(deployment_id, None)
 
 
-def update_strategy_status(strategy_id: str, status: str) -> None:
+def update_strategy_status(deployment_id: str, status: str) -> None:
     """Update a running strategy's status.
 
     Args:
-        strategy_id: The strategy ID
+        deployment_id: The deployment ID
         status: New status
     """
-    if strategy_id in _running_strategies:
-        _running_strategies[strategy_id]["status"] = status
-        _running_strategies[strategy_id]["last_iteration_at"] = datetime.now(UTC).isoformat()
+    if deployment_id in _running_strategies:
+        _running_strategies[deployment_id]["status"] = status
+        _running_strategies[deployment_id]["last_iteration_at"] = datetime.now(UTC).isoformat()
 
 
 def get_running_strategies() -> dict[str, dict[str, Any]]:
@@ -146,21 +146,21 @@ async def health_check() -> HealthResponse:
     )
 
 
-@router.get("/api/health/strategies/{strategy_id}")
-async def strategy_health(strategy_id: str) -> dict[str, Any]:
+@router.get("/api/health/strategies/{deployment_id}")
+async def strategy_health(deployment_id: str) -> dict[str, Any]:
     """Check if a specific strategy is running.
 
     Args:
-        strategy_id: The strategy to check
+        deployment_id: The strategy to check
 
     Returns:
         Status information for the strategy
     """
-    if strategy_id in _running_strategies:
+    if deployment_id in _running_strategies:
         return {
             "running": True,
-            "strategy_id": strategy_id,
-            **_running_strategies[strategy_id],
+            "deployment_id": deployment_id,
+            **_running_strategies[deployment_id],
             "features": {
                 "pause_resume": True,
                 "bump_gas": True,
@@ -172,7 +172,7 @@ async def strategy_health(strategy_id: str) -> dict[str, Any]:
     else:
         return {
             "running": False,
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "features": {
                 "pause_resume": False,
                 "bump_gas": False,

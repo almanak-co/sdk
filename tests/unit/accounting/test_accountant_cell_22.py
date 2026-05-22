@@ -40,7 +40,6 @@ _SCHEMA_SQL = """
 CREATE TABLE accounting_events (
     id TEXT PRIMARY KEY,
     deployment_id TEXT NOT NULL,
-    strategy_id TEXT NOT NULL,
     cycle_id TEXT NOT NULL,
     execution_mode TEXT NOT NULL,
     timestamp TEXT NOT NULL,
@@ -81,7 +80,7 @@ CREATE TABLE position_registry (
 -- about their content — empty tables are fine — but the cell harness
 -- would otherwise emit warnings.
 CREATE TABLE transaction_ledger (
-    id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT, deployment_id TEXT,
+    id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT,
     execution_mode TEXT, timestamp TEXT, intent_type TEXT, token_in TEXT,
     amount_in TEXT, token_out TEXT, amount_out TEXT, effective_price TEXT,
     slippage_bps INTEGER, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
@@ -91,7 +90,7 @@ CREATE TABLE transaction_ledger (
 );
 CREATE TABLE position_events (id TEXT, timestamp TEXT, event_type TEXT, cycle_id TEXT);
 CREATE TABLE portfolio_snapshots (id INTEGER PRIMARY KEY, timestamp TEXT, iteration_number INTEGER, total_value_usd TEXT, available_cash_usd TEXT, positions_json TEXT, value_confidence TEXT);
-CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT, deployment_id TEXT);
+CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
 CREATE TABLE position_state_snapshots (id INTEGER PRIMARY KEY, position_type TEXT);
 """
 
@@ -137,10 +136,10 @@ def _insert_acct_event(
     conn.execute(
         """
         INSERT INTO accounting_events
-        (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
+        (id, deployment_id, cycle_id, execution_mode, timestamp,
          chain, protocol, wallet_address, event_type, position_key, ledger_entry_id,
          tx_hash, confidence, payload_json, position_reference)
-        VALUES (?, 'dep-1', 'strat-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
+        VALUES (?, 'dep-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
                 'arbitrum', 'uniswap_v3', '0xwallet', ?, 'pos:lp:1', 'led-1',
                 '0xdead', 'high', ?, ?)
         """,
@@ -440,10 +439,10 @@ def test_cell22_xfail_position_reference_column_missing(tmp_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO accounting_events
-            (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
+            (id, deployment_id, cycle_id, execution_mode, timestamp,
              chain, protocol, wallet_address, event_type, position_key, ledger_entry_id,
              tx_hash, confidence, payload_json)
-            VALUES ('ae-1', 'dep-1', 'strat-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
+            VALUES ('ae-1', 'dep-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
                     'arbitrum', 'uniswap_v3', '0xwallet', 'LP_CLOSE', 'pos:lp:1', 'led-1',
                     '0xdead', 'high', '{}')
             """
@@ -469,10 +468,10 @@ def test_cell22_fails_malformed_position_reference_json(tmp_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO accounting_events
-            (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
+            (id, deployment_id, cycle_id, execution_mode, timestamp,
              chain, protocol, wallet_address, event_type, position_key, ledger_entry_id,
              tx_hash, confidence, payload_json, position_reference)
-            VALUES ('ae-bad', 'dep-1', 'strat-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
+            VALUES ('ae-bad', 'dep-1', 'cyc-1', 'live', '2026-05-10T00:00:00+00:00',
                     'arbitrum', 'uniswap_v3', '0xwallet', 'LP_CLOSE', 'pos:lp:1', 'led-1',
                     '0xdead', 'high', '{}', '{not a valid json')
             """

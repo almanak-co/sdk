@@ -24,7 +24,7 @@ from almanak.framework.services.prediction_monitor import (
 def monitor() -> PredictionPositionMonitor:
     """Create a monitor instance for testing."""
     return PredictionPositionMonitor(
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         check_interval=60,
         emit_events=False,
     )
@@ -700,7 +700,7 @@ class TestEventCallback:
         callback = MagicMock()
 
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             event_callback=callback,
         )
@@ -736,7 +736,7 @@ class TestEventCallback:
         callback = MagicMock(side_effect=Exception("Callback error"))
 
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             event_callback=callback,
         )
@@ -777,7 +777,7 @@ class TestTimelineEvents:
         """Test that timeline events are emitted."""
         with patch("almanak.framework.services.prediction_monitor.add_event") as mock_add:
             monitor = PredictionPositionMonitor(
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 emit_events=True,
             )
 
@@ -804,14 +804,14 @@ class TestTimelineEvents:
 
             mock_add.assert_called_once()
             event = mock_add.call_args[0][0]
-            assert event.strategy_id == "test-strategy"
+            assert event.deployment_id == "test-strategy"
             assert "MARKET_RESOLVED" in event.description
 
     def test_no_emit_when_disabled(self) -> None:
         """Test that events are not emitted when disabled."""
         with patch("almanak.framework.services.prediction_monitor.add_event") as mock_add:
             monitor = PredictionPositionMonitor(
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 emit_events=False,
             )
 
@@ -1442,7 +1442,7 @@ class TestPartialExits:
         from almanak.framework.intents.vocabulary import PredictionSellIntent
 
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             allow_partial_exits=False,
         )
@@ -1490,7 +1490,7 @@ class TestStrategyLevelDefaults:
     def test_default_exit_before_resolution_hours(self) -> None:
         """Test that strategy-level default is used when position has no condition."""
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             default_exit_before_resolution_hours=24,
         )
@@ -1526,7 +1526,7 @@ class TestStrategyLevelDefaults:
     def test_position_exit_hours_overrides_default(self) -> None:
         """Test that position-level setting overrides strategy default."""
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             default_exit_before_resolution_hours=48,  # 48 hour default
         )
@@ -1566,7 +1566,7 @@ class TestStrategyLevelDefaults:
     def test_no_default_no_trigger(self) -> None:
         """Test that no trigger occurs when no defaults are set."""
         monitor = PredictionPositionMonitor(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             emit_events=False,
             default_exit_before_resolution_hours=None,  # No default
         )
@@ -1694,7 +1694,7 @@ class TestExitBeforeResolutionSeconds:
         purpose of the field. Seconds=60 triggers correctly only when
         market is within 60s of close.
         """
-        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
         position = self._make_position(
             PredictionExitConditions(exit_before_resolution_seconds=60)
         )
@@ -1721,7 +1721,7 @@ class TestExitBeforeResolutionSeconds:
 
     def test_legacy_hours_path_still_works(self) -> None:
         """Backward compat: pure-hours strategies behave unchanged."""
-        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
         position = self._make_position(
             PredictionExitConditions(exit_before_resolution_hours=24)
         )
@@ -1745,7 +1745,7 @@ class TestExitBeforeResolutionSeconds:
 
     def test_sub_hour_exit_before_hours_is_float(self) -> None:
         """Sub-hour thresholds surface as float on the legacy hours key."""
-        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
         position = self._make_position(
             PredictionExitConditions(exit_before_resolution_seconds=300)
         )
@@ -1764,7 +1764,7 @@ class TestExitBeforeResolutionSeconds:
     def test_position_seconds_overrides_strategy_default_hours(self) -> None:
         """Position seconds beats strategy hours default."""
         monitor = PredictionPositionMonitor(
-            strategy_id="t",
+            deployment_id="t",
             emit_events=False,
             default_exit_before_resolution_hours=24,
         )
@@ -1785,7 +1785,7 @@ class TestExitBeforeResolutionSeconds:
     def test_strategy_default_seconds(self) -> None:
         """Strategy-level seconds default applies when position has none."""
         monitor = PredictionPositionMonitor(
-            strategy_id="t",
+            deployment_id="t",
             emit_events=False,
             default_exit_before_resolution_seconds=120,
         )
@@ -1805,7 +1805,7 @@ class TestExitBeforeResolutionSeconds:
     def test_strategy_default_seconds_beats_strategy_default_hours(self) -> None:
         """When both strategy-level defaults are set, seconds wins."""
         monitor = PredictionPositionMonitor(
-            strategy_id="t",
+            deployment_id="t",
             emit_events=False,
             default_exit_before_resolution_hours=24,
             default_exit_before_resolution_seconds=60,

@@ -1,5 +1,5 @@
 {
-    "strategy_id": "ethena_leverage_loop",
+    "deployment_id": "ethena_leverage_loop",
     "strategy_name": "ethena_leverage_loop",
     "description": "Leveraged sUSDe yield via recursive borrowing on Morpho Blue",
     "market_id": "0x85c7f4374f3a403b36d54cc284983b2b02bbd8581ee0f3c36494447b87d9fcab",

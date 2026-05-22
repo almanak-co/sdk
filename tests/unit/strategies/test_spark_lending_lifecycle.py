@@ -33,7 +33,7 @@ def _make_strategy(**config_overrides) -> SparkLendingLifecycleStrategy:
         strategy = SparkLendingLifecycleStrategy.__new__(SparkLendingLifecycleStrategy)
 
     # Set required base class attributes
-    strategy._strategy_id = "test-spark-lifecycle"
+    strategy._deployment_id = "test-spark-lifecycle"
     strategy._chain = "ethereum"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
     strategy._config = default_config

@@ -200,7 +200,7 @@ def render_attention_required(strategies: list[Strategy]) -> None:
             with col1:
                 if st.button("View Details", key=f"attention_view_{strategy.id}"):
                     st.query_params["page"] = "detail"
-                    st.query_params["strategy_id"] = strategy.id
+                    st.query_params["deployment_id"] = strategy.id
                     st.rerun()
             with col2:
                 if st.button("Bump Gas", key=f"attention_bump_{strategy.id}"):
@@ -312,7 +312,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
 
     if st.button("View Details", key=f"card_view_{strategy.id}_{col_idx}"):
         st.query_params["page"] = "detail"
-        st.query_params["strategy_id"] = strategy.id
+        st.query_params["deployment_id"] = strategy.id
         st.rerun()
 
     if manage_mode:
@@ -421,8 +421,8 @@ def render_strategy_grid(strategies: list[Strategy]) -> None:  # noqa: C901
         with bulk_col1:
             if st.button("Archive Selected", disabled=not selected_ids, use_container_width=True):
                 successes = 0
-                for strategy_id in selected_ids:
-                    if archive_strategy_instance(strategy_id, reason="Bulk archive from Command Center"):
+                for deployment_id in selected_ids:
+                    if archive_strategy_instance(deployment_id, reason="Bulk archive from Command Center"):
                         successes += 1
                 if successes:
                     st.success(f"Archived {successes}/{len(selected_ids)} strategies")
@@ -441,8 +441,8 @@ def render_strategy_grid(strategies: list[Strategy]) -> None:  # noqa: C901
                 help="Permanent delete",
             ):
                 successes = 0
-                for strategy_id in selected_ids:
-                    if purge_strategy_instance(strategy_id, reason="Bulk purge from Command Center"):
+                for deployment_id in selected_ids:
+                    if purge_strategy_instance(deployment_id, reason="Bulk purge from Command Center"):
                         successes += 1
                 if successes:
                     st.success(f"Purged {successes}/{len(selected_ids)} strategies")
@@ -488,7 +488,7 @@ def page(strategies: list[Strategy]) -> None:
     if st.session_state.get("show_debug", False):
         st.write(f"📊 Found {len(strategies)} strategies")
         if strategies:
-            st.write("Strategy IDs:", [s.id for s in strategies[:5]])
+            st.write("Deployment IDs:", [s.id for s in strategies[:5]])
 
     if not strategies:
         st.info("""

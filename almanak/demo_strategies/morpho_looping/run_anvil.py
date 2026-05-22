@@ -83,7 +83,7 @@ USDC_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 
 # Base strategy configuration
 BASE_STRATEGY_CONFIG = {
-    "strategy_id": "morpho-looping-test",
+    "deployment_id": "morpho-looping-test",
     "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
     "collateral_token": "wstETH",
     "borrow_token": "USDC",

@@ -254,7 +254,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Loop {self._current_loop + 1}: Supplied {self._pending_supply_amount} {self.supply_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
 
@@ -269,7 +269,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Loop {self._current_loop + 1}: Borrowed {borrow_amount} {self.borrow_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
 
@@ -288,7 +288,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Loop {self._current_loop}: Swapped {self.borrow_token} -> {self.supply_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "swap", "loop": self._current_loop},
                     )
                 )
@@ -300,7 +300,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Repaid all {self.borrow_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "repay"},
                     )
                 )
@@ -312,7 +312,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Withdrew all {self.supply_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "withdraw"},
                     )
                 )
@@ -431,7 +431,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

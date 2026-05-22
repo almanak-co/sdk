@@ -340,7 +340,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description="No position found - opening new TraderJoe LP position",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"action": "opening_new_position", "pool": self.pool},
             )
         )
@@ -489,7 +489,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"TraderJoe LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "bin_step": self.bin_step, "bin_ids": bin_ids},
                 )
             )
@@ -599,7 +599,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         total_value = sum(p.value_usd for p in positions)
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             total_value_usd=total_value,
             positions=positions,

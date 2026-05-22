@@ -235,9 +235,10 @@ async def test_serving_deferred_until_after_warmup():
 # _announce_initializing — ALM-2732 follow-up
 #
 # Both pods of a hosted V2 agent (strategy + dashboard) ship the same gateway
-# image with the same AGENT_ID. Only the strategy-pod gateway is configured
-# with ``lifecycle_writer=True`` and should write INITIALIZING; the dashboard
-# pod must stay read-only for lifecycle state so it doesn't clobber RUNNING.
+# image with the same ALMANAK_DEPLOYMENT_ID. Only the strategy-pod gateway is
+# configured with ``lifecycle_writer=True`` and should write INITIALIZING; the
+# dashboard pod must stay read-only for lifecycle state so it doesn't clobber
+# RUNNING.
 # ---------------------------------------------------------------------------
 
 
@@ -251,7 +252,8 @@ def _make_state_row(state: str):
 @pytest.mark.asyncio
 async def test_announce_initializing_writes_when_hosted_and_writer(monkeypatch):
     """Strategy-pod gateway writes INITIALIZING on first boot (no existing row)."""
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -265,7 +267,8 @@ async def test_announce_initializing_writes_when_hosted_and_writer(monkeypatch):
 @pytest.mark.asyncio
 async def test_announce_initializing_writes_when_row_is_platform_state(monkeypatch):
     """V2_DEPLOYING / V2_PREPARING are platform-owned — gateway advances them."""
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -286,7 +289,8 @@ async def test_announce_initializing_skips_when_sdk_owned_state(monkeypatch, exi
     process startup. Without this skip, a sidecar-only restart would clobber
     RUNNING → INITIALIZING and the reconciler would escalate to V2_DEPLOY_FAILED.
     """
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -300,7 +304,8 @@ async def test_announce_initializing_skips_when_sdk_owned_state(monkeypatch, exi
 @pytest.mark.asyncio
 async def test_announce_initializing_noop_when_not_writer(monkeypatch):
     """Dashboard-pod gateway must not write — flag defaults to False."""
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -313,8 +318,9 @@ async def test_announce_initializing_noop_when_not_writer(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_announce_initializing_noop_when_local(monkeypatch):
-    """Local mode (AGENT_ID unset) never writes — local SDK owns its own state."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    """Local mode (ALMANAK_IS_HOSTED unset) never writes — local SDK owns its own state."""
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -328,7 +334,8 @@ async def test_announce_initializing_noop_when_local(monkeypatch):
 @pytest.mark.asyncio
 async def test_announce_initializing_swallows_write_errors(monkeypatch):
     """A failed write must not raise — the SDK's later RUNNING write supersedes."""
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
@@ -343,7 +350,8 @@ async def test_announce_initializing_swallows_write_errors(monkeypatch):
 @pytest.mark.asyncio
 async def test_announce_initializing_swallows_read_errors(monkeypatch):
     """A read failure short-circuits cleanly without raising."""
-    monkeypatch.setenv("AGENT_ID", "agent-abc")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()

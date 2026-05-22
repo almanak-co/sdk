@@ -52,7 +52,7 @@ class StrategySnapshot:
     a stuck strategy.
     """
 
-    strategy_id: str
+    deployment_id: str
     chain: str
     current_state: str  # e.g., "PREPARING_SWAP", "VALIDATING_LP_OPEN"
     state_entered_at: datetime
@@ -411,7 +411,7 @@ class StuckDetector:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.STRATEGY_STUCK,
             description=description,
-            strategy_id=snapshot.strategy_id,
+            deployment_id=snapshot.deployment_id,
             chain=snapshot.chain,
             details={
                 "reason": result.reason.value if result.reason else None,

@@ -462,7 +462,7 @@ class TestPortfolioValuerDiscoveryIntegration:
     def _make_strategy(self, **overrides):
         """Create a mock strategy matching StrategyLike protocol."""
         strategy = MagicMock()
-        strategy.strategy_id = overrides.get("strategy_id", "test-strategy")
+        strategy.deployment_id = overrides.get("deployment_id", "test-strategy")
         strategy.chain = overrides.get("chain", "arbitrum")
         strategy.wallet_address = overrides.get("wallet_address", "0x1234567890abcdef1234567890abcdef12345678")
         strategy._get_tracked_tokens.return_value = overrides.get("tracked_tokens", ["USDC", "WETH"])
@@ -476,7 +476,7 @@ class TestPortfolioValuerDiscoveryIntegration:
             from datetime import datetime, UTC
 
             summary = TeardownPositionSummary(
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 timestamp=datetime.now(UTC),
                 positions=overrides["positions"],
             )
@@ -732,7 +732,7 @@ class TestPortfolioValuerFullIntegration:
             details={"token_id": "1"},
         )
         strategy = MagicMock()
-        strategy.strategy_id = "test-unknown-proto"
+        strategy.deployment_id = "test-unknown-proto"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
         # Empty tracked-tokens → no wallet balance → the snapshot has no
@@ -743,7 +743,7 @@ class TestPortfolioValuerFullIntegration:
         metadata.supported_protocols = ["future_dex_v9"]
         strategy.STRATEGY_METADATA = metadata
         summary = TeardownPositionSummary(
-            strategy_id="test-unknown-proto",
+            deployment_id="test-unknown-proto",
             timestamp=datetime.now(UTC),
             positions=[lp_pos],
         )
@@ -775,7 +775,7 @@ class TestPortfolioValuerFullIntegration:
         valuer = PortfolioValuer(gateway_client=None)
 
         strategy = MagicMock()
-        strategy.strategy_id = "test-lending"
+        strategy.deployment_id = "test-lending"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
         strategy._get_tracked_tokens.return_value = ["USDC"]
@@ -816,4 +816,4 @@ class TestPortfolioValuerFullIntegration:
         assert snapshot.total_value_usd == Decimal("0")
         assert snapshot.available_cash_usd == Decimal("100")
         assert snapshot.wallet_total_value_usd == Decimal("100")
-        assert snapshot.strategy_id == "test-lending"
+        assert snapshot.deployment_id == "test-lending"

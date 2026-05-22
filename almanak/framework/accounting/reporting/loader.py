@@ -73,7 +73,6 @@ def _parse_identity(row: dict) -> AccountingIdentity:
     return AccountingIdentity(
         id=row["id"],
         deployment_id=row["deployment_id"],
-        strategy_id=row["strategy_id"],
         cycle_id=row["cycle_id"],
         execution_mode=row.get("execution_mode", ""),
         timestamp=datetime.fromisoformat(row["timestamp"]),

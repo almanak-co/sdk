@@ -26,7 +26,6 @@ from almanak.framework.state.state_manager import _pg_row_to_portfolio_snapshot
 def _row(**overrides):
     """Return a Postgres-shaped row dict with sensible defaults."""
     base = {
-        "agent_id": "Strat:abc",
         "timestamp": datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC),
         "iteration_number": 7,
         "total_value_usd": "100.50",
@@ -55,39 +54,44 @@ def test_pg_row_round_trips_identity_fields() -> None:
     assert snap.execution_mode == "live"
 
 
-def test_pg_row_strategy_id_uses_agent_id_column() -> None:
-    """``snapshot.strategy_id`` is sourced from the ``agent_id`` column
-    (hosted convention per ``state_manager.py:702-710``)."""
-    row = _row(agent_id="hosted-agent-xyz")
+def test_pg_row_deployment_id_uses_deployment_id_column() -> None:
+    """``snapshot.deployment_id`` is sourced from the ``deployment_id`` column.
+
+    VIB-4721/4722: ``portfolio_snapshots`` has a single identity column,
+    ``deployment_id`` (the legacy ``agent_id`` column was DROPPED); the
+    reader filters and reads it directly with no gateway-side translation
+    (blueprint 29 §4-5)."""
+    row = _row(deployment_id="hosted-agent-xyz")
     snap = _pg_row_to_portfolio_snapshot(row)
-    assert snap.strategy_id == "hosted-agent-xyz"
+    assert snap.deployment_id == "hosted-agent-xyz"
 
 
-def test_pg_row_legacy_missing_identity_columns_default_to_empty_string() -> None:
-    """Pre-VIB-4095 rows that don't have the identity columns still load.
+def test_pg_row_legacy_missing_phase4_columns_default_to_empty_string() -> None:
+    """Rows that don't have the optional Phase-4 columns still load.
 
-    The reader uses ``row.get(...) or ""`` defensively so an existing
-    legacy row does not blow up when the SDK is upgraded against an
-    older Postgres schema (the validator catches the schema gap
-    separately at boot — VIB-3763)."""
+    The reader uses ``row.get(...) or ""`` defensively for the optional
+    ``cycle_id`` / ``execution_mode`` columns so an existing row does not
+    blow up when the SDK is upgraded against an older Postgres schema (the
+    validator catches the schema gap separately at boot — VIB-3763).
+    ``deployment_id`` is the required identity column (NOT NULL) and is
+    always present post-VIB-4721."""
 
     class _RowMissingIdentity(dict):
-        # Force ``row.get(missing)`` to return ``None`` (default), but
-        # still allow ``row["agent_id"]`` etc. for required columns.
+        # Force ``row.get(missing)`` to return ``None`` (default).
         pass
 
     row = _row()
-    for k in ("deployment_id", "cycle_id", "execution_mode"):
+    for k in ("cycle_id", "execution_mode"):
         row.pop(k)
     snap = _pg_row_to_portfolio_snapshot(_RowMissingIdentity(row))
-    assert snap.deployment_id == ""
+    assert snap.deployment_id == "Strat:abc"
     assert snap.cycle_id == ""
     assert snap.execution_mode == ""
 
 
 def test_pg_row_empty_identity_columns_remain_empty_strings() -> None:
     """Columns present-but-empty must stay ``""`` (not get filled with a
-    fallback like ``strategy_id``). The validator's intent is that an
+    fallback like ``deployment_id``). The validator's intent is that an
     empty cell is observable."""
     row = _row(deployment_id="", cycle_id="", execution_mode="")
     snap = _pg_row_to_portfolio_snapshot(row)

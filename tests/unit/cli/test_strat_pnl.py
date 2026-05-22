@@ -80,7 +80,6 @@ def _make_metrics(
     withdrawals: str = "0",
 ) -> PortfolioMetrics:
     return PortfolioMetrics(
-        strategy_id=DEPLOYMENT_ID,
         deployment_id=DEPLOYMENT_ID,
         timestamp=_ts(),
         total_value_usd=Decimal(total),
@@ -102,7 +101,6 @@ def _make_swap_ledger(
     chain: str = "arbitrum",
 ) -> LedgerEntry:
     return LedgerEntry(
-        strategy_id=DEPLOYMENT_ID,
         deployment_id=DEPLOYMENT_ID,
         timestamp=_ts(),
         intent_type="SWAP",
@@ -586,7 +584,7 @@ def test_compute_pnl_warns_when_metrics_missing() -> None:
 def test_compute_pnl_picks_up_chain_from_snapshot() -> None:
     snapshot = PortfolioSnapshot(
         timestamp=_ts(),
-        strategy_id=DEPLOYMENT_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("1000"),
         available_cash_usd=Decimal("1000"),
         value_confidence=ValueConfidence.HIGH,
@@ -649,7 +647,7 @@ def seeded_db(tmp_path: Path) -> Path:
     ]
     snapshot = PortfolioSnapshot(
         timestamp=_ts(),
-        strategy_id=DEPLOYMENT_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("1123.45"),
         available_cash_usd=Decimal("500"),
         value_confidence=ValueConfidence.HIGH,
@@ -784,7 +782,7 @@ def test_strat_pnl_help_shows_command() -> None:
     runner = CliRunner()
     result = runner.invoke(strat_pnl, ["--help"])
     assert result.exit_code == 0
-    assert "--strategy-id" in result.output
+    assert "--deployment-id" in result.output
     assert "--json" in result.output
 
 

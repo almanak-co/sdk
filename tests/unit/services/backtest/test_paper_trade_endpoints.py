@@ -204,7 +204,7 @@ class TestPaperTradeManager:
         session = mgr.get_session(session_id)
         assert session is not None
         assert session.status == PaperTradeSessionStatus.STARTING
-        assert session.strategy_id == "test_strategy"
+        assert session.deployment_id == "test_strategy"
         assert session.chain == "arbitrum"
 
     def test_lifecycle_starting_running_stopped(self, tmp_path):

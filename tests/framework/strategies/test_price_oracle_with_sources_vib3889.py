@@ -202,7 +202,7 @@ def test_ledger_writer_preserves_nested_oracle_source_through_round_trip():
     )
 
     entry = build_ledger_entry(
-        strategy_id="s",
+        deployment_id="s",
         cycle_id="c",
         intent=intent,
         result=result,
@@ -245,7 +245,7 @@ def test_ledger_writer_legacy_flat_oracle_still_normalises_to_unknown():
     )
 
     entry = build_ledger_entry(
-        strategy_id="s",
+        deployment_id="s",
         cycle_id="c",
         intent=intent,
         result=result,

@@ -93,7 +93,7 @@ def load_strategy_config(strategy: Strategy) -> StrategyConfig:  # noqa: C901
         return default
 
     return StrategyConfig(
-        strategy_id=strategy.id,
+        deployment_id=strategy.id,
         strategy_name=strategy.name,
         max_slippage=get_decimal("max_slippage", DEFAULT_CONFIG_VALUES["max_slippage"]),
         trade_size_usd=get_decimal("trade_size_usd", DEFAULT_CONFIG_VALUES["trade_size_usd"]),
@@ -143,10 +143,10 @@ def render_risk_guard_guidance(guidance: list[dict[str, Any]]) -> None:
 
 
 def call_config_update_api(
-    strategy_id: str, updates: dict[str, Decimal], api_base_url: str = API_BASE_URL
+    deployment_id: str, updates: dict[str, Decimal], api_base_url: str = API_BASE_URL
 ) -> dict[str, Any]:
     """Call the config update API endpoint."""
-    url = f"{api_base_url}/api/strategies/{strategy_id}/config"
+    url = f"{api_base_url}/api/strategies/{deployment_id}/config"
 
     # Convert Decimal values to strings for JSON serialization
     payload = {"updates": {field: str(value) for field, value in updates.items()}}
@@ -328,10 +328,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 )
                 st.write(f"CONFIG_PARAM_DEFINITIONS type: {type(CONFIG_PARAM_DEFINITIONS)}")
 
-        # Get strategy ID from query params
-        strategy_id = st.query_params.get("strategy_id")
+        # Get deployment ID from query params
+        deployment_id = st.query_params.get("deployment_id")
 
-        if not strategy_id:
+        if not deployment_id:
             maybe_auto_select_strategy(strategies)
             st.info("👈 Please select a strategy from the sidebar to edit its configuration.")
             st.markdown("### Or select a strategy here:")
@@ -344,7 +344,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                     key="config_strategy_selector",
                 )
                 if st.button("Edit Config", use_container_width=True):
-                    st.query_params["strategy_id"] = strategies[selected_idx].id
+                    st.query_params["deployment_id"] = strategies[selected_idx].id
                     st.rerun()
             else:
                 st.warning("No strategies found. Make sure you have strategies running or check your state database.")
@@ -352,10 +352,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                     st.query_params["page"] = "overview"
             return
 
-        strategy = next((s for s in strategies if s.id == strategy_id), None)
+        strategy = next((s for s in strategies if s.id == deployment_id), None)
 
         if not strategy:
-            st.error(f"Strategy {strategy_id} not found.")
+            st.error(f"Strategy {deployment_id} not found.")
             if st.button("Go to Overview"):
                 st.query_params["page"] = "overview"
             return
@@ -396,7 +396,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
             st.caption("Using default configuration values")
 
         # Initialize session state for config editor
-        config_state_key = f"config_editor_{strategy_id}"
+        config_state_key = f"config_editor_{deployment_id}"
         if config_state_key not in st.session_state:
             st.session_state[config_state_key] = {
                 "pending_changes": {},
@@ -432,7 +432,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                     param_name=param_name,
                     current_value=current_value,
                     definition=definition,
-                    key_prefix=f"config_{strategy_id}",
+                    key_prefix=f"config_{deployment_id}",
                 )
 
                 if new_value is not None:
@@ -459,7 +459,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                     param_name=param_name,
                     current_value=current_value,
                     definition=definition,
-                    key_prefix=f"config_{strategy_id}",
+                    key_prefix=f"config_{deployment_id}",
                 )
 
                 if new_value is not None:
@@ -540,10 +540,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
             ):
                 # Call API to update config
                 pending_changes = st.session_state[config_state_key]["pending_changes"]
-                result = call_config_update_api(strategy_id, pending_changes)
+                result = call_config_update_api(deployment_id, pending_changes)
 
                 if result.get("success"):
-                    st.session_state[f"config_result_{strategy_id}"] = {
+                    st.session_state[f"config_result_{deployment_id}"] = {
                         "success": True,
                         "message": result.get("message", "Configuration updated successfully!"),
                         "simulated": result.get("simulated", False),
@@ -552,7 +552,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                     st.session_state[config_state_key]["pending_changes"] = {}
                     st.rerun()
                 else:
-                    st.session_state[f"config_result_{strategy_id}"] = {
+                    st.session_state[f"config_result_{deployment_id}"] = {
                         "success": False,
                         "message": result.get("error", "Failed to update configuration"),
                         "guidance": result.get("guidance"),
@@ -565,7 +565,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 st.session_state[config_state_key]["pending_changes"] = {}
                 # Reset individual widget values
                 for param_name in CONFIG_PARAM_DEFINITIONS.keys():
-                    widget_key = f"config_{strategy_id}_{param_name}"
+                    widget_key = f"config_{deployment_id}_{param_name}"
                     if widget_key in st.session_state:
                         del st.session_state[widget_key]
                 st.rerun()
@@ -576,13 +576,13 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 st.session_state[config_state_key]["pending_changes"] = {}
                 # Reset individual widget values
                 for param_name in CONFIG_PARAM_DEFINITIONS.keys():
-                    widget_key = f"config_{strategy_id}_{param_name}"
+                    widget_key = f"config_{deployment_id}_{param_name}"
                     if widget_key in st.session_state:
                         del st.session_state[widget_key]
                 st.rerun()
 
         # Show result feedback
-        result_key = f"config_result_{strategy_id}"
+        result_key = f"config_result_{deployment_id}"
         if result_key in st.session_state and st.session_state[result_key]:
             result = st.session_state[result_key]
             if result["success"]:

@@ -30,7 +30,7 @@ from almanak.framework.runner.strategy_runner import (
 _BASELINE_FIELDS = {
     "event_type",
     "event",
-    "strategy_id",
+    "deployment_id",
     "chain",
     "iteration",
     "decision",
@@ -124,7 +124,7 @@ def test_prediction_buy_surfaces_order_id_and_clob_status():
             order_id="0xabc123def456",
             clob_status="MATCHED",
         ),
-        strategy_id="poly-buy-strat",
+        deployment_id="poly-buy-strat",
         duration_ms=512.0,
     )
 
@@ -158,7 +158,7 @@ def test_prediction_sell_surfaces_order_id_and_clob_status():
             order_id="0xfeedbeef0001",
             clob_status="MATCHED",
         ),
-        strategy_id="poly-sell-strat",
+        deployment_id="poly-sell-strat",
         duration_ms=341.0,
     )
 
@@ -200,7 +200,7 @@ def test_prediction_redeem_keeps_tx_hashes_and_omits_clob_fields():
         status=IterationStatus.SUCCESS,
         intent=_make_clob_intent("PREDICTION_REDEEM"),
         execution_result=exec_result,
-        strategy_id="poly-redeem-strat",
+        deployment_id="poly-redeem-strat",
         duration_ms=900.0,
     )
 
@@ -242,7 +242,7 @@ def test_swap_intent_omits_clob_fields():
         status=IterationStatus.SUCCESS,
         intent=_make_clob_intent("SWAP"),
         execution_result=exec_result,
-        strategy_id="swap-strat",
+        deployment_id="swap-strat",
         duration_ms=120.0,
     )
 
@@ -269,7 +269,7 @@ def test_prediction_buy_without_extracted_data_is_graceful():
         status=IterationStatus.SUCCESS,
         intent=_make_clob_intent("PREDICTION_BUY"),
         execution_result=_make_clob_execution_result(order_id=None, clob_status=None),
-        strategy_id="poly-buy-degraded",
+        deployment_id="poly-buy-degraded",
         duration_ms=200.0,
     )
 
@@ -301,7 +301,7 @@ def test_prediction_buy_with_only_clob_status_omits_order_id():
             order_id=None,
             clob_status="FAILED",
         ),
-        strategy_id="poly-buy-failed",
+        deployment_id="poly-buy-failed",
         duration_ms=180.0,
     )
 
@@ -332,7 +332,7 @@ def test_iteration_summary_baseline_fields_preserved_for_prediction_buy():
             order_id="0x1",
             clob_status="MATCHED",
         ),
-        strategy_id="baseline-prediction",
+        deployment_id="baseline-prediction",
         duration_ms=10.0,
     )
 
@@ -365,7 +365,7 @@ def test_iteration_summary_baseline_fields_preserved_for_swap():
         status=IterationStatus.SUCCESS,
         intent=_make_clob_intent("SWAP"),
         execution_result=exec_result,
-        strategy_id="baseline-swap",
+        deployment_id="baseline-swap",
         duration_ms=10.0,
     )
 

@@ -27,8 +27,8 @@ Usage:
         borrow_token="USDC",
     )
 
-    def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
-        render_lending_dashboard(strategy_id, strategy_config, session_state, config)
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+        render_lending_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
 from dataclasses import dataclass
@@ -225,7 +225,7 @@ def prepare_lending_session_state(
 
 
 def render_lending_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     session_state: dict[str, Any],
     config: LendingDashboardConfig,
@@ -239,7 +239,7 @@ def render_lending_dashboard(
     the section helpers directly rather than parameterizing this template.
 
     Args:
-        strategy_id: The strategy identifier
+        deployment_id: The deployment identifier
         strategy_config: Strategy configuration dictionary
         session_state: Current session state with position data
         config: LendingDashboardConfig for this dashboard
@@ -252,12 +252,12 @@ def render_lending_dashboard(
 
     st.title(f"{protocol.replace('_', ' ').title()} Lending Dashboard")
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Collateral:** {collateral_token} | **Borrow:** {borrow_token}")
     st.markdown(f"**Chain:** {chain.title()}")
 
     # Eyeball — am I making or losing money?
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     # Health Factor and LTV Section
     col1, col2 = st.columns(2)
@@ -316,8 +316,8 @@ def render_lending_dashboard(
     _render_performance_summary(session_state)
 
     # Audit — life-to-date costs + per-intent trade tape
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_position_details(

@@ -497,7 +497,7 @@ class ExecutionEvent:
     Attributes:
         event_type: Type of execution event
         timestamp: When the event occurred
-        strategy_id: Strategy that triggered the event
+        deployment_id: Strategy that triggered the event
         chain: Blockchain network
         correlation_id: Unique identifier for the execution
         payload: Typed payload for this event type
@@ -507,7 +507,7 @@ class ExecutionEvent:
         event = ExecutionEvent(
             event_type=ExecutionEventType.TX_SENT,
             timestamp=datetime.now(timezone.utc),
-            strategy_id="momentum-arb-001",
+            deployment_id="momentum-arb-001",
             chain="arbitrum",
             correlation_id="abc123",
             payload=TransactionSentPayload(...),
@@ -519,7 +519,7 @@ class ExecutionEvent:
             timestamp=event.timestamp,
             event_type=TimelineEventType.TRANSACTION_SUBMITTED,
             description=f"Transaction sent: {event.payload.tx_hash}",
-            strategy_id=event.strategy_id,
+            deployment_id=event.deployment_id,
             chain=event.chain,
             details=event.payload.to_dict(),
         )
@@ -528,7 +528,7 @@ class ExecutionEvent:
 
     event_type: ExecutionEventType
     timestamp: datetime
-    strategy_id: str
+    deployment_id: str
     chain: str
     correlation_id: str
     payload: (
@@ -541,7 +541,7 @@ class ExecutionEvent:
         return {
             "event_type": self.event_type.value,
             "timestamp": self.timestamp.isoformat(),
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self.chain,
             "correlation_id": self.correlation_id,
             "payload": self.payload.to_dict() if self.payload else None,

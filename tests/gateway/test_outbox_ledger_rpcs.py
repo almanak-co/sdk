@@ -7,7 +7,7 @@ Covers input validation, SQLite-delegate happy paths, and error paths for:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
@@ -19,7 +19,7 @@ from almanak.gateway.services.state_service import StateServiceServicer
 _LEDGER_UUID = "deadbeef-dead-beef-dead-beefdeadbeef"
 _OUTBOX_UUID = "cafebabe-cafe-babe-cafe-babecafebabe"
 _DEPLOY_ID = "deploy-test"
-_STRATEGY_ID = "test-strategy"
+_DEPLOYMENT_ID = "test-strategy"
 
 
 @pytest.fixture
@@ -55,8 +55,7 @@ class TestSaveOutboxEntryValidation:
     async def test_missing_ledger_entry_id(self, state_service, mock_context, ledger_entry_id):
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=ledger_entry_id,
-            deployment_id=_DEPLOY_ID,
-            strategy_id=_STRATEGY_ID,
+            deployment_id=_DEPLOYMENT_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert resp.success is False
@@ -64,28 +63,16 @@ class TestSaveOutboxEntryValidation:
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("deployment_id", ["", "  "])
+    @pytest.mark.parametrize("deployment_id", ["", "  ", "   "])
     async def test_missing_deployment_id(self, state_service, mock_context, deployment_id):
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_UUID,
             deployment_id=deployment_id,
-            strategy_id=_STRATEGY_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert resp.success is False
-        assert "deployment_id is required" in resp.error
-        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("strategy_id", ["", "   "])
-    async def test_missing_strategy_id(self, state_service, mock_context, strategy_id):
-        req = gateway_pb2.SaveOutboxEntryRequest(
-            ledger_entry_id=_LEDGER_UUID,
-            deployment_id=_DEPLOY_ID,
-            strategy_id=strategy_id,
-        )
-        resp = await state_service.SaveOutboxEntry(req, mock_context)
-        assert resp.success is False
+        assert "deployment_id" in resp.error
+        assert "required" in resp.error
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
 
@@ -100,8 +87,7 @@ class TestSaveOutboxEntrySqlite:
         req = gateway_pb2.SaveOutboxEntryRequest(
             outbox_id=_OUTBOX_UUID,
             ledger_entry_id=_LEDGER_UUID,
-            deployment_id=_DEPLOY_ID,
-            strategy_id=_STRATEGY_ID,
+            deployment_id=_DEPLOYMENT_ID,
             intent_type="SWAP",
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
@@ -110,9 +96,8 @@ class TestSaveOutboxEntrySqlite:
         warm.save_outbox_entry.assert_awaited_once()
         call_kwargs = warm.save_outbox_entry.await_args.kwargs
         assert call_kwargs["ledger_entry_id"] == _LEDGER_UUID
-        assert call_kwargs["deployment_id"] == _DEPLOY_ID
-        # SQLite path must use the resolved strategy_id, not the raw request value
-        assert call_kwargs["strategy_id"] != ""
+        assert call_kwargs["deployment_id"] == _DEPLOYMENT_ID
+        assert call_kwargs["deployment_id"] != ""
 
     @pytest.mark.asyncio
     async def test_backend_error_returns_failure(self, state_service, mock_context):
@@ -123,8 +108,7 @@ class TestSaveOutboxEntrySqlite:
 
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_UUID,
-            deployment_id=_DEPLOY_ID,
-            strategy_id=_STRATEGY_ID,
+            deployment_id=_DEPLOYMENT_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert resp.success is False
@@ -137,8 +121,7 @@ class TestSaveOutboxEntrySqlite:
 
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_UUID,
-            deployment_id=_DEPLOY_ID,
-            strategy_id=_STRATEGY_ID,
+            deployment_id=_DEPLOYMENT_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert resp.success is False
@@ -167,8 +150,7 @@ class TestGetOutboxEntrySqlite:
             return_value={
                 "id": _OUTBOX_UUID,
                 "ledger_entry_id": _LEDGER_UUID,
-                "deployment_id": _DEPLOY_ID,
-                "strategy_id": _STRATEGY_ID,
+                "deployment_id": _DEPLOYMENT_ID,
                 "cycle_id": "cycle-1",
                 "intent_type": "SWAP",
                 "wallet_address": "0xabc",
@@ -225,8 +207,7 @@ class TestGetOutboxPendingSqlite:
         row = {
             "id": _OUTBOX_UUID,
             "ledger_entry_id": _LEDGER_UUID,
-            "deployment_id": _DEPLOY_ID,
-            "strategy_id": _STRATEGY_ID,
+            "deployment_id": _DEPLOYMENT_ID,
             "cycle_id": "c1",
             "intent_type": "LP_OPEN",
             "wallet_address": "0xabc",
@@ -391,7 +372,7 @@ class TestHasAccountingEventsForLedgerSqlite:
         state_service._state_manager.warm_backend = warm
 
         req = gateway_pb2.HasAccountingEventsForLedgerRequest(ledger_entry_id=_LEDGER_UUID)
-        resp = await state_service.HasAccountingEventsForLedger(req, mock_context)
+        await state_service.HasAccountingEventsForLedger(req, mock_context)
 
         # The response content is irrelevant; what matters is that INTERNAL is set
         # so grpc propagates it as an exception to the client.
@@ -419,7 +400,6 @@ class TestGetLedgerEntrySqlite:
         row = {
             "id": _LEDGER_UUID,
             "cycle_id": "cycle-1",
-            "strategy_id": _STRATEGY_ID,
             "deployment_id": _DEPLOY_ID,
             "execution_mode": "live",
             "timestamp": "2026-01-01T12:00:00+00:00",

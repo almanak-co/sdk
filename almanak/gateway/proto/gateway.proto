@@ -321,11 +321,11 @@ service StateService {
 }
 
 message LoadStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message StateData {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 version = 2;
   bytes data = 3;  // JSON-serialized state
   int32 schema_version = 4;
@@ -336,7 +336,7 @@ message StateData {
 }
 
 message SaveStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 expected_version = 2;  // For optimistic locking (0 = new state)
   bytes data = 3;  // JSON-serialized state
   int32 schema_version = 4;
@@ -350,7 +350,7 @@ message SaveStateResponse {
 }
 
 message DeleteStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message DeleteStateResponse {
@@ -360,7 +360,7 @@ message DeleteStateResponse {
 
 // Portfolio snapshot messages
 message SaveSnapshotRequest {
-  string strategy_id = 1;
+  reserved 1;
   int64 timestamp = 2;  // Unix epoch seconds
   int32 iteration_number = 3;
   string total_value_usd = 4;
@@ -383,17 +383,17 @@ message SaveSnapshotResponse {
 }
 
 message GetLatestSnapshotRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetSnapshotsSinceRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 since = 2;  // Unix epoch seconds
   int32 limit = 3;  // Max snapshots to return (default 168)
 }
 
 message SnapshotData {
-  string strategy_id = 1;
+  reserved 1;
   int64 timestamp = 2;
   int32 iteration_number = 3;
   string total_value_usd = 4;
@@ -414,7 +414,7 @@ message SnapshotList {
 
 // Portfolio metrics messages (PnL baseline tracking)
 message SaveMetricsRequest {
-  string strategy_id = 1;
+  reserved 1;
   string initial_value_usd = 2;
   int64 initial_timestamp = 3;  // Unix epoch seconds
   string deposits_usd = 4;
@@ -433,11 +433,11 @@ message SaveMetricsResponse {
 }
 
 message GetMetricsRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message PortfolioMetricsData {
-  string strategy_id = 1;
+  reserved 1;
   string initial_value_usd = 2;
   int64 initial_timestamp = 3;
   string deposits_usd = 4;
@@ -458,7 +458,7 @@ message PortfolioMetricsData {
 message SaveLedgerEntryRequest {
   string id = 1;                   // UUID primary key (idempotent ON CONFLICT target)
   string cycle_id = 2;
-  string strategy_id = 3;
+  reserved 3;
   string deployment_id = 4;        // Phase 4 identity (VIB-2835)
   string execution_mode = 5;       // "live" | "paper" | "dry_run" (VIB-2837)
   int64 timestamp = 6;             // Unix epoch seconds
@@ -496,7 +496,7 @@ message SaveAccountingEventRequest {
   // AccountingIdentity fields
   string id = 1;                    // UUID primary key (idempotent ON CONFLICT target)
   string deployment_id = 2;
-  string strategy_id = 3;
+  reserved 3;
   string cycle_id = 4;
   string execution_mode = 5;        // "live" | "paper" | "dry_run"
   int64 timestamp = 6;              // Unix epoch seconds
@@ -577,7 +577,7 @@ message SavePositionEventResponse {
 // `None` (unmeasured) on the server side. A present empty string is still
 // "0" / measured-zero where the typed value is "0".
 message PositionStateSnapshotRow {
-  string strategy_id = 1;
+  reserved 1;
   string deployment_id = 2;
   string cycle_id = 3;
   // ISO-8601 UTC timestamp (matches SQLite captured_at TEXT column shape
@@ -637,7 +637,7 @@ message SavePositionStateSnapshotsResponse {
 // CLOSE). Field order on PositionEventData mirrors SavePositionEventRequest
 // so wire-shape drift between writer and reader is easy to spot in review.
 message GetPositionHistoryRequest {
-  string strategy_id = 1;     // resolved to agent_id at the gateway via resolve_agent_id
+  reserved 1;
   string deployment_id = 2;   // required
   string position_id = 3;     // required
 }
@@ -715,7 +715,7 @@ message UpdatePositionAttributionResponse {
 // Empty-string filters mean "no filter on this field" (matches the convention
 // established by other Save* RPCs that treat "" as the unset sentinel).
 message GetAccountingEventsRequest {
-  string strategy_id = 1;     // resolved to agent_id at the gateway via resolve_agent_id
+  reserved 1;
   string deployment_id = 2;   // required
   string position_key = 3;    // "" = no filter
   string event_type = 4;      // "" = no filter
@@ -726,7 +726,7 @@ message GetAccountingEventsRequest {
 message AccountingEvent {
   string id = 1;                    // UUIDv5, deterministic from (deployment, cycle, intent_type, tx, position)
   string deployment_id = 2;
-  string strategy_id = 3;           // PG `agent_id` mapped back to strategy_id on the wire
+  reserved 3;
   string cycle_id = 4;
   string execution_mode = 5;
   int64 timestamp = 6;              // Unix epoch seconds
@@ -757,7 +757,7 @@ message GetAccountingEventsResponse {
 message SaveOutboxEntryRequest {
   string outbox_id = 1;        // UUID (INSERT OR IGNORE; ignored on PG where PK = ledger_entry_id)
   string deployment_id = 2;
-  string strategy_id = 3;      // resolved to agent_id at the gateway
+  reserved 3;
   string cycle_id = 4;
   string ledger_entry_id = 5;  // FK to transaction_ledger (PG primary key)
   string intent_type = 6;
@@ -774,7 +774,7 @@ message SaveOutboxEntryResponse {
 message OutboxEntry {
   string id = 1;               // = ledger_entry_id on PG, UUID on SQLite
   string deployment_id = 2;
-  string strategy_id = 3;
+  reserved 3;
   string cycle_id = 4;
   string ledger_entry_id = 5;
   string intent_type = 6;
@@ -830,7 +830,7 @@ message GetLedgerEntryRequest {
 message LedgerEntryData {
   string id = 1;
   string cycle_id = 2;
-  string strategy_id = 3;         // agent_id in PG, mapped to strategy_id on the wire
+  reserved 3;
   string deployment_id = 4;
   string execution_mode = 5;
   int64 timestamp = 6;            // Unix epoch seconds
@@ -860,7 +860,7 @@ message GetLedgerEntryResponse {
 
 message SumLedgerGasUsdRequest {
   string deployment_id = 1;
-  string strategy_id = 2;
+  reserved 2;
 }
 message SumLedgerGasUsdResponse {
   bool success = 1;
@@ -1027,7 +1027,7 @@ message SaveLedgerAndRegistryRequest {
   // ---- LedgerEntry (mirrors SaveLedgerEntryRequest) ----
   string id = 1;
   string cycle_id = 2;
-  string strategy_id = 3;
+  reserved 3;
   string deployment_id = 4;
   string execution_mode = 5;
   int64 timestamp = 6;
@@ -1136,7 +1136,7 @@ message ExecuteRequest {
   bytes action_bundle = 1;  // JSON-serialized ActionBundle
   bool dry_run = 2;  // Simulate only, don't submit
   bool simulation_enabled = 3;  // Run simulation before execution
-  string strategy_id = 4;
+  string deployment_id = 4;
   string intent_id = 5;
   string chain = 6;
   string wallet_address = 7;
@@ -1187,7 +1187,7 @@ service ObserveService {
 message LogEntry {
   string level = 1;  // "DEBUG", "INFO", "WARNING", "ERROR"
   string message = 2;
-  string strategy_id = 3;
+  string deployment_id = 3;
   map<string, string> context = 4;
   int64 timestamp = 5;
   string logger_name = 6;
@@ -1197,7 +1197,7 @@ message AlertRequest {
   string channel = 1;  // "slack", "telegram"
   string message = 2;
   string severity = 3;  // "info", "warning", "critical"
-  string strategy_id = 4;
+  string deployment_id = 4;
   map<string, string> metadata = 5;
 }
 
@@ -1216,7 +1216,7 @@ message MetricEntry {
 }
 
 message RecordTimelineEventRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string event_type = 2;       // "TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc.
   string description = 3;
   string tx_hash = 4;          // Optional: transaction hash
@@ -2029,7 +2029,7 @@ message ListStrategiesResponse {
 }
 
 message StrategySummary {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string name = 2;
   string status = 3;          // "RUNNING", "PAUSED", "ERROR", "STUCK"
   string chain = 4;
@@ -2051,7 +2051,7 @@ message StrategySummary {
 }
 
 message GetStrategyDetailsRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   bool include_timeline = 2;      // Include recent timeline events
   bool include_pnl_history = 3;   // Include PnL history for charts
   int32 timeline_limit = 4;       // Max timeline events (default 20)
@@ -2147,7 +2147,7 @@ message PnLDataPoint {
 }
 
 message OperatorCardInfo {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 timestamp = 2;
   string reason = 3;          // StuckReason enum value
   string severity = 4;        // "LOW", "MEDIUM", "HIGH", "CRITICAL"
@@ -2168,7 +2168,7 @@ message ChainHealthInfo {
 }
 
 message GetTimelineRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int32 limit = 2;            // Default 50
   string event_type_filter = 3;   // Optional filter
   int64 since_timestamp = 4;  // Optional: only events after this time
@@ -2180,30 +2180,30 @@ message GetTimelineResponse {
 }
 
 message GetStrategyConfigRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message StrategyConfigResponse {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string strategy_name = 2;
   string config_json = 3;     // Full config as JSON
   int64 last_updated = 4;
 }
 
 message GetStrategyStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   repeated string fields = 2; // Optional: specific fields to return
 }
 
 message StrategyStateResponse {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string state_json = 2;      // State as JSON (filtered by fields if specified)
   int64 version = 3;
   int64 updated_at = 4;
 }
 
 message ExecuteActionRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string action = 2;          // "PAUSE", "RESUME", "BUMP_GAS", "CANCEL_TX", "EMERGENCY_UNWIND"
   string reason = 3;          // Required for audit
   map<string, string> params = 4;  // Action-specific parameters
@@ -2218,8 +2218,8 @@ message ExecuteActionResponse {
 // Instance registry messages
 
 message RegisterInstanceRequest {
-  string strategy_id = 1;          // Unique instance ID (e.g. "uniswap_lp:a1b2c3d4e5f6")
-  string strategy_name = 2;        // Display name (from config's strategy_id or strategy_name)
+  string deployment_id = 1;          // Unique instance ID (e.g. "uniswap_lp:a1b2c3d4e5f6")
+  string strategy_name = 2;        // Display name (from config's deployment_id or strategy_name)
   string template_name = 3;        // Class name, e.g. "UniswapLPStrategy"
   string chain = 4;
   string protocol = 5;
@@ -2233,11 +2233,11 @@ message RegisterInstanceRequest {
 message RegisterInstanceResponse {
   bool success = 1;
   string error = 2;
-  bool already_existed = 3;        // True if re-registering on restart (same strategy_id)
+  bool already_existed = 3;        // True if re-registering on restart (same deployment_id)
 }
 
 message UpdateInstanceStatusRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string status = 2;               // RUNNING, INACTIVE, ERROR, PAUSED
   string reason = 3;
   bool heartbeat_only = 4;         // If true, only update last_heartbeat_at
@@ -2251,7 +2251,7 @@ message UpdateInstanceStatusResponse {
 }
 
 message ArchiveInstanceRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string reason = 2;
 }
 
@@ -2261,7 +2261,7 @@ message ArchiveInstanceResponse {
 }
 
 message PurgeInstanceRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string reason = 2;               // Required for audit
 }
 
@@ -2273,7 +2273,7 @@ message PurgeInstanceResponse {
 // Transaction ledger messages (VIB-2402) -------------------------------------
 
 message GetTransactionLedgerRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 since_timestamp = 2;  // Optional: only entries after this time (unix)
   string intent_type_filter = 3;  // Optional: filter by intent type
   int32 limit = 4;  // Default 100
@@ -2287,7 +2287,7 @@ message GetTransactionLedgerResponse {
 message LedgerEntryInfo {
   string id = 1;
   string cycle_id = 2;
-  string strategy_id = 3;
+  string deployment_id = 3;
   int64 timestamp = 4;
   string intent_type = 5;
   string token_in = 6;
@@ -2400,21 +2400,21 @@ message AuditPosture {
 }
 
 message GetPnLSummaryRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetCostStackRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetAuditPostureRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 // Trade tape messages --------------------------------------------------------
 
 message GetTradeTapeRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int32 limit = 2;
   int64 before_timestamp = 3;       // pagination (unix; 0 = newest first)
 }
@@ -2526,7 +2526,7 @@ message TradeTapeRow {
 // pathological case (e.g., trigger a different read path or alert).
 
 message GetActivityFeedRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int32 limit = 2;                  // Default 50, capped server-side at 200
   int64 before_timestamp = 3;       // Cursor: only items at-or-before this timestamp (unix; 0 = newest first)
   string event_type_filter = 4;     // Optional: restrict timeline-side filter (intent-type filter applies to ledger side)
@@ -2573,7 +2573,7 @@ message ActivityFeedItem {
   }
   Kind kind = 1;
   int64 timestamp = 2;              // Sort key, copied from the inner row
-  string strategy_id = 3;
+  string deployment_id = 3;
   string cycle_id = 4;              // For grouping in the renderer
   oneof payload {
     TimelineEventInfo timeline_event = 10;
@@ -2635,7 +2635,7 @@ enum PositionStatus {
 }
 
 message GetPositionsRequest {
-  string strategy_id = 1;                  // required
+  string deployment_id = 1;                  // required
   string chain = 2;                        // optional filter
   string primitive = 3;                    // optional filter ("lp", "lending", "perp", ...)
   string accounting_category = 4;          // optional filter ("LP_UNIV3", "AAVE_COLLATERAL", ...)
@@ -2710,7 +2710,7 @@ message PositionEntry {
 }
 
 message GetPositionRangeHistoryRequest {
-  string strategy_id = 1;                  // required
+  string deployment_id = 1;                  // required
   string chain = 2;                        // required (history is per-chain)
   string accounting_category = 3;          // required
   // Either handle OR physical_identity_hash. If both supplied,
@@ -2759,7 +2759,7 @@ enum ReconciliationSeverity {
 }
 
 message GetReconciliationReportRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetReconciliationReportResponse {
@@ -2799,7 +2799,7 @@ message PrimitiveCoverageStub {
 }
 
 message PreviewReconcileRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message PreviewReconcileResponse {
@@ -2824,7 +2824,7 @@ message PreviewReconcileResponse {
 }
 
 message ApplyReconcileRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   // Token issued by PreviewReconcile. INVALID_ARGUMENT if empty.
   string preview_token = 2;
 }
@@ -2846,7 +2846,7 @@ message ApplyReconcileResponse {
 }
 
 message RefreshRegistryFromChainRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message RefreshRegistryFromChainResponse {
@@ -3544,7 +3544,7 @@ service LifecycleService {
 // --- LifecycleService Messages ---
 
 message WriteAgentStateRequest {
-  string agent_id = 1;
+  string deployment_id = 1;
   string state = 2;             // INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED
   string error_message = 3;     // Optional: error details when state=ERROR
   optional string running_almanak_version = 4; // Optional: strategy-loaded almanak package version
@@ -3556,12 +3556,12 @@ message WriteAgentStateResponse {
 }
 
 message ReadAgentStateRequest {
-  string agent_id = 1;
+  string deployment_id = 1;
 }
 
 message ReadAgentStateResponse {
   bool found = 1;
-  string agent_id = 2;
+  string deployment_id = 2;
   string state = 3;
   string state_changed_at = 4;  // ISO 8601
   string last_heartbeat_at = 5; // ISO 8601
@@ -3570,7 +3570,7 @@ message ReadAgentStateResponse {
 }
 
 message HeartbeatRequest {
-  string agent_id = 1;
+  string deployment_id = 1;
 }
 
 message HeartbeatResponse {
@@ -3579,13 +3579,13 @@ message HeartbeatResponse {
 }
 
 message ReadAgentCommandRequest {
-  string agent_id = 1;
+  string deployment_id = 1;
 }
 
 message ReadAgentCommandResponse {
   bool found = 1;
   int64 command_id = 2;
-  string agent_id = 3;
+  string deployment_id = 3;
   string command = 4;           // PAUSE, RESUME, STOP
   string issued_at = 5;         // ISO 8601
   string issued_by = 6;
@@ -3601,7 +3601,7 @@ message AckAgentCommandResponse {
 }
 
 message WriteAgentCommandRequest {
-  string agent_id = 1;
+  string deployment_id = 1;
   string command = 2;           // PAUSE, RESUME, STOP
   string issued_by = 3;
 }
@@ -3656,11 +3656,11 @@ message CreateTeardownRequestResponse {
 }
 
 message GetTeardownRequestRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetActiveTeardownRequestRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetTeardownRequestResponse {
@@ -3680,28 +3680,28 @@ message UpdateTeardownRequestRequest {
 }
 
 message AckTeardownRequestRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message MarkTeardownStartedRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int32 total_positions = 2;
 }
 
 message UpdateTeardownProgressRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int32 positions_closed = 2;
   int32 positions_failed = 3;
   string current_phase = 4; // Optional TeardownPhase value
 }
 
 message MarkTeardownCompletedRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string result_json = 2; // Optional JSON object
 }
 
 message MarkTeardownFailedRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string error_message = 2;
   // VIB-4542: intent-landing counts, parallel to UpdateTeardownProgressRequest.
   // Proto3 `optional` gives presence-tracked scalars — an omitted field
@@ -3710,7 +3710,7 @@ message MarkTeardownFailedRequest {
   // runner's safety-validation early-fail path that has no intent counts)
   // instead of accidentally zeroing out a prior progress write.
   // Audit (PR #2343): the prior `-1` sentinel was unsafe — proto3 scalar
-  // defaults are 0, not -1, so a legacy client sending only strategy_id +
+  // defaults are 0, not -1, so a legacy client sending only deployment_id +
   // error_message would have arrived as positions_closed=0 (overwrite),
   // not -1 (preserve).
   optional int32 positions_closed = 3;
@@ -3718,15 +3718,15 @@ message MarkTeardownFailedRequest {
 }
 
 message MarkTeardownCancelledRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message RequestTeardownCancelRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message DeleteTeardownRequestRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message TeardownRequestMutationResponse {
@@ -3752,7 +3752,7 @@ message SaveTeardownStateResponse {
 }
 
 message LoadTeardownStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message LoadTeardownStateResponse {
@@ -3772,7 +3772,7 @@ message DeleteTeardownStateResponse {
 
 message CreateApprovalRequestRequest {
   string teardown_id = 1;
-  string strategy_id = 2;
+  string deployment_id = 2;
   string level = 3;
   string request_json = 4;
   string expires_at = 5; // ISO 8601
@@ -3801,17 +3801,17 @@ message WriteApprovalResponseRequest {
 }
 
 message GetLatestPendingApprovalRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 
 message GetLatestPendingApprovalResponse {
   bool found = 1;
-  string approval_json = 2; // JSON object with teardown_id, level, strategy_id, request_json, created_at, expires_at
+  string approval_json = 2; // JSON object with teardown_id, level, deployment_id, request_json, created_at, expires_at
   string error = 3;
 }
 
 message WriteApprovalResponseByStrategyRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string response_json = 2;
 }
 
@@ -3895,8 +3895,8 @@ service PositionService {
   // Idempotency: running Reconcile twice back-to-back with no on-chain
   // change is a no-op (ADR §4.1 formal proof).
   //
-  // Auth: same gateway-auth posture as StateService RPCs (resolve_agent_id
-  // on deployment_id). v1 accepts the existing strategy-bound auth token;
+  // Auth: same gateway-auth posture as StateService RPCs. v1 accepts the
+  // existing strategy-bound auth token;
   // a future hardened posture may require an additional "operator" role
   // claim — out of scope for T24 (ADR §6 + §8.2).
   rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
@@ -3907,8 +3907,7 @@ service PositionService {
 }
 
 message ReconcileRequest {
-  // Required: deployment that owns the registry rows. Resolved to agent_id
-  // at the gateway via resolve_agent_id (matches StateService pattern).
+  // Required: deployment that owns the registry rows.
   // Empty string => INVALID_ARGUMENT.
   string deployment_id = 1;
 

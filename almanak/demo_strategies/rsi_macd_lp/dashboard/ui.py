@@ -30,14 +30,14 @@ from almanak.framework.data.indicators.rsi import RSICalculator
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
 ) -> None:
     """Render the RSI + MACD Confluence LP custom dashboard."""
     st.title("RSI + MACD Confluence LP Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     pool = strategy_config.get("pool", "WETH/USDC/500")
     chain = strategy_config.get("chain", "arbitrum")
@@ -49,7 +49,7 @@ def render_custom_dashboard(
     macd_slow = int(strategy_config.get("macd_slow", 26))
     macd_signal_period = int(strategy_config.get("macd_signal", 9))
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {pool} | **Chain:** {chain} | **DEX:** Uniswap V3")
     st.markdown(
         f"**RSI({rsi_period}):** ≤ {rsi_oversold:.0f} / ≥ {rsi_overbought:.0f}  "
@@ -74,8 +74,8 @@ def render_custom_dashboard(
 
     st.divider()
     st.markdown("## Audit")
-    render_cost_stack_section(strategy_id, heading="")
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id, heading="")
+    render_trade_tape_section(deployment_id)
 
 
 def _parse_pool_tokens(pool: str) -> tuple[str, str]:

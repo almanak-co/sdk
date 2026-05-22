@@ -63,7 +63,7 @@ def _make_runner() -> StrategyRunner:
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test_strat"
+    strategy.deployment_id = "test_strat"
     strategy.chain = "zerog"
     return strategy
 

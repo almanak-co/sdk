@@ -30,7 +30,7 @@ class StrategyState:
     This is the input structure for generating operator cards.
     """
 
-    strategy_id: str
+    deployment_id: str
     status: str  # "running", "paused", "stuck", "error"
 
     # Position information
@@ -231,7 +231,7 @@ class OperatorCardGenerator:
         auto_remediation = self._setup_auto_remediation(reason, suggested_actions)
 
         return OperatorCard(
-            strategy_id=strategy_state.strategy_id,
+            deployment_id=strategy_state.deployment_id,
             timestamp=datetime.now(UTC),
             event_type=event_type,
             reason=reason,

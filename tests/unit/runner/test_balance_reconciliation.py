@@ -33,7 +33,7 @@ _TEARDOWN_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._chec
 def _make_strategy(decide_return=None):
     """Create a mock strategy."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -170,7 +170,7 @@ class TestReconcileBalances:
         """No reconciliation for HoldIntent (no tokens)."""
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
         intent = HoldIntent(reason="waiting")
 
         result = await runner._reconcile_post_execution_balances(strategy, intent, None)
@@ -188,7 +188,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
 
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
         recon = await runner._reconcile_post_execution_balances(strategy, intent, None)
@@ -209,7 +209,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
 
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
 
@@ -232,7 +232,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
 
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
         recon = await runner._reconcile_post_execution_balances(strategy, intent, None)
@@ -256,7 +256,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
 
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
         recon = await runner._reconcile_post_execution_balances(strategy, intent, None)
@@ -277,7 +277,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
         pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
 
@@ -303,7 +303,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
         pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
 
@@ -325,7 +325,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
 
         recon = await runner._reconcile_post_execution_balances(strategy, intent, None, pre_snapshot=None)
@@ -348,7 +348,7 @@ class TestReconcileBalances:
 
         runner = _make_runner(balance_provider=bp)
         strategy = MagicMock()
-        strategy.strategy_id = "test"
+        strategy.deployment_id = "test"
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("4"))
         pre_snapshot = BalanceSnapshot.now({"USDC": Decimal("100"), "ETH": Decimal("0")})
 

@@ -9,7 +9,7 @@ import pytest
 from almanak.gateway.audit import (
     AuditInterceptor,
     AuditRecord,
-    _extract_strategy_id,
+    _extract_deployment_id,
     _parse_method_name,
     _summarize_request,
     _summarize_response,
@@ -29,7 +29,7 @@ class TestAuditRecord:
             timestamp="2024-01-01T00:00:00+00:00",
             service="MarketService",
             method="GetPrice",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             latency_ms=15.5,
             success=True,
             request_summary={"chain": "arbitrum"},
@@ -41,7 +41,7 @@ class TestAuditRecord:
         assert d["timestamp"] == "2024-01-01T00:00:00+00:00"
         assert d["service"] == "MarketService"
         assert d["method"] == "GetPrice"
-        assert d["strategy_id"] == "test-strategy"
+        assert d["deployment_id"] == "test-strategy"
         assert d["latency_ms"] == 15.5
         assert d["success"] is True
         assert d["error_type"] is None
@@ -55,7 +55,7 @@ class TestAuditRecord:
             timestamp="2024-01-01T00:00:00+00:00",
             service="RpcService",
             method="Call",
-            strategy_id=None,
+            deployment_id=None,
             latency_ms=50.0,
             success=False,
             error_type="ValidationError",
@@ -67,7 +67,7 @@ class TestAuditRecord:
         assert d["success"] is False
         assert d["error_type"] == "ValidationError"
         assert d["error_message"] == "Invalid chain"
-        assert d["strategy_id"] is None
+        assert d["deployment_id"] is None
 
     def test_latency_rounding(self):
         """Latency is rounded to 3 decimal places."""
@@ -75,7 +75,7 @@ class TestAuditRecord:
             timestamp="2024-01-01T00:00:00+00:00",
             service="Test",
             method="Test",
-            strategy_id=None,
+            deployment_id=None,
             latency_ms=15.123456789,
             success=True,
         )
@@ -113,47 +113,47 @@ class TestParseMethodName:
 
 
 class TestExtractStrategyId:
-    """Tests for _extract_strategy_id helper."""
+    """Tests for _extract_deployment_id helper."""
 
-    def test_with_strategy_id_field(self):
-        """Extract strategy_id from request with strategy_id field."""
-
-        @dataclass
-        class MockRequest:
-            strategy_id: str = "my-strategy"
-
-        request = MockRequest()
-        assert _extract_strategy_id(request) == "my-strategy"
-
-    def test_with_strategyId_field(self):
-        """Extract strategyId from request with camelCase field."""
+    def test_with_deployment_id_field(self):
+        """Extract deployment_id from request with deployment_id field."""
 
         @dataclass
         class MockRequest:
-            strategyId: str = "my-strategy"
+            deployment_id: str = "my-deployment"
 
         request = MockRequest()
-        assert _extract_strategy_id(request) == "my-strategy"
+        assert _extract_deployment_id(request) == "my-deployment"
 
-    def test_no_strategy_id(self):
-        """Return None when no strategy_id field."""
+    def test_with_removed_camel_case_identity_field(self):
+        """Ignore the removed camelCase identity field."""
+
+        @dataclass
+        class MockRequest:
+            legacyId: str = "my-deployment"
+
+        request = MockRequest()
+        assert _extract_deployment_id(request) is None
+
+    def test_no_deployment_id(self):
+        """Return None when no deployment_id field."""
 
         @dataclass
         class MockRequest:
             chain: str = "arbitrum"
 
         request = MockRequest()
-        assert _extract_strategy_id(request) is None
+        assert _extract_deployment_id(request) is None
 
-    def test_empty_strategy_id(self):
-        """Return None for empty strategy_id."""
+    def test_empty_deployment_id(self):
+        """Return None for empty deployment_id."""
 
         @dataclass
         class MockRequest:
-            strategy_id: str = ""
+            deployment_id: str = ""
 
         request = MockRequest()
-        assert _extract_strategy_id(request) is None
+        assert _extract_deployment_id(request) is None
 
 
 class TestSummarizeRequest:
@@ -165,7 +165,7 @@ class TestSummarizeRequest:
         @dataclass
         class MockRequest:
             chain: str = "arbitrum"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             method: str = "eth_call"
             wallet_address: str = "0x1234"
 
@@ -174,7 +174,7 @@ class TestSummarizeRequest:
 
         assert "chain" in summary
         assert summary["chain"] == "arbitrum"
-        assert "strategy_id" in summary
+        assert "deployment_id" in summary
         assert "method" in summary
         assert "wallet_address" in summary
 
@@ -196,7 +196,7 @@ class TestSummarizeRequest:
         @dataclass
         class MockRequest:
             chain: str = "arbitrum"
-            strategy_id: str = "test"
+            deployment_id: str = "test"
             method: str = "eth_call"
             symbol: str = "BTCUSDT"
             token_id: str = "bitcoin"
@@ -215,13 +215,13 @@ class TestSummarizeRequest:
         @dataclass
         class MockRequest:
             chain: str = ""
-            strategy_id: str = "test"
+            deployment_id: str = "test"
 
         request = MockRequest()
         summary = _summarize_request(request)
 
         assert "chain" not in summary
-        assert "strategy_id" in summary
+        assert "deployment_id" in summary
 
 
 class TestSummarizeResponse:
@@ -277,7 +277,7 @@ class TestLogAuditRecord:
             timestamp="2024-01-01T00:00:00+00:00",
             service="Test",
             method="Test",
-            strategy_id=None,
+            deployment_id=None,
             latency_ms=10.0,
             success=True,
         )
@@ -298,7 +298,7 @@ class TestLogAuditRecord:
             timestamp="2024-01-01T00:00:00+00:00",
             service="Test",
             method="Test",
-            strategy_id=None,
+            deployment_id=None,
             latency_ms=10.0,
             success=False,
             error_type="TestError",

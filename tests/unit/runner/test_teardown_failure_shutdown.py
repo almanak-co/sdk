@@ -28,21 +28,21 @@ from almanak.framework.runner.strategy_runner import (
 
 def _make_runner(**overrides) -> StrategyRunner:
     """Build a StrategyRunner with minimal mocks."""
-    defaults = dict(
-        price_oracle=MagicMock(),
-        balance_provider=MagicMock(),
-        execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
-        alert_manager=None,
-    )
+    defaults = {
+        "price_oracle": MagicMock(),
+        "balance_provider": MagicMock(),
+        "execution_orchestrator": MagicMock(),
+        "state_manager": MagicMock(),
+        "alert_manager": None,
+    }
     defaults.update(overrides)
     return StrategyRunner(**defaults)
 
 
-def _make_strategy(strategy_id: str = "test_strat", chain: str = "arbitrum") -> MagicMock:
+def _make_strategy(deployment_id: str = "test_strat", chain: str = "arbitrum") -> MagicMock:
     """Build a mock strategy for teardown tests."""
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = chain
     strategy.wallet_address = "0x1234"
     strategy.create_market_snapshot.return_value = MagicMock(
@@ -61,13 +61,14 @@ def _make_intent(intent_type: str = "SWAP") -> MagicMock:
 
 @pytest.fixture()
 def _deployed(monkeypatch):
-    """Simulate a managed K8s deployment (AGENT_ID env var present)."""
-    monkeypatch.setenv("AGENT_ID", "agent-v2-test-123")
+    """Simulate a managed K8s deployment."""
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-v2-test-123")
 
 
 @pytest.fixture()
 def _local(monkeypatch, tmp_path):
-    """Simulate local development (no AGENT_ID env var).
+    """Simulate local development.
 
     Also pin ``ALMANAK_STATE_DB`` to a per-test tmp file so the strict,
     strategy-scoped DB resolver (VIB-3835) doesn't hard-fail when the
@@ -75,7 +76,8 @@ def _local(monkeypatch, tmp_path):
     test only constructs the manager — it never reads the file — so a
     placeholder path is sufficient.
     """
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
 
 
@@ -231,13 +233,13 @@ class TestManagerTeardownIncomplete:
         success_result = IterationResult(
             status=IterationStatus.SUCCESS,
             intent=intent,
-            strategy_id="test_strat",
+            deployment_id="test_strat",
         )
         failed_result = IterationResult(
             status=IterationStatus.STRATEGY_ERROR,
             error="second swap reverted",
             intent=intent,
-            strategy_id="test_strat",
+            deployment_id="test_strat",
         )
         runner._execute_single_chain = AsyncMock(side_effect=[success_result, failed_result])
 
@@ -272,7 +274,7 @@ class TestManagerTeardownIncompleteLocal:
             status=IterationStatus.STRATEGY_ERROR,
             error="swap reverted",
             intent=intent,
-            strategy_id="test_strat",
+            deployment_id="test_strat",
         )
         runner._execute_single_chain = AsyncMock(return_value=failed_result)
 
@@ -312,7 +314,7 @@ class TestInlineTeardownFailure:
             status=IterationStatus.STRATEGY_ERROR,
             error="swap reverted",
             intent=intent,
-            strategy_id="test_strat",
+            deployment_id="test_strat",
         )
         runner._execute_single_chain = AsyncMock(return_value=failed_result)
 

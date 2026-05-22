@@ -241,7 +241,7 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_curve_cryptoswap_pnl"),
+            deployment_id=getattr(self, "deployment_id", "demo_curve_cryptoswap_pnl"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

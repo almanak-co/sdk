@@ -213,18 +213,18 @@ class DeterministicSwapStrategy:
         buy_threshold: Decimal = Decimal("0.85"),
         sell_threshold: Decimal = Decimal("0.95"),
         trade_size_usd: Decimal = Decimal("3000"),
-        strategy_id: str = "uniswap_rsi_crisis",
+        deployment_id: str = "uniswap_rsi_crisis",
     ):
         self._initial_price = initial_price
         self._buy_threshold = buy_threshold
         self._sell_threshold = sell_threshold
         self._trade_size_usd = trade_size_usd
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._last_action: str | None = None
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         try:
@@ -261,12 +261,12 @@ class DeterministicSwapStrategy:
 class HoldOnlyStrategy:
     """Strategy that never trades — baseline for comparison."""
 
-    def __init__(self, strategy_id: str = "hold_baseline"):
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "hold_baseline"):
+        self._deployment_id = deployment_id
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> None:
         return None

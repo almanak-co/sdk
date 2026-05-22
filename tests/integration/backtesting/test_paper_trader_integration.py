@@ -199,21 +199,21 @@ class DeterministicPaperStrategy:
     def __init__(
         self,
         intents: list[Any | None],
-        strategy_id: str = "paper_test_strategy",
+        deployment_id: str = "paper_test_strategy",
     ):
         """Initialize with pre-defined intent sequence.
 
         Args:
             intents: List of intents to return in order (None = hold)
-            strategy_id: Identifier for the strategy
+            deployment_id: Identifier for the strategy
         """
         self._intents = intents
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: MarketSnapshot) -> Any | None:
         """Return next intent from sequence."""
@@ -288,7 +288,7 @@ def paper_trader_config() -> PaperTraderConfig:
     return PaperTraderConfig(
         chain="arbitrum",
         rpc_url=ANVIL_RPC,
-        strategy_id="integration_test",
+        deployment_id="integration_test",
         initial_eth=Decimal("10"),
         initial_tokens={"USDC": Decimal("10000")},
         tick_interval_seconds=1,  # Fast ticks for testing
@@ -361,7 +361,7 @@ class TestPaperTraderSetup:
 
         # Create portfolio tracker
         portfolio_tracker = PaperPortfolioTracker(
-            strategy_id=paper_trader_config.strategy_id,
+            deployment_id=paper_trader_config.deployment_id,
             chain="arbitrum",
         )
 
@@ -395,7 +395,7 @@ class TestPortfolioTracking:
     ) -> None:
         """Test that portfolio tracker correctly initializes balances."""
         tracker = PaperPortfolioTracker(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="arbitrum",
         )
 
@@ -422,7 +422,7 @@ class TestPortfolioTracking:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="arbitrum",
         )
 
@@ -463,7 +463,7 @@ class TestPortfolioTracking:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="arbitrum",
         )
 
@@ -534,7 +534,7 @@ class TestHoldStrategy:
 
         # Create portfolio tracker
         portfolio_tracker = PaperPortfolioTracker(
-            strategy_id="hold_test",
+            deployment_id="hold_test",
             chain="arbitrum",
         )
 
@@ -542,7 +542,7 @@ class TestHoldStrategy:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=ANVIL_RPC,
-            strategy_id="hold_test",
+            deployment_id="hold_test",
             initial_eth=Decimal("10"),
             initial_tokens={"USDC": Decimal("10000")},
             tick_interval_seconds=1,
@@ -560,7 +560,7 @@ class TestHoldStrategy:
         # Create hold-only strategy
         strategy = DeterministicPaperStrategy(
             intents=[None, None, None],  # Always hold
-            strategy_id="hold_test",
+            deployment_id="hold_test",
         )
 
         # Run paper trading (short duration)
@@ -669,7 +669,7 @@ class TestMetricsCalculation:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="gas_test",
+            deployment_id="gas_test",
             chain="arbitrum",
         )
 
@@ -707,7 +707,7 @@ class TestMetricsCalculation:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="summary_test",
+            deployment_id="summary_test",
             chain="arbitrum",
         )
 
@@ -734,7 +734,7 @@ class TestMetricsCalculation:
         summary = tracker.get_summary_with_pnl(current_prices)
 
         # Verify summary fields
-        assert summary.strategy_id == "summary_test"
+        assert summary.deployment_id == "summary_test"
         assert summary.chain == "arbitrum"
         assert summary.total_trades == 1
         assert summary.successful_trades == 1
@@ -757,7 +757,7 @@ class TestConfigValidation:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=ANVIL_RPC,
-            strategy_id="test",
+            deployment_id="test",
         )
         assert config.chain == "arbitrum"
 
@@ -768,7 +768,7 @@ class TestConfigValidation:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=ANVIL_RPC,
-            strategy_id="test",
+            deployment_id="test",
             initial_eth=Decimal("5"),
             initial_tokens={"USDC": Decimal("5000"), "ARB": Decimal("1000")},
         )
@@ -790,7 +790,7 @@ class TestConfigValidation:
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url=ANVIL_RPC,
-            strategy_id="test",
+            deployment_id="test",
             initial_eth=Decimal("10"),
             initial_tokens={"USDC": Decimal("10000")},
             tick_interval_seconds=60,
@@ -802,7 +802,7 @@ class TestConfigValidation:
 
         # Verify serialization
         assert config_dict["chain"] == "arbitrum"
-        assert config_dict["strategy_id"] == "test"
+        assert config_dict["deployment_id"] == "test"
         assert config_dict["tick_interval_seconds"] == 60
         assert config_dict["max_ticks"] == 100
 
@@ -811,5 +811,5 @@ class TestConfigValidation:
 
         # Verify restoration
         assert restored_config.chain == config.chain
-        assert restored_config.strategy_id == config.strategy_id
+        assert restored_config.deployment_id == config.deployment_id
         assert restored_config.tick_interval_seconds == config.tick_interval_seconds

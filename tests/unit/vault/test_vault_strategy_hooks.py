@@ -84,7 +84,7 @@ def _make_strategy(cls):
 
 def _teardown_mixin_get_open_positions(self):
     from almanak.framework.teardown.models import TeardownPositionSummary
-    return TeardownPositionSummary.empty(getattr(self, "_strategy_id", "test"))
+    return TeardownPositionSummary.empty(getattr(self, "_deployment_id", "test"))
 
 
 def _teardown_mixin_generate_teardown_intents(self, mode=None, market=None):

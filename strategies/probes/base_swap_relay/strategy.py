@@ -207,7 +207,7 @@ class SwapRelayProbeStrategy(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "probe_base_swap_relay"),
+            deployment_id=getattr(self, "deployment_id", "probe_base_swap_relay"),
             timestamp=datetime.now(UTC),
             positions=[
                 PositionInfo(

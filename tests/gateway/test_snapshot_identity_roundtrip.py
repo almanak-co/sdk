@@ -38,9 +38,9 @@ def _make_settings(database_url: str | None = None) -> SimpleNamespace:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_agent_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip AGENT_ID so resolve_agent_id() passes through verbatim."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+def _isolate_deployment_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip hosted mode so identity assertions use explicit test inputs."""
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
 
 
 @pytest.fixture
@@ -93,7 +93,6 @@ def _make_save_request(
     execution_mode: str = "live",
 ) -> gateway_pb2.SaveSnapshotRequest:
     return gateway_pb2.SaveSnapshotRequest(
-        strategy_id="Strat:abc",
         timestamp=1_725_000_000,
         iteration_number=1,
         total_value_usd="1000.00",
@@ -113,8 +112,14 @@ def _make_save_request(
 
 
 class TestPgSnapshotIdentityWrite:
-    """Exercise the asymmetric ``ON CONFLICT DO UPDATE ... CASE WHEN
-    existing IS NULL OR existing = ''`` pattern at state_service.py:602-654."""
+    """Exercise the portfolio_snapshots UPSERT identity columns.
+
+    VIB-4721/4722: portfolio_snapshots has a single identity column,
+    ``deployment_id`` (the legacy ``deployment_id`` column was DROPPED). It is
+    part of the ``(deployment_id, timestamp)`` unique constraint and NOT
+    NULL, so it carries the validated wire id directly — no asymmetric
+    preserve CASE. The optional Phase-4 ``cycle_id`` / ``execution_mode``
+    columns keep the once-stamped-never-blanked CASE clause."""
 
     @pytest.mark.asyncio
     async def test_pg_save_passes_identity_fields_into_insert(self, pg_service, context) -> None:
@@ -142,35 +147,42 @@ class TestPgSnapshotIdentityWrite:
         assert "deployment_id" in query
         assert "cycle_id" in query
         assert "execution_mode" in query
-        # And the asymmetric preserve clause must be present (otherwise a
-        # second unstamped write would blank a stamped row — May 7 incident
-        # class on the SQLite side, ported here for the PG path).
-        assert "WHEN portfolio_snapshots.deployment_id IS NULL" in query
+        # Legacy hosted identity is gone; deployment_id is the conflict key.
+        assert "agent_id" not in query
+        assert "ON CONFLICT (deployment_id, timestamp)" in query
+        # The asymmetric preserve clause stays for the optional Phase-4
+        # columns (otherwise a second unstamped write would blank a stamped
+        # row — May 7 incident class). deployment_id is the conflict key so
+        # it has no preserve CASE.
+        assert "WHEN portfolio_snapshots.deployment_id IS NULL" not in query
         assert "WHEN portfolio_snapshots.cycle_id IS NULL" in query
         assert "WHEN portfolio_snapshots.execution_mode IS NULL" in query
-        # Values arrive as the LAST three positional args, in declared order.
-        assert tuple(args[-3:]) == ("dep-1", "cycle-7", "live")
+        # deployment_id ($1) is the validated wire id; cycle_id /
+        # execution_mode arrive as the LAST two positional args.
+        assert args[0] == "dep-1"
+        assert tuple(args[-2:]) == ("cycle-7", "live")
 
     @pytest.mark.asyncio
-    async def test_pg_save_with_omitted_identity_falls_back_to_empty(self, pg_service, context) -> None:
-        """Legacy clients that don't set the new fields must still succeed;
-        the wire default for proto3 string fields is ``""`` and the writer
-        passes that through verbatim. Hosted PG's CASE preserves any
-        previously-written value, so the missing-identity write is a safe
-        no-op on a stamped row."""
+    async def test_pg_save_with_omitted_phase4_identity_falls_back_to_empty(self, pg_service, context) -> None:
+        """Legacy clients that don't set the optional Phase-4 fields must
+        still succeed; the wire default for proto3 string fields is ``""``
+        and the writer passes that through verbatim. Hosted PG's CASE
+        preserves any previously-written value, so the missing-identity
+        write is a safe no-op on a stamped row. ``deployment_id`` is the
+        required identity column — always the validated wire id."""
 
         async def _fake_fetchrow(query, *args):
             return {"id": 7}
 
         request = gateway_pb2.SaveSnapshotRequest(
-            strategy_id="Strat:abc",
+            deployment_id="Strat:abc",
             timestamp=1_725_000_001,
             total_value_usd="0",
             available_cash_usd="0",
             value_confidence="HIGH",
             positions_json=b"[]",
             chain="arbitrum",
-            # deployment_id/cycle_id/execution_mode left unset — proto3 default ""
+            # cycle_id/execution_mode left unset — proto3 default ""
         )
         with patch.object(
             pg_service,
@@ -180,7 +192,8 @@ class TestPgSnapshotIdentityWrite:
             response = await pg_service.SavePortfolioSnapshot(request, context)
         assert response.success is True
         args = fake.call_args.args[1:]
-        assert tuple(args[-3:]) == ("", "", "")
+        assert args[0] == "Strat:abc"  # deployment_id always present
+        assert tuple(args[-2:]) == ("", "")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -215,7 +228,7 @@ class TestSqliteSnapshotIdentityWrite:
         self, sqlite_service, warm_backend, context
     ) -> None:
         request = gateway_pb2.SaveSnapshotRequest(
-            strategy_id="Strat:abc",
+            deployment_id="Strat:abc",
             timestamp=1_725_000_002,
             total_value_usd="0",
             available_cash_usd="0",
@@ -225,7 +238,7 @@ class TestSqliteSnapshotIdentityWrite:
         )
         await sqlite_service.SavePortfolioSnapshot(request, context)
         snapshot = warm_backend.save_portfolio_snapshot.call_args.args[0]
-        assert snapshot.deployment_id == ""
+        assert snapshot.deployment_id == "Strat:abc"
         assert snapshot.cycle_id == ""
         assert snapshot.execution_mode == ""
 
@@ -240,7 +253,6 @@ class TestSnapshotIdentityReadMapping:
     async def test_get_latest_includes_identity_fields(self, sqlite_service, warm_backend, context) -> None:
         snap = PortfolioSnapshot(
             timestamp=datetime(2026, 5, 7, 12, 0, tzinfo=UTC),
-            strategy_id="Strat:abc",
             total_value_usd=Decimal("1234.56"),
             available_cash_usd=Decimal("500"),
             value_confidence=ValueConfidence.HIGH,
@@ -251,7 +263,7 @@ class TestSnapshotIdentityReadMapping:
             execution_mode="live",
         )
         warm_backend.get_latest_snapshot.return_value = snap
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="Strat:abc")
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="Strat:abc")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is True
         assert response.deployment_id == "Strat:abc"
@@ -265,7 +277,7 @@ class TestSnapshotIdentityReadMapping:
         can render legacy rows with a missing-identity badge."""
         snap = PortfolioSnapshot(
             timestamp=datetime(2026, 5, 7, 12, 0, tzinfo=UTC),
-            strategy_id="Strat:abc",
+            deployment_id="Strat:abc",
             total_value_usd=Decimal("1234.56"),
             available_cash_usd=Decimal("500"),
             value_confidence=ValueConfidence.HIGH,
@@ -274,10 +286,10 @@ class TestSnapshotIdentityReadMapping:
             # No deployment_id/cycle_id/execution_mode — defaults to ""
         )
         warm_backend.get_latest_snapshot.return_value = snap
-        request = gateway_pb2.GetLatestSnapshotRequest(strategy_id="Strat:abc")
+        request = gateway_pb2.GetLatestSnapshotRequest(deployment_id="Strat:abc")
         response = await sqlite_service.GetLatestSnapshot(request, context)
         assert response.found is True
-        assert response.deployment_id == ""
+        assert response.deployment_id == "Strat:abc"
         assert response.cycle_id == ""
         assert response.execution_mode == ""
 
@@ -288,7 +300,6 @@ class TestSnapshotIdentityReadMapping:
         snaps = [
             PortfolioSnapshot(
                 timestamp=datetime(2026, 5, 7, 12, i, tzinfo=UTC),
-                strategy_id="Strat:abc",
                 total_value_usd=Decimal("100"),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.HIGH,
@@ -301,7 +312,7 @@ class TestSnapshotIdentityReadMapping:
             for i in range(3)
         ]
         warm_backend.get_snapshots_since.return_value = snaps
-        request = gateway_pb2.GetSnapshotsSinceRequest(strategy_id="Strat:abc", since=0, limit=10)
+        request = gateway_pb2.GetSnapshotsSinceRequest(deployment_id="Strat:abc", since=0, limit=10)
         response = await sqlite_service.GetSnapshotsSince(request, context)
         assert len(response.snapshots) == 3
         for i, wire in enumerate(response.snapshots):

@@ -244,7 +244,7 @@ class AaveSweepLendingPolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.supply_amount} {self.supply_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
             elif intent_type == "BORROW":
@@ -258,7 +258,7 @@ class AaveSweepLendingPolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
             elif intent_type == "REPAY":
@@ -273,7 +273,7 @@ class AaveSweepLendingPolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Repaid {self.borrow_token} (cycle {self._borrow_cycles})",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "repay", "cycle": self._borrow_cycles},
                     )
                 )
@@ -365,7 +365,7 @@ class AaveSweepLendingPolygonStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

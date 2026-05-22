@@ -24,7 +24,7 @@ def strategy():
         strat._config = {}
         strat._chain = "arbitrum"
         strat._wallet_address = "0x" + "0" * 40
-        strat._strategy_id = "test-aave-sweep-arbitrum"
+        strat._deployment_id = "test-aave-sweep-arbitrum"
         strat.get_config = lambda key, default=None: strat._config.get(key, default)
         AaveSweepLendingStrategy.__init__(strat)
         return strat

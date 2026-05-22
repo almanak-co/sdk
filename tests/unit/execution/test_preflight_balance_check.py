@@ -69,7 +69,7 @@ def _make_context(
     chain: str = "arbitrum",
 ) -> ExecutionContext:
     return ExecutionContext(
-        strategy_id="test",
+        deployment_id="test",
         intent_id="intent-1",
         chain=chain,
         wallet_address=wallet,

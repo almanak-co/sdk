@@ -25,8 +25,8 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 from almanak.framework.state.schema_contract import (
-    ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
-    ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
+    ACCOUNTING_SCHEMA_CONTRACT,
+    TEARDOWN_SCHEMA_CONTRACT_POSTGRES,
     SchemaContractViolation,
     format_violations,
 )
@@ -62,7 +62,7 @@ def validate_sqlite_schema_or_raise(db_path: str) -> None:
     """
     violations: dict[str, set[str]] = {}
     with sqlite3.connect(db_path) as conn:
-        for table, required in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items():
+        for table, required in ACCOUNTING_SCHEMA_CONTRACT.items():
             actual = _sqlite_columns_for_table(conn, table)
             missing = set(required) - actual
             if missing:
@@ -71,7 +71,7 @@ def validate_sqlite_schema_or_raise(db_path: str) -> None:
     if not violations:
         logger.info(
             "Local SQLite schema contract: all %d accounting tables OK at %s",
-            len(ACCOUNTING_SCHEMA_CONTRACT_SQLITE),
+            len(ACCOUNTING_SCHEMA_CONTRACT),
             db_path,
         )
         return
@@ -107,12 +107,10 @@ async def validate_postgres_schema_or_raise(database_url: str) -> None:
     conn = await asyncpg.connect(url)
     try:
         violations: dict[str, set[str]] = {}
-        # Use the Postgres-shaped contract (``agent_id`` instead of
-        # ``strategy_id`` per the deployed metrics-database schema —
-        # Codex review on PR #2162). The SQLite-shaped legacy contract
-        # would falsely flag ``strategy_id`` as missing on every hosted
-        # boot.
-        for table, required in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items():
+        # Accounting uses one shared contract across SQLite and Postgres; hosted
+        # additionally validates teardown bridge tables owned by metrics-db.
+        contract = {**ACCOUNTING_SCHEMA_CONTRACT, **TEARDOWN_SCHEMA_CONTRACT_POSTGRES}
+        for table, required in contract.items():
             if schema:
                 rows = await conn.fetch(
                     "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
@@ -137,7 +135,7 @@ async def validate_postgres_schema_or_raise(database_url: str) -> None:
     if not violations:
         logger.info(
             "Hosted Postgres schema contract: all %d accounting tables OK",
-            len(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES),
+            len(contract),
         )
         return
 

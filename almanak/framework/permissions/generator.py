@@ -141,7 +141,7 @@ def generate_manifest(
     generated even when the strategy only declares the "open" side.
 
     Args:
-        strategy_name: Strategy identifier
+        strategy_name: Deployment identifier
         chain: Target chain name
         supported_protocols: Protocols the strategy uses
         intent_types: Intent types the strategy uses
@@ -514,8 +514,8 @@ def _set_stub_attrs(instance: Any, chain: str, config: dict[str, Any]) -> None:
         ("_config", config),
         ("persistent_state", persistent_state),
         ("_persistent_state", persistent_state),
-        ("strategy_id", "__permissions_introspection__"),
-        ("_strategy_id", "__permissions_introspection__"),
+        ("deployment_id", "__permissions_introspection__"),
+        ("_deployment_id", "__permissions_introspection__"),
         ("wallet_address", "0x0000000000000000000000000000000000000000"),
         ("_wallet_address", "0x0000000000000000000000000000000000000000"),
     ]:

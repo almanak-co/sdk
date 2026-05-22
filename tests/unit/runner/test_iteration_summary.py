@@ -52,14 +52,14 @@ def test_emit_iteration_summary_hold():
     result = IterationResult(
         status=IterationStatus.HOLD,
         intent=HoldIntent(reason="Waiting for entry"),
-        strategy_id="test-strat",
+        deployment_id="test-strat",
         duration_ms=42.5,
     )
 
     record = _capture_summary(runner, result, chain="arbitrum")
 
     assert record["event_type"] == "iteration_summary"
-    assert record["strategy_id"] == "test-strat"
+    assert record["deployment_id"] == "test-strat"
     assert record["chain"] == "arbitrum"
     assert record["iteration"] == 1
     assert record["decision"] == "HOLD"
@@ -97,14 +97,14 @@ def test_emit_iteration_summary_success_with_execution():
         status=IterationStatus.SUCCESS,
         intent=intent,
         execution_result=exec_result,
-        strategy_id="swap-strat",
+        deployment_id="swap-strat",
         duration_ms=1234.0,
     )
 
     record = _capture_summary(runner, result, chain="base")
 
     assert record["event_type"] == "iteration_summary"
-    assert record["strategy_id"] == "swap-strat"
+    assert record["deployment_id"] == "swap-strat"
     assert record["chain"] == "base"
     assert record["iteration"] == 3
     assert record["decision"] == "SWAP"
@@ -124,7 +124,7 @@ def test_emit_iteration_summary_dry_run_flag():
 
     result = IterationResult(
         status=IterationStatus.SUCCESS,
-        strategy_id="dry-strat",
+        deployment_id="dry-strat",
         duration_ms=10.0,
     )
 
@@ -142,7 +142,7 @@ def test_emit_iteration_summary_error():
     result = IterationResult(
         status=IterationStatus.EXECUTION_FAILED,
         error="Transaction reverted: insufficient balance",
-        strategy_id="err-strat",
+        deployment_id="err-strat",
         duration_ms=500.0,
     )
 
@@ -150,7 +150,7 @@ def test_emit_iteration_summary_error():
 
     assert record["status"] == "EXECUTION_FAILED"
     assert record["error"] == "Transaction reverted: insufficient balance"
-    assert record["strategy_id"] == "err-strat"
+    assert record["deployment_id"] == "err-strat"
     assert record["iteration"] == 5
 
 
@@ -172,7 +172,7 @@ def test_emit_iteration_summary_gateway_execution_result():
         status=IterationStatus.SUCCESS,
         intent=intent,
         execution_result=exec_result,
-        strategy_id="lp-strat",
+        deployment_id="lp-strat",
         duration_ms=2000.0,
     )
 

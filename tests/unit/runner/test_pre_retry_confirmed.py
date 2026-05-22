@@ -79,7 +79,7 @@ def _make_swap_intent():
 def _make_strategy(intent):
     """Build a minimal mock strategy that returns *intent* from decide()."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strat"
+    strategy.deployment_id = "test_strat"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0xWALLET"
     strategy.decide.return_value = intent

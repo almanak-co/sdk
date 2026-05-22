@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "ethereum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-curve-cryptoswap-pnl"
+    strat._deployment_id = "test-curve-cryptoswap-pnl"
     strat.trade_size_usd = Decimal("100")
     strat.rsi_period = 14
     strat.rsi_oversold = Decimal("40")

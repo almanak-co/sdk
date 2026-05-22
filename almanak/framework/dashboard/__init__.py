@@ -18,9 +18,9 @@ with three section helpers (VIB-3969) so accounting is visually QA'able
 locally and on the hosted platform from the same single-source code
 path:
 
-  - ``render_pnl_section(strategy_id)`` — top, the 5-second eyeball
-  - ``render_cost_stack_section(strategy_id)`` — bottom, life-to-date costs
-  - ``render_trade_tape_section(strategy_id)`` — bottom, TX-level audit
+  - ``render_pnl_section(deployment_id)`` — top, the 5-second eyeball
+  - ``render_cost_stack_section(deployment_id)`` — bottom, life-to-date costs
+  - ``render_trade_tape_section(deployment_id)`` — bottom, TX-level audit
 
 Usage::
 

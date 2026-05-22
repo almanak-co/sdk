@@ -29,7 +29,7 @@ def _snapshot(*positions: PositionValue) -> PortfolioSnapshot:
     """Build a minimal PortfolioSnapshot with the given positions."""
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id="test:nav",
+        deployment_id="test:nav",
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("0"),
         value_confidence=ValueConfidence.HIGH,

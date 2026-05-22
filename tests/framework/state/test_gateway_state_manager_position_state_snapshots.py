@@ -59,7 +59,6 @@ def _gsm() -> tuple[GatewayStateManager, MagicMock, MagicMock]:
 def _row(**overrides) -> PositionStateRow:
     defaults = dict(
         snapshot_id=None,
-        strategy_id="strat-1",
         deployment_id="deploy-1",
         cycle_id="cycle-1",
         timestamp=datetime(2026, 5, 17, 12, 0, tzinfo=UTC),

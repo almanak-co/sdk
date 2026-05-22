@@ -59,16 +59,16 @@ class GatewayTeardownStateManager:
         )
         _require_success(response, "CreateTeardownRequest")
 
-    def get_request(self, strategy_id: str) -> TeardownRequest | None:
+    def get_request(self, deployment_id: str) -> TeardownRequest | None:
         response = self._client.teardown.GetTeardownRequest(
-            gateway_pb2.GetTeardownRequestRequest(strategy_id=strategy_id),
+            gateway_pb2.GetTeardownRequestRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         return _request_from_response(response, "GetTeardownRequest")
 
-    def get_active_request(self, strategy_id: str) -> TeardownRequest | None:
+    def get_active_request(self, deployment_id: str) -> TeardownRequest | None:
         response = self._client.teardown.GetActiveTeardownRequest(
-            gateway_pb2.GetActiveTeardownRequestRequest(strategy_id=strategy_id),
+            gateway_pb2.GetActiveTeardownRequestRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         return _request_from_response(response, "GetActiveTeardownRequest")
@@ -104,30 +104,30 @@ class GatewayTeardownStateManager:
         )
         _require_success(response, "UpdateTeardownRequest")
 
-    def acknowledge_request(self, strategy_id: str) -> TeardownRequest | None:
+    def acknowledge_request(self, deployment_id: str) -> TeardownRequest | None:
         response = self._client.teardown.AcknowledgeTeardownRequest(
-            gateway_pb2.AckTeardownRequestRequest(strategy_id=strategy_id),
+            gateway_pb2.AckTeardownRequestRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         return _mutation_from_response(response, "AcknowledgeTeardownRequest")
 
-    def mark_started(self, strategy_id: str, total_positions: int = 0) -> TeardownRequest | None:
+    def mark_started(self, deployment_id: str, total_positions: int = 0) -> TeardownRequest | None:
         response = self._client.teardown.MarkTeardownStarted(
-            gateway_pb2.MarkTeardownStartedRequest(strategy_id=strategy_id, total_positions=total_positions),
+            gateway_pb2.MarkTeardownStartedRequest(deployment_id=deployment_id, total_positions=total_positions),
             timeout=_timeout(self._client),
         )
         return _mutation_from_response(response, "MarkTeardownStarted")
 
     def update_progress(
         self,
-        strategy_id: str,
+        deployment_id: str,
         positions_closed: int,
         positions_failed: int = 0,
         current_phase: TeardownPhase | None = None,
     ) -> TeardownRequest | None:
         response = self._client.teardown.UpdateTeardownProgress(
             gateway_pb2.UpdateTeardownProgressRequest(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 positions_closed=positions_closed,
                 positions_failed=positions_failed,
                 current_phase=current_phase.value if current_phase is not None else "",
@@ -136,10 +136,10 @@ class GatewayTeardownStateManager:
         )
         return _mutation_from_response(response, "UpdateTeardownProgress")
 
-    def mark_completed(self, strategy_id: str, result: dict | None = None) -> TeardownRequest | None:
+    def mark_completed(self, deployment_id: str, result: dict | None = None) -> TeardownRequest | None:
         response = self._client.teardown.MarkTeardownCompleted(
             gateway_pb2.MarkTeardownCompletedRequest(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 result_json=json.dumps(result, sort_keys=True) if result else "",
             ),
             timeout=_timeout(self._client),
@@ -148,7 +148,7 @@ class GatewayTeardownStateManager:
 
     def mark_failed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         error: str,
         *,
         positions_closed: int | None = None,
@@ -161,7 +161,7 @@ class GatewayTeardownStateManager:
         # "overwrite to 0". The earlier ``-1`` sentinel was unsafe — proto3
         # scalar defaults are 0, not -1, so a legacy client would have
         # zeroed counters instead of preserving them.
-        kwargs: dict[str, Any] = {"strategy_id": strategy_id, "error_message": error}
+        kwargs: dict[str, Any] = {"deployment_id": deployment_id, "error_message": error}
         if positions_closed is not None:
             kwargs["positions_closed"] = positions_closed
         if positions_failed is not None:
@@ -172,24 +172,24 @@ class GatewayTeardownStateManager:
         )
         return _mutation_from_response(response, "MarkTeardownFailed")
 
-    def request_cancel(self, strategy_id: str) -> bool:
+    def request_cancel(self, deployment_id: str) -> bool:
         response = self._client.teardown.RequestTeardownCancel(
-            gateway_pb2.RequestTeardownCancelRequest(strategy_id=strategy_id),
+            gateway_pb2.RequestTeardownCancelRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         _require_success(response, "RequestTeardownCancel")
         return bool(response.value)
 
-    def mark_cancelled(self, strategy_id: str) -> TeardownRequest | None:
+    def mark_cancelled(self, deployment_id: str) -> TeardownRequest | None:
         response = self._client.teardown.MarkTeardownCancelled(
-            gateway_pb2.MarkTeardownCancelledRequest(strategy_id=strategy_id),
+            gateway_pb2.MarkTeardownCancelledRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         return _mutation_from_response(response, "MarkTeardownCancelled")
 
-    def delete_request(self, strategy_id: str) -> bool:
+    def delete_request(self, deployment_id: str) -> bool:
         response = self._client.teardown.DeleteTeardownRequest(
-            gateway_pb2.DeleteTeardownRequestRequest(strategy_id=strategy_id),
+            gateway_pb2.DeleteTeardownRequestRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         _require_success(response, "DeleteTeardownRequest")
@@ -211,9 +211,9 @@ class GatewayTeardownStateAdapter:
         )
         _require_success(response, "SaveTeardownState")
 
-    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None:
+    async def get_teardown_state(self, deployment_id: str) -> TeardownState | None:
         response = self._client.teardown.LoadTeardownState(
-            gateway_pb2.LoadTeardownStateRequest(strategy_id=strategy_id),
+            gateway_pb2.LoadTeardownStateRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         if response.error:
@@ -232,7 +232,7 @@ class GatewayTeardownStateAdapter:
     def create_approval_request(
         self,
         teardown_id: str,
-        strategy_id: str,
+        deployment_id: str,
         level: EscalationLevel | str,
         request_json: str,
         expires_at: str,
@@ -240,7 +240,7 @@ class GatewayTeardownStateAdapter:
         response = self._client.teardown.CreateApprovalRequest(
             gateway_pb2.CreateApprovalRequestRequest(
                 teardown_id=teardown_id,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 level=_level_value(level),
                 request_json=request_json,
                 expires_at=expires_at,
@@ -277,9 +277,9 @@ class GatewayTeardownStateAdapter:
         _require_success(response, "WriteApprovalResponse")
         return bool(response.value)
 
-    def get_latest_pending_approval(self, strategy_id: str) -> dict[str, Any] | None:
+    def get_latest_pending_approval(self, deployment_id: str) -> dict[str, Any] | None:
         response = self._client.teardown.GetLatestPendingApproval(
-            gateway_pb2.GetLatestPendingApprovalRequest(strategy_id=strategy_id),
+            gateway_pb2.GetLatestPendingApprovalRequest(deployment_id=deployment_id),
             timeout=_timeout(self._client),
         )
         if response.error:
@@ -288,9 +288,11 @@ class GatewayTeardownStateAdapter:
             return None
         return json.loads(response.approval_json)
 
-    def write_approval_response_by_strategy(self, strategy_id: str, response_json: str) -> bool:
+    def write_approval_response_by_strategy(self, deployment_id: str, response_json: str) -> bool:
         response = self._client.teardown.WriteApprovalResponseByStrategy(
-            gateway_pb2.WriteApprovalResponseByStrategyRequest(strategy_id=strategy_id, response_json=response_json),
+            gateway_pb2.WriteApprovalResponseByStrategyRequest(
+                deployment_id=deployment_id, response_json=response_json
+            ),
             timeout=_timeout(self._client),
         )
         _require_success(response, "WriteApprovalResponseByStrategy")

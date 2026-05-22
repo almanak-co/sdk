@@ -110,7 +110,7 @@ class StrategyLike(Protocol):
     """Minimal strategy interface for PortfolioValuer."""
 
     @property
-    def strategy_id(self) -> str: ...
+    def deployment_id(self) -> str: ...
 
     @property
     def chain(self) -> str: ...
@@ -182,7 +182,8 @@ class PortfolioValuer:
 
         Args:
             store: Object with get_accounting_events_sync(deployment_id, position_key).
-            deployment_id: Canonical deployment key (wallet+chain hash or --id flag).
+            deployment_id: Canonical deployment key (hosted: ALMANAK_DEPLOYMENT_ID;
+                local: wallet+chain hash).
         """
         self._accounting_store = store
         self._deployment_id = deployment_id
@@ -207,7 +208,7 @@ class PortfolioValuer:
             PortfolioSnapshot with real values and appropriate ValueConfidence
         """
         now = datetime.now(UTC)
-        strategy_id = ""
+        deployment_id = ""
         chain = ""
 
         # VIB-3503 Part 2c: prefetch accounting events once per snapshot so
@@ -220,7 +221,7 @@ class PortfolioValuer:
         self._prefetch_accounting_events(self._deployment_id)
 
         try:
-            strategy_id = strategy.strategy_id
+            deployment_id = strategy.deployment_id
             chain = strategy.chain
 
             # Step 1: Discover tracked tokens from strategy config
@@ -317,7 +318,7 @@ class PortfolioValuer:
 
             framework_snapshot = PortfolioSnapshot(
                 timestamp=now,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 total_value_usd=position_value_positive,
                 available_cash_usd=wallet_value,
                 deployed_capital_usd=deployed_capital_usd,
@@ -342,7 +343,7 @@ class PortfolioValuer:
             logger.warning("Portfolio valuation failed: %s", e)
             return PortfolioSnapshot(
                 timestamp=now,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 total_value_usd=Decimal("0"),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.UNAVAILABLE,
@@ -494,7 +495,7 @@ class PortfolioValuer:
             metadata["reconciliation_status"] = "external_won_zero_framework"
             logger.warning(
                 "External portfolio valuation replaced zero framework value for %s on %s: framework=$%s external=$%s",
-                framework_snapshot.strategy_id,
+                framework_snapshot.deployment_id,
                 framework_snapshot.chain,
                 framework_total,
                 external_total,
@@ -507,7 +508,7 @@ class PortfolioValuer:
             metadata["reconciliation_status"] = "framework_won_large_divergence"
             logger.warning(
                 "Large divergence between framework and external for %s on %s: framework=$%s external=$%s divergence=%s",
-                framework_snapshot.strategy_id,
+                framework_snapshot.deployment_id,
                 framework_snapshot.chain,
                 framework_total,
                 external_total,
@@ -598,7 +599,7 @@ class PortfolioValuer:
 
         return PortfolioSnapshot(
             timestamp=framework_snapshot.timestamp,
-            strategy_id=framework_snapshot.strategy_id,
+            deployment_id=framework_snapshot.deployment_id,
             total_value_usd=pos_total,
             available_cash_usd=available_cash_usd,
             deployed_capital_usd=framework_snapshot.deployed_capital_usd,

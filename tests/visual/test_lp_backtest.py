@@ -333,7 +333,7 @@ class LPStrategy:
         self._current_price: Decimal = Decimal("0")
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "lp_visual_test_strategy"
 
     @property

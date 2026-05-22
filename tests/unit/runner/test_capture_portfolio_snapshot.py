@@ -49,9 +49,9 @@ from almanak.framework.state.state_manager import StateData
 # =============================================================================
 
 
-def _make_state_data(strategy_id: str = "test-strategy") -> StateData:
+def _make_state_data(deployment_id: str = "test-strategy") -> StateData:
     return StateData(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         version=1,
         state={},
     )
@@ -113,14 +113,14 @@ def _make_runner(
 
 def _make_strategy(
     *,
-    strategy_id: str = "test-strategy",
+    deployment_id: str = "test-strategy",
     chain: str = "arbitrum",
     supports_valuer: bool = True,
     supports_fallback: bool = True,
 ) -> MagicMock:
     """Mock strategy with configurable valuation capabilities."""
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = chain
 
     if supports_valuer:
@@ -138,7 +138,7 @@ def _make_strategy(
 
 def _make_snapshot(
     *,
-    strategy_id: str = "test-strategy",
+    deployment_id: str = "test-strategy",
     total_value_usd: Decimal | str = "1000.50",
     confidence: ValueConfidence = ValueConfidence.HIGH,
     chain: str = "arbitrum",
@@ -156,7 +156,7 @@ def _make_snapshot(
     md.setdefault("gas_native_status", "ok")
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         total_value_usd=Decimal(str(total_value_usd)),
         available_cash_usd=Decimal("0"),
         value_confidence=confidence,
@@ -393,7 +393,7 @@ class TestErrorPropagation:
         runner.state_manager.save_portfolio_snapshot = AsyncMock(
             side_effect=AccountingPersistenceError(
                 write_kind="snapshot",
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 message="DB down",
             )
         )
@@ -432,7 +432,7 @@ class TestErrorPropagation:
             await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
 
         assert excinfo.value.write_kind == "metrics"
-        assert excinfo.value.strategy_id == "test-strategy"
+        assert excinfo.value.deployment_id == "deploy-1"
         # Snapshot row was written exactly once; no duplicate UNAVAILABLE row.
         runner.state_manager.save_portfolio_snapshot.assert_awaited_once()
         persisted = runner.state_manager.save_portfolio_snapshot.call_args.args[0]

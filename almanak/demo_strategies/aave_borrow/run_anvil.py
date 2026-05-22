@@ -267,7 +267,7 @@ def run_strategy_via_cli(force_action: str = "supply") -> int:
     import tempfile
 
     config = {
-        "strategy_id": "demo_aave_borrow",
+        "deployment_id": "demo_aave_borrow",
         "strategy_name": "demo_aave_borrow",
         "collateral_token": "wstETH",
         "collateral_amount": "0.1",

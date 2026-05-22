@@ -269,7 +269,7 @@ class MorphoUSDCYieldPaperStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_morpho_paper_usdc_yield"),
+            deployment_id=getattr(self, "deployment_id", "demo_morpho_paper_usdc_yield"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

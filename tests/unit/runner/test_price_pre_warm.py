@@ -29,7 +29,7 @@ from almanak.framework.runner.strategy_runner import (
 def _make_strategy(tracked_tokens=None, has_tracked_tokens=True):
     """Create a mock strategy with optional tracked tokens."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.generate_teardown_intents.side_effect = NotImplementedError

@@ -69,26 +69,26 @@ def parse_token_list(tokens: str) -> list[str]:
     return [t.strip().upper() for t in tokens.split(",")]
 
 
-def ensure_strategy_id(strategy_instance: Any, *, fallback: str) -> None:
-    """Ensure a strategy instance has a non-empty `strategy_id`.
+def ensure_deployment_id(strategy_instance: Any, *, fallback: str) -> None:
+    """Ensure a strategy instance has a non-empty `deployment_id`.
 
-    Mirrors the `_strategy_id`-before-`strategy_id` attribute-setter dance
-    from the original inline code: some strategies expose `strategy_id` as a
-    read-only property backed by `_strategy_id`, so we prefer assigning the
+    Mirrors the `_deployment_id`-before-`deployment_id` attribute-setter dance
+    from the original inline code: some strategies expose `deployment_id` as a
+    read-only property backed by `_deployment_id`, so we prefer assigning the
     private attribute when present. Only runs if the instance does not
-    already have a truthy `strategy_id`.
+    already have a truthy `deployment_id`.
 
     Args:
         strategy_instance: Instantiated strategy object.
-        fallback: Value to assign when `strategy_id` is missing or empty.
+        fallback: Value to assign when `deployment_id` is missing or empty.
     """
-    existing_id = getattr(strategy_instance, "strategy_id", "")
+    existing_id = getattr(strategy_instance, "deployment_id", "")
     if existing_id:
         return
-    if hasattr(strategy_instance, "_strategy_id"):
-        strategy_instance._strategy_id = fallback
+    if hasattr(strategy_instance, "_deployment_id"):
+        strategy_instance._deployment_id = fallback
     else:
-        strategy_instance.strategy_id = fallback
+        strategy_instance.deployment_id = fallback
 
 
 def resolve_strategy_class_or_mock(strategy: str, *, allow_mock: bool) -> Any:

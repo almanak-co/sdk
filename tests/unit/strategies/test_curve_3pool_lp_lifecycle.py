@@ -25,7 +25,7 @@ def strategy():
     strat = Curve3poolLPLifecycleStrategy.__new__(Curve3poolLPLifecycleStrategy)
     strat._chain = "ethereum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-curve-3pool-lp-lifecycle"
+    strat._deployment_id = "test-curve-3pool-lp-lifecycle"
     strat.deposit_amount = Decimal("100")
     strat.force_action = "open"
     strat._phase = "IDLE"

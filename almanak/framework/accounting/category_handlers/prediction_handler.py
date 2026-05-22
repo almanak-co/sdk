@@ -54,7 +54,7 @@ def handle_prediction(
 
     All inputs come from the dicts — no live chain calls. Reads:
       - outbox_row: position_key, market_id, wallet_address
-      - ledger_row: deployment_id, strategy_id, cycle_id, execution_mode,
+      - ledger_row: deployment_id, cycle_id, execution_mode,
                     chain, protocol, tx_hash, timestamp, gas_usd,
                     extracted_data_json
       - extracted_data:
@@ -79,7 +79,6 @@ def handle_prediction(
 
     # ── Identity fields ──────────────────────────────────────────────────────
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
-    strategy_id = ledger_row.get("strategy_id") or outbox_row.get("strategy_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     execution_mode = ledger_row.get("execution_mode") or ""
     chain = ledger_row.get("chain") or ""
@@ -129,7 +128,6 @@ def handle_prediction(
             extracted=extracted,
             basis_store=basis_store,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -150,7 +148,6 @@ def handle_prediction(
         extracted=extracted,
         basis_store=basis_store,
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         chain=chain,
@@ -176,7 +173,6 @@ def _handle_buy(
     extracted: dict[str, Any],
     basis_store: FIFOBasisStore,
     deployment_id: str,
-    strategy_id: str,
     cycle_id: str,
     execution_mode: str,
     chain: str,
@@ -224,7 +220,6 @@ def _handle_buy(
         return _build_event(
             event_type=PredictionEventType.PREDICTION_OPEN,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -253,7 +248,6 @@ def _handle_buy(
         return _build_event(
             event_type=PredictionEventType.PREDICTION_OPEN,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -304,7 +298,6 @@ def _handle_buy(
     return _build_event(
         event_type=event_type,
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         chain=chain,
@@ -335,7 +328,6 @@ def _handle_sell_or_redeem(
     extracted: dict[str, Any],
     basis_store: FIFOBasisStore,
     deployment_id: str,
-    strategy_id: str,
     cycle_id: str,
     execution_mode: str,
     chain: str,
@@ -409,7 +401,6 @@ def _handle_sell_or_redeem(
         return _build_event(
             event_type=event_type,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -456,7 +447,6 @@ def _handle_sell_or_redeem(
         return _build_event(
             event_type=event_type,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -497,7 +487,6 @@ def _handle_sell_or_redeem(
         return _build_event(
             event_type=event_type,
             deployment_id=deployment_id,
-            strategy_id=strategy_id,
             cycle_id=cycle_id,
             execution_mode=execution_mode,
             chain=chain,
@@ -550,7 +539,6 @@ def _handle_sell_or_redeem(
     return _build_event(
         event_type=event_type,
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         chain=chain,
@@ -583,7 +571,6 @@ def _build_event(
     *,
     event_type: PredictionEventType,
     deployment_id: str,
-    strategy_id: str,
     cycle_id: str,
     execution_mode: str,
     chain: str,
@@ -609,7 +596,6 @@ def _build_event(
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, intent_type, _id_seed, position_key),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         timestamp=timestamp,

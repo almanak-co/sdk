@@ -310,16 +310,16 @@ def _build_runner_for_chain_test():
     )
 
 
-def _build_state_for_chain_test(intents, strategy_id="vib-2036-test"):
+def _build_state_for_chain_test(intents, deployment_id="vib-2036-test"):
     """Build a ``RunIterationState`` populated with ``intents``."""
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x" + "ab" * 20
 
     state = RunIterationState(
         strategy=strategy,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         start_time=datetime.now(UTC),
     )
     state.intents = list(intents)
@@ -327,12 +327,12 @@ def _build_state_for_chain_test(intents, strategy_id="vib-2036-test"):
     return state
 
 
-def _success_result_without_swap_amounts(intent, strategy_id):
+def _success_result_without_swap_amounts(intent, deployment_id):
     """An ``IterationResult`` whose ``execution_result`` has no swap_amounts."""
     return IterationResult(
         status=IterationStatus.SUCCESS,
         intent=intent,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         duration_ms=1,
         execution_result=SimpleNamespace(swap_amounts=None),
     )
@@ -366,8 +366,8 @@ async def test_vib_2036_no_warning_when_no_subsequent_chained_amount(caplog):
     state = _build_state_for_chain_test([intent1, intent2])
 
     results = [
-        _success_result_without_swap_amounts(intent1, state.strategy_id),
-        _success_result_without_swap_amounts(intent2, state.strategy_id),
+        _success_result_without_swap_amounts(intent1, state.deployment_id),
+        _success_result_without_swap_amounts(intent2, state.deployment_id),
     ]
     with (
         patch.object(runner, "_execute_single_chain", new=AsyncMock(side_effect=results)),
@@ -403,7 +403,7 @@ async def test_vib_2036_warning_still_fires_when_next_intent_uses_all(caplog):
     # swap_amounts (chain broken), then ``_resolve_chained_amount_for_intent``
     # short-circuits step 2 with COMPILATION_FAILED before it can dispatch.
     mock_execute = AsyncMock(
-        side_effect=[_success_result_without_swap_amounts(intent1, state.strategy_id)]
+        side_effect=[_success_result_without_swap_amounts(intent1, state.deployment_id)]
     )
     with (
         patch.object(runner, "_execute_single_chain", new=mock_execute),

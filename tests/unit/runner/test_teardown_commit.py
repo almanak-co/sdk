@@ -55,7 +55,7 @@ from almanak.framework.state.exceptions import (
 @pytest.fixture
 def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Pin the deferred-log to ``tmp_path`` for assertions."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "state.db"))
     return tmp_path
 
@@ -63,7 +63,6 @@ def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 @pytest.fixture
 def fake_strategy() -> SimpleNamespace:
     return SimpleNamespace(
-        strategy_id="strat-1",
         deployment_id="dep-1",
         chain="arbitrum",
         wallet_address="0xWALLET",
@@ -147,10 +146,10 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
     sidecar_calls: list[dict] = []
 
     class _SpySidecar:
-        def append(self, *, strategy_id, intent, result, chain, price_oracle=None):
+        def append(self, *, deployment_id, intent, result, chain, price_oracle=None):
             sidecar_calls.append(
                 {
-                    "strategy_id": strategy_id,
+                    "deployment_id": deployment_id,
                     "intent_type": getattr(
                         intent.intent_type, "value", str(intent.intent_type)
                     ),
@@ -264,7 +263,7 @@ async def test_t3_live_ledger_failure_degrades_does_not_raise(
     runner = _make_runner(live_mode=True)
     runner._write_ledger_entry.side_effect = AccountingPersistenceError(
         write_kind=AccountingWriteKind.LEDGER,
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         message="forced ledger fail",
     )
     intent = _make_intent("LP_CLOSE")
@@ -315,7 +314,7 @@ async def test_t4_live_outbox_failure_degrades_does_not_raise(
     runner = _make_runner(live_mode=True)
     runner._write_outbox_and_fire_processor.side_effect = AccountingPersistenceError(
         write_kind=AccountingWriteKind.ACCOUNTING,
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         message="forced outbox fail",
     )
     intent = _make_intent("LP_CLOSE")
@@ -474,7 +473,7 @@ async def test_enrich_failure_does_not_block_ledger_outbox_sidecar(
     sidecar_seen: list[bool] = []
 
     class _SpySidecar:
-        def append(self, *, strategy_id, intent, result, chain, price_oracle=None):
+        def append(self, *, deployment_id, intent, result, chain, price_oracle=None):
             sidecar_seen.append(True)
 
     monkeypatch.setattr(

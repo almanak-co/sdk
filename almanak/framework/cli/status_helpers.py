@@ -68,7 +68,7 @@ def _validate_status_args(timeline_limit: int) -> None:
 
 def _fetch_strategy_details(
     client: GatewayClient,
-    strategy_id: str,
+    deployment_id: str,
     *,
     include_timeline: bool,
     timeline_limit: int,
@@ -86,7 +86,7 @@ def _fetch_strategy_details(
 
     try:
         request = gateway_pb2.GetStrategyDetailsRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             include_timeline=include_timeline,
             include_pnl_history=False,
             timeline_limit=timeline_limit,
@@ -111,7 +111,7 @@ def _render_json_summary(summary: Any) -> dict[str, Any]:
     In particular `pnl_since_deploy_usd` is normalized: empty string -> None.
     """
     return {
-        "strategy_id": summary.strategy_id,
+        "deployment_id": summary.deployment_id,
         "name": summary.name,
         "status": summary.status,
         "chain": summary.chain,
@@ -244,9 +244,9 @@ def _has_operator_card(details: Any) -> bool:
     """Return True when `details.operator_card` sub-message is present.
 
     Closes issue #1704. Previously the code relied on
-    `details.operator_card.strategy_id` truthiness to decide presence, which
+    `details.operator_card.deployment_id` truthiness to decide presence, which
     is fragile because proto3 scalar fields default to empty string — a
-    legitimately-empty `strategy_id` would silently hide the card.
+    legitimately-empty `deployment_id` would silently hide the card.
 
     Correct presence check for a proto3 *message-typed* field is
     `parent.HasField("operator_card")` (message fields DO carry presence
@@ -322,10 +322,10 @@ def _print_summary_header(s: Any) -> None:
     from .status import _format_timestamp, _status_color
 
     click.echo()
-    click.echo(click.style(f"Strategy: {s.name or s.strategy_id}", bold=True, fg="cyan"))
+    click.echo(click.style(f"Strategy: {s.name or s.deployment_id}", bold=True, fg="cyan"))
     click.echo()
 
-    click.echo(f"  ID:          {s.strategy_id}")
+    click.echo(f"  ID:          {s.deployment_id}")
     click.echo(f"  Status:      {_status_color(s.status)}")
     click.echo(f"  Chain:       {','.join(s.chains) if s.is_multi_chain else s.chain}")
     click.echo(f"  Protocol:    {s.protocol or '-'}")
@@ -348,9 +348,9 @@ def _print_operator_card(oc: Any) -> None:
 
     Presence is decided at the orchestrator via `_has_operator_card`
     (#1704). This function only defends against `oc is None` — it does NOT
-    inspect `oc.strategy_id` for presence, because that would re-introduce
+    inspect `oc.deployment_id` for presence, because that would re-introduce
     the proto3 empty-string-as-falsy sentinel anti-pattern that #1704 is
-    explicitly fixing. A card with an intentionally-empty `strategy_id`
+    explicitly fixing. A card with an intentionally-empty `deployment_id`
     MUST still render.
     """
     if oc is None:

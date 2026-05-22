@@ -107,9 +107,9 @@ def test_generate_dashboard_ui_includes_three_section_helpers() -> None:
     assert "render_trade_tape_section" in code
 
     # All three helpers actually invoked inside render_custom_dashboard.
-    assert "render_pnl_section(strategy_id)" in code
-    assert "render_cost_stack_section(strategy_id" in code  # may have heading kwarg
-    assert "render_trade_tape_section(strategy_id)" in code
+    assert "render_pnl_section(deployment_id)" in code
+    assert "render_cost_stack_section(deployment_id" in code  # may have heading kwarg
+    assert "render_trade_tape_section(deployment_id)" in code
 
 
 def test_generate_dashboard_ui_section_order_is_pnl_then_audit() -> None:
@@ -118,9 +118,9 @@ def test_generate_dashboard_ui_section_order_is_pnl_then_audit() -> None:
     must lead the page so the operator sees money status first."""
     code = generate_dashboard_ui("Mean Reversion")
 
-    pnl_idx = code.index("render_pnl_section(strategy_id)")
-    cost_idx = code.index("render_cost_stack_section(strategy_id")
-    tape_idx = code.index("render_trade_tape_section(strategy_id)")
+    pnl_idx = code.index("render_pnl_section(deployment_id)")
+    cost_idx = code.index("render_cost_stack_section(deployment_id")
+    tape_idx = code.index("render_trade_tape_section(deployment_id)")
     assert pnl_idx < cost_idx < tape_idx, "section order must be PnL → Cost Stack → Trade Tape"
 
 

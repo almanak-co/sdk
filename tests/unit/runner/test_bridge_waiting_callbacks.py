@@ -37,7 +37,7 @@ def _make_runner() -> StrategyRunner:
 def _make_strategy() -> MagicMock:
     """Create a mock strategy with required attributes."""
     strategy = MagicMock()
-    strategy.strategy_id = "test-bridge-strategy"
+    strategy.deployment_id = "test-bridge-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x" + "a1" * 20
     strategy.on_intent_executed = MagicMock()

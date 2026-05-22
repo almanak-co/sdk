@@ -84,7 +84,7 @@ def _make_backtest_result(
     ]
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="spec_uniswap_v3_swap_arbitrum",
+        deployment_id="spec_uniswap_v3_swap_arbitrum",
         backtest_id="test-integration-001",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 1, 8, tzinfo=UTC),

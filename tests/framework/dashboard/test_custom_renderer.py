@@ -165,7 +165,7 @@ def test_render_happy_path_invokes_render_func(fake_st, monkeypatch, tmp_path) -
     )
     assert ok is True
     assert calls == {
-        "strategy_id": "demo_strat",
+        "deployment_id": "demo_strat",
         "strategy_config": {"x": 1},
         "api_client": api,
         "session_state": {"s": 2},
@@ -178,7 +178,7 @@ def test_render_applies_defaults_when_args_omitted(fake_st, monkeypatch, tmp_pat
     monkeypatch.setattr(renderer, "get_dashboard_render_function", lambda _m: lambda **k: calls.update(k))
     ok = renderer.render_custom_dashboard_safe(_dashboard_info(tmp_path), api_client=object())
     assert ok is True
-    assert calls["strategy_id"] == "demo_strat"
+    assert calls["deployment_id"] == "demo_strat"
     assert calls["strategy_config"] == {}
     assert calls["session_state"] == {}
 

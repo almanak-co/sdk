@@ -27,11 +27,11 @@ Usage:
 
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
 
-    def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
         session_state = prepare_lp_session_state(api_client, config=config)
         # Pass api_client so the template renders the gateway-backed
         # Positions registry + Position Lifecycle sections (PR #2373).
-        render_lp_dashboard(strategy_id, strategy_config, session_state, config, api_client=api_client)
+        render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)
 """
 
 import logging
@@ -578,7 +578,7 @@ def _fee_tier_to_bps(value: Any) -> int:
 
 
 def render_lp_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     session_state: dict[str, Any],
     config: LPDashboardConfig,
@@ -593,7 +593,7 @@ def render_lp_dashboard(
     the section helpers directly rather than parameterizing this template.
 
     Args:
-        strategy_id: The strategy identifier
+        deployment_id: The deployment identifier
         strategy_config: Strategy configuration dictionary
         session_state: Current session state with position data.
             Use :func:`prepare_lp_session_state` to populate this from the
@@ -626,12 +626,12 @@ def render_lp_dashboard(
 
     st.title(f"{protocol.replace('_', ' ').title()} LP Dashboard")
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1} ({fee_tier})")
     st.markdown(f"**Chain:** {chain.title()}")
 
     # Eyeball — am I making or losing money?
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     # Position Status Section
     st.subheader("Position Status")
@@ -732,14 +732,14 @@ def render_lp_dashboard(
     # lifecycle tables that the local detail page renders today. Skipped
     # silently for legacy callers that don't thread ``api_client`` through.
     if api_client is not None:
-        _render_lp_position_panels(strategy_id, api_client)
+        _render_lp_position_panels(deployment_id, api_client)
 
     # Audit — life-to-date costs + per-intent trade tape
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
-def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
+def _render_lp_position_panels(deployment_id: str, api_client: Any) -> None:
     """Render the gateway-backed Positions + Position Lifecycle sections.
 
     Split out so a missing api_client falls through cleanly without
@@ -780,7 +780,7 @@ def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
     try:
         if not service_client.is_connected:
             service_client.connect()
-        render_positions_section(strategy_id, service_client, heading="### Positions")
+        render_positions_section(deployment_id, service_client, heading="### Positions")
     except DashboardClientError as exc:
         st.info(f"Positions temporarily unavailable: {exc}")
     except Exception:
@@ -791,7 +791,7 @@ def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
         # no positions, which the UAT card §A explicitly forbids. The
         # visible warning gives the operator something to correlate with
         # the logs.
-        logger.exception("render_positions_section unexpected failure for %s", strategy_id)
+        logger.exception("render_positions_section unexpected failure for %s", deployment_id)
         st.warning("Positions panel failed to render — check logs.")
 
     # Lifecycle table (OPEN / CLOSE rows + PnL attribution). Filters on
@@ -799,7 +799,7 @@ def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
     # position_events today.
     try:
         render_position_lifecycle_section(
-            strategy_id,
+            deployment_id,
             api_client,
             position_types=["LP", "PERP"],
         )
@@ -808,7 +808,7 @@ def _render_lp_position_panels(strategy_id: str, api_client: Any) -> None:
         # log at EXCEPTION level + visible warning so unexpected failures
         # are not laundered as "section rendered successfully with no
         # data" (UAT card §A).
-        logger.exception("render_position_lifecycle_section unexpected failure for %s", strategy_id)
+        logger.exception("render_position_lifecycle_section unexpected failure for %s", deployment_id)
         st.warning("Position lifecycle panel failed to render — check logs.")
 
 

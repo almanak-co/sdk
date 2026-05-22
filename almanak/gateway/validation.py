@@ -134,7 +134,7 @@ ALLOWED_SOLANA_RPC_METHODS = frozenset(
 )
 
 # Maximum sizes
-MAX_STRATEGY_ID_LENGTH = 128
+MAX_DEPLOYMENT_ID_LENGTH = 128
 MAX_SYMBOL_LENGTH = 20
 MAX_TOKEN_ID_LENGTH = 64
 MAX_STATE_SIZE_BYTES = 1 * 1024 * 1024  # 1MB
@@ -148,7 +148,7 @@ SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 # Chains that use the Solana address format (base58)
 _SOLANA_FAMILY_CHAINS = frozenset({"solana"})
-STRATEGY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:-]{1,128}$")
+DEPLOYMENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:-]{1,128}$")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{1,20}$")
 TOKEN_ID_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
 TX_HASH_PATTERN = re.compile(r"^0x[a-fA-F0-9]{64}$")
@@ -247,47 +247,31 @@ def validate_address_for_chain(address: str, chain: str, field: str = "address")
     return address
 
 
-def resolve_agent_id(strategy_id: str) -> str:
-    """Use platform AGENT_ID if set and non-blank, otherwise pass through.
+def validate_deployment_id(deployment_id: str | None, field: str = "deployment_id") -> str:
+    """Validate deployment ID format.
 
-    In deployed mode (K8s), the platform injects AGENT_ID into every container.
-    This ensures all data paths (state, registry, timeline) use the platform
-    identifier consistently. In local mode, AGENT_ID is not set and the
-    original strategy_id passes through unchanged.
-
-    Delegates env-var reading to `framework.deployment.agent_id()` —
-    `AGENT_ID` is the single deployment-mode signal across the SDK.
-    """
-    from almanak.framework.deployment import agent_id
-
-    return agent_id() or strategy_id
-
-
-def validate_strategy_id(strategy_id: str, field: str = "strategy_id") -> str:
-    """Validate strategy ID format.
-
-    Strategy IDs must be alphanumeric with dashes and underscores,
+    Deployment IDs must be alphanumeric with dashes and underscores,
     max 128 characters.
 
     Args:
-        strategy_id: Strategy ID to validate
+        deployment_id: Deployment ID to validate
         field: Field name for error messages
 
     Returns:
-        Strategy ID (unchanged)
+        Deployment ID (unchanged)
 
     Raises:
         ValidationError: If format is invalid
     """
-    if not strategy_id:
+    if not isinstance(deployment_id, str) or not deployment_id or not deployment_id.strip():
         raise ValidationError(field, "required")
 
-    if not STRATEGY_ID_PATTERN.match(strategy_id):
+    if not DEPLOYMENT_ID_PATTERN.match(deployment_id):
         raise ValidationError(
-            field, f"invalid format (alphanumeric, colons, dashes, underscores, max {MAX_STRATEGY_ID_LENGTH} chars)"
+            field, f"invalid format (alphanumeric, colons, dashes, underscores, max {MAX_DEPLOYMENT_ID_LENGTH} chars)"
         )
 
-    return strategy_id
+    return deployment_id
 
 
 def is_solana_chain(chain: str) -> bool:

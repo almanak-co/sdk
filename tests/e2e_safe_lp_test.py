@@ -856,7 +856,7 @@ async def main() -> bool:
             policy=policy,
             catalog=catalog,
             wallet_address=EOA_WALLET,
-            strategy_id="e2e-safe-lp-test",
+            deployment_id="e2e-safe-lp-test",
             default_chain="base",
         )
 

@@ -322,7 +322,7 @@ def load_strategy_config(
 
     # Return minimal default config with generated UUID
     return {
-        "strategy_id": f"{strategy_name}:{uuid.uuid4().hex[:12]}",
+        "deployment_id": f"{strategy_name}:{uuid.uuid4().hex[:12]}",
     }
 
 
@@ -1042,11 +1042,6 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Working directory containing strategy.py. Defaults to current directory.",
 )
 @click.option(
-    "--id",
-    "strategy_id_override",
-    help="Strategy instance ID to resume a previous run.",
-)
-@click.option(
     "--config",
     "-c",
     "config_file",
@@ -1243,7 +1238,6 @@ def run(  # noqa: C901
     reset_fork: bool = False,
     max_iterations: int | None = None,
     teardown_after: bool = False,
-    strategy_id_override: str | None = None,
     # Internal-only (not exposed as click flags). Used by `almanak strat test`
     # to drive a force-action lifecycle through this command's setup pipeline
     # without duplicating it. Do not set from the CLI.
@@ -1277,9 +1271,6 @@ def run(  # noqa: C901
 
         # Dry run (no transactions)
         almanak strat run --dry-run --once
-
-        # Resume a previous run
-        almanak strat run --id abc123 --once
 
         # Fresh start (clear stale state, useful for Anvil forks)
         almanak strat run --fresh --once
@@ -1369,13 +1360,12 @@ def run(  # noqa: C901
         strategy_bootstrap=strategy_bootstrap,
         no_gateway=no_gateway,
         gateway_client=gateway_client,
-        provided_instance_id=strategy_id_override,
         network=network,
         gateway_network=gateway_network,
         fresh=fresh,
     )
 
-    # Launch the dashboard sidecar AFTER ``strategy_id`` is resolved so
+    # Launch the dashboard sidecar AFTER ``deployment_id`` is resolved so
     # hosted-parity mode can scope to it from the first render rather than
     # racing the strategy boot. The dashboard subprocess uses the same
     # ``render_custom_dashboard_safe(...)`` shape the hosted platform uses,
@@ -1388,7 +1378,7 @@ def run(  # noqa: C901
         gateway_port=gateway_port,
         auth_token=session_auth_token,
         mode=dashboard_mode.lower(),
-        strategy_id=runtime_bootstrap.strategy_id,
+        deployment_id=runtime_bootstrap.deployment_id,
         strategy_working_dir=working_dir,
         # Forward the RESOLVED + MUTATED runtime config (post-bootstrap)
         # so the dashboard renders the same values the strategy sees —
@@ -1399,12 +1389,12 @@ def run(  # noqa: C901
     )
 
     is_resume, existing_state_info = _load_resume_state(
-        strategy_id=runtime_bootstrap.strategy_id,
+        deployment_id=runtime_bootstrap.deployment_id,
     )
 
     _print_startup_banner(
         strategy_name=strategy_bootstrap.strategy_name,
-        strategy_id=runtime_bootstrap.strategy_id,
+        deployment_id=runtime_bootstrap.deployment_id,
         run_id=runtime_bootstrap.run_id,
         is_resume=is_resume,
         existing_state_info=existing_state_info,
@@ -1449,7 +1439,7 @@ def run(  # noqa: C901
         chain_wallets=runtime_bootstrap.chain_wallets,
         interval=interval,
         effective_dry_run=strategy_bootstrap.effective_dry_run,
-        strategy_id=runtime_bootstrap.strategy_id,
+        deployment_id=runtime_bootstrap.deployment_id,
         normalized_copy_mode=strategy_bootstrap.normalized_copy_mode,
         copy_replay_file=copy_replay_file,
         copy_shadow=copy_shadow,

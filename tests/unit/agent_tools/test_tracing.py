@@ -630,7 +630,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -660,7 +660,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -711,7 +711,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -733,7 +733,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -760,7 +760,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -809,7 +809,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -833,7 +833,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -859,7 +859,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 
@@ -884,7 +884,7 @@ class TestToolExecutorTracing:
             mock_gateway,
             policy=permissive_policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             tracer=tracer,
         )
 

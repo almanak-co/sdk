@@ -318,7 +318,7 @@ class ExecutionContext:
     """Context for the current execution.
 
     Attributes:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         intent_id: Intent identifier (for session tracking)
         chain: Blockchain network
         wallet_address: Address executing transactions
@@ -328,7 +328,7 @@ class ExecutionContext:
         dry_run: If True, don't actually submit transactions
     """
 
-    strategy_id: str = "unknown"
+    deployment_id: str = "unknown"
     intent_id: str = ""
     chain: str = "arbitrum"
     wallet_address: str = ""
@@ -1305,7 +1305,7 @@ class ExecutionOrchestrator:
             timestamp=datetime.now(UTC),
             event_type=timeline_event_type,
             description=description,
-            strategy_id=context.strategy_id,
+            deployment_id=context.deployment_id,
             chain=context.chain,
             details={
                 "execution_event": event_type.value,
@@ -1324,7 +1324,7 @@ class ExecutionOrchestrator:
             except Exception as e:
                 logger.warning(f"Event callback failed: {e}")
 
-        logger.debug(f"Event emitted: {event_type.value} for {context.strategy_id}")
+        logger.debug(f"Event emitted: {event_type.value} for {context.deployment_id}")
 
     def _create_session(
         self,
@@ -1334,7 +1334,7 @@ class ExecutionOrchestrator:
         """Create an execution session for crash recovery tracking.
 
         Args:
-            context: Execution context with strategy_id and intent_id
+            context: Execution context with deployment_id and intent_id
             action_bundle: ActionBundle to snapshot for replay
 
         Returns:
@@ -1345,7 +1345,7 @@ class ExecutionOrchestrator:
 
         # Create session with PREPARING phase
         session = create_session(
-            strategy_id=context.strategy_id,
+            deployment_id=context.deployment_id,
             intent_id=context.intent_id or context.correlation_id,
             session_id=context.session_id if context.session_id else None,
         )
@@ -1359,7 +1359,7 @@ class ExecutionOrchestrator:
         # Update context with session_id
         context.session_id = session.session_id
 
-        logger.debug(f"Created execution session {session.session_id} for strategy {context.strategy_id}")
+        logger.debug(f"Created execution session {session.session_id} for deployment {context.deployment_id}")
 
         return session
 

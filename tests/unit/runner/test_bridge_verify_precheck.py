@@ -80,14 +80,14 @@ def _make_runner() -> StrategyRunner:
 
 def _make_state(*, gateway_client: object) -> BridgeWaitState:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
     state = BridgeWaitState(
         strategy=strategy,
         intents=[intent],
         orchestrator=MagicMock(),
         start_time=datetime.now(UTC),
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         first_intent=intent,
     )
     state.gateway_client = gateway_client
@@ -469,7 +469,7 @@ class TestBridgeWaitProcessIntentMaterializesPostSubmissionDefects:
         # ``_bridge_wait_cross_chain`` -- assemble a minimal state that
         # makes it run through the cross-chain branch.
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.on_intent_executed = MagicMock()
         strategy.save_state = MagicMock()
 

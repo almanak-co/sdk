@@ -398,7 +398,7 @@ class LidoStakerStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id or self.STRATEGY_NAME,
+            deployment_id=self.deployment_id or self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

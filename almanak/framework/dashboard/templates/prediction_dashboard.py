@@ -25,8 +25,8 @@ Usage:
         protocol="polymarket",
     )
 
-    def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
-        render_prediction_dashboard(strategy_id, strategy_config, session_state, config)
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+        render_prediction_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
 from dataclasses import dataclass
@@ -75,7 +75,7 @@ class PredictionDashboardConfig:
 
 
 def render_prediction_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     session_state: dict[str, Any],
     config: PredictionDashboardConfig,
@@ -89,7 +89,7 @@ def render_prediction_dashboard(
     helpers directly rather than parameterizing this template.
 
     Args:
-        strategy_id: The strategy identifier
+        deployment_id: The deployment identifier
         strategy_config: Strategy configuration dictionary
         session_state: Current session state with position data
         config: PredictionDashboardConfig for this dashboard
@@ -100,11 +100,11 @@ def render_prediction_dashboard(
 
     st.title(f"{protocol.replace('_', ' ').title()} Dashboard")
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Chain:** {chain.title()}")
 
     # Eyeball — am I making or losing money?
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     # Active Market Info
     market_question = session_state.get("market_question", "")
@@ -220,8 +220,8 @@ def render_prediction_dashboard(
     _render_performance_summary(session_state)
 
     # Audit — life-to-date costs + per-intent trade tape
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_position_details(session_state: dict[str, Any]) -> None:

@@ -227,7 +227,7 @@ class BaseFullCycleProbeStrategy(IntentStrategy):
         # This probe uses IntentSequence which is atomic — either all legs complete
         # or execution is rolled back. No partial positions to report.
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "probe_base_full_cycle"),
+            deployment_id=getattr(self, "deployment_id", "probe_base_full_cycle"),
             timestamp=datetime.now(UTC),
             positions=[],
         )

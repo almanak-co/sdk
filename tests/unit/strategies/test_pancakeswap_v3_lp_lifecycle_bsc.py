@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "bsc"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-pancakeswap-lp-lifecycle-bsc"
+    strat._deployment_id = "test-pancakeswap-lp-lifecycle-bsc"
     strat.STRATEGY_NAME = "pancakeswap_lp_lifecycle_bsc"
 
     # Config values (matching config.json defaults)

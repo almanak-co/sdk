@@ -426,16 +426,16 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             "config_version": 0,
         }
         self._notification_callback = notification_callback
-        self._strategy_id: str = getattr(config, "strategy_id", "unknown")
+        self._deployment_id: str = getattr(config, "deployment_id", "unknown")
         self._chain: str = getattr(config, "chain", "unknown")
 
         # Take initial config snapshot
         self._save_config_snapshot("initialization")
 
     @property
-    def strategy_id(self) -> str:
-        """Get the strategy ID."""
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        """Get the deployment ID."""
+        return self._deployment_id
 
     @property
     def chain(self) -> str:
@@ -516,13 +516,13 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
                 error="No updates provided",
             )
 
-        logger.info(f"Config update requested for {self.strategy_id}: fields={list(updates.keys())}, by={updated_by}")
+        logger.info(f"Config update requested for {self.deployment_id}: fields={list(updates.keys())}, by={updated_by}")
 
         # Step 1: Validate against RiskGuard
         risk_result = self.risk_guard.validate_config_update(self.config, updates)
         if not risk_result.passed:
             error_msg = f"RiskGuard validation failed: {'; '.join(risk_result.violations)}"
-            logger.warning(f"Config update rejected for {self.strategy_id}: {error_msg}")
+            logger.warning(f"Config update rejected for {self.deployment_id}: {error_msg}")
             return ConfigUpdateResult(
                 success=False,
                 error=error_msg,
@@ -547,7 +547,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         result = self.config.update(**processed_updates)
 
         if not result.success:
-            logger.warning(f"Config update failed for {self.strategy_id}: {result.error}")
+            logger.warning(f"Config update failed for {self.deployment_id}: {result.error}")
             return result
 
         # Step 3a: Strategy-level validate_config() hook (if defined).
@@ -580,7 +580,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
                     # Rollback itself failed -- surface loudly; strategy may
                     # be in an inconsistent state and needs operator review.
                     logger.error(
-                        f"Config update validation FAILED for {self.strategy_id} AND rollback failed: "
+                        f"Config update validation FAILED for {self.deployment_id} AND rollback failed: "
                         f"validation_error={exc!r}; rollback_error={rollback_error!r}"
                     )
                     error_msg = (
@@ -589,7 +589,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
                     )
                 else:
                     logger.warning(
-                        f"Config update rejected by validate_config for {self.strategy_id}: {exc} "
+                        f"Config update rejected by validate_config for {self.deployment_id}: {exc} "
                         f"(rolled back to previous values)"
                     )
                 return ConfigUpdateResult(success=False, error=error_msg)
@@ -613,7 +613,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             updated_by=updated_by,
         )
 
-        logger.info(f"Config updated successfully for {self.strategy_id}: updated_fields={result.updated_fields}")
+        logger.info(f"Config updated successfully for {self.deployment_id}: updated_fields={result.updated_fields}")
 
         return result
 
@@ -640,7 +640,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             config_dict = {}
             logger.warning(
                 f"Config type {type(self.config).__name__} has no to_dict() and is not a dict; "
-                f"snapshot will be empty for {self.strategy_id}"
+                f"snapshot will be empty for {self.deployment_id}"
             )
 
         snapshot = ConfigSnapshot(
@@ -657,7 +657,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             snapshots = snapshots[-10:]
         self.persistent_state["config_snapshots"] = snapshots
 
-        logger.debug(f"Config snapshot saved for {self.strategy_id}: version={version}")
+        logger.debug(f"Config snapshot saved for {self.deployment_id}: version={version}")
 
     def _emit_config_updated_event(
         self,
@@ -691,7 +691,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.CONFIG_UPDATED,
             description=f"Configuration updated: {', '.join(updated_fields)}",
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             chain=self.chain,
             details={
                 "changes": changes,
@@ -701,7 +701,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         )
 
         add_event(event)
-        logger.debug(f"CONFIG_UPDATED event emitted for {self.strategy_id}")
+        logger.debug(f"CONFIG_UPDATED event emitted for {self.deployment_id}")
 
     def _send_config_update_notification(
         self,
@@ -720,7 +720,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         """
         if not self._notification_callback:
             logger.debug(
-                f"No notification callback configured for {self.strategy_id}, skipping config update notification"
+                f"No notification callback configured for {self.deployment_id}, skipping config update notification"
             )
             return
 
@@ -740,7 +740,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         # Config updates are informational, so we use minimal position summary
         # and a simple "acknowledge" action
         card = OperatorCard(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             event_type=EventType.ALERT,
             reason=StuckReason.UNKNOWN,  # CONFIG_UPDATED doesn't have a stuck reason
@@ -764,9 +764,9 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
 
         try:
             self._notification_callback(card)
-            logger.info(f"Config update notification sent for {self.strategy_id}")
+            logger.info(f"Config update notification sent for {self.deployment_id}")
         except Exception as e:
-            logger.error(f"Failed to send config update notification for {self.strategy_id}: {e}")
+            logger.error(f"Failed to send config update notification for {self.deployment_id}: {e}")
 
     def set_notification_callback(
         self,

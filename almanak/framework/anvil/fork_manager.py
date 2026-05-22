@@ -1462,16 +1462,11 @@ class RollingForkManager:
         # with "intrinsic gas too high"). If a future Anvil version drops this
         # flag, surface that as a startup failure rather than silent drop.
         #
-        # Belt-and-suspenders: also pass ``--disable-block-gas-limit`` which
-        # disables Anvil's ``tx.gas_limit <= block.gas_limit`` constraint
-        # outright. Mantle's L1-calldata-included gas accounting can produce
-        # tx-level gas estimates that exceed even a 1B block-gas-limit
-        # override (the in-CI symptom of #2103 even after dropping the
-        # supported-flags gate). With both flags present, the check is
-        # disabled regardless of how Anvil interprets ``--gas-limit``.
         if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
+            supported_flags = _get_anvil_supported_flags()
+            if "--disable-block-gas-limit" in supported_flags:
+                cmd.append("--disable-block-gas-limit")
             cmd.extend(["--gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
-            cmd.append("--disable-block-gas-limit")
 
         # Cache upstream RPC responses to reduce Alchemy/RPC calls
         if self.cache_path:

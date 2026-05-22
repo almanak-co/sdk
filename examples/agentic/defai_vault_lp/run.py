@@ -149,14 +149,14 @@ def create_dynamic_mock_llm(config: dict) -> DynamicMockLLMClient:
     deposit_cfg = config.get("deposit", {})
     wallet = config["wallet_address"]
     safe = config.get("safe_address", wallet)
-    strategy_id = config.get("strategy_id", "defai-vault-lp")
+    deployment_id = config.get("deployment_id", "defai-vault-lp")
     usdc_token = config["usdc_token"]
     almanak_token = config["almanak_token"]
 
     def round_1(ctx):
         """Phase 1: Market assessment -- load state, get price, get balances."""
         return _resp(
-            _tc("load_agent_state", {"strategy_id": strategy_id}),
+            _tc("load_agent_state", {"deployment_id": deployment_id}),
             _tc("get_price", {"token": "ALMANAK", "chain": "base"}),
             _tc("get_balance", {"token": "USDC", "chain": "base"}),
             _tc("get_balance", {"token": "ALMANAK", "chain": "base"}),
@@ -289,7 +289,7 @@ def create_dynamic_mock_llm(config: dict) -> DynamicMockLLMClient:
         va = ctx.get("vault_address", "0x0000000000000000000000000000000000000001")
         return _resp(
             _tc("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "vault_address": va,
                     "lp_position_id": ctx.get("position_id"),
@@ -298,7 +298,7 @@ def create_dynamic_mock_llm(config: dict) -> DynamicMockLLMClient:
                 },
             }),
             _tc("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": (
                     f"DeFAI lifecycle complete: deployed vault at {va}, "
                     "approved underlying, initialized, deposited USDC, "
@@ -334,7 +334,7 @@ def create_rebalance_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient
     """
     wallet = config["wallet_address"]
     safe = config.get("safe_address", wallet)
-    strategy_id = config.get("strategy_id", "defai-vault-lp")
+    deployment_id = config.get("deployment_id", "defai-vault-lp")
     usdc_token = config["usdc_token"]
     almanak_token = config["almanak_token"]
     lp_cfg = config.get("lp", {})
@@ -344,7 +344,7 @@ def create_rebalance_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient
     def round_1(ctx):
         """Load state + assess position and pool."""
         return _resp(
-            _tc("load_agent_state", {"strategy_id": strategy_id}),
+            _tc("load_agent_state", {"deployment_id": deployment_id}),
             _tc("get_vault_state", {"vault_address": vault_address, "chain": "base"}),
             _tc("get_pool_state", {
                 "token_a": almanak_token,
@@ -421,7 +421,7 @@ def create_rebalance_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient
         new_pos = ctx.get("position_id", position_id)
         return _resp(
             _tc("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "vault_address": vault_address,
                     "lp_position_id": new_pos,
@@ -431,7 +431,7 @@ def create_rebalance_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient
                 },
             }),
             _tc("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": (
                     f"Rebalanced LP position: closed #{position_id}, "
                     f"opened new position centered on current price."
@@ -463,7 +463,7 @@ def create_teardown_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient:
     """
     wallet = config["wallet_address"]
     safe = config.get("safe_address", wallet)
-    strategy_id = config.get("strategy_id", "defai-vault-lp")
+    deployment_id = config.get("deployment_id", "defai-vault-lp")
     usdc_token = config["usdc_token"]
     almanak_token = config["almanak_token"]
     vault_address = state.get("vault_address", "0xVAULT")
@@ -472,7 +472,7 @@ def create_teardown_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient:
     def round_1(ctx):
         """Load state (teardown_requested=true) + get vault state."""
         return _resp(
-            _tc("load_agent_state", {"strategy_id": strategy_id}),
+            _tc("load_agent_state", {"deployment_id": deployment_id}),
             _tc("get_vault_state", {"vault_address": vault_address, "chain": "base"}),
         )
 
@@ -535,7 +535,7 @@ def create_teardown_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient:
         """Save state + record decision."""
         return _resp(
             _tc("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "vault_address": vault_address,
                     "phase": "torn_down",
@@ -543,7 +543,7 @@ def create_teardown_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient:
                 },
             }),
             _tc("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": (
                     f"Teardown complete: closed LP #{position_id}, "
                     "swapped all to USDC, settled vault twice to clear pending redeems."
@@ -593,14 +593,14 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
 
         policy = create_policy(config)
         catalog = get_default_catalog()
-        strategy_id = config.get("strategy_id", "defai-vault-lp")
-        alert_manager = GatewayAlertManager(gateway, strategy_id=strategy_id)
+        deployment_id = config.get("deployment_id", "defai-vault-lp")
+        alert_manager = GatewayAlertManager(gateway, deployment_id=deployment_id)
         executor = ToolExecutor(
             gateway,
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             default_chain=config.get("chain", "base"),
             alert_manager=alert_manager,
         )
@@ -656,7 +656,7 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
             # For real LLM: try loading persisted state to detect mode
             try:
                 state_resp = await executor.execute("load_agent_state", {
-                    "strategy_id": config.get("strategy_id", "defai-vault-lp"),
+                    "deployment_id": config.get("deployment_id", "defai-vault-lp"),
                 })
                 if state_resp.status == "success" and state_resp.data:
                     saved = state_resp.data.get("state", {})
@@ -692,7 +692,7 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_rounds=config.get("max_tool_rounds", 15),
-                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
                 ),
                 timeout=iteration_timeout,
             )

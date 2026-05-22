@@ -265,7 +265,7 @@ class TestBacktestResultGasPriceFields:
 
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
             metrics=BacktestMetrics(),
@@ -302,7 +302,7 @@ class TestBacktestResultGasPriceFields:
 
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
             metrics=BacktestMetrics(),
@@ -335,7 +335,7 @@ class TestBacktestResultGasPriceFields:
 
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
             metrics=BacktestMetrics(),
@@ -353,7 +353,7 @@ class TestBacktestResultGasPriceFields:
 
         result_data = {
             "engine": "pnl",
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "start_time": "2024-01-01T00:00:00",
             "end_time": "2024-06-01T00:00:00",
             "metrics": {},

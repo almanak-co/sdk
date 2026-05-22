@@ -243,7 +243,7 @@ class TestPrintNoOpIfEmpty:
             assert (
                 th.print_no_op_if_empty_and_signal_return(
                     positions=positions,
-                    strategy=SimpleNamespace(strategy_id="x"),
+                    strategy=SimpleNamespace(deployment_id="x"),
                     strategy_class=type("X", (), {}),
                     discover=False,
                     no_op_message_builder=lambda sid: f"NOOP {sid}",
@@ -258,7 +258,7 @@ class TestPrintNoOpIfEmpty:
         with runner.isolation() as (out, _err):
             result = th.print_no_op_if_empty_and_signal_return(
                 positions=positions,
-                strategy=SimpleNamespace(strategy_id="my-strat"),
+                strategy=SimpleNamespace(deployment_id="my-strat"),
                 strategy_class=type("X", (), {}),
                 discover=False,
                 no_op_message_builder=lambda sid: f"no-op for {sid}",
@@ -274,7 +274,7 @@ class TestPrintNoOpIfEmpty:
         with runner.isolation() as (out, _err):
             th.print_no_op_if_empty_and_signal_return(
                 positions=positions,
-                strategy=SimpleNamespace(strategy_id="x"),
+                strategy=SimpleNamespace(deployment_id="x"),
                 strategy_class=type("X", (), {}),
                 discover=True,
                 no_op_message_builder=lambda sid: f"no-op for {sid}",
@@ -282,23 +282,21 @@ class TestPrintNoOpIfEmpty:
             output = out.getvalue().decode()
         assert "rerun with --discover" not in output
 
-    def test_strategy_id_falls_back_to_classname(self):
-        # When the strategy lacks a strategy_id attr, the helper uses the
-        # class __name__. Same fallback the original inline code had.
+    def test_deployment_id_is_required(self):
         class FallbackStrategy:
             pass
 
         runner = CliRunner()
         with runner.isolation() as (out, _err):
-            th.print_no_op_if_empty_and_signal_return(
-                positions=SimpleNamespace(positions=[]),
-                strategy=FallbackStrategy(),
-                strategy_class=FallbackStrategy,
-                discover=False,
-                no_op_message_builder=lambda sid: f"no-op for {sid}",
-            )
-            output = out.getvalue().decode()
-        assert "no-op for FallbackStrategy" in output
+            with pytest.raises(AttributeError):
+                th.print_no_op_if_empty_and_signal_return(
+                    positions=SimpleNamespace(positions=[]),
+                    strategy=FallbackStrategy(),
+                    strategy_class=FallbackStrategy,
+                    discover=False,
+                    no_op_message_builder=lambda sid: f"no-op for {sid}",
+                )
+            assert out.getvalue() == b""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -580,7 +578,7 @@ class TestUpdateTeardownRequestsLifecycle:
         tsm.get_active_request.return_value = None
 
         th.update_teardown_requests_lifecycle(
-            strategy_id="my-strat",
+            deployment_id="my-strat",
             mode="SOFT",
             result=_result(success=True, intents_total=3, intents_succeeded=3),
             state_manager_provider=lambda: tsm,
@@ -588,7 +586,7 @@ class TestUpdateTeardownRequestsLifecycle:
 
         tsm.create_request.assert_called_once()
         created = tsm.create_request.call_args.args[0]
-        assert created.strategy_id == "my-strat"
+        assert created.deployment_id == "my-strat"
         assert created.requested_by == "cli-execute"
         assert created.target_token == "USDC"
         # And then update_request was called with success status
@@ -615,7 +613,7 @@ class TestUpdateTeardownRequestsLifecycle:
 
         with caplog.at_level("DEBUG", logger="almanak.framework.cli.teardown_helpers"):
             th.update_teardown_requests_lifecycle(
-                strategy_id="my-strat",
+                deployment_id="my-strat",
                 mode="graceful",  # CLI value — not a valid TeardownMode
                 result=_result(),
                 state_manager_provider=lambda: tsm,
@@ -640,7 +638,7 @@ class TestUpdateTeardownRequestsLifecycle:
         tsm.get_active_request.return_value = existing
 
         th.update_teardown_requests_lifecycle(
-            strategy_id="my-strat",
+            deployment_id="my-strat",
             mode="emergency",
             result=_result(intents_total=3, intents_succeeded=2, intents_failed=1, success=False),
             state_manager_provider=lambda: tsm,
@@ -662,7 +660,7 @@ class TestUpdateTeardownRequestsLifecycle:
 
         # Must not propagate.
         th.update_teardown_requests_lifecycle(
-            strategy_id="my-strat",
+            deployment_id="my-strat",
             mode="graceful",
             result=_result(),
             state_manager_provider=boom,

@@ -607,7 +607,7 @@ def walk_forward_backtest(  # noqa: C901
         class MockWalkForwardStrategy:
             """Mock strategy for walk-forward demonstration."""
 
-            strategy_id: str = "mock-walk-forward"
+            deployment_id: str = "mock-walk-forward"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -864,7 +864,7 @@ def monte_carlo_backtest(  # noqa: C901
         class MockMonteCarloStrategy:
             """Mock strategy for Monte Carlo demonstration."""
 
-            strategy_id: str = "mock-monte-carlo"
+            deployment_id: str = "mock-monte-carlo"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -1254,7 +1254,7 @@ def scenario_backtest(  # noqa: C901
         class MockCrisisStrategy:
             """Mock strategy for crisis scenario demonstration."""
 
-            strategy_id: str = "mock-crisis"
+            deployment_id: str = "mock-crisis"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

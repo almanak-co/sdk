@@ -35,22 +35,22 @@ class TestDashboardAPIClientInit:
     """Tests for DashboardAPIClient initialization."""
 
     def test_init_with_gateway_client(self, mock_gateway_client):
-        """Test initialization stores gateway client and strategy ID."""
+        """Test initialization stores gateway client and deployment ID."""
         client = DashboardAPIClient(mock_gateway_client, "my-strategy")
 
         assert client._client is mock_gateway_client
-        assert client._strategy_id == "my-strategy"
+        assert client._deployment_id == "my-strategy"
 
-    def test_strategy_id_property(self, api_client):
-        """Test strategy_id property returns the scoped ID."""
-        assert api_client.strategy_id == "test-strategy"
+    def test_deployment_id_property(self, api_client):
+        """Test deployment_id property returns the scoped ID."""
+        assert api_client.deployment_id == "test-strategy"
 
     def test_create_api_client_factory(self, mock_gateway_client):
         """Test factory function creates client correctly."""
         client = create_api_client(mock_gateway_client, "factory-strategy")
 
         assert isinstance(client, DashboardAPIClient)
-        assert client.strategy_id == "factory-strategy"
+        assert client.deployment_id == "factory-strategy"
         assert client._client is mock_gateway_client
 
 
@@ -267,7 +267,7 @@ class TestGetSummary:
     def test_get_summary_success(self, api_client, mock_gateway_client):
         """Test getting strategy summary."""
         mock_summary = MagicMock()
-        mock_summary.strategy_id = "test-strategy"
+        mock_summary.deployment_id = "test-strategy"
         mock_summary.name = "My Strategy"
         mock_summary.status = "RUNNING"
         mock_summary.chain = "arbitrum"
@@ -284,7 +284,7 @@ class TestGetSummary:
 
         summary = api_client.get_summary()
 
-        assert summary["strategy_id"] == "test-strategy"
+        assert summary["deployment_id"] == "test-strategy"
         assert summary["name"] == "My Strategy"
         assert summary["status"] == "RUNNING"
         assert summary["total_value_usd"] == "10000"
@@ -709,13 +709,13 @@ class TestSummaryToDict:
 
         assert result == {}
 
-    def test_summary_to_dict_uses_strategy_id_fallback(self, api_client):
-        """Test summary uses api client strategy_id as fallback."""
+    def test_summary_to_dict_uses_deployment_id_fallback(self, api_client):
+        """Test summary uses api client deployment_id as fallback."""
         summary = MagicMock(spec=[])  # No attributes
 
         result = api_client._summary_to_dict(summary)
 
-        # Falls back to client's strategy_id
-        assert result["strategy_id"] == "test-strategy"
+        # Falls back to client's deployment_id
+        assert result["deployment_id"] == "test-strategy"
         assert result["name"] == ""
         assert result["status"] == "UNKNOWN"

@@ -16,7 +16,7 @@ Example (offline / mocked, matches this demo's actual render call):
     )
 
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
-    render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+    render_lp_dashboard(deployment_id, strategy_config, session_state, config)
     # That's it! Full dashboard with all LP plots rendered automatically.
 
 In a real strategy with a live gateway, pass ``api_client=api_client`` as a
@@ -315,7 +315,7 @@ if page == "🏠 Overview":
     from almanak.framework.dashboard.templates import get_uniswap_v3_config, render_lp_dashboard
 
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
-    render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+    render_lp_dashboard(deployment_id, strategy_config, session_state, config)
     ```
 
     In a real strategy with a live gateway, pass `api_client=api_client` as a
@@ -410,7 +410,7 @@ config = get_uniswap_v3_config(token0="WETH", token1="USDC", fee_tier="0.30%")
 # In a real strategy: pass api_client=api_client so the LP template
 # renders the gateway-backed Positions + Lifecycle sections (PR #2373).
 # This offline demo uses mocked session_state, so api_client is omitted.
-render_lp_dashboard(strategy_id, strategy_config, session_state, config)
+render_lp_dashboard(deployment_id, strategy_config, session_state, config)
 # That's it! Full dashboard with all LP plots.
 """, language="python")
     
@@ -452,7 +452,7 @@ render_lp_dashboard(strategy_id, strategy_config, session_state, config)
     }
     
     render_lp_dashboard(
-        strategy_id="demo_lp_strategy",
+        deployment_id="demo_lp_strategy",
         strategy_config=strategy_config,
         session_state=session_state,
         config=config,
@@ -467,7 +467,7 @@ elif page == "📈 TA Dashboard":
 from almanak.framework.dashboard.templates import get_rsi_config, render_ta_dashboard
 
 config = get_rsi_config(period=14, overbought=70, oversold=30)
-render_ta_dashboard(strategy_id, strategy_config, session_state, config)
+render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 # Complete TA dashboard with RSI indicator, signals, and performance metrics.
 """, language="python")
     
@@ -506,7 +506,7 @@ render_ta_dashboard(strategy_id, strategy_config, session_state, config)
     }
     
     render_ta_dashboard(
-        strategy_id="demo_ta_strategy",
+        deployment_id="demo_ta_strategy",
         strategy_config=strategy_config,
         session_state=session_state,
         config=config,
@@ -524,7 +524,7 @@ from almanak.framework.dashboard.templates import (
 )
 
 config = get_aave_v3_config(collateral_token="WETH", borrow_token="USDC")
-render_lending_dashboard(strategy_id, strategy_config, session_state, config)
+render_lending_dashboard(deployment_id, strategy_config, session_state, config)
 # Complete lending dashboard with health factor, LTV, collateral breakdown.
 """, language="python")
     
@@ -554,7 +554,7 @@ render_lending_dashboard(strategy_id, strategy_config, session_state, config)
     }
     
     render_lending_dashboard(
-        strategy_id="demo_lending_strategy",
+        deployment_id="demo_lending_strategy",
         strategy_config=strategy_config,
         session_state=session_state,
         config=config,
@@ -572,7 +572,7 @@ from almanak.framework.dashboard.templates import (
 )
 
 config = PerpDashboardConfig(protocol="gmx_v2", market="ETH/USD")
-render_perp_dashboard(strategy_id, strategy_config, session_state, config)
+render_perp_dashboard(deployment_id, strategy_config, session_state, config)
 # Complete perp dashboard with position, funding rates, liquidation levels.
 """, language="python")
     
@@ -606,7 +606,7 @@ render_perp_dashboard(strategy_id, strategy_config, session_state, config)
     }
     
     render_perp_dashboard(
-        strategy_id="demo_perp_strategy",
+        deployment_id="demo_perp_strategy",
         strategy_config=strategy_config,
         session_state=session_state,
         config=config,
@@ -624,7 +624,7 @@ from almanak.framework.dashboard.templates import (
 )
 
 config = PredictionDashboardConfig(protocol="polymarket")
-render_prediction_dashboard(strategy_id, strategy_config, session_state, config)
+render_prediction_dashboard(deployment_id, strategy_config, session_state, config)
 # Complete prediction dashboard with positions, probabilities, arbitrage analysis.
 """, language="python")
     
@@ -657,7 +657,7 @@ render_prediction_dashboard(strategy_id, strategy_config, session_state, config)
     }
     
     render_prediction_dashboard(
-        strategy_id="demo_prediction_strategy",
+        deployment_id="demo_prediction_strategy",
         strategy_config=strategy_config,
         session_state=session_state,
         config=config,

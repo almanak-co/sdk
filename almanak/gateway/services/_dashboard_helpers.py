@@ -54,7 +54,7 @@ def build_registry_strategy_info(
 
     Returns:
         ``strategy_info`` dict matching the pre-refactor shape:
-        ``strategy_id, name, status, chain, protocol, total_value_usd,
+        ``deployment_id, name, status, chain, protocol, total_value_usd,
         pnl_24h_usd, last_action_at, attention_required, attention_reason,
         is_multi_chain, chains, consecutive_errors, last_iteration_at,
         pnl_since_deploy_usd, wallet_address, chain_wallets``.
@@ -81,7 +81,7 @@ def build_registry_strategy_info(
             pass
 
     return {
-        "strategy_id": inst.strategy_id,
+        "deployment_id": inst.deployment_id,
         "name": inst.strategy_name.replace("_", " ").title(),
         "status": effective_status,
         "chain": inst.chain,
@@ -219,7 +219,7 @@ def build_strategy_summary_kwargs(info: dict) -> dict:
     templates and paper sessions do not.
     """
     summary_kwargs: dict[str, Any] = {
-        "strategy_id": info["strategy_id"],
+        "deployment_id": info["deployment_id"],
         "name": info["name"],
         "status": info["status"],
         "chain": info["chain"],
@@ -347,8 +347,7 @@ def build_position_proto(
 
 def lookup_strategy_source(
     *,
-    strategy_id: str,
-    original_strategy_id: str,
+    deployment_id: str,
     registry_getter: Any,
     compute_effective_status: Any,
     discover_filesystem: Any,
@@ -356,25 +355,22 @@ def lookup_strategy_source(
 ) -> dict | None:
     """Resolve a strategy to its base ``strategy_info`` dict.
 
-    Performs the three-way fallback cascade preserved byte-for-byte
-    from the pre-refactor ``GetStrategyDetails`` block:
+    Performs the three-way fallback cascade:
 
-    1. **Registry lookup** via ``registry_getter().get(strategy_id)``.
+    1. **Registry lookup** via ``registry_getter().get(deployment_id)``.
        On hit, builds the dict via :func:`build_registry_strategy_info`
        using the effective status computed by the caller-supplied
        ``compute_effective_status`` callable (which lives on the
        servicer). Registry errors are caught and logged at DEBUG.
     2. **Filesystem discovery** via the caller-supplied
        ``discover_filesystem`` callable. First strategy whose
-       ``strategy_id`` matches ``strategy_id`` wins.
+       ``deployment_id`` matches ``deployment_id`` wins.
     3. **Paper session discovery** via the caller-supplied
-       ``discover_paper_sessions`` callable. Matches against either
-       ``original_strategy_id`` OR ``strategy_id``, because
-       ``resolve_agent_id`` may rewrite ``paper:xxx`` IDs.
+       ``discover_paper_sessions`` callable.
 
-    The ``original_strategy_id`` vs resolved ``strategy_id`` distinction
-    is load-bearing for paper-session matching and must be preserved —
-    do not collapse.
+    Per blueprint 29 the gateway no longer translates identity: the
+    caller passes the canonical ``deployment_id`` and every lookup keys
+    on that exact value.
 
     ``registry_getter`` is passed in (rather than imported here) so
     ``unittest.mock.patch`` on the caller's module-scope
@@ -382,11 +378,9 @@ def lookup_strategy_source(
     existing characterization tests rely on that patch target.
 
     Args:
-        strategy_id: Resolved strategy ID (post ``resolve_agent_id``).
-        original_strategy_id: Original client-supplied strategy ID
-            (pre-resolution) — used for paper-session matching.
+        deployment_id: The canonical deployment_id supplied by the caller.
         registry_getter: Zero-arg callable returning an instance
-            registry with a ``.get(strategy_id)`` method.
+            registry with a ``.get(deployment_id)`` method.
         compute_effective_status: Callable ``(inst) -> str`` that
             returns the effective status for a registry instance.
         discover_filesystem: Callable ``() -> list[dict]`` returning
@@ -400,22 +394,21 @@ def lookup_strategy_source(
     # Registry first
     try:
         registry = registry_getter()
-        inst = registry.get(strategy_id)
+        inst = registry.get(deployment_id)
         if inst is not None:
             effective_status = compute_effective_status(inst)
             return build_registry_strategy_info(inst, effective_status)
     except Exception as e:
-        logger.debug(f"Failed to check registry for {strategy_id}: {e}")
+        logger.debug(f"Failed to check registry for {deployment_id}: {e}")
 
     # Fallback to filesystem discovery
     for s in discover_filesystem():
-        if s["strategy_id"] == strategy_id:
+        if s["deployment_id"] == deployment_id:
             return s
 
-    # Fallback to paper session discovery (match against original ID
-    # because resolve_agent_id may have rewritten paper:xxx IDs)
+    # Fallback to paper session discovery
     for s in discover_paper_sessions():
-        if s["strategy_id"] == original_strategy_id or s["strategy_id"] == strategy_id:
+        if s["deployment_id"] == deployment_id:
             return s
 
     return None

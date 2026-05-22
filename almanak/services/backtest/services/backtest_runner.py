@@ -94,7 +94,7 @@ class SpecBacktestStrategy:
 
     def __init__(self, spec: StrategySpec) -> None:
         self._spec = spec
-        self._strategy_id = f"spec_{spec.protocol}_{spec.action}_{spec.chain}"
+        self._deployment_id = f"spec_{spec.protocol}_{spec.action}_{spec.chain}"
         self._tick_count = 0
         self._metadata = self._build_metadata(spec)
 
@@ -108,7 +108,7 @@ class SpecBacktestStrategy:
         tags, intent_types = self._ACTION_METADATA[action]
 
         return StrategyMetadata(
-            name=self._strategy_id,
+            name=self._deployment_id,
             description=f"{spec.action} on {spec.protocol} ({spec.chain})",
             tags=tags,
             supported_chains=[spec.chain],
@@ -121,8 +121,8 @@ class SpecBacktestStrategy:
         return self._metadata
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     # ------------------------------------------------------------------
     # decide() — called by PnLBacktester on every tick

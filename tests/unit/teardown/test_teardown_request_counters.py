@@ -1,6 +1,6 @@
 """VIB-4542: TeardownStateManager.mark_failed must persist counters.
 
-`mark_completed(strategy_id, result)` already lifts `result["intents"]` into
+`mark_completed(deployment_id, result)` already lifts `result["intents"]` into
 `positions_closed` (VIB-3920). The failed-path peer accepted only the
 error string and only wrote `error_message` — so after a teardown that
 landed 6 of 7 intents on-chain, the SQLite row showed
@@ -40,10 +40,10 @@ from almanak.framework.teardown.state_manager import (
 )
 
 
-def _make_request(strategy_id: str = "S") -> TeardownRequest:
+def _make_request(deployment_id: str = "S") -> TeardownRequest:
     """Minimal TeardownRequest — defaults on asset_policy / target_token /
     requested_by keep the construction short (see ``models.py:536``)."""
-    return TeardownRequest(strategy_id=strategy_id, mode=TeardownMode.SOFT)
+    return TeardownRequest(deployment_id=deployment_id, mode=TeardownMode.SOFT)
 
 
 class TestTeardownCountersIncrement:
@@ -85,7 +85,7 @@ class TestTeardownCountersIncrement:
         with sqlite3.connect(str(db_path)) as c:
             row = c.execute(
                 "SELECT positions_closed, positions_failed, error_message, status "
-                "FROM teardown_requests WHERE strategy_id = ?",
+                "FROM teardown_requests WHERE deployment_id = ?",
                 ("S",),
             ).fetchone()
         assert row == (6, 1, "1 intents failed", "failed")
@@ -151,10 +151,10 @@ class TestTeardownCountersIncrement:
             def create_request(self, request):  # noqa: ANN001
                 return None
 
-            def get_request(self, strategy_id):  # noqa: ANN001
+            def get_request(self, deployment_id):  # noqa: ANN001
                 return None
 
-            def get_active_request(self, strategy_id):  # noqa: ANN001
+            def get_active_request(self, deployment_id):  # noqa: ANN001
                 return None
 
             def get_pending_requests(self):
@@ -169,27 +169,27 @@ class TestTeardownCountersIncrement:
             def update_request(self, request):  # noqa: ANN001
                 return None
 
-            def acknowledge_request(self, strategy_id):  # noqa: ANN001
+            def acknowledge_request(self, deployment_id):  # noqa: ANN001
                 return None
 
-            def mark_started(self, strategy_id, total_positions=0):  # noqa: ANN001
+            def mark_started(self, deployment_id, total_positions=0):  # noqa: ANN001
                 return None
 
             def update_progress(  # noqa: ANN001
                 self,
-                strategy_id,
+                deployment_id,
                 positions_closed,
                 positions_failed=0,
                 current_phase=None,
             ):
                 return None
 
-            def mark_completed(self, strategy_id, result=None):  # noqa: ANN001
+            def mark_completed(self, deployment_id, result=None):  # noqa: ANN001
                 return None
 
             def mark_failed(  # noqa: ANN001
                 self,
-                strategy_id,
+                deployment_id,
                 error,
                 *,
                 positions_closed=None,
@@ -200,13 +200,13 @@ class TestTeardownCountersIncrement:
                 # would copy from. Audit PR #2343 finding (CodeRabbit + Claude).
                 return None
 
-            def request_cancel(self, strategy_id):  # noqa: ANN001
+            def request_cancel(self, deployment_id):  # noqa: ANN001
                 return False
 
-            def mark_cancelled(self, strategy_id):  # noqa: ANN001
+            def mark_cancelled(self, deployment_id):  # noqa: ANN001
                 return None
 
-            def delete_request(self, strategy_id):  # noqa: ANN001
+            def delete_request(self, deployment_id):  # noqa: ANN001
                 return False
 
         # runtime_checkable Protocol — verifies the stub has every method

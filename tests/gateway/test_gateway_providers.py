@@ -275,7 +275,7 @@ class TestGatewayStateManager:
 
         state_dict = {"position": "long", "entry_price": 2500}
         mock_response = gateway_pb2.StateData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             version=5,
             data=json.dumps(state_dict).encode("utf-8"),
             schema_version=1,
@@ -292,7 +292,7 @@ class TestGatewayStateManager:
         result = asyncio.run(manager.load_state("test-strategy"))
 
         assert result is not None
-        assert result.strategy_id == "test-strategy"
+        assert result.deployment_id == "test-strategy"
         assert result.version == 5
         assert result.state == state_dict
 
@@ -325,7 +325,7 @@ class TestGatewayStateManager:
 
         manager = GatewayStateManager(mock_client)
         state = StateData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             version=5,
             state={"position": "short"},
             schema_version=1,
@@ -356,7 +356,7 @@ class TestGatewayStateManagerSnapshots:
 
         return PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             total_value_usd=Decimal("1000.50"),
             available_cash_usd=Decimal("500.25"),
             value_confidence=ValueConfidence.HIGH,
@@ -423,7 +423,7 @@ class TestGatewayStateManagerSnapshots:
         VIB-3157: the legacy ``return 0`` swallow-on-failure contract was a
         silent accounting-loss footgun. Failures now propagate so the runner
         can halt the cycle and alert the operator. Also asserts the typed
-        ``write_kind`` / ``strategy_id`` metadata so a regression to a
+        ``write_kind`` / ``deployment_id`` metadata so a regression to a
         different accounting-error shape would be caught.
         """
         import asyncio
@@ -441,7 +441,7 @@ class TestGatewayStateManagerSnapshots:
 
         assert "internal error" in str(excinfo.value)
         assert excinfo.value.write_kind == "snapshot"
-        assert excinfo.value.strategy_id == sample_snapshot.strategy_id
+        assert excinfo.value.deployment_id == sample_snapshot.deployment_id
 
     def test_save_portfolio_snapshot_exception_raises(self, mock_client, sample_snapshot):
         """save_portfolio_snapshot raises AccountingPersistenceError on gRPC exception."""
@@ -458,10 +458,10 @@ class TestGatewayStateManagerSnapshots:
 
         # Public ``cause`` attribute, not ``__cause__`` dunder — see
         # test_portfolio_metrics_rpc for rationale. Asserting write_kind AND
-        # strategy_id locks the runner's accounting-failure dispatch contract.
+        # deployment_id locks the runner's accounting-failure dispatch contract.
         assert "gRPC failed" in str(excinfo.value) or excinfo.value.cause is not None
         assert excinfo.value.write_kind == "snapshot"
-        assert excinfo.value.strategy_id == sample_snapshot.strategy_id
+        assert excinfo.value.deployment_id == sample_snapshot.deployment_id
 
     def test_get_latest_snapshot_success(self, mock_client):
         """get_latest_snapshot returns snapshot from gRPC response."""
@@ -473,7 +473,7 @@ class TestGatewayStateManagerSnapshots:
 
         ts = int(datetime.now(UTC).timestamp())
         mock_response = gateway_pb2.SnapshotData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             timestamp=ts,
             total_value_usd="1000.50",
             available_cash_usd="500.25",
@@ -487,7 +487,7 @@ class TestGatewayStateManagerSnapshots:
         result = asyncio.run(manager.get_latest_snapshot("test-strategy"))
 
         assert result is not None
-        assert result.strategy_id == "test-strategy"
+        assert result.deployment_id == "test-strategy"
 
     def test_get_latest_snapshot_supports_metadata_envelope(self, mock_client):
         """get_latest_snapshot reads both positions and snapshot metadata from envelope rows."""
@@ -499,7 +499,7 @@ class TestGatewayStateManagerSnapshots:
         manager = GatewayStateManager(mock_client)
         ts = int(datetime.now(UTC).timestamp())
         mock_response = gateway_pb2.SnapshotData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             timestamp=ts,
             total_value_usd="4.70",
             available_cash_usd="0",
@@ -576,7 +576,7 @@ class TestGatewayStateManagerSnapshots:
         mock_response = gateway_pb2.SnapshotList(
             snapshots=[
                 gateway_pb2.SnapshotData(
-                    strategy_id="test-strategy",
+                    deployment_id="test-strategy",
                     timestamp=ts,
                     total_value_usd="1000.50",
                     available_cash_usd="500.25",
@@ -593,7 +593,7 @@ class TestGatewayStateManagerSnapshots:
         result = asyncio.run(manager.get_snapshots_since("test-strategy", since))
 
         assert len(result) == 1
-        assert result[0].strategy_id == "test-strategy"
+        assert result[0].deployment_id == "test-strategy"
 
     def test_get_snapshots_since_failure_returns_empty(self, mock_client):
         """get_snapshots_since returns empty list on gRPC failure."""
@@ -651,7 +651,7 @@ class TestGatewayExecutionOrchestrator:
         result = asyncio.run(
             orchestrator.execute(
                 action_bundle=action_bundle,
-                strategy_id="test",
+                deployment_id="test",
                 dry_run=False,
             )
         )
@@ -684,7 +684,7 @@ class TestGatewayExecutionOrchestrator:
         result = asyncio.run(
             orchestrator.execute(
                 action_bundle={"actions": []},
-                strategy_id="test",
+                deployment_id="test",
             )
         )
 

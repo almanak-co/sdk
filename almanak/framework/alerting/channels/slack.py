@@ -94,14 +94,14 @@ class SlackChannel:
         self._last_send_time: float = 0.0
         self._min_interval: float = 1.0  # 1 second minimum between sends
 
-        # Track threads per strategy (strategy_id -> (thread_ts, timestamp))
+        # Track threads per strategy (deployment_id -> (thread_ts, timestamp))
         self._strategy_threads: dict[str, tuple[str, float]] = {}
 
-    def _get_thread_ts(self, strategy_id: str) -> str | None:
+    def _get_thread_ts(self, deployment_id: str) -> str | None:
         """Get the thread_ts for a strategy if within timeout.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
 
         Returns:
             Thread timestamp if valid, None otherwise
@@ -109,7 +109,7 @@ class SlackChannel:
         if not self.enable_threading:
             return None
 
-        thread_data = self._strategy_threads.get(strategy_id)
+        thread_data = self._strategy_threads.get(deployment_id)
         if thread_data is None:
             return None
 
@@ -118,41 +118,42 @@ class SlackChannel:
 
         # Check if thread has expired
         if now - created_at > self.thread_timeout_seconds:
-            del self._strategy_threads[strategy_id]
-            logger.debug(f"Thread expired for strategy {strategy_id}, will create new thread")
+            del self._strategy_threads[deployment_id]
+            logger.debug(f"Thread expired for strategy {deployment_id}, will create new thread")
             return None
 
         return thread_ts
 
-    def _set_thread_ts(self, strategy_id: str, thread_ts: str) -> None:
+    def _set_thread_ts(self, deployment_id: str, thread_ts: str) -> None:
         """Store the thread_ts for a strategy.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             thread_ts: The thread timestamp from Slack
         """
         if self.enable_threading:
-            self._strategy_threads[strategy_id] = (thread_ts, time.time())
-            logger.debug(f"Stored thread_ts {thread_ts} for strategy {strategy_id}")
+            self._strategy_threads[deployment_id] = (thread_ts, time.time())
+            logger.debug(f"Stored thread_ts {thread_ts} for strategy {deployment_id}")
 
-    def clear_thread(self, strategy_id: str) -> None:
+    def clear_thread(self, deployment_id: str) -> None:
         """Clear the thread context for a strategy.
 
         Call this when a strategy issue is resolved to start fresh
         threads for future alerts.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
         """
-        if strategy_id in self._strategy_threads:
-            del self._strategy_threads[strategy_id]
-            logger.debug(f"Cleared thread context for strategy {strategy_id}")
+        if deployment_id in self._strategy_threads:
+            del self._strategy_threads[deployment_id]
+            logger.debug(f"Cleared thread context for strategy {deployment_id}")
 
     def clear_all_threads(self) -> None:
         """Clear all thread contexts."""
         self._strategy_threads.clear()
         logger.debug("Cleared all thread contexts")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _build_blocks(self, card: OperatorCard) -> list[dict[str, Any]]:
         """Build Slack Block Kit blocks for an OperatorCard.
 
@@ -184,7 +185,7 @@ class SlackChannel:
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"*Strategy:*\n{card.strategy_id}",
+                        "text": f"*Strategy:*\n{card.deployment_id}",
                     },
                     {
                         "type": "mrkdwn",
@@ -269,7 +270,7 @@ class SlackChannel:
 
         # Add dashboard link button
         if self.dashboard_base_url:
-            dashboard_link = f"{self.dashboard_base_url}/strategy/{card.strategy_id}"
+            dashboard_link = f"{self.dashboard_base_url}/strategy/{card.deployment_id}"
             action_elements.append(
                 {
                     "type": "button",
@@ -295,7 +296,7 @@ class SlackChannel:
         for action in card.available_actions[:4]:  # Limit to 4 actions + dashboard = 5 total
             label = action_labels.get(action.value, action.value)
             if self.dashboard_base_url:
-                action_url = f"{self.dashboard_base_url}/strategy/{card.strategy_id}/action/{action.value.lower()}"
+                action_url = f"{self.dashboard_base_url}/strategy/{card.deployment_id}/action/{action.value.lower()}"
                 action_elements.append(
                     {
                         "type": "button",
@@ -341,7 +342,7 @@ class SlackChannel:
             "attachments": [
                 {
                     "color": color,
-                    "fallback": f"{card.severity.value} Alert: {card.strategy_id} - {card.reason.value}",
+                    "fallback": f"{card.severity.value} Alert: {card.deployment_id} - {card.reason.value}",
                 }
             ],
         }
@@ -395,6 +396,7 @@ class SlackChannel:
             except httpx.RequestError as e:
                 return SlackSendResult(success=False, error=f"Request error: {e}")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_alert(
         self,
         card: OperatorCard,
@@ -420,7 +422,7 @@ class SlackChannel:
             SlackSendResult indicating success or failure, with thread_ts if available
         """
         # Get thread_ts from storage if not explicitly provided
-        effective_thread_ts = thread_ts or self._get_thread_ts(card.strategy_id)
+        effective_thread_ts = thread_ts or self._get_thread_ts(card.deployment_id)
 
         # Build payload with threading if available
         payload = self._build_payload(card, thread_ts=effective_thread_ts)
@@ -441,7 +443,7 @@ class SlackChannel:
                 delay = self.base_delay * (2 ** (attempt - 1))
                 logger.info(
                     f"Retrying Slack send (attempt {attempt + 1}/{self.max_retries + 1}) "
-                    f"after {delay:.1f}s delay for strategy {card.strategy_id}"
+                    f"after {delay:.1f}s delay for strategy {card.deployment_id}"
                 )
                 await asyncio.sleep(delay)
 
@@ -455,27 +457,29 @@ class SlackChannel:
 
                 thread_info = " (thread reply)" if is_thread_reply else ""
                 logger.info(
-                    f"Slack alert sent successfully for strategy {card.strategy_id} "
+                    f"Slack alert sent successfully for strategy {card.deployment_id} "
                     f"(severity={card.severity.value}){thread_info}"
                 )
                 return result
 
             # If rate limited, use the server's retry_after value
             if result.retry_after:
-                logger.warning(f"Rate limited by Slack, waiting {result.retry_after}s for strategy {card.strategy_id}")
+                logger.warning(
+                    f"Rate limited by Slack, waiting {result.retry_after}s for strategy {card.deployment_id}"
+                )
                 if attempt < self.max_retries:
                     await asyncio.sleep(result.retry_after)
 
             last_error = result.error
             logger.warning(
                 f"Slack send failed (attempt {attempt + 1}/{self.max_retries + 1}): "
-                f"{result.error} for strategy {card.strategy_id}"
+                f"{result.error} for strategy {card.deployment_id}"
             )
 
         # All retries exhausted
         logger.error(
             f"Failed to send Slack alert after {self.max_retries + 1} attempts "
-            f"for strategy {card.strategy_id}: {last_error}"
+            f"for strategy {card.deployment_id}: {last_error}"
         )
         return SlackSendResult(success=False, error=last_error)
 
@@ -495,7 +499,7 @@ class SlackChannel:
         """
         return asyncio.run(self.send_alert(card, thread_ts=thread_ts))
 
-    def set_thread_for_strategy(self, strategy_id: str, thread_ts: str) -> None:
+    def set_thread_for_strategy(self, deployment_id: str, thread_ts: str) -> None:
         """Set the thread_ts for a strategy externally.
 
         This allows integration with the Slack Web API which returns
@@ -503,14 +507,15 @@ class SlackChannel:
         this method to enable subsequent alerts to be threaded.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             thread_ts: The thread timestamp from Slack Web API
         """
-        self._set_thread_ts(strategy_id, thread_ts)
+        self._set_thread_ts(deployment_id, thread_ts)
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def send_custom_message(
         self,
-        strategy_id: str,
+        deployment_id: str,
         severity: Severity,
         title: str,
         message: str,
@@ -523,7 +528,7 @@ class SlackChannel:
         come from an OperatorCard. Supports threading for related messages.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             severity: Alert severity level
             title: Alert title
             message: Alert message body
@@ -549,7 +554,7 @@ class SlackChannel:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Strategy:* {strategy_id}\n\n{message}",
+                    "text": f"*Strategy:* {deployment_id}\n\n{message}",
                 },
             },
         ]
@@ -572,7 +577,7 @@ class SlackChannel:
 
         # Add dashboard link button if configured
         if self.dashboard_base_url:
-            dashboard_link = f"{self.dashboard_base_url}/strategy/{strategy_id}"
+            dashboard_link = f"{self.dashboard_base_url}/strategy/{deployment_id}"
             blocks.append(
                 {
                     "type": "actions",
@@ -592,14 +597,14 @@ class SlackChannel:
             )
 
         # Get thread_ts from storage if not explicitly provided
-        effective_thread_ts = thread_ts or self._get_thread_ts(strategy_id)
+        effective_thread_ts = thread_ts or self._get_thread_ts(deployment_id)
 
         payload: dict[str, Any] = {
             "blocks": blocks,
             "attachments": [
                 {
                     "color": color,
-                    "fallback": f"{severity.value}: {title} - {strategy_id}",
+                    "fallback": f"{severity.value}: {title} - {deployment_id}",
                 }
             ],
         }
@@ -615,8 +620,8 @@ class SlackChannel:
         if result.success:
             result.thread_ts = effective_thread_ts
             thread_info = " (thread reply)" if is_thread_reply else ""
-            logger.info(f"Custom Slack message sent for strategy {strategy_id}{thread_info}")
+            logger.info(f"Custom Slack message sent for strategy {deployment_id}{thread_info}")
         else:
-            logger.error(f"Failed to send custom Slack message for strategy {strategy_id}: {result.error}")
+            logger.error(f"Failed to send custom Slack message for strategy {deployment_id}: {result.error}")
 
         return result

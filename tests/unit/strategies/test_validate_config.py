@@ -45,7 +45,7 @@ class _NoopStrategy(IntentStrategy):
     def get_open_positions(self):
         from almanak.framework.teardown.models import TeardownPositionSummary
 
-        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+        return TeardownPositionSummary.empty(self.deployment_id or self.STRATEGY_NAME)
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []
@@ -103,7 +103,7 @@ class _CrossFieldStrategy(_NoopStrategy):
 def _make(cls, config: dict | None = None) -> IntentStrategy:
     """Instantiate an IntentStrategy subclass with minimal kwargs."""
     return cls(
-        config=config if config is not None else {"strategy_id": cls.STRATEGY_NAME},
+        config=config if config is not None else {"deployment_id": cls.STRATEGY_NAME},
         chain="arbitrum",
         wallet_address="0x000000000000000000000000000000000000dEaD",
     )
@@ -187,7 +187,7 @@ class TestOverrideInvokedDuringInit:
         with pytest.raises(ConfigValidationError) as excinfo:
             _make(
                 _RaisingStrategy,
-                config={"strategy_id": "raise_test", "trade_size_usd": 0},
+                config={"deployment_id": "raise_test", "trade_size_usd": 0},
             )
         assert excinfo.value.field == "trade_size_usd"
         assert "trade_size_usd" in excinfo.value.message
@@ -195,7 +195,7 @@ class TestOverrideInvokedDuringInit:
     def test_override_passes_with_valid_config(self):
         strategy = _make(
             _RaisingStrategy,
-            config={"strategy_id": "raise_test", "trade_size_usd": Decimal("100")},
+            config={"deployment_id": "raise_test", "trade_size_usd": Decimal("100")},
         )
         # Instantiation succeeded -- validate_config didn't raise.
         assert strategy.chain == "arbitrum"
@@ -205,7 +205,7 @@ class TestOverrideInvokedDuringInit:
             _make(
                 _CrossFieldStrategy,
                 config={
-                    "strategy_id": "cross",
+                    "deployment_id": "cross",
                     "rsi_oversold": 70,
                     "rsi_overbought": 30,
                 },
@@ -234,7 +234,7 @@ class TestValidationRunsBeforeSetup:
         with pytest.raises(ConfigValidationError):
             local["s"] = _make(
                 _RaisingStrategy,
-                config={"strategy_id": "raise_test", "trade_size_usd": 0},
+                config={"deployment_id": "raise_test", "trade_size_usd": 0},
             )
         # "s" never got assigned because __init__ raised.
         assert "s" not in local
@@ -253,10 +253,10 @@ class TestValidationRunsBeforeSetup:
 
         _make(
             _CaptureStrategy,
-            config={"strategy_id": "capture_config", "trade_size_usd": "42"},
+            config={"deployment_id": "capture_config", "trade_size_usd": "42"},
         )
         assert captured["config_seen"] == {
-            "strategy_id": "capture_config",
+            "deployment_id": "capture_config",
             "trade_size_usd": "42",
         }
         assert captured["trade_size"] == "42"
@@ -315,7 +315,7 @@ class TestChainContextAvailableInValidateConfig:
 
         _make(
             _ChainAwareStrategy,
-            config={"strategy_id": "chain_aware"},
+            config={"deployment_id": "chain_aware"},
         )
         # Constructor passed chain="arbitrum" -- hook must see it, not the
         # StrategyBase default of "unknown".
@@ -338,13 +338,13 @@ class TestChainContextAvailableInValidateConfig:
 
         # arbitrum -> rejected
         with pytest.raises(ConfigValidationError) as excinfo:
-            _make(_OnlyBaseStrategy, config={"strategy_id": "only_base"})
+            _make(_OnlyBaseStrategy, config={"deployment_id": "only_base"})
         assert excinfo.value.field == "chain"
         assert "arbitrum" in excinfo.value.message
 
         # base -> accepted
         s = _OnlyBaseStrategy(
-            config={"strategy_id": "only_base"},
+            config={"deployment_id": "only_base"},
             chain="base",
             wallet_address="0x000000000000000000000000000000000000dEaD",
         )

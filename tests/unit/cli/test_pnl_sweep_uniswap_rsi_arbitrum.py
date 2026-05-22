@@ -72,7 +72,7 @@ def _make_backtest_result(
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo_uniswap_rsi_sweep",
+        deployment_id="demo_uniswap_rsi_sweep",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 1, 31, tzinfo=UTC),
         trades=[],
@@ -238,7 +238,7 @@ class TestStrategyParameterInjection:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "test_rsi"
+            deployment_id = "test_rsi"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

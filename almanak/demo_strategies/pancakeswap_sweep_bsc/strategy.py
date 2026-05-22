@@ -207,7 +207,7 @@ class PancakeSwapSweepBSCStrategy(IntentStrategy):
             logger.warning(f"Failed to query balance for teardown; reporting no positions: {e}")
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_pancakeswap_sweep_bsc"),
+            deployment_id=getattr(self, "deployment_id", "demo_pancakeswap_sweep_bsc"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

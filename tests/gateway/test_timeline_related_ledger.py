@@ -46,7 +46,7 @@ def sqlite_store() -> tuple[TimelineStore, Path]:
 def _make_event(related_ledger_entry_id: str = "") -> TimelineEvent:
     return TimelineEvent(
         event_id="evt-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         timestamp=datetime.now(UTC),
         event_type="POSITION_OPENED",
         description="LP_OPEN landed on-chain",
@@ -63,7 +63,7 @@ class TestDataclass:
     def test_default_is_empty_string(self) -> None:
         evt = TimelineEvent(
             event_id="e",
-            strategy_id="s",
+            deployment_id="s",
             timestamp=datetime.now(UTC),
             event_type="STATE_CHANGE",
             description="d",
@@ -82,7 +82,7 @@ class TestDataclass:
 
     def test_from_dict_round_trip(self) -> None:
         original = _make_event(related_ledger_entry_id="ledger-99")
-        rebuilt = TimelineEvent.from_dict(original.to_dict() | {"strategy_id": original.strategy_id})
+        rebuilt = TimelineEvent.from_dict(original.to_dict() | {"deployment_id": original.deployment_id})
         assert rebuilt.related_ledger_entry_id == "ledger-99"
 
 
@@ -129,7 +129,7 @@ class TestSQLiteRoundTrip:
                     """
                     CREATE TABLE timeline_events (
                         event_id TEXT PRIMARY KEY,
-                        strategy_id TEXT NOT NULL,
+                        deployment_id TEXT NOT NULL,
                         timestamp TEXT NOT NULL,
                         event_type TEXT NOT NULL,
                         description TEXT,
@@ -156,7 +156,7 @@ class TestSQLiteRoundTrip:
 class TestProtoSurface:
     def test_record_request_carries_field(self) -> None:
         req = gateway_pb2.RecordTimelineEventRequest(
-            strategy_id="s",
+            deployment_id="s",
             event_type="POSITION_OPENED",
             description="d",
             related_ledger_entry_id="ledger-7",
@@ -323,7 +323,7 @@ class TestPostgresCapabilityGate:
 
         event = TimelineEvent(
             event_id="evt-pg",
-            strategy_id="strat-pg",
+            deployment_id="strat-pg",
             timestamp=datetime.now(UTC),
             event_type="STATE_CHANGE",
             description="d",

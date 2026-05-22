@@ -32,7 +32,7 @@ class _FakeIdentity:
     def __init__(self, *, execution_mode: str = "live") -> None:
         self.execution_mode = execution_mode
         self.deployment_id = "dep-1"
-        self.strategy_id = "strat-1"
+        self.deployment_id = "strat-1"
         self.cycle_id = "cycle-1"
 
 
@@ -270,7 +270,7 @@ async def test_writer_propagates_typed_persistence_error_in_live():
     event = _FakeEvent({"event_type": "REPAY"}, execution_mode="live")
 
     async def _fake_save(_ev: Any) -> bool:
-        raise AccountingPersistenceError("accounting", strategy_id="strat-1")
+        raise AccountingPersistenceError("accounting", deployment_id="strat-1")
 
     store = AsyncMock()
     store.save_accounting_event = _fake_save
@@ -285,7 +285,7 @@ async def test_writer_swallows_typed_persistence_error_in_paper(caplog):
     event = _FakeEvent({"event_type": "REPAY"}, execution_mode="paper")
 
     async def _fake_save(_ev: Any) -> bool:
-        raise AccountingPersistenceError("accounting", strategy_id="strat-1")
+        raise AccountingPersistenceError("accounting", deployment_id="strat-1")
 
     store = AsyncMock()
     store.save_accounting_event = _fake_save

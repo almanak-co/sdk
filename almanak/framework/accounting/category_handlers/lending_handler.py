@@ -103,7 +103,6 @@ def handle_lending(  # noqa: C901
         return None
 
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
-    strategy_id = ledger_row.get("strategy_id") or outbox_row.get("strategy_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     execution_mode = ledger_row.get("execution_mode") or ""
     chain = ledger_row.get("chain") or ""
@@ -382,7 +381,6 @@ def handle_lending(  # noqa: C901
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, intent_type_str, _id_seed, position_key),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         timestamp=timestamp,

@@ -11,7 +11,7 @@ Convention matches test_dashboard_service.py:
   - mocked state_manager
 
 Coverage per RPC:
-  - invalid_strategy_id → INVALID_ARGUMENT
+  - invalid_deployment_id → INVALID_ARGUMENT
   - no state_manager   → degraded empty response (not an error)
   - empty backend      → empty rows, cutover_states populated with
                          PRE_BACKFILL (no migration_state row)
@@ -272,13 +272,13 @@ class TestBuildCutoverStateEntry:
 
 @pytest.mark.asyncio
 class TestGetPositions:
-    async def test_invalid_strategy_id_returns_invalid_argument(
+    async def test_invalid_deployment_id_returns_invalid_argument(
         self,
         dashboard_service: DashboardServiceServicer,
         mock_context: MagicMock,
     ) -> None:
         dashboard_service._initialized = True
-        request = gateway_pb2.GetPositionsRequest(strategy_id="")
+        request = gateway_pb2.GetPositionsRequest(deployment_id="")
         response = await dashboard_service.GetPositions(request, mock_context)
         assert isinstance(response, gateway_pb2.GetPositionsResponse)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -290,7 +290,7 @@ class TestGetPositions:
     ) -> None:
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetPositionsRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetPositionsRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetPositions(request, mock_context)
         assert len(response.positions) == 0
         assert len(response.cutover_states) == 0
@@ -308,7 +308,7 @@ class TestGetPositions:
         sm.get_position_events_filtered = AsyncMock(return_value=[])
         dashboard_service._state_manager = sm
 
-        request = gateway_pb2.GetPositionsRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetPositionsRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetPositions(request, mock_context)
         assert len(response.positions) == 0
         sm.get_position_registry_open_rows.assert_awaited_once()
@@ -325,7 +325,7 @@ class TestGetPositions:
             _registry_row(handle="5678", physical_identity_hash="cafe", accounting_category="LP_UNIV3"),
         ]
         snapshot = PortfolioSnapshot(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             timestamp=datetime(2026, 5, 17, 12, 0, tzinfo=UTC),
             total_value_usd=1000.0,
             available_cash_usd=100.0,
@@ -345,7 +345,7 @@ class TestGetPositions:
         sm.get_position_events_filtered = AsyncMock(return_value=[])
         dashboard_service._state_manager = sm
 
-        request = gateway_pb2.GetPositionsRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetPositionsRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetPositions(request, mock_context)
 
         assert len(response.positions) == 2
@@ -496,13 +496,13 @@ class TestBuildSnapshotPositionIndex:
 
 @pytest.mark.asyncio
 class TestGetPositionRangeHistory:
-    async def test_invalid_strategy_id_returns_invalid_argument(
+    async def test_invalid_deployment_id_returns_invalid_argument(
         self,
         dashboard_service: DashboardServiceServicer,
         mock_context: MagicMock,
     ) -> None:
         dashboard_service._initialized = True
-        request = gateway_pb2.GetPositionRangeHistoryRequest(strategy_id="")
+        request = gateway_pb2.GetPositionRangeHistoryRequest(deployment_id="")
         response = await dashboard_service.GetPositionRangeHistory(request, mock_context)
         assert isinstance(response, gateway_pb2.GetPositionRangeHistoryResponse)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -514,7 +514,7 @@ class TestGetPositionRangeHistory:
     ) -> None:
         dashboard_service._initialized = True
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             accounting_category="LP_UNIV3",
             handle="1234",
         )
@@ -528,7 +528,7 @@ class TestGetPositionRangeHistory:
     ) -> None:
         dashboard_service._initialized = True
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="base",
             accounting_category="LP_UNIV3",
         )
@@ -543,7 +543,7 @@ class TestGetPositionRangeHistory:
         dashboard_service._initialized = True
         dashboard_service._state_manager = MagicMock()
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="base",
             accounting_category="AAVE_COLLATERAL",
             handle="0xpos",
@@ -560,7 +560,7 @@ class TestGetPositionRangeHistory:
         dashboard_service._initialized = True
         dashboard_service._state_manager = MagicMock()
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="base",
             accounting_category="SWAP_RSI",
             handle="0xpos",
@@ -602,7 +602,7 @@ class TestGetPositionRangeHistory:
         dashboard_service._state_manager = sm
 
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="base",
             accounting_category="LP_UNIV3",
             handle="1234",
@@ -645,7 +645,7 @@ class TestGetPositionRangeHistory:
         from_unix = int(datetime(2026, 5, 12, tzinfo=UTC).timestamp())
         to_unix = int(datetime(2026, 5, 18, tzinfo=UTC).timestamp())
         request = gateway_pb2.GetPositionRangeHistoryRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             chain="base",
             accounting_category="LP_UNIV3",
             handle="1234",
@@ -705,7 +705,7 @@ class TestGetPositionRangeHistory:
 
         response = await dashboard_service.GetPositionRangeHistory(
             gateway_pb2.GetPositionRangeHistoryRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 chain="base",
                 accounting_category="LP_UNIV3",
                 physical_identity_hash="0xdeadbeef",
@@ -734,7 +734,7 @@ class TestGetPositionRangeHistory:
 
         response = await dashboard_service.GetPositionRangeHistory(
             gateway_pb2.GetPositionRangeHistoryRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 chain="base",
                 accounting_category="LP_UNIV3",
                 physical_identity_hash="0xnonexistent",
@@ -782,7 +782,7 @@ class TestGetPositionRangeHistory:
 
         response = await dashboard_service.GetPositionRangeHistory(
             gateway_pb2.GetPositionRangeHistoryRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 chain="base",
                 accounting_category="LP_UNIV3",
                 handle="lp-shared",
@@ -826,7 +826,7 @@ class TestGetPositionRangeHistory:
 
         response = await dashboard_service.GetPositionRangeHistory(
             gateway_pb2.GetPositionRangeHistoryRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 chain="base",
                 accounting_category="LP_UNIV3",
                 handle="lp-shared",
@@ -864,7 +864,7 @@ class TestGetPositionRangeHistory:
 
         response = await dashboard_service.GetPositionRangeHistory(
             gateway_pb2.GetPositionRangeHistoryRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 chain="base",
                 accounting_category="LP_UNIV3",
                 handle="lp-legacy",

@@ -198,7 +198,7 @@ class CompoundV3PnLBacktestStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.supply_amount} {self.supply_token} to Compound V3",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
                 logger.info("SUPPLY confirmed: %s %s -> state=supplied", self.supply_amount, self.supply_token)
@@ -211,7 +211,7 @@ class CompoundV3PnLBacktestStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Withdrew {self.supply_token} from Compound V3",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "withdraw", "protocol": "compound_v3"},
                     )
                 )
@@ -271,7 +271,7 @@ class CompoundV3PnLBacktestStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

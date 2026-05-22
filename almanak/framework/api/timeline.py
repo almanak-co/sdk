@@ -162,7 +162,7 @@ class TimelineEvent:
     tx_hash: str | None = None
 
     # Additional context
-    strategy_id: str = ""
+    deployment_id: str = ""
     chain: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
@@ -191,7 +191,7 @@ class TimelineEvent:
             "event_type": self.event_type.value,
             "description": self.description,
             "tx_hash": self.tx_hash,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self.chain,
             "details": self.details,
             "block_explorer_url": self.block_explorer_url,
@@ -236,8 +236,8 @@ _event_store: dict[str, list[TimelineEvent]] = {}
 # Gateway client for dual-write persistence (registered by StrategyRunner at startup)
 _gateway_client: Any = None
 
-# Throttle state: tracks last emission time per (strategy_id, event_type) for dedup.
-# Events matching a recently-emitted (strategy_id, event_type) within the cooldown
+# Throttle state: tracks last emission time per (deployment_id, event_type) for dedup.
+# Events matching a recently-emitted (deployment_id, event_type) within the cooldown
 # window are suppressed to prevent timeline spam (e.g. STRATEGY_STUCK every 60s).
 # Note: these dicts are accessed from the single-threaded strategy runner loop.
 # If add_event() is ever called from multiple threads, wrap in a threading.Lock.
@@ -287,20 +287,20 @@ def _load_events_from_file() -> None:
         with open(EVENTS_CACHE_FILE) as f:
             cached_data = json.load(f)
 
-        # Handle both formats: dict keyed by strategy_id, or flat list
+        # Handle both formats: dict keyed by deployment_id, or flat list
         if isinstance(cached_data, list):
             # Old format: flat list of events
             events_by_strategy: dict[str, list] = {}
             for event_data in cached_data:
-                sid = event_data.get("strategy_id", "unknown")
+                sid = event_data.get("deployment_id", "unknown")
                 if sid not in events_by_strategy:
                     events_by_strategy[sid] = []
                 events_by_strategy[sid].append(event_data)
             cached_data = events_by_strategy
 
-        for strategy_id, events_data in cached_data.items():
-            if strategy_id not in _event_store:
-                _event_store[strategy_id] = []
+        for deployment_id, events_data in cached_data.items():
+            if deployment_id not in _event_store:
+                _event_store[deployment_id] = []
             for event_data in events_data:
                 # Map event_type - handle both old lowercase and new uppercase formats
                 event_type_str = event_data.get("event_type", "CUSTOM").upper()
@@ -324,7 +324,7 @@ def _load_events_from_file() -> None:
                     event_type=event_type,
                     description=event_data.get("description", ""),
                     tx_hash=event_data.get("tx_hash"),
-                    strategy_id=event_data.get("strategy_id", strategy_id),
+                    deployment_id=event_data.get("deployment_id", deployment_id),
                     chain=event_data.get("chain", ""),
                     details=event_data.get("details") or event_data.get("metadata", {}),
                     cycle_id=event_data.get("cycle_id", ""),
@@ -334,12 +334,12 @@ def _load_events_from_file() -> None:
                 # Avoid duplicates
                 if not any(
                     e.timestamp == event.timestamp and e.description == event.description
-                    for e in _event_store[strategy_id]
+                    for e in _event_store[deployment_id]
                 ):
-                    _event_store[strategy_id].append(event)
+                    _event_store[deployment_id].append(event)
 
             # Sort by timestamp descending
-            _event_store[strategy_id].sort(key=lambda e: e.timestamp, reverse=True)
+            _event_store[deployment_id].sort(key=lambda e: e.timestamp, reverse=True)
 
         total_events = sum(len(e) for e in _event_store.values())
         if total_events > 0:
@@ -360,7 +360,7 @@ def add_event(event: TimelineEvent) -> None:
     All 26+ callers get gateway persistence for free with zero call-site changes.
 
     Certain noisy event types (e.g. STRATEGY_STUCK) are throttled: if the same
-    (strategy_id, event_type) was emitted within the last 5 minutes, the event
+    (deployment_id, event_type) was emitted within the last 5 minutes, the event
     is suppressed and a count is tracked. When the cooldown expires, the next
     event includes the suppressed count in its description.
 
@@ -369,8 +369,8 @@ def add_event(event: TimelineEvent) -> None:
     """
     # Throttle noisy event types to prevent timeline spam
     event_type_str = event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type)
-    if event_type_str in _THROTTLED_EVENT_TYPES and event.strategy_id:
-        throttle_key = (event.strategy_id, event_type_str)
+    if event_type_str in _THROTTLED_EVENT_TYPES and event.deployment_id:
+        throttle_key = (event.deployment_id, event_type_str)
         now = datetime.now(UTC)
         last_emitted = _throttle_last_emitted.get(throttle_key)
         if last_emitted is not None:
@@ -380,7 +380,7 @@ def add_event(event: TimelineEvent) -> None:
                 logger.debug(
                     "Throttled %s event for %s (%d suppressed in current window)",
                     event_type_str,
-                    event.strategy_id,
+                    event.deployment_id,
                     _throttle_suppressed_counts[throttle_key],
                 )
                 return
@@ -393,11 +393,11 @@ def add_event(event: TimelineEvent) -> None:
             event.description = f"{event.description} ({suppressed} suppressed since last emit)"
         _throttle_last_emitted[throttle_key] = now
 
-    if event.strategy_id not in _event_store:
-        _event_store[event.strategy_id] = []
-    _event_store[event.strategy_id].append(event)
+    if event.deployment_id not in _event_store:
+        _event_store[event.deployment_id] = []
+    _event_store[event.deployment_id].append(event)
     # Keep events sorted by timestamp descending
-    _event_store[event.strategy_id].sort(key=lambda e: e.timestamp, reverse=True)
+    _event_store[event.deployment_id].sort(key=lambda e: e.timestamp, reverse=True)
 
     # Persist to file for cross-process sharing (dashboard) — only in local mode
     if _gateway_client is None:
@@ -409,7 +409,7 @@ def add_event(event: TimelineEvent) -> None:
             from almanak.gateway.proto import gateway_pb2
 
             request = gateway_pb2.RecordTimelineEventRequest(
-                strategy_id=event.strategy_id,
+                deployment_id=event.deployment_id,
                 event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
                 description=event.description,
                 tx_hash=event.tx_hash or "",
@@ -430,8 +430,8 @@ def _persist_events_to_file() -> None:
     try:
         # Convert events to serializable format
         cache_data = {}
-        for strategy_id, events in _event_store.items():
-            cache_data[strategy_id] = [e.to_dict() for e in events]
+        for deployment_id, events in _event_store.items():
+            cache_data[deployment_id] = [e.to_dict() for e in events]
 
         # Write atomically using temp file
         temp_file = EVENTS_CACHE_FILE.with_suffix(".tmp")
@@ -445,7 +445,7 @@ def _persist_events_to_file() -> None:
 
 
 def get_events(
-    strategy_id: str,
+    deployment_id: str,
     event_type: TimelineEventType | None = None,
     offset: int = 0,
     limit: int = 50,
@@ -453,7 +453,7 @@ def get_events(
     """Get timeline events for a strategy.
 
     Args:
-        strategy_id: The strategy ID to get events for
+        deployment_id: The deployment ID to get events for
         event_type: Optional filter by event type
         offset: Number of events to skip (for pagination)
         limit: Maximum number of events to return
@@ -461,7 +461,7 @@ def get_events(
     Returns:
         TimelineResponse with paginated events
     """
-    events = _event_store.get(strategy_id, [])
+    events = _event_store.get(deployment_id, [])
 
     # Filter by event type if specified
     if event_type is not None:
@@ -485,17 +485,17 @@ def get_events(
     )
 
 
-def clear_events(strategy_id: str | None = None) -> None:
+def clear_events(deployment_id: str | None = None) -> None:
     """Clear events from the store and file.
 
     Args:
-        strategy_id: If provided, only clear events for this strategy.
+        deployment_id: If provided, only clear events for this strategy.
                     If None, clear all events.
     """
-    if strategy_id is not None:
-        _event_store.pop(strategy_id, None)
+    if deployment_id is not None:
+        _event_store.pop(deployment_id, None)
         # Clear throttle state for this strategy so the next event isn't suppressed
-        keys_to_remove = [k for k in _throttle_last_emitted if k[0] == strategy_id]
+        keys_to_remove = [k for k in _throttle_last_emitted if k[0] == deployment_id]
         for k in keys_to_remove:
             _throttle_last_emitted.pop(k, None)
             _throttle_suppressed_counts.pop(k, None)
@@ -512,9 +512,9 @@ def clear_events(strategy_id: str | None = None) -> None:
 router = APIRouter(prefix="/api/strategies", tags=["timeline"])
 
 
-@router.get("/{strategy_id}/timeline")
+@router.get("/{deployment_id}/timeline")
 def get_strategy_timeline(
-    strategy_id: str,
+    deployment_id: str,
     event_type: TimelineEventType | None = Query(None, description="Filter by event type"),
     offset: int = Query(0, ge=0, description="Number of events to skip"),
     limit: int = Query(50, ge=1, le=100, description="Maximum events to return"),
@@ -525,7 +525,7 @@ def get_strategy_timeline(
     with optional filtering by event type.
 
     Args:
-        strategy_id: The unique identifier of the strategy
+        deployment_id: The unique identifier of the strategy
         event_type: Optional event type to filter by
         offset: Number of events to skip for pagination
         limit: Maximum number of events to return (1-100)
@@ -534,7 +534,7 @@ def get_strategy_timeline(
         TimelineResponse with events and pagination metadata
     """
     response = get_events(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         event_type=event_type,
         offset=offset,
         limit=limit,

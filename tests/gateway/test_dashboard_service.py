@@ -27,7 +27,7 @@ from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidenc
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
-from almanak.gateway.timeline.store import TimelineEvent, TimelineStore, reset_timeline_store
+from almanak.gateway.timeline.store import TimelineEvent, reset_timeline_store
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def temp_strategies_dir():
         strategy_dir.mkdir()
 
         config = {
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "strategy_name": "Test Strategy",
             "chain": "arbitrum",
             "protocol": "Uniswap V3",
@@ -75,7 +75,7 @@ def temp_strategies_dir():
 
 
 def _make_instance(
-    strategy_id: str = "test_strategy",
+    deployment_id: str = "test_strategy",
     strategy_name: str | None = None,
     chain: str = "arbitrum",
     protocol: str = "Uniswap V3",
@@ -84,8 +84,8 @@ def _make_instance(
 ) -> MagicMock:
     """Create a mock StrategyInstance for testing."""
     inst = MagicMock()
-    inst.strategy_id = strategy_id
-    inst.strategy_name = strategy_name or strategy_id.split(":")[0]
+    inst.deployment_id = deployment_id
+    inst.strategy_name = strategy_name or deployment_id.split(":")[0]
     inst.template_name = "TestStrategy"
     inst.chain = chain
     inst.protocol = protocol
@@ -147,13 +147,11 @@ class TestListStrategies:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "uniswap_lp:abc123"
+        assert response.strategies[0].deployment_id == "uniswap_lp:abc123"
         assert response.strategies[0].status == "RUNNING"
 
     @pytest.mark.asyncio
-    async def test_available_returns_filesystem_templates(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_available_returns_filesystem_templates(self, dashboard_service, mock_context, temp_strategies_dir):
         """AVAILABLE filter returns filesystem-discovered templates."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -167,14 +165,12 @@ class TestListStrategies:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "test_strategy"
+        assert response.strategies[0].deployment_id == "test_strategy"
         assert response.strategies[0].chain == "arbitrum"
         assert response.strategies[0].protocol == "Uniswap V3"
 
     @pytest.mark.asyncio
-    async def test_available_deduplicates_exact_match(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_available_deduplicates_exact_match(self, dashboard_service, mock_context, temp_strategies_dir):
         """AVAILABLE excludes templates with exact-match instance IDs (--once runs)."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -192,9 +188,7 @@ class TestListStrategies:
         assert response.total_count == 0  # Template excluded
 
     @pytest.mark.asyncio
-    async def test_available_deduplicates_suffixed_instance(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_available_deduplicates_suffixed_instance(self, dashboard_service, mock_context, temp_strategies_dir):
         """AVAILABLE excludes templates when instance uses suffixed ID (continuous runs)."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -212,9 +206,7 @@ class TestListStrategies:
         assert response.total_count == 0  # Template excluded by canonical match
 
     @pytest.mark.asyncio
-    async def test_all_returns_combined(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_all_returns_combined(self, dashboard_service, mock_context, temp_strategies_dir):
         """ALL filter returns registry instances plus unseen filesystem templates."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -230,14 +222,12 @@ class TestListStrategies:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 2  # 1 registry + 1 filesystem
-        ids = {s.strategy_id for s in response.strategies}
+        ids = {s.deployment_id for s in response.strategies}
         assert "other_strategy:xyz789" in ids
         assert "test_strategy" in ids
 
     @pytest.mark.asyncio
-    async def test_all_deduplicates_templates(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_all_deduplicates_templates(self, dashboard_service, mock_context, temp_strategies_dir):
         """ALL filter deduplicates filesystem templates that have registry instances."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -252,7 +242,7 @@ class TestListStrategies:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1  # Only the registry instance
-        assert response.strategies[0].strategy_id == "test_strategy:run001"
+        assert response.strategies[0].deployment_id == "test_strategy:run001"
 
     @pytest.mark.asyncio
     async def test_status_filter_applied_on_registry(self, dashboard_service, mock_context):
@@ -271,7 +261,7 @@ class TestListStrategies:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "strat_a:001"
+        assert response.strategies[0].deployment_id == "strat_a:001"
 
     @pytest.mark.asyncio
     async def test_archived_filter_includes_archived_instances(self, dashboard_service, mock_context):
@@ -292,12 +282,10 @@ class TestListStrategies:
         # Verify include_archived=True was passed
         mock_registry.list_all.assert_called_once_with(include_archived=True)
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "old_strat:001"
+        assert response.strategies[0].deployment_id == "old_strat:001"
 
     @pytest.mark.asyncio
-    async def test_chain_filter(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_chain_filter(self, dashboard_service, mock_context, temp_strategies_dir):
         """Chain filter works across both AVAILABLE and REGISTRY modes."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -322,9 +310,7 @@ class TestListStrategies:
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
-        mock_context.abort = AsyncMock(side_effect=grpc.aio.AbortError(
-            grpc.StatusCode.INVALID_ARGUMENT, "test"
-        ))
+        mock_context.abort = AsyncMock(side_effect=grpc.aio.AbortError(grpc.StatusCode.INVALID_ARGUMENT, "test"))
 
         request = gateway_pb2.ListStrategiesRequest(status_filter="BOGUS")
 
@@ -365,8 +351,8 @@ class TestGetStrategyDetails:
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
-        request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="nonexistent")
-        response = await dashboard_service.GetStrategyDetails(request, mock_context)
+        request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="nonexistent")
+        await dashboard_service.GetStrategyDetails(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.NOT_FOUND)
 
@@ -377,23 +363,23 @@ class TestGetStrategyDetails:
         dashboard_service._strategies_root = temp_strategies_dir
 
         request = gateway_pb2.GetStrategyDetailsRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             include_timeline=False,
         )
         response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        assert response.summary.strategy_id == "test_strategy"
+        assert response.summary.deployment_id == "test_strategy"
         assert response.summary.chain == "arbitrum"
 
     @pytest.mark.asyncio
-    async def test_get_details_invalid_strategy_id(self, dashboard_service, mock_context):
-        """Test validation of strategy_id."""
+    async def test_get_details_invalid_deployment_id(self, dashboard_service, mock_context):
+        """Test validation of deployment_id."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
-        # Empty strategy_id
-        request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="")
-        response = await dashboard_service.GetStrategyDetails(request, mock_context)
+        # Empty deployment_id
+        request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="")
+        await dashboard_service.GetStrategyDetails(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
@@ -412,7 +398,7 @@ class TestPortfolioFallback:
         dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
             return_value=PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 total_value_usd=Decimal("123.45"),
                 available_cash_usd=Decimal("100"),
                 value_confidence=ValueConfidence.HIGH,
@@ -438,7 +424,7 @@ class TestPortfolioFallback:
         dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
             return_value=PortfolioSnapshot(
                 timestamp=datetime.fromtimestamp(0, tz=UTC),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 total_value_usd=Decimal("100"),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.STALE,
@@ -463,7 +449,7 @@ class TestPortfolioFallback:
         dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
             return_value=PortfolioSnapshot(
                 timestamp=datetime.fromtimestamp(0, tz=UTC),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 total_value_usd=Decimal("100"),
                 available_cash_usd=Decimal("0"),
                 value_confidence=ValueConfidence.STALE,
@@ -512,7 +498,7 @@ class TestGetTimeline:
         dashboard_service._strategies_root = temp_strategies_dir
 
         request = gateway_pb2.GetTimelineRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             limit=50,
         )
         response = await dashboard_service.GetTimeline(request, mock_context)
@@ -532,7 +518,7 @@ class TestGetTimeline:
         store.add_event(
             TimelineEvent(
                 event_id=str(uuid4()),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Test trade",
@@ -542,7 +528,7 @@ class TestGetTimeline:
         )
 
         request = gateway_pb2.GetTimelineRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             limit=50,
         )
         response = await dashboard_service.GetTimeline(request, mock_context)
@@ -564,7 +550,7 @@ class TestGetTimeline:
         store.add_event(
             TimelineEvent(
                 event_id=str(uuid4()),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 timestamp=datetime.now(UTC),
                 event_type="TRADE",
                 description="Trade event",
@@ -573,7 +559,7 @@ class TestGetTimeline:
         store.add_event(
             TimelineEvent(
                 event_id=str(uuid4()),
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 timestamp=datetime.now(UTC),
                 event_type="ERROR",
                 description="Error event",
@@ -581,7 +567,7 @@ class TestGetTimeline:
         )
 
         request = gateway_pb2.GetTimelineRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             limit=50,
             event_type_filter="TRADE",
         )
@@ -600,10 +586,10 @@ class TestGetStrategyConfig:
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
-        request = gateway_pb2.GetStrategyConfigRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetStrategyConfigRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetStrategyConfig(request, mock_context)
 
-        assert response.strategy_id == "test_strategy"
+        assert response.deployment_id == "test_strategy"
         assert response.strategy_name == "Test Strategy"
 
         config = json.loads(response.config_json)
@@ -616,8 +602,8 @@ class TestGetStrategyConfig:
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
-        request = gateway_pb2.GetStrategyConfigRequest(strategy_id="nonexistent")
-        response = await dashboard_service.GetStrategyConfig(request, mock_context)
+        request = gateway_pb2.GetStrategyConfigRequest(deployment_id="nonexistent")
+        await dashboard_service.GetStrategyConfig(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.NOT_FOUND)
 
@@ -631,8 +617,8 @@ class TestGetStrategyState:
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
 
-        request = gateway_pb2.GetStrategyStateRequest(strategy_id="test_strategy")
-        response = await dashboard_service.GetStrategyState(request, mock_context)
+        request = gateway_pb2.GetStrategyStateRequest(deployment_id="test_strategy")
+        await dashboard_service.GetStrategyState(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.NOT_FOUND)
 
@@ -650,10 +636,10 @@ class TestGetStrategyState:
         mock_state_manager.load_state = AsyncMock(return_value=mock_state)
         dashboard_service._state_manager = mock_state_manager
 
-        request = gateway_pb2.GetStrategyStateRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetStrategyStateRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetStrategyState(request, mock_context)
 
-        assert response.strategy_id == "test_strategy"
+        assert response.deployment_id == "test_strategy"
         assert response.version == 5
 
         state = json.loads(response.state_json)
@@ -675,7 +661,7 @@ class TestGetStrategyState:
         dashboard_service._state_manager = mock_state_manager
 
         request = gateway_pb2.GetStrategyStateRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             fields=["key", "count"],
         )
         response = await dashboard_service.GetStrategyState(request, mock_context)
@@ -695,7 +681,7 @@ class TestExecuteAction:
         dashboard_service._initialized = True
 
         request = gateway_pb2.ExecuteActionRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             action="PAUSE",
             reason="",  # Empty reason
         )
@@ -713,7 +699,7 @@ class TestExecuteAction:
 
         with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
             request = gateway_pb2.ExecuteActionRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 action="PAUSE",
                 reason="Maintenance",
             )
@@ -723,7 +709,7 @@ class TestExecuteAction:
         assert response.action_id  # Should have an action ID
 
         mock_store.write_command.assert_called_once_with(
-            agent_id="test_strategy",
+            deployment_id="test_strategy",
             command="PAUSE",
             issued_by="dashboard:Maintenance",
         )
@@ -737,7 +723,7 @@ class TestExecuteAction:
 
         with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
             request = gateway_pb2.ExecuteActionRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 action="RESUME",
                 reason="Ready to continue",
             )
@@ -746,7 +732,7 @@ class TestExecuteAction:
         assert response.success is True
 
         mock_store.write_command.assert_called_once_with(
-            agent_id="test_strategy",
+            deployment_id="test_strategy",
             command="RESUME",
             issued_by="dashboard:Ready to continue",
         )
@@ -757,7 +743,7 @@ class TestExecuteAction:
         dashboard_service._initialized = True
 
         request = gateway_pb2.ExecuteActionRequest(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             action="UNKNOWN_ACTION",
             reason="Test",
         )
@@ -798,8 +784,8 @@ class TestProtocolDerivation:
         result = dashboard_service._derive_protocol_from_config(config, "test")
         assert result == "Uniswap V3"
 
-    def test_derive_protocol_from_strategy_id(self, dashboard_service):
-        """Test deriving protocol from strategy ID."""
+    def test_derive_protocol_from_deployment_id(self, dashboard_service):
+        """Test deriving protocol from deployment ID."""
         assert dashboard_service._derive_protocol_from_config({}, "uniswap_lp") == "Uniswap V3"
         assert dashboard_service._derive_protocol_from_config({}, "aave_lending") == "Aave V3"
         assert dashboard_service._derive_protocol_from_config({}, "gmx_perps") == "GMX V2"
@@ -809,50 +795,44 @@ class TestProtocolDerivation:
         assert dashboard_service._derive_protocol_from_config({}, "unknown_strategy") == "Unknown"
 
 
-class TestDeployedModeAgentIdResolution:
-    """Tests for AGENT_ID normalization in deployed (K8s) mode.
+class TestDeployedModeIdentityPassThrough:
+    """Identity is passed through verbatim — no gateway-side translation.
 
-    When the platform injects AGENT_ID into the container, all gateway
-    service methods should use that ID for registry and state lookups,
-    regardless of the strategy_id sent by the SDK runner.
+    Per blueprint 29 (VIB-4722) the gateway no longer rewrites the SDK's
+    ``deployment_id`` to a separate hosted env id: there is one canonical
+    ``deployment_id``, resolved once at runner boot, and every gateway RPC
+    filters whatever the caller passed. These tests pin that pass-through
+    behaviour — the registry / heartbeat is keyed on the exact wire id.
     """
 
     @pytest.mark.asyncio
-    async def test_get_strategy_details_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """GetStrategyDetails uses AGENT_ID for registry lookup when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    async def test_get_strategy_details_uses_wire_id(self, dashboard_service, mock_context):
+        """GetStrategyDetails queries the registry with the wire deployment_id."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
-        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
+        inst = _make_instance("platform-agent-1234", strategy_name="uniswap_rsi")
         mock_registry.get.return_value = inst
 
         with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            # Dashboard sends the SDK strategy_id, but it gets resolved to AGENT_ID
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="platform-agent-1234")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        # Registry was queried with the resolved AGENT_ID
-        mock_registry.get.assert_called_with("platform-uuid-1234")
-        assert response.summary.strategy_id == "platform-uuid-1234"
+        # Registry queried with the exact wire id — no translation.
+        mock_registry.get.assert_called_with("platform-agent-1234")
+        assert response.summary.deployment_id == "platform-agent-1234"
 
     @pytest.mark.asyncio
-    async def test_register_instance_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """RegisterStrategyInstance stores under AGENT_ID when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-
+    async def test_register_instance_stores_wire_id(self, dashboard_service, mock_context):
+        """RegisterStrategyInstance stores under the wire deployment_id verbatim."""
         mock_registry = MagicMock()
         mock_registry.get.return_value = None
         mock_registry.register.return_value = True
 
         with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
             request = gateway_pb2.RegisterInstanceRequest(
-                strategy_id="uniswap_rsi:abc123",
+                deployment_id="platform-agent-1234",
                 strategy_name="uniswap_rsi",
                 chain="arbitrum",
                 protocol="Uniswap V3",
@@ -860,70 +840,58 @@ class TestDeployedModeAgentIdResolution:
             response = await dashboard_service.RegisterStrategyInstance(request, mock_context)
 
         assert response.success
-        # The registered instance should have strategy_id = AGENT_ID
         registered = mock_registry.register.call_args[0][0]
-        assert registered.strategy_id == "platform-uuid-1234"
+        assert registered.deployment_id == "platform-agent-1234"
 
     @pytest.mark.asyncio
-    async def test_update_status_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """UpdateStrategyInstanceStatus uses AGENT_ID for registry lookup."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-
+    async def test_update_status_uses_wire_id(self, dashboard_service, mock_context):
+        """UpdateStrategyInstanceStatus heartbeats the wire deployment_id verbatim."""
         mock_registry = MagicMock()
         mock_registry.heartbeat.return_value = True
 
         with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
             request = gateway_pb2.UpdateInstanceStatusRequest(
-                strategy_id="uniswap_rsi:abc123",
+                deployment_id="deployment:abc123def456",
                 heartbeat_only=True,
             )
             response = await dashboard_service.UpdateStrategyInstanceStatus(request, mock_context)
 
         assert response.success
-        mock_registry.heartbeat.assert_called_with("platform-uuid-1234")
+        mock_registry.heartbeat.assert_called_with("deployment:abc123def456")
 
     @pytest.mark.asyncio
-    async def test_local_mode_passes_through(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+    async def test_local_id_passes_through(self, dashboard_service, mock_context):
+        """A local deployment_id passes through unchanged."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
-        mock_registry.get.return_value = _make_instance("uniswap_rsi:abc123")
+        mock_registry.get.return_value = _make_instance("deployment:abc123def456")
 
         with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi:abc123")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="deployment:abc123def456")
             await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        # Registry queried with the original strategy_id
-        mock_registry.get.assert_called_with("uniswap_rsi:abc123")
+        mock_registry.get.assert_called_with("deployment:abc123def456")
 
     @pytest.mark.asyncio
-    async def test_get_strategy_config_falls_back_to_registry(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """GetStrategyConfig serves config from registry when filesystem has no match (deployed mode)."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    async def test_get_strategy_config_falls_back_to_registry(self, dashboard_service, mock_context):
+        """GetStrategyConfig serves config from registry when filesystem misses."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         config_data = {"strategy_name": "uniswap_rsi", "chain": "arbitrum"}
         mock_registry = MagicMock()
-        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
+        inst = _make_instance("platform-agent-1234", strategy_name="uniswap_rsi")
         inst.config_json = json.dumps(config_data)
         inst.updated_at = datetime.now(UTC)
         mock_registry.get.return_value = inst
 
         with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.GetStrategyConfigRequest(strategy_id="uniswap_rsi")
+            request = gateway_pb2.GetStrategyConfigRequest(deployment_id="platform-agent-1234")
             response = await dashboard_service.GetStrategyConfig(request, mock_context)
 
-        assert response.strategy_id == "platform-uuid-1234"
+        assert response.deployment_id == "platform-agent-1234"
         assert response.strategy_name == "uniswap_rsi"
         assert json.loads(response.config_json) == config_data
 
@@ -961,13 +929,11 @@ class TestListStrategiesSourceMatrix:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "only_in_registry:xyz"
+        assert response.strategies[0].deployment_id == "only_in_registry:xyz"
         assert response.strategies[0].chain == "base"
 
     @pytest.mark.asyncio
-    async def test_filesystem_only_source(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_filesystem_only_source(self, dashboard_service, mock_context, temp_strategies_dir):
         """AVAILABLE filter with empty registry: strategy found only on disk."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -983,7 +949,7 @@ class TestListStrategiesSourceMatrix:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "test_strategy"
+        assert response.strategies[0].deployment_id == "test_strategy"
         # Filesystem templates default to PAUSED status
         assert response.strategies[0].status == "PAUSED"
 
@@ -997,7 +963,7 @@ class TestListStrategiesSourceMatrix:
         mock_registry.list_all.return_value = []
 
         paper_session = {
-            "strategy_id": "paper:my_strat",
+            "deployment_id": "paper:my_strat",
             "name": "My Strat (Paper)",
             "status": "PAPER_TRADING",
             "chain": "arbitrum",
@@ -1021,14 +987,12 @@ class TestListStrategiesSourceMatrix:
             response = await dashboard_service.ListStrategies(request, mock_context)
 
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "paper:my_strat"
+        assert response.strategies[0].deployment_id == "paper:my_strat"
         assert response.strategies[0].status == "PAPER_TRADING"
         assert response.strategies[0].execution_mode == "paper"
 
     @pytest.mark.asyncio
-    async def test_mixed_sources_registry_plus_paper(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_mixed_sources_registry_plus_paper(self, dashboard_service, mock_context, temp_strategies_dir):
         """ALL filter combines registry + filesystem + paper sessions."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -1039,7 +1003,7 @@ class TestListStrategiesSourceMatrix:
         ]
 
         paper_session = {
-            "strategy_id": "paper:sim_strat",
+            "deployment_id": "paper:sim_strat",
             "name": "Sim (Paper)",
             "status": "PAPER_TRADING",
             "chain": "arbitrum",
@@ -1062,14 +1026,12 @@ class TestListStrategiesSourceMatrix:
             request = gateway_pb2.ListStrategiesRequest(status_filter="ALL")
             response = await dashboard_service.ListStrategies(request, mock_context)
 
-        ids = {s.strategy_id for s in response.strategies}
+        ids = {s.deployment_id for s in response.strategies}
         # Registry (live_strat:abc) + filesystem (test_strategy) + paper (paper:sim_strat)
         assert ids == {"live_strat:abc", "test_strategy", "paper:sim_strat"}
 
     @pytest.mark.asyncio
-    async def test_paper_excluded_from_available_source(
-        self, dashboard_service, mock_context, temp_strategies_dir
-    ):
+    async def test_paper_excluded_from_available_source(self, dashboard_service, mock_context, temp_strategies_dir):
         """AVAILABLE mode is library-only: paper sessions must not leak through."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
@@ -1078,7 +1040,7 @@ class TestListStrategiesSourceMatrix:
         mock_registry.list_all.return_value = []
 
         paper_session = {
-            "strategy_id": "paper:sim_strat",
+            "deployment_id": "paper:sim_strat",
             "name": "Sim (Paper)",
             "status": "PAPER_TRADING",
             "chain": "arbitrum",
@@ -1101,7 +1063,7 @@ class TestListStrategiesSourceMatrix:
             request = gateway_pb2.ListStrategiesRequest(status_filter="AVAILABLE")
             response = await dashboard_service.ListStrategies(request, mock_context)
 
-        ids = {s.strategy_id for s in response.strategies}
+        ids = {s.deployment_id for s in response.strategies}
         assert "paper:sim_strat" not in ids
         assert "test_strategy" in ids
 
@@ -1116,9 +1078,7 @@ class TestListStrategiesStatusFilters:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["RUNNING", "PAUSED", "ERROR", "STUCK", "INACTIVE"])
-    async def test_each_status_filter_matches_registry_status(
-        self, dashboard_service, mock_context, status
-    ):
+    async def test_each_status_filter_matches_registry_status(self, dashboard_service, mock_context, status):
         """RUNNING / PAUSED / ERROR / STUCK / INACTIVE each pick only their own."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1143,9 +1103,7 @@ class TestListStrategiesStatusFilters:
         assert response.strategies[0].status == status
 
     @pytest.mark.asyncio
-    async def test_chain_filter_arbitrum_selects_only_matching(
-        self, dashboard_service, mock_context
-    ):
+    async def test_chain_filter_arbitrum_selects_only_matching(self, dashboard_service, mock_context):
         """chain_filter='arbitrum' picks out only arbitrum instances."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1168,9 +1126,7 @@ class TestListStrategiesStatusFilters:
         assert response.strategies[0].chain == "arbitrum"
 
     @pytest.mark.asyncio
-    async def test_chain_filter_substring_matches_multichain(
-        self, dashboard_service, mock_context
-    ):
+    async def test_chain_filter_substring_matches_multichain(self, dashboard_service, mock_context):
         """chain_filter does a substring match against the chain column."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1190,7 +1146,7 @@ class TestListStrategiesStatusFilters:
 
         # Substring match: "arbitrum,base" contains "base" → included
         assert response.total_count == 1
-        assert response.strategies[0].strategy_id == "multi:01"
+        assert response.strategies[0].deployment_id == "multi:01"
         assert response.strategies[0].is_multi_chain is True
 
 
@@ -1227,9 +1183,7 @@ class TestListStrategiesRegistryEnrichment:
         assert dict(s.chain_wallets) == {"arbitrum": "0xAAA", "base": "0xBBB"}
 
     @pytest.mark.asyncio
-    async def test_chain_wallets_json_parse_failure_is_silent(
-        self, dashboard_service, mock_context
-    ):
+    async def test_chain_wallets_json_parse_failure_is_silent(self, dashboard_service, mock_context):
         """Malformed chain_wallets JSON is swallowed; map ends up empty."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1253,9 +1207,7 @@ class TestListStrategiesRegistryEnrichment:
         assert dict(response.strategies[0].chain_wallets) == {}
 
     @pytest.mark.asyncio
-    async def test_wallet_address_is_propagated_to_summary(
-        self, dashboard_service, mock_context
-    ):
+    async def test_wallet_address_is_propagated_to_summary(self, dashboard_service, mock_context):
         """wallet_address from the registry is forwarded on the summary proto."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1277,9 +1229,7 @@ class TestListStrategiesRegistryEnrichment:
         assert response.strategies[0].wallet_address == "0xDEADBEEF"
 
     @pytest.mark.asyncio
-    async def test_state_enrichment_consecutive_errors_parsed(
-        self, dashboard_service, mock_context
-    ):
+    async def test_state_enrichment_consecutive_errors_parsed(self, dashboard_service, mock_context):
         """Valid consecutive_errors in state is reflected on the summary."""
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
@@ -1289,7 +1239,7 @@ class TestListStrategiesRegistryEnrichment:
             _make_instance("strat:01", status="RUNNING"),
         ]
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"consecutive_errors": 3}
 
         with (
@@ -1318,7 +1268,7 @@ class TestListStrategiesRegistryEnrichment:
             _make_instance("strat:01", status="RUNNING"),
         ]
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"consecutive_errors": "not-a-number"}
 
         with (
@@ -1347,7 +1297,7 @@ class TestListStrategiesRegistryEnrichment:
             _make_instance("strat:01", status="RUNNING"),
         ]
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"last_iteration": {"timestamp": "not-an-iso-date"}}
 
         with (
@@ -1379,14 +1329,14 @@ class TestGetStrategyDetailsStateEnrichment:
         self, dashboard_service, mock_context, monkeypatch
     ):
         """EXECUTION_FAILED in state overrides RUNNING from registry → status=ERROR."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="RUNNING")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"last_iteration": {"status": "EXECUTION_FAILED"}}
 
         with (
@@ -1396,7 +1346,7 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         assert response.summary.status == "ERROR"
@@ -1404,18 +1354,16 @@ class TestGetStrategyDetailsStateEnrichment:
         assert "EXECUTION_FAILED" in response.summary.attention_reason
 
     @pytest.mark.asyncio
-    async def test_registry_paused_wins_over_iteration_error(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_registry_paused_wins_over_iteration_error(self, dashboard_service, mock_context, monkeypatch):
         """Registry PAUSED preserved even when state reports EXECUTION_FAILED."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="PAUSED")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {
                 "last_iteration": {"status": "EXECUTION_FAILED"},
                 "is_running": True,  # would also say RUNNING, but registry PAUSED wins
@@ -1428,17 +1376,15 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         assert response.summary.status == "PAUSED"
 
     @pytest.mark.asyncio
-    async def test_is_running_in_state_promotes_to_running(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_is_running_in_state_promotes_to_running(self, dashboard_service, mock_context, monkeypatch):
         """is_running=True in state promotes registry status to RUNNING."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
@@ -1446,7 +1392,7 @@ class TestGetStrategyDetailsStateEnrichment:
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"is_running": True}
 
         with (
@@ -1456,29 +1402,27 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         assert response.summary.status == "RUNNING"
 
     @pytest.mark.asyncio
-    async def test_issue_1706_paused_wins_over_running(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_issue_1706_paused_wins_over_running(self, dashboard_service, mock_context, monkeypatch):
         """Fix #1706: when state sets BOTH is_running=True and is_paused=True, PAUSED wins.
 
         A strategy carrying both flags is almost certainly mid-transition; treating it
         as PAUSED is the safer default. Advertising a paused strategy as RUNNING would
         mislead operators into thinking funds are actively being managed.
         """
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"is_running": True, "is_paused": True}
 
         with (
@@ -1488,25 +1432,23 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         # Fix #1706: paused precedence — a concurrent is_running=True must not mask pause.
         assert response.summary.status == "PAUSED"
 
     @pytest.mark.asyncio
-    async def test_is_paused_in_state_promotes_to_paused(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_is_paused_in_state_promotes_to_paused(self, dashboard_service, mock_context, monkeypatch):
         """is_paused=True in state promotes to PAUSED when is_running is absent."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"is_paused": True}
 
         with (
@@ -1516,24 +1458,22 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         assert response.summary.status == "PAUSED"
 
     @pytest.mark.asyncio
-    async def test_last_iteration_at_parse_failure_defaults_to_zero(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_last_iteration_at_parse_failure_defaults_to_zero(self, dashboard_service, mock_context, monkeypatch):
         """Malformed last_iteration.timestamp in state → last_iteration_at=0."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
         mock_registry = MagicMock()
         mock_registry.get.return_value = _make_instance("strat:01", status="RUNNING")
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {"last_iteration": {"timestamp": "garbage"}}
 
         with (
@@ -1543,7 +1483,7 @@ class TestGetStrategyDetailsStateEnrichment:
             ),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         assert response.summary.last_iteration_at == 0
@@ -1557,7 +1497,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch
     ):
         """Paper session ID (paper:xxx) resolves via _discover_paper_sessions fallback."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
@@ -1565,7 +1505,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         mock_registry.get.return_value = None
 
         paper_session = {
-            "strategy_id": "paper:my_sim",
+            "deployment_id": "paper:my_sim",
             "name": "My Sim (Paper)",
             "status": "PAPER_TRADING",
             "chain": "arbitrum",
@@ -1588,18 +1528,16 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             ),
             patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="paper:my_sim")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="paper:my_sim")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        assert response.summary.strategy_id == "paper:my_sim"
+        assert response.summary.deployment_id == "paper:my_sim"
         assert response.summary.execution_mode == "paper"
         assert response.summary.status == "PAPER_TRADING"
         assert response.summary.paper_metrics_json == '{"tick_count": 10}'
 
     @pytest.mark.asyncio
-    async def test_issue_1705_tuple_chains_accepted(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
+    async def test_issue_1705_tuple_chains_accepted(self, dashboard_service, mock_context, monkeypatch):
         """Fix #1705: a paper/filesystem source that returns ``chains`` as a
         tuple (rather than a list) must still produce chain_health entries.
 
@@ -1609,7 +1547,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         operator dashboard. The fix accepts any Sequence[str] (except
         str/bytes) and logs a warning when coercion still happens.
         """
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = Path("/nonexistent")
 
@@ -1617,7 +1555,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         mock_registry.get.return_value = None
 
         paper_session = {
-            "strategy_id": "paper:multi_chain_tuple",
+            "deployment_id": "paper:multi_chain_tuple",
             "name": "Multi Chain Tuple (Paper)",
             "status": "PAPER_TRADING",
             "chain": "arbitrum,base",
@@ -1641,10 +1579,10 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             ),
             patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="paper:multi_chain_tuple")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="paper:multi_chain_tuple")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        assert response.summary.strategy_id == "paper:multi_chain_tuple"
+        assert response.summary.deployment_id == "paper:multi_chain_tuple"
         # Fix #1705: chain health is populated from the tuple, not empty.
         assert set(response.chain_health.keys()) == {"arbitrum", "base"}
 
@@ -1656,13 +1594,13 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         NOT from state["balances"] (snapshot wins over state dict fallback)."""
         from almanak.framework.portfolio.models import TokenBalance
 
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
         snapshot = PortfolioSnapshot(
             timestamp=datetime.now(UTC),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             total_value_usd=Decimal("500"),
             available_cash_usd=Decimal("500"),
             value_confidence=ValueConfidence.HIGH,
@@ -1671,10 +1609,10 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             ],
         )
 
-        async def fake_snapshot(strategy_id):
+        async def fake_snapshot(deployment_id):
             return snapshot
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             # State also has balances — must NOT win
             return {"balances": {"WETH": {"balance": "99", "value_usd": "99"}}}
 
@@ -1682,7 +1620,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             patch.object(dashboard_service, "_get_latest_snapshot", side_effect=fake_snapshot),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="test_strategy")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         symbols = [tb.symbol for tb in response.position.token_balances]
@@ -1694,14 +1632,14 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """With no snapshot balances, PositionInfo is populated from state["balances"]."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
-        async def fake_snapshot(strategy_id):
+        async def fake_snapshot(deployment_id):
             return None  # No snapshot available
 
-        async def fake_state(strategy_id, fallback_strategy_id=None):
+        async def fake_state(deployment_id, fallback_deployment_id=None):
             return {
                 "balances": {
                     "USDC": {"balance": "100", "value_usd": "100"},
@@ -1715,7 +1653,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             patch.object(dashboard_service, "_get_latest_snapshot", side_effect=fake_snapshot),
             patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="test_strategy")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         symbols = {tb.symbol for tb in response.position.token_balances}
@@ -1728,7 +1666,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """include_timeline=True calls self.GetTimeline with the requested limit."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
@@ -1745,7 +1683,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             new=AsyncMock(return_value=timeline_response),
         ) as mock_get_timeline:
             request = gateway_pb2.GetStrategyDetailsRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 include_timeline=True,
                 timeline_limit=7,
             )
@@ -1753,7 +1691,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
 
         mock_get_timeline.assert_awaited_once()
         inner_req = mock_get_timeline.await_args[0][0]
-        assert inner_req.strategy_id == "test_strategy"
+        assert inner_req.deployment_id == "test_strategy"
         assert inner_req.limit == 7
         assert len(response.timeline) == 1
         assert response.timeline[0].event_type == "TRADE"
@@ -1763,7 +1701,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """include_timeline=False (default) must NOT invoke self.GetTimeline."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
@@ -1773,7 +1711,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             new=AsyncMock(return_value=gateway_pb2.GetTimelineResponse()),
         ) as mock_get_timeline:
             request = gateway_pb2.GetStrategyDetailsRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 include_timeline=False,
             )
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
@@ -1786,7 +1724,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """include_pnl_history=True calls _build_pnl_history and attaches points."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
@@ -1801,7 +1739,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             new=AsyncMock(return_value=fake_points),
         ) as mock_build:
             request = gateway_pb2.GetStrategyDetailsRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 include_pnl_history=True,
             )
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
@@ -1815,7 +1753,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """include_pnl_history=False (default) must NOT call _build_pnl_history."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
@@ -1825,7 +1763,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             new=AsyncMock(return_value=[]),
         ) as mock_build:
             request = gateway_pb2.GetStrategyDetailsRequest(
-                strategy_id="test_strategy",
+                deployment_id="test_strategy",
                 include_pnl_history=False,
             )
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
@@ -1838,7 +1776,7 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
     ):
         """Filesystem-sourced strategies don't set wallet_address (proto default=empty)."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         dashboard_service._initialized = True
         dashboard_service._strategies_root = temp_strategies_dir
 
@@ -1852,12 +1790,12 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
             ),
             patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
         ):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id="test_strategy")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         # Filesystem path does not carry wallet_address — proto default is empty string
         assert response.summary.wallet_address == ""
-        assert response.summary.strategy_id == "test_strategy"
+        assert response.summary.deployment_id == "test_strategy"
 
 
 class TestGetPnLSummary:
@@ -1870,9 +1808,9 @@ class TestGetPnLSummary:
     """
 
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+    async def test_invalid_deployment_id_returns_invalid_argument(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
-        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="")
+        request = gateway_pb2.GetPnLSummaryRequest(deployment_id="")
         response = await dashboard_service.GetPnLSummary(request, mock_context)
         mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert isinstance(response, gateway_pb2.PnLSummary)
@@ -1881,7 +1819,7 @@ class TestGetPnLSummary:
     async def test_no_state_manager_returns_degraded_response(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetPnLSummaryRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetPnLSummary(request, mock_context)
         assert isinstance(response, gateway_pb2.PnLSummary)
         assert response.value_confidence in ("", "UNAVAILABLE")
@@ -1896,7 +1834,7 @@ class TestGetPnLSummary:
         sm.get_accounting_events_sync = MagicMock(return_value=[])
         dashboard_service._state_manager = sm
 
-        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetPnLSummaryRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetPnLSummary(request, mock_context)
         assert isinstance(response, gateway_pb2.PnLSummary)
         for field in ("deployed_usd", "nav_usd", "lifetime_pnl_usd"):
@@ -1908,9 +1846,9 @@ class TestGetCostStack:
     """Smoke tests for GetCostStack RPC (VIB-3969)."""
 
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+    async def test_invalid_deployment_id_returns_invalid_argument(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
-        request = gateway_pb2.GetCostStackRequest(strategy_id="")
+        request = gateway_pb2.GetCostStackRequest(deployment_id="")
         response = await dashboard_service.GetCostStack(request, mock_context)
         mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert isinstance(response, gateway_pb2.CostStackInfo)
@@ -1919,7 +1857,7 @@ class TestGetCostStack:
     async def test_no_state_manager_returns_zero_decimals(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetCostStackRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetCostStackRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetCostStack(request, mock_context)
         assert isinstance(response, gateway_pb2.CostStackInfo)
         for field in (
@@ -1936,9 +1874,9 @@ class TestGetAuditPosture:
     """Smoke tests for GetAuditPosture RPC (VIB-3969)."""
 
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+    async def test_invalid_deployment_id_returns_invalid_argument(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
-        request = gateway_pb2.GetAuditPostureRequest(strategy_id="")
+        request = gateway_pb2.GetAuditPostureRequest(deployment_id="")
         response = await dashboard_service.GetAuditPosture(request, mock_context)
         mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert isinstance(response, gateway_pb2.AuditPosture)
@@ -1947,7 +1885,7 @@ class TestGetAuditPosture:
     async def test_no_state_manager_returns_na_status(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetAuditPostureRequest(strategy_id="test_strategy")
+        request = gateway_pb2.GetAuditPostureRequest(deployment_id="test_strategy")
         response = await dashboard_service.GetAuditPosture(request, mock_context)
         assert isinstance(response, gateway_pb2.AuditPosture)
         # Empty inputs → no events → G6 has no data → NA status, not
@@ -1967,10 +1905,10 @@ class TestGetTradeTape:
     """
 
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
-        """An invalid strategy_id sets INVALID_ARGUMENT and returns an empty proto."""
+    async def test_invalid_deployment_id_returns_invalid_argument(self, dashboard_service, mock_context):
+        """An invalid deployment_id sets INVALID_ARGUMENT and returns an empty proto."""
         dashboard_service._initialized = True
-        request = gateway_pb2.GetTradeTapeRequest(strategy_id="")
+        request = gateway_pb2.GetTradeTapeRequest(deployment_id="")
         response = await dashboard_service.GetTradeTape(request, mock_context)
         mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
@@ -1981,7 +1919,7 @@ class TestGetTradeTape:
         """No state_manager → empty rows, has_more False, no crash."""
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+        request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
         response = await dashboard_service.GetTradeTape(request, mock_context)
         assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
         assert len(response.rows) == 0
@@ -1997,7 +1935,7 @@ class TestGetTradeTape:
         sm.get_position_events_sync = MagicMock(return_value=[])
         dashboard_service._state_manager = sm
 
-        request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=50)
+        request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=50)
         response = await dashboard_service.GetTradeTape(request, mock_context)
         assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
         assert len(response.rows) == 0

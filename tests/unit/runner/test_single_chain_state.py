@@ -20,7 +20,7 @@ from almanak.framework.runner.strategy_runner import (
 
 
 class _DummyStrategy:
-    strategy_id = "test-strategy"
+    deployment_id = "test-strategy"
     chain = "arbitrum"
 
 
@@ -38,12 +38,12 @@ class TestSingleChainExecutionStateDefaults:
             strategy=strategy,  # type: ignore[arg-type]
             intent=intent,
             start_time=start,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
         )
         assert state.strategy is strategy
         assert state.intent is intent
         assert state.start_time is start
-        assert state.strategy_id == "test-strategy"
+        assert state.deployment_id == "test-strategy"
 
     def test_optional_fields_default_none(self) -> None:
         state = SingleChainExecutionState(
@@ -87,7 +87,7 @@ class TestSingleChainExecutionStateMutation:
             strategy=_DummyStrategy(),  # type: ignore[arg-type]
             intent=HoldIntent(reason="x"),
             start_time=datetime.now(UTC),
-            strategy_id="s",
+            deployment_id="s",
         )
 
         # _init_single_chain_state writes these
@@ -123,14 +123,14 @@ class TestBridgeWaitStateDefaults:
             intents=intents,
             orchestrator=orchestrator,  # type: ignore[arg-type]
             start_time=start,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             first_intent=intents[0],
         )
         assert state.strategy is strategy
         assert state.intents is intents
         assert state.orchestrator is orchestrator
         assert state.start_time is start
-        assert state.strategy_id == "test-strategy"
+        assert state.deployment_id == "test-strategy"
         assert state.first_intent is intents[0]
 
     def test_optional_fields_default_empty(self) -> None:

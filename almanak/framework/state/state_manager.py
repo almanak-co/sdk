@@ -92,26 +92,26 @@ class StateConflictError(Exception):
 
     def __init__(
         self,
-        strategy_id: str,
+        deployment_id: str,
         expected_version: int,
         actual_version: int,
         message: str | None = None,
     ) -> None:
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self.expected_version = expected_version
         self.actual_version = actual_version
         super().__init__(
             message
-            or f"State conflict for strategy {strategy_id}: expected version {expected_version}, found {actual_version}"
+            or f"State conflict for deployment {deployment_id}: expected version {expected_version}, found {actual_version}"
         )
 
 
 class StateNotFoundError(Exception):
     """Raised when state is not found in any tier."""
 
-    def __init__(self, strategy_id: str, message: str | None = None) -> None:
-        self.strategy_id = strategy_id
-        super().__init__(message or f"State not found for strategy {strategy_id}")
+    def __init__(self, deployment_id: str, message: str | None = None) -> None:
+        self.deployment_id = deployment_id
+        super().__init__(message or f"State not found for deployment {deployment_id}")
 
 
 # =============================================================================
@@ -169,11 +169,11 @@ class WarmStore(Protocol):
         """Close the backend and release resources."""
         ...
 
-    async def get(self, strategy_id: str) -> Optional["StateData"]:
+    async def get(self, deployment_id: str) -> Optional["StateData"]:
         """Get active state for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             StateData if found, None otherwise.
@@ -199,11 +199,11 @@ class WarmStore(Protocol):
         """
         ...
 
-    async def delete(self, strategy_id: str) -> bool:
+    async def delete(self, deployment_id: str) -> bool:
         """Delete/deactivate state for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             True if state was deleted.
@@ -216,12 +216,12 @@ class WarmStore(Protocol):
 # =============================================================================
 
 
-@dataclass
+@dataclass(init=False)
 class StateData:
     """Strategy state data container.
 
     Attributes:
-        strategy_id: Unique identifier for the strategy
+        deployment_id: Unique identifier for the strategy
         version: CAS version number (incremented on each update)
         state: The actual state data as a dictionary
         schema_version: Schema version for migrations
@@ -230,7 +230,7 @@ class StateData:
         loaded_from: Which tier the state was loaded from
     """
 
-    strategy_id: str
+    deployment_id: str
     version: int
     state: dict[str, Any]
     schema_version: int = 1
@@ -238,8 +238,23 @@ class StateData:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     loaded_from: StateTier | None = None
 
-    def __post_init__(self) -> None:
-        """Calculate checksum if not provided."""
+    def __init__(
+        self,
+        deployment_id: str = "",
+        version: int = 0,
+        state: dict[str, Any] | None = None,
+        schema_version: int = 1,
+        checksum: str = "",
+        created_at: datetime | None = None,
+        loaded_from: StateTier | None = None,
+    ) -> None:
+        self.deployment_id = deployment_id
+        self.version = version
+        self.state = state or {}
+        self.schema_version = schema_version
+        self.checksum = checksum
+        self.created_at = created_at or datetime.now(UTC)
+        self.loaded_from = loaded_from
         if not self.checksum:
             self.checksum = self._calculate_checksum()
 
@@ -255,7 +270,7 @@ class StateData:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "version": self.version,
             "state": self.state,
             "schema_version": self.schema_version,
@@ -278,7 +293,7 @@ class StateData:
             created_at = datetime.now(UTC)
 
         return cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             version=data["version"],
             state=data["state"],
             schema_version=data.get("schema_version", 1),
@@ -421,18 +436,18 @@ class HotCache:
         ttl_seconds: int = 0,
         max_size: int = 1000,
     ) -> None:
-        self._cache: dict[str, tuple[StateData, float]] = {}  # strategy_id -> (data, timestamp)
+        self._cache: dict[str, tuple[StateData, float]] = {}
         self._ttl_seconds = ttl_seconds
         self._max_size = max_size
 
-    def get(self, strategy_id: str) -> StateData | None:
+    def get(self, deployment_id: str) -> StateData | None:
         """Get state from cache.
 
         Returns None if not found or expired. Returns a deep copy so callers
         cannot mutate the cached StateData; a failed CAS save must leave the
         cache on its prior value.
         """
-        entry = self._cache.get(strategy_id)
+        entry = self._cache.get(deployment_id)
         if entry is None:
             return None
 
@@ -441,7 +456,7 @@ class HotCache:
         # Check TTL if enabled
         if self._ttl_seconds > 0:
             if time.time() - timestamp > self._ttl_seconds:
-                del self._cache[strategy_id]
+                del self._cache[deployment_id]
                 return None
 
         return copy.deepcopy(data)
@@ -454,18 +469,18 @@ class HotCache:
         cached state.
         """
         # Evict oldest if at capacity
-        if len(self._cache) >= self._max_size and state.strategy_id not in self._cache:
+        if len(self._cache) >= self._max_size and state.deployment_id not in self._cache:
             self._evict_oldest()
 
-        self._cache[state.strategy_id] = (copy.deepcopy(state), time.time())
+        self._cache[state.deployment_id] = (copy.deepcopy(state), time.time())
 
-    def delete(self, strategy_id: str) -> bool:
+    def delete(self, deployment_id: str) -> bool:
         """Delete state from cache.
 
         Returns True if entry was deleted, False if not found.
         """
-        if strategy_id in self._cache:
-            del self._cache[strategy_id]
+        if deployment_id in self._cache:
+            del self._cache[deployment_id]
             return True
         return False
 
@@ -560,7 +575,7 @@ class PostgresStore:
             await self._pool.close()
             self._initialized = False
 
-    async def get(self, strategy_id: str) -> StateData | None:
+    async def get(self, deployment_id: str) -> StateData | None:
         """Get state from PostgreSQL (single row per agent)."""
         if not self._initialized:
             await self.initialize()
@@ -571,16 +586,16 @@ class PostgresStore:
                 SELECT version, state_data, schema_version,
                        checksum, created_at
                 FROM strategy_state
-                WHERE agent_id = $1
+                WHERE deployment_id = $1
                 """,
-                strategy_id,
+                deployment_id,
             )
 
             if row is None:
                 return None
 
             return StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=row["version"],
                 state=json.loads(row["state_data"]) if isinstance(row["state_data"], str) else row["state_data"],
                 schema_version=row["schema_version"],
@@ -621,17 +636,17 @@ class PostgresStore:
                 await conn.execute(
                     """
                     INSERT INTO strategy_state
-                        (agent_id, version, state_data, schema_version, checksum,
+                        (deployment_id, version, state_data, schema_version, checksum,
                          created_at, updated_at)
                     VALUES ($1, $2, $3::jsonb, $4, $5, now(), now())
-                    ON CONFLICT (agent_id) DO UPDATE SET
+                    ON CONFLICT (deployment_id) DO UPDATE SET
                         version = strategy_state.version + 1,
                         state_data = EXCLUDED.state_data,
                         schema_version = EXCLUDED.schema_version,
                         checksum = EXCLUDED.checksum,
                         updated_at = now()
                     """,
-                    state.strategy_id,
+                    state.deployment_id,
                     state.version,
                     state_json,
                     state.schema_version,
@@ -648,10 +663,10 @@ class PostgresStore:
                         schema_version = $4,
                         checksum = $5,
                         updated_at = now()
-                    WHERE agent_id = $1
+                    WHERE deployment_id = $1
                       AND version = $2
                     """,
-                    state.strategy_id,
+                    state.deployment_id,
                     expected_version,
                     state_json,
                     state.schema_version,
@@ -664,18 +679,18 @@ class PostgresStore:
                     # consistent snapshot. The surrounding transaction will
                     # be rolled back by the raised exception.
                     actual = await conn.fetchval(
-                        "SELECT version FROM strategy_state WHERE agent_id = $1",
-                        state.strategy_id,
+                        "SELECT version FROM strategy_state WHERE deployment_id = $1",
+                        state.deployment_id,
                     )
                     raise StateConflictError(
-                        strategy_id=state.strategy_id,
+                        deployment_id=state.deployment_id,
                         expected_version=expected_version,
                         actual_version=actual or 0,
                     )
 
                 return True
 
-    async def delete(self, strategy_id: str) -> bool:
+    async def delete(self, deployment_id: str) -> bool:
         """Delete state row for a strategy.
 
         Returns True if state was deleted.
@@ -685,35 +700,33 @@ class PostgresStore:
 
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM strategy_state WHERE agent_id = $1",
-                strategy_id,
+                "DELETE FROM strategy_state WHERE deployment_id = $1",
+                deployment_id,
             )
             return result != "DELETE 0"
 
-    async def get_all_strategy_ids(self) -> list[str]:
-        """Return all strategy IDs (for HOT cache warm-up)."""
+    async def get_all_deployment_ids(self) -> list[str]:
+        """Return all deployment IDs (for HOT cache warm-up)."""
         if not self._initialized:
             await self.initialize()
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("SELECT agent_id FROM strategy_state")
-            return [row["agent_id"] for row in rows]
+            rows = await conn.fetch("SELECT deployment_id FROM strategy_state")
+            return [row["deployment_id"] for row in rows]
 
     # =========================================================================
     # Reader methods used by DashboardService (VIB-3933)
     #
-    # Identity convention (per AGENTS.md):
-    #   - Hosted Postgres tables key on ``agent_id`` (set from the
-    #     platform-injected ``AGENT_ID`` env var via ``resolve_agent_id``).
-    #   - Local SQLite tables key on ``strategy_id``.
-    # Callers always pass the already-resolved value; the column name is the
-    # only difference. ``accounting_events`` and ``position_events`` carry both
-    # ``agent_id`` and ``deployment_id`` columns; we filter on ``deployment_id``
-    # to mirror the SQLite signature, since under the 1 Gateway : 1 Strategy
-    # rule the two values are identical for any row written in hosted mode.
+    # Identity convention (blueprint 29; VIB-4721/4722):
+    #   Every deployment-scoped table — hosted Postgres and local SQLite —
+    #   carries exactly one identity column, ``deployment_id``. The legacy
+    #   hosted identity columns were DROPPED by the metrics-database migration
+    #   (VIB-4721). Callers pass the canonical ``deployment_id`` resolved
+    #   once at runner boot; every read filters that value directly with no
+    #   gateway-side translation (blueprint 29 §4-5).
     # =========================================================================
 
-    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+    async def get_latest_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
         """Most recent ``portfolio_snapshots`` row for a strategy."""
         if not self._initialized:
             await self.initialize()
@@ -721,7 +734,7 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
@@ -729,11 +742,11 @@ class PostgresStore:
                        chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE agent_id = $1
+                WHERE deployment_id = $1
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """,
-                strategy_id,
+                deployment_id,
             )
         if row is None:
             return None
@@ -741,7 +754,7 @@ class PostgresStore:
 
     async def get_snapshots_since(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime,
         limit: int = 168,
     ) -> list["PortfolioSnapshot"]:
@@ -752,7 +765,7 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
@@ -760,11 +773,11 @@ class PostgresStore:
                        chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE agent_id = $1 AND timestamp >= $2
+                WHERE deployment_id = $1 AND timestamp >= $2
                 ORDER BY timestamp ASC
                 LIMIT $3
                 """,
-                strategy_id,
+                deployment_id,
                 since,
                 limit,
             )
@@ -772,7 +785,7 @@ class PostgresStore:
 
     async def get_snapshot_at(
         self,
-        strategy_id: str,
+        deployment_id: str,
         timestamp: datetime,
     ) -> "PortfolioSnapshot | None":
         """Snapshot closest to ``timestamp`` (at or before)."""
@@ -782,7 +795,7 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
@@ -790,18 +803,18 @@ class PostgresStore:
                        chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE agent_id = $1 AND timestamp <= $2
+                WHERE deployment_id = $1 AND timestamp <= $2
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """,
-                strategy_id,
+                deployment_id,
                 timestamp,
             )
         if row is None:
             return None
         return _pg_row_to_portfolio_snapshot(row)
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+    async def get_portfolio_metrics(self, deployment_id: str) -> "PortfolioMetrics | None":
         """Lifetime portfolio metrics row (one per strategy)."""
         if not self._initialized:
             await self.initialize()
@@ -809,15 +822,15 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT agent_id, initial_value_usd, initial_timestamp,
+                SELECT initial_value_usd, initial_timestamp,
                        deposits_usd, withdrawals_usd, gas_spent_usd,
                        total_value_usd, positions_json::text AS positions_text,
                        cycle_id, deployment_id, execution_mode, is_complete,
                        updated_at
                 FROM portfolio_metrics
-                WHERE agent_id = $1
+                WHERE deployment_id = $1
                 """,
-                strategy_id,
+                deployment_id,
             )
         if row is None:
             return None
@@ -825,7 +838,7 @@ class PostgresStore:
 
     async def get_ledger_entries(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime | None = None,
         intent_type: str | None = None,
         limit: int = 100,
@@ -840,8 +853,8 @@ class PostgresStore:
 
         # Build the WHERE clause dynamically to keep the optional filter
         # parameters bound positionally for asyncpg.
-        conditions = ["agent_id = $1"]
-        params: list[Any] = [strategy_id]
+        conditions = ["deployment_id = $1"]
+        params: list[Any] = [deployment_id]
         idx = 2
         if since is not None:
             conditions.append(f"timestamp > ${idx}")
@@ -859,7 +872,7 @@ class PostgresStore:
         params.append(limit)
 
         sql = f"""
-            SELECT id, cycle_id, agent_id, deployment_id, execution_mode,
+            SELECT id, cycle_id, deployment_id, execution_mode,
                    timestamp, intent_type,
                    token_in, amount_in, token_out, amount_out,
                    effective_price, slippage_bps, gas_used, gas_usd,
@@ -881,15 +894,16 @@ class PostgresStore:
     async def sum_ledger_gas_usd(
         self,
         deployment_id: str,
-        strategy_id: str | None = None,
     ) -> Decimal:
         """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
 
         Postgres counterpart of :meth:`SQLiteStore.sum_ledger_gas_usd`.
         ``NULLIF(gas_usd, '')::numeric`` handles the parser-didn't-emit
         empty-string case; ``COALESCE(SUM(...), 0)`` handles the no-rows
-        case. Postgres reads are ``agent_id``-keyed (mirrors the rest of
-        :class:`PostgresStateStore`).
+        case. VIB-4721/4722: ``transaction_ledger`` has a single identity
+        column, ``deployment_id`` (the legacy hosted identity column was
+        DROPPED), so the read filters ``deployment_id`` directly with no
+        legacy-key fallback (blueprint 29 §4-5).
         """
         if not self._initialized:
             await self.initialize()
@@ -898,10 +912,9 @@ class PostgresStore:
             SELECT COALESCE(SUM(NULLIF(gas_usd, '')::numeric), 0) AS total
             FROM transaction_ledger
             WHERE deployment_id = $1
-               OR (deployment_id = '' AND agent_id = $2)
         """
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(sql, deployment_id, strategy_id or deployment_id)
+            row = await conn.fetchrow(sql, deployment_id)
         total = (row or {"total": 0})["total"]
         return Decimal(str(total or 0))
 
@@ -916,7 +929,7 @@ class PostgresStore:
 
         Mirrors :meth:`SQLiteStore.get_accounting_events`.
 
-        Filter is by ``deployment_id`` (not ``agent_id``) so the same
+        Filter is by ``deployment_id`` so the same
         signature works for SQLite and Postgres callers — see the identity
         comment at the top of this section.
         """
@@ -938,7 +951,7 @@ class PostgresStore:
         params.append(limit)
 
         sql = f"""
-            SELECT id, deployment_id, agent_id, cycle_id, execution_mode,
+            SELECT id, deployment_id, cycle_id, execution_mode,
                    timestamp, chain, protocol, wallet_address,
                    event_type, position_key, ledger_entry_id, tx_hash,
                    confidence, payload_json::text AS payload_text,
@@ -988,7 +1001,7 @@ class PostgresStore:
         where = " AND ".join(conditions)
 
         sql = f"""
-            SELECT id, agent_id, deployment_id, cycle_id, execution_mode,
+            SELECT id, deployment_id, cycle_id, execution_mode,
                    position_id, position_type, event_type, timestamp,
                    protocol, chain, token0, token1, amount0, amount1,
                    value_usd, tick_lower, tick_upper, liquidity, in_range,
@@ -1030,13 +1043,12 @@ class PostgresStore:
         SQLite ``INSERT OR IGNORE`` semantic. Companion partial-UPDATE for
         attribution columns is :meth:`update_position_attribution` (VIB-3944).
 
-        The PG schema requires ``agent_id NOT NULL`` (the SQLite schema has
-        no such column). We populate it from
-        :func:`almanak.framework.deployment.agent_id`, matching the same
-        ``AGENT_ID``-or-passthrough semantic used by ``resolve_agent_id`` on
-        the gateway read side. ``PostgresStore`` is only instantiated as a
-        warm backend in hosted mode (local SDK uses ``SQLiteStore``), so
-        ``agent_id()`` is always populated when this method runs.
+        VIB-4721/4722: ``position_events`` has a single identity column,
+        ``deployment_id`` (the legacy hosted identity column was DROPPED by the
+        metrics-database migration). Per blueprint 29 there is exactly one
+        identity — ``deployment_id`` — resolved once at runner boot; the
+        gateway no longer translates identity. We stamp
+        ``event.deployment_id`` directly with no translation.
 
         Empty-vs-zero (``AGENTS.md`` "Empty ≠ Zero"): ``protocol_fees_usd``
         stores a ``str`` — ``""`` means parser-did-not-emit, ``"0"`` means
@@ -1047,12 +1059,6 @@ class PostgresStore:
         if not self._initialized:
             await self.initialize()
 
-        # Local import — PostgresStore is a hosted-only path so we lazily
-        # touch the deployment helper rather than module-load it.
-        from almanak.framework.deployment import agent_id as _hosted_agent_id
-
-        agent_id_value = _hosted_agent_id() or event.deployment_id
-
         pfu = getattr(event, "protocol_fees_usd", None)
         protocol_fees_usd = "" if pfu is None else str(pfu)
 
@@ -1060,7 +1066,7 @@ class PostgresStore:
             await conn.execute(
                 """
                 INSERT INTO position_events (
-                    id, agent_id, deployment_id, cycle_id, execution_mode,
+                    id, deployment_id, cycle_id, execution_mode,
                     position_id, position_type, event_type, timestamp,
                     protocol, chain, token0, token1, amount0, amount1,
                     value_usd, tick_lower, tick_upper, liquidity, in_range,
@@ -1069,19 +1075,18 @@ class PostgresStore:
                     ledger_entry_id, protocol_fees_usd,
                     attribution_json, attribution_version
                 ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20,
-                    $21, $22, $23, $24,
-                    $25, $26, $27, $28, $29,
-                    $30, $31,
-                    $32::jsonb, $33
+                    $1, $2, $3, $4,
+                    $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13, $14,
+                    $15, $16, $17, $18, $19,
+                    $20, $21, $22, $23,
+                    $24, $25, $26, $27, $28,
+                    $29, $30,
+                    $31::jsonb, $32
                 )
                 ON CONFLICT (id) DO NOTHING
                 """,
                 event.id,
-                agent_id_value,
                 event.deployment_id,
                 getattr(event, "cycle_id", "") or "",
                 getattr(event, "execution_mode", "") or "",
@@ -1134,7 +1139,7 @@ class PostgresStore:
             await self.initialize()
 
         sql = """
-            SELECT id, agent_id, deployment_id, cycle_id, execution_mode,
+            SELECT id, deployment_id, cycle_id, execution_mode,
                    position_id, position_type, event_type, timestamp,
                    protocol, chain, token0, token1, amount0, amount1,
                    value_usd, tick_lower, tick_upper, liquidity, in_range,
@@ -1312,7 +1317,6 @@ def _pg_row_to_portfolio_snapshot(row: Any) -> "PortfolioSnapshot":
     return PortfolioSnapshot.from_dict(
         {
             "timestamp": timestamp.isoformat(),
-            "strategy_id": row["agent_id"],
             "total_value_usd": str(row["total_value_usd"]),
             "available_cash_usd": str(row["available_cash_usd"]),
             "deployed_capital_usd": deployed_capital_usd,
@@ -1351,7 +1355,6 @@ def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
     initial_timestamp = _require_dt(row["initial_timestamp"], "portfolio_metrics.initial_timestamp")
     is_complete = bool(row["is_complete"]) if row.get("is_complete") is not None else True
     return PortfolioMetrics(
-        strategy_id=row["agent_id"],
         timestamp=initial_timestamp,
         total_value_usd=Decimal(row.get("total_value_usd") or "0"),
         initial_value_usd=Decimal(row["initial_value_usd"]),
@@ -1374,7 +1377,6 @@ def _pg_row_to_ledger_entry(row: Any) -> "LedgerEntry":
     return LedgerEntry(
         id=row["id"] or "",
         cycle_id=row.get("cycle_id") or "",
-        strategy_id=row.get("agent_id") or "",
         deployment_id=row.get("deployment_id") or "",
         execution_mode=row.get("execution_mode") or "",
         timestamp=timestamp,
@@ -1411,8 +1413,6 @@ def _pg_row_to_accounting_event_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"] or "",
         "deployment_id": row.get("deployment_id") or "",
-        "agent_id": row.get("agent_id") or "",
-        "strategy_id": row.get("agent_id") or "",
         "cycle_id": row.get("cycle_id") or "",
         "execution_mode": row.get("execution_mode") or "",
         "timestamp": timestamp.isoformat(),
@@ -1446,7 +1446,6 @@ def _pg_row_to_position_event_dict(row: Any) -> dict[str, Any]:
     timestamp = _require_dt(row["timestamp"], "position_events.timestamp")
     return {
         "id": row["id"] or "",
-        "agent_id": row.get("agent_id") or "",
         "deployment_id": row.get("deployment_id") or "",
         "cycle_id": row.get("cycle_id") or "",
         "execution_mode": row.get("execution_mode") or "",
@@ -1518,7 +1517,7 @@ class StateManager:
         await manager.initialize()
 
         # Save state (writes to HOT then WARM)
-        state = StateData(strategy_id="strat-1", version=1, state={"key": "value"})
+        state = StateData(deployment_id="strat-1", version=1, state={"key": "value"})
         await manager.save_state(state)
 
         # Load state (reads from fastest available tier)
@@ -1656,23 +1655,23 @@ class StateManager:
             return
 
         try:
-            # Check if backend supports listing all strategy IDs
-            if hasattr(self._warm, "get_all_strategy_ids"):
-                strategy_ids = await self._warm.get_all_strategy_ids()
+            # Check if backend supports listing all deployment IDs
+            if hasattr(self._warm, "get_all_deployment_ids"):
+                deployment_ids = await self._warm.get_all_deployment_ids()
                 loaded_count = 0
-                for strategy_id in strategy_ids:
+                for deployment_id in deployment_ids:
                     try:
-                        state = await self._warm.get(strategy_id)
+                        state = await self._warm.get(deployment_id)
                         if state:
                             self._hot.set(state)
                             loaded_count += 1
                     except Exception as e:
-                        logger.warning(f"Failed to load state {strategy_id} to HOT: {e}")
+                        logger.warning(f"Failed to load state {deployment_id} to HOT: {e}")
 
                 if loaded_count > 0:
                     logger.info(f"Loaded {loaded_count} states from WARM to HOT tier on startup")
             else:
-                logger.debug("WARM backend does not support get_all_strategy_ids, skipping startup load")
+                logger.debug("WARM backend does not support get_all_deployment_ids, skipping startup load")
         except Exception as e:
             logger.warning(f"Failed to load states from WARM to HOT on startup: {e}")
 
@@ -1718,14 +1717,14 @@ class StateManager:
                 f"Slow {tier.name} tier {operation}: {latency_ms:.2f}ms (threshold: {thresholds.get(tier)}ms)"
             )
 
-    async def load_state(self, strategy_id: str) -> StateData:
+    async def load_state(self, deployment_id: str) -> StateData:
         """Load state from the fastest available tier.
 
         Tries tiers in order: HOT -> WARM.
         Populates HOT cache on WARM hit.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
 
         Returns:
             StateData from the fastest available tier
@@ -1739,7 +1738,7 @@ class StateManager:
         # Try HOT tier first
         if self._hot:
             start = time.perf_counter()
-            state = self._hot.get(strategy_id)
+            state = self._hot.get(deployment_id)
             latency = (time.perf_counter() - start) * 1000
 
             if state:
@@ -1753,7 +1752,7 @@ class StateManager:
         if self._warm:
             start = time.perf_counter()
             try:
-                state = await self._warm.get(strategy_id)
+                state = await self._warm.get(deployment_id)
                 latency = (time.perf_counter() - start) * 1000
 
                 if state:
@@ -1772,7 +1771,7 @@ class StateManager:
                 self._record_metrics(StateTier.WARM, "load", latency, False, str(e))
                 logger.error(f"WARM tier load failed: {e}")
 
-        raise StateNotFoundError(strategy_id)
+        raise StateNotFoundError(deployment_id)
 
     async def save_state(
         self,
@@ -1819,7 +1818,7 @@ class StateManager:
                 self._record_metrics(StateTier.WARM, "save", latency, True)
 
                 # Get updated version (PostgreSQL auto-increments)
-                updated = await self._warm.get(state.strategy_id)
+                updated = await self._warm.get(state.deployment_id)
                 if updated:
                     state = updated
             except StateConflictError:
@@ -1841,11 +1840,11 @@ class StateManager:
 
         return state
 
-    async def delete_state(self, strategy_id: str) -> bool:
+    async def delete_state(self, deployment_id: str) -> bool:
         """Delete state from all tiers.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
 
         Returns:
             True if state was deleted from at least one tier
@@ -1858,7 +1857,7 @@ class StateManager:
         # Delete from HOT tier
         if self._hot:
             start = time.perf_counter()
-            hot_deleted = self._hot.delete(strategy_id)
+            hot_deleted = self._hot.delete(deployment_id)
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.HOT, "delete", latency, True)
             deleted = deleted or hot_deleted
@@ -1867,7 +1866,7 @@ class StateManager:
         if self._warm:
             start = time.perf_counter()
             try:
-                warm_deleted = await self._warm.delete(strategy_id)
+                warm_deleted = await self._warm.delete(deployment_id)
                 latency = (time.perf_counter() - start) * 1000
                 self._record_metrics(StateTier.WARM, "delete", latency, True)
                 deleted = deleted or warm_deleted
@@ -1878,17 +1877,17 @@ class StateManager:
 
         return deleted
 
-    def invalidate_hot_cache(self, strategy_id: str | None = None) -> None:
+    def invalidate_hot_cache(self, deployment_id: str | None = None) -> None:
         """Invalidate HOT tier cache.
 
         Args:
-            strategy_id: Specific strategy to invalidate, or None to clear all
+            deployment_id: Specific strategy to invalidate, or None to clear all
         """
         if not self._hot:
             return
 
-        if strategy_id:
-            self._hot.delete(strategy_id)
+        if deployment_id:
+            self._hot.delete(deployment_id)
         else:
             self._hot.clear()
 
@@ -2019,7 +2018,13 @@ class StateManager:
             logger.error(f"Failed to save CLOB order: {e}")
             return False
 
-    async def get_clob_order(self, order_id: str) -> "ClobOrderState | None":
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+    async def get_clob_order(
+        self,
+        order_id: str,
+        *,
+        deployment_id: str,
+    ) -> "ClobOrderState | None":
         """Get a CLOB order by order_id.
 
         Args:
@@ -2030,6 +2035,8 @@ class StateManager:
         """
         if not self._initialized:
             await self.initialize()
+        if not (deployment_id or "").strip():
+            raise ValueError("get_clob_order: deployment_id is required")
 
         if not self._warm:
             logger.warning("Cannot get CLOB order: no WARM backend configured")
@@ -2041,7 +2048,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_clob_order(order_id)  # type: ignore[attr-defined]
+            result = await self._warm.get_clob_order(order_id, deployment_id=deployment_id)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_clob_order", latency, True)
             return result
@@ -2051,7 +2058,13 @@ class StateManager:
             logger.error(f"Failed to get CLOB order: {e}")
             return None
 
-    async def get_open_clob_orders(self, market_id: str | None = None) -> list["ClobOrderState"]:
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+    async def get_open_clob_orders(
+        self,
+        market_id: str | None = None,
+        *,
+        deployment_id: str,
+    ) -> list["ClobOrderState"]:
         """Get all open CLOB orders, optionally filtered by market.
 
         Open orders are those with status: pending, submitted, live, partially_filled.
@@ -2064,6 +2077,8 @@ class StateManager:
         """
         if not self._initialized:
             await self.initialize()
+        if not (deployment_id or "").strip():
+            raise ValueError("get_open_clob_orders: deployment_id is required")
 
         if not self._warm:
             logger.warning("Cannot get open CLOB orders: no WARM backend configured")
@@ -2075,7 +2090,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_open_clob_orders(market_id)  # type: ignore[attr-defined]
+            result = await self._warm.get_open_clob_orders(market_id, deployment_id=deployment_id)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_open_clob_orders", latency, True)
             return result
@@ -2085,6 +2100,7 @@ class StateManager:
             logger.error(f"Failed to get open CLOB orders: {e}")
             return []
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def update_clob_order_status(
         self,
         order_id: str,
@@ -2093,6 +2109,8 @@ class StateManager:
         filled_size: str | None = None,
         average_fill_price: str | None = None,
         error: str | None = None,
+        *,
+        deployment_id: str,
     ) -> bool:
         """Update the status and fill information of a CLOB order.
 
@@ -2109,6 +2127,8 @@ class StateManager:
         """
         if not self._initialized:
             await self.initialize()
+        if not (deployment_id or "").strip():
+            raise ValueError("update_clob_order_status: deployment_id is required")
 
         if not self._warm:
             logger.warning("Cannot update CLOB order: no WARM backend configured")
@@ -2127,6 +2147,7 @@ class StateManager:
                 filled_size=filled_size,
                 average_fill_price=average_fill_price,
                 error=error,
+                deployment_id=deployment_id,
             )
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "update_clob_order_status", latency, True)
@@ -2141,6 +2162,7 @@ class StateManager:
     # Portfolio Snapshot Management
     # -------------------------------------------------------------------------
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
         """Save a portfolio snapshot.
 
@@ -2159,13 +2181,13 @@ class StateManager:
         if not self._initialized:
             await self.initialize()
 
-        strategy_id = getattr(snapshot, "strategy_id", "") or ""
+        deployment_id = snapshot.deployment_id
 
         if not self._warm:
             logger.error("Cannot save portfolio snapshot: no WARM backend configured")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.SNAPSHOT,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="No WARM backend configured for portfolio snapshot",
             )
 
@@ -2173,7 +2195,7 @@ class StateManager:
             logger.error("WARM backend does not support portfolio snapshot storage")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.SNAPSHOT,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="WARM backend does not support portfolio snapshot storage",
             )
 
@@ -2196,15 +2218,15 @@ class StateManager:
             logger.error(f"Failed to save portfolio snapshot: {e}")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.SNAPSHOT,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
 
-    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+    async def get_latest_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
         """Get most recent portfolio snapshot for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             Latest PortfolioSnapshot if found, None otherwise.
@@ -2222,7 +2244,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_latest_snapshot(strategy_id)  # type: ignore[attr-defined]
+            result = await self._warm.get_latest_snapshot(deployment_id)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_latest_snapshot", latency, True)
             return result
@@ -2234,14 +2256,14 @@ class StateManager:
 
     async def get_snapshots_since(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime,
         limit: int = 168,
     ) -> list["PortfolioSnapshot"]:
         """Get portfolio snapshots since a timestamp (for charts).
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
             since: Start timestamp for query.
             limit: Maximum number of snapshots to return.
 
@@ -2261,7 +2283,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_snapshots_since(strategy_id, since, limit)  # type: ignore[attr-defined]
+            result = await self._warm.get_snapshots_since(deployment_id, since, limit)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshots_since", latency, True)
             return result
@@ -2273,13 +2295,13 @@ class StateManager:
 
     async def get_snapshot_at(
         self,
-        strategy_id: str,
+        deployment_id: str,
         timestamp: datetime,
     ) -> "PortfolioSnapshot | None":
         """Get snapshot closest to a timestamp (for PnL calculation).
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
             timestamp: Target timestamp.
 
         Returns:
@@ -2298,7 +2320,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_snapshot_at(strategy_id, timestamp)  # type: ignore[attr-defined]
+            result = await self._warm.get_snapshot_at(deployment_id, timestamp)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshot_at", latency, True)
             return result
@@ -2326,13 +2348,13 @@ class StateManager:
         if not self._initialized:
             await self.initialize()
 
-        strategy_id = getattr(metrics, "strategy_id", "") or ""
+        deployment_id = metrics.deployment_id
 
         if not self._warm:
             logger.error("Cannot save portfolio metrics: no WARM backend configured")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="No WARM backend configured for portfolio metrics",
             )
 
@@ -2340,7 +2362,7 @@ class StateManager:
             logger.error("WARM backend does not support portfolio metrics storage")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="WARM backend does not support portfolio metrics storage",
             )
 
@@ -2366,7 +2388,7 @@ class StateManager:
             logger.error(f"Failed to save portfolio metrics: {e}")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
 
@@ -2387,17 +2409,17 @@ class StateManager:
             )
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="WARM backend save_portfolio_metrics returned False",
             )
         self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, True)
         return True
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+    async def get_portfolio_metrics(self, deployment_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             PortfolioMetrics if found, None otherwise.
@@ -2415,7 +2437,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_portfolio_metrics(strategy_id)  # type: ignore[attr-defined]
+            result = await self._warm.get_portfolio_metrics(deployment_id)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_portfolio_metrics", latency, True)
             return result
@@ -2475,13 +2497,13 @@ class StateManager:
         if not self._initialized:
             await self.initialize()
 
-        strategy_id = getattr(entry, "strategy_id", "") or ""
+        deployment_id = entry.deployment_id
 
         if not self._warm:
             logger.error("Cannot save ledger entry: no WARM backend configured")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.LEDGER,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="No WARM backend configured for transaction ledger",
             )
 
@@ -2489,7 +2511,7 @@ class StateManager:
             logger.error("WARM backend does not support transaction ledger")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.LEDGER,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="WARM backend does not support transaction ledger",
             )
 
@@ -2509,10 +2531,10 @@ class StateManager:
             # VIB-3157: surface as typed error so the runner can halt the cycle in live
             # mode. Mode-aware suppression (paper/dry-run) happens upstream, never here
             # -- the backend write either completed or it didn't.
-            logger.error("Failed to save ledger entry for %s: %s", strategy_id, e)
+            logger.error("Failed to save ledger entry for %s: %s", deployment_id, e)
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.LEDGER,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
 
@@ -2569,13 +2591,13 @@ class StateManager:
         if not self._initialized:
             await self.initialize()
 
-        strategy_id = getattr(ledger, "strategy_id", "") or ""
+        deployment_id = ledger.deployment_id
 
         if not self._warm:
             logger.error("Cannot save ledger+registry: no WARM backend configured")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.ACCOUNTING,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message="No WARM backend configured for ledger+registry atomic commit",
             )
 
@@ -2583,7 +2605,7 @@ class StateManager:
             logger.error("WARM backend does not support save_ledger_and_registry_atomic")
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.ACCOUNTING,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message=(
                     "WARM backend does not support atomic ledger+registry commit "
                     "(hosted Postgres path ships in T19 / VIB-4205)"
@@ -2649,12 +2671,12 @@ class StateManager:
             )
             logger.error(
                 "Failed to save ledger+registry atomically for %s: %s",
-                strategy_id,
+                deployment_id,
                 e,
             )
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.ACCOUNTING,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
 
@@ -2884,9 +2906,10 @@ class StateManager:
             position_types=position_types,
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def get_ledger_entries(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: "datetime | None" = None,
         intent_type: str | None = None,
         limit: int = 100,
@@ -2895,7 +2918,7 @@ class StateManager:
         """Query transaction ledger entries.
 
         Args:
-            strategy_id: Strategy to query.
+            deployment_id: Strategy to query.
             since: Only entries after this timestamp.
             intent_type: Filter by intent type.
             limit: Maximum entries to return.
@@ -2948,10 +2971,10 @@ class StateManager:
                     )
             if before is not None:
                 result = await self._warm.get_ledger_entries(  # type: ignore[attr-defined]
-                    strategy_id, since, intent_type, limit, before=before
+                    deployment_id, since, intent_type, limit, before=before
                 )
             else:
-                result = await self._warm.get_ledger_entries(strategy_id, since, intent_type, limit)  # type: ignore[attr-defined]
+                result = await self._warm.get_ledger_entries(deployment_id, since, intent_type, limit)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, True)
             return result
@@ -2964,7 +2987,6 @@ class StateManager:
     async def sum_ledger_gas_usd(
         self,
         deployment_id: str,
-        strategy_id: str | None = None,
     ) -> Decimal:
         """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
 
@@ -2981,7 +3003,7 @@ class StateManager:
             return Decimal("0")
         start = time.perf_counter()
         try:
-            result = await self._warm.sum_ledger_gas_usd(deployment_id, strategy_id)
+            result = await self._warm.sum_ledger_gas_usd(deployment_id)
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "sum_ledger_gas_usd", latency, True)
             return result
@@ -3005,7 +3027,7 @@ class StateManager:
             logger.error("Failed to sum ledger gas_usd for %s: %s", deployment_id, e)
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id or deployment_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
 
@@ -3319,7 +3341,7 @@ class StateManager:
 
     async def get_position_events(
         self,
-        strategy_id: str,
+        deployment_id: str,
         event_type: str | None = None,
         limit: int = 100,
     ) -> list:
@@ -3328,7 +3350,7 @@ class StateManager:
         Backend signature is ``(deployment_id, position_id, event_type, limit)``
         — call with keyword args so positional binding can't silently bind
         ``event_type`` to ``position_id``. CodeRabbit round-4 caught this:
-        my round-3 forwarding was ``(strategy_id, event_type, limit)`` which
+        my round-3 forwarding was ``(deployment_id, event_type, limit)`` which
         mis-bound, producing empty results for every caller that passed
         ``event_type`` (e.g. ``recompute_attribution`` filtering CLOSE events).
         """
@@ -3339,7 +3361,7 @@ class StateManager:
         start = time.perf_counter()
         try:
             result = await self._warm.get_position_events(
-                deployment_id=strategy_id,
+                deployment_id=deployment_id,
                 position_id=None,
                 event_type=event_type,
                 limit=limit,
@@ -3353,7 +3375,7 @@ class StateManager:
             logger.error(f"Failed to get position events: {e}")
             return []
 
-    async def get_position_history(self, strategy_id: str, position_id: str) -> list:
+    async def get_position_history(self, deployment_id: str, position_id: str) -> list:
         """Fetch full history (timestamp-ASC) for a single position_id."""
         if not self._initialized:
             await self.initialize()
@@ -3361,7 +3383,7 @@ class StateManager:
             return []
         start = time.perf_counter()
         try:
-            result = await self._warm.get_position_history(strategy_id, position_id)
+            result = await self._warm.get_position_history(deployment_id, position_id)
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_position_history", latency, True)
             return result

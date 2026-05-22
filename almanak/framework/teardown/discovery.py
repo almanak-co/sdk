@@ -481,7 +481,7 @@ async def discover_lp_positions(
 
 
 def to_teardown_summary(
-    strategy_id: str,
+    deployment_id: str,
     chain: str,
     positions: list[DiscoveredPosition],
 ) -> TeardownPositionSummary:
@@ -530,7 +530,7 @@ def to_teardown_summary(
             )
         )
     return TeardownPositionSummary(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         timestamp=datetime.now(UTC),
         positions=infos,
     )

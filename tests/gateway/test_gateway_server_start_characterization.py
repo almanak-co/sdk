@@ -336,8 +336,9 @@ class TestServerAndExecutorBuild:
 class TestStorageBootstrap:
     @pytest.mark.asyncio
     async def test_timeline_store_postgres_when_database_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # VIB-3760: hosted-mode (Postgres) requires AGENT_ID + auth_token.
-        monkeypatch.setenv("AGENT_ID", "agent-test")
+        # VIB-3760: hosted-mode (Postgres) requires ALMANAK_IS_HOSTED + auth_token.
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test")
         mocks = _install_bootstrap_patches(monkeypatch)
         with patch("almanak.gateway.server.asyncio.create_task") as create_task:
             create_task.side_effect = _fake_create_task
@@ -400,8 +401,9 @@ class TestStorageBootstrap:
     async def test_lifecycle_store_receives_database_url_and_sqlite_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # VIB-3760: hosted-mode (Postgres) requires AGENT_ID + auth_token.
-        monkeypatch.setenv("AGENT_ID", "agent-test")
+        # VIB-3760: hosted-mode (Postgres) requires ALMANAK_IS_HOSTED + auth_token.
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test")
         mocks = _install_bootstrap_patches(monkeypatch)
         with patch("almanak.gateway.server.asyncio.create_task") as create_task:
             create_task.side_effect = _fake_create_task

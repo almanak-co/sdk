@@ -365,7 +365,7 @@ class PaperTradingSummary:
     including trade counts, timing, and basic performance metrics.
 
     Attributes:
-        strategy_id: Identifier of the strategy being tested
+        deployment_id: Identifier of the strategy being tested
         start_time: When the session started
         duration: How long the session ran
         total_trades: Total number of trades attempted
@@ -383,7 +383,7 @@ class PaperTradingSummary:
         errors: List of trade errors
     """
 
-    strategy_id: str
+    deployment_id: str
     start_time: datetime
     duration: timedelta
     total_trades: int
@@ -443,6 +443,7 @@ class PaperTradingSummary:
             return 0
         return self.total_gas_used // self.successful_trades
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def summary(self) -> str:
         """Generate a human-readable summary.
 
@@ -456,7 +457,7 @@ class PaperTradingSummary:
             "",
             "SESSION INFO",
             "-" * 70,
-            f"Strategy:           {self.strategy_id}",
+            f"Strategy:           {self.deployment_id}",
             f"Chain:              {self.chain}",
             f"Start Time:         {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}",
             f"End Time:           {self.end_time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -544,7 +545,7 @@ class PaperTradingSummary:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "start_time": self.start_time.isoformat(),
             "duration_seconds": self.duration_seconds,
             "end_time": self.end_time.isoformat(),
@@ -584,7 +585,7 @@ class PaperTradingSummary:
         errors = [PaperTradeError.from_dict(e) for e in data.get("errors", [])]
 
         return cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             start_time=datetime.fromisoformat(data["start_time"]),
             duration=timedelta(seconds=data["duration_seconds"]),
             total_trades=data["total_trades"],

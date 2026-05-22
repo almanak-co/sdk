@@ -55,14 +55,14 @@ from almanak.framework.models.stuck_reason import StuckReason
 
 def _make_card(
     *,
-    strategy_id: str = "strat-1",
+    deployment_id: str = "strat-1",
     event_type: EventType = EventType.ERROR,
     severity: Severity = Severity.HIGH,
     reason: StuckReason = StuckReason.RPC_FAILURE,
 ) -> OperatorCard:
     """Build a minimal OperatorCard for tests."""
     return OperatorCard(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
         event_type=event_type,
         reason=reason,
@@ -633,13 +633,13 @@ class TestCooldownRecording:
 
         # rule_a (TELEGRAM, succeeded) -> cooldown recorded.
         assert mgr.cooldown_tracker.is_on_cooldown(
-            strategy_id=card.strategy_id,
+            deployment_id=card.deployment_id,
             condition=AlertCondition.STRATEGY_ERROR,
             cooldown_seconds=3600,
         )
         # rule_b (SLACK, failed) -> cooldown NOT recorded.
         assert not mgr.cooldown_tracker.is_on_cooldown(
-            strategy_id=card.strategy_id,
+            deployment_id=card.deployment_id,
             condition=AlertCondition.RISK_GUARD_TRIGGERED,
             cooldown_seconds=3600,
         )

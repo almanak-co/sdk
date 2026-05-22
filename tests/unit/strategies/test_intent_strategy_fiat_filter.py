@@ -16,12 +16,12 @@ from almanak import IntentStrategy
 
 @dataclass
 class _Config:
-    strategy_id: str = "test"
+    deployment_id: str = "test"
     strategy_name: str = "test"
     chain: str = "bsc"
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if k not in {"strategy_id", "strategy_name", "chain"}}
+        return {k: v for k, v in self.__dict__.items() if k not in {"deployment_id", "strategy_name", "chain"}}
 
     def update(self, **kwargs) -> None:
         for k, v in kwargs.items():
@@ -45,7 +45,7 @@ def _make(config):
     s = object.__new__(_Strat)
     s.config = config
     s._chain = getattr(config, "chain", "bsc")
-    s._strategy_id = "test"
+    s._deployment_id = "test"
     return s
 
 

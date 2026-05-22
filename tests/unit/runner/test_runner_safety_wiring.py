@@ -43,14 +43,14 @@ class MockMarketSnapshot:
 class MockStrategy:
     def __init__(
         self,
-        strategy_id: str = "test_strategy",
+        deployment_id: str = "test_strategy",
         chain: str = "arbitrum",
         wallet_address: str = "0x1234567890123456789012345678901234567890",
         decide_returns: Any | None = None,
         decide_raises: Exception | None = None,
         decide_delay: float = 0.0,
     ) -> None:
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._chain = chain
         self._wallet_address = wallet_address
         self._decide_returns = decide_returns
@@ -59,8 +59,8 @@ class MockStrategy:
         self.decide_call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     @property
     def chain(self) -> str:
@@ -138,14 +138,14 @@ class MockStateManager:
     async def close(self) -> None:
         pass
 
-    async def load_state(self, strategy_id: str) -> StateData:
-        if strategy_id not in self._states:
-            self._states[strategy_id] = StateData(strategy_id=strategy_id, version=1, state={})
-        return self._states[strategy_id]
+    async def load_state(self, deployment_id: str) -> StateData:
+        if deployment_id not in self._states:
+            self._states[deployment_id] = StateData(deployment_id=deployment_id, version=1, state={})
+        return self._states[deployment_id]
 
     async def save_state(self, state: StateData, expected_version: int | None = None) -> StateData:
         state.version += 1
-        self._states[state.strategy_id] = state
+        self._states[state.deployment_id] = state
         return state
 
     async def save_ledger_entry(self, entry: Any) -> None:
@@ -156,11 +156,11 @@ class MockStateManager:
         return len(self._snapshots)
 
     async def save_portfolio_metrics(self, metrics: Any) -> bool:
-        self._metrics[getattr(metrics, "strategy_id", "")] = metrics
+        self._metrics[getattr(metrics, "deployment_id", "")] = metrics
         return True
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> Any:
-        return self._metrics.get(strategy_id)
+    async def get_portfolio_metrics(self, deployment_id: str) -> Any:
+        return self._metrics.get(deployment_id)
 
     def get_accounting_events_sync(
         self,
@@ -493,9 +493,9 @@ class TestStuckDetectorWiring:
         states_written: list[str] = []
         original_write = runner._lifecycle_write_state
 
-        def spy(agent_id, state, error_message=None):
+        def spy(deployment_id, state, error_message=None):
             states_written.append(state)
-            return original_write(agent_id, state, error_message)
+            return original_write(deployment_id, state, error_message)
 
         monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
 
@@ -503,15 +503,15 @@ class TestStuckDetectorWiring:
             """Fails for the first N calls, then returns a HOLD on every subsequent call."""
 
             def __init__(self, n_fails: int):
-                self._strategy_id = "recovery_test"
+                self._deployment_id = "recovery_test"
                 self._chain = "arbitrum"
                 self._wallet_address = "0x1234567890123456789012345678901234567890"
                 self._n_fails = n_fails
                 self.decide_call_count = 0
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
             @property
             def chain(self) -> str:
@@ -551,9 +551,9 @@ class TestStuckDetectorWiring:
         states_written: list[str] = []
         original_write = runner._lifecycle_write_state
 
-        def spy(agent_id, state, error_message=None):
+        def spy(deployment_id, state, error_message=None):
             states_written.append(state)
-            return original_write(agent_id, state, error_message)
+            return original_write(deployment_id, state, error_message)
 
         monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
 
@@ -561,14 +561,14 @@ class TestStuckDetectorWiring:
             """One failure, then permanent success — never reaches the ERROR threshold."""
 
             def __init__(self):
-                self._strategy_id = "below_threshold_test"
+                self._deployment_id = "below_threshold_test"
                 self._chain = "arbitrum"
                 self._wallet_address = "0x1234567890123456789012345678901234567890"
                 self.decide_call_count = 0
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
             @property
             def chain(self) -> str:
@@ -613,9 +613,9 @@ class TestStuckDetectorWiring:
         states_written: list[str] = []
         original_write = runner._lifecycle_write_state
 
-        def spy(agent_id, state, error_message=None):
+        def spy(deployment_id, state, error_message=None):
             states_written.append(state)
-            return original_write(agent_id, state, error_message)
+            return original_write(deployment_id, state, error_message)
 
         monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
 
@@ -624,14 +624,14 @@ class TestStuckDetectorWiring:
 
             def __init__(self, runner_ref: StrategyRunner):
                 self._runner = runner_ref
-                self._strategy_id = "terminal_test"
+                self._deployment_id = "terminal_test"
                 self._chain = "arbitrum"
                 self._wallet_address = "0x1234567890123456789012345678901234567890"
                 self.decide_call_count = 0
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
             @property
             def chain(self) -> str:
@@ -644,7 +644,7 @@ class TestStuckDetectorWiring:
             def decide(self, market):
                 self.decide_call_count += 1
                 # Simulate a teardown-style transition: terminal write + shutdown request
-                self._runner._lifecycle_write_state(self._strategy_id, "TERMINATED")
+                self._runner._lifecycle_write_state(self._deployment_id, "TERMINATED")
                 self._runner.request_shutdown()
                 return HoldIntent(reason="terminal")
 
@@ -719,7 +719,7 @@ class TestSafetyIntegration:
         result = IterationResult(
             status=IterationStatus.CIRCUIT_BREAKER_OPEN,
             error="breaker open",
-            strategy_id="test",
+            deployment_id="test",
         )
         d = result.to_dict()
         assert d["status"] == "CIRCUIT_BREAKER_OPEN"

@@ -22,6 +22,7 @@ def _build_menu_entries(strategies: list[dict]) -> list[str]:
     return entries
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("demo")
 @click.option(
     "--name",
@@ -112,7 +113,7 @@ def demo(name: str | None, output_dir: str, list_only: bool) -> None:
 
     shutil.copytree(source, target)
 
-    # Rewrite strategy_id and strategy_name in copied config.json
+    # Rewrite deployment_id and strategy_name in copied config.json
     _rewrite_config(target, selected)
 
     # Remove run_anvil.py from the copy (internal dev script)
@@ -170,10 +171,11 @@ def _interactive_select(strategies: list[dict]) -> str | None:
     return strategies[index]["name"]
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def _rewrite_config(target: Path, strategy_name: str) -> None:
     """Clean up the copied config.json.
 
-    Strips leftover identity/descriptive metadata (strategy_id, strategy_name,
+    Strips leftover identity/descriptive metadata (deployment_id, strategy_name,
     description, protocol, network) that belongs in the @almanak_strategy
     decorator. The top-level ``chain`` / ``chains`` field is preserved: it is
     an explicit runtime override that sdk-planner and operators rely on to
@@ -190,7 +192,7 @@ def _rewrite_config(target: Path, strategy_name: str) -> None:
             click.echo(f"Warning: could not parse config.json ({e}); skipping config rewrite.", err=True)
             return
 
-    metadata_keys = {"strategy_id", "strategy_name", "description", "protocol", "network"}
+    metadata_keys = {"deployment_id", "strategy_name", "description", "protocol", "network"}
     removed = {k for k in metadata_keys if k in config}
     for k in removed:
         del config[k]

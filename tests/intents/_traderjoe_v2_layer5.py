@@ -44,19 +44,19 @@ from almanak.framework.execution.orchestrator import ExecutionContext
 from almanak.framework.execution.result_enricher import enrich_result
 from tests.intents.conftest import assert_accounting_persisted
 
-# The Layer-5 persisted row's strategy_id comes from
-# ``assert_accounting_persisted(strategy_id=...)`` (conftest default
+# The Layer-5 persisted row's deployment_id comes from
+# ``assert_accounting_persisted(deployment_id=...)`` (conftest default
 # ``"layer5-intent-test"``), NOT from this ExecutionContext — the context only
 # feeds ``enrich_result`` metadata. We still stamp the SAME id here so the
 # enrichment context and the persisted/asserted identity never diverge (avoids
 # a latent happy-path identity mismatch once VIB-4634 lands; CodeRabbit
 # PR #2366).
-LAYER5_STRATEGY_ID = "layer5-intent-test"
+LAYER5_DEPLOYMENT_ID = "layer5-intent-test"
 
 
 def execution_context(*, chain: str, wallet: str) -> ExecutionContext:
     return ExecutionContext(
-        strategy_id=LAYER5_STRATEGY_ID,
+        deployment_id=LAYER5_DEPLOYMENT_ID,
         chain=chain,
         wallet_address=wallet,
         protocol="traderjoe_v2",
@@ -92,7 +92,6 @@ def to_human(raw: int | None, decimals: int) -> Decimal | None:
 
 def assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
     assert row["deployment_id"] == "layer5-intent-test"
-    assert row["strategy_id"] == "layer5-intent-test"
     assert row["cycle_id"] == "layer5-cycle"
     assert row["execution_mode"] == "paper"
     assert row["event_type"] == event_type

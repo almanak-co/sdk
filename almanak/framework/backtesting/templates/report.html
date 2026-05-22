@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Backtest Report - {{ result.strategy_id }}</title>
+    <title>Backtest Report - {{ result.deployment_id }}</title>
     <style>
         /* CSS Variables for theming */
         :root {
@@ -678,7 +678,7 @@
         <!-- Header -->
         <header>
             <h1>Backtest Report</h1>
-            <p class="subtitle">Strategy: <strong>{{ result.strategy_id }}</strong></p>
+            <p class="subtitle">Strategy: <strong>{{ result.deployment_id }}</strong></p>
             <span class="engine-badge {{ result.engine.value }}">{{ result.engine.value }} Engine</span>
         </header>
 

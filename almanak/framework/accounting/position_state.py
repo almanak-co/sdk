@@ -55,7 +55,6 @@ class PositionStateRow:
     """One row per open position per iteration in `position_state_snapshots`."""
 
     snapshot_id: int | None  # FK → portfolio_snapshots.id; set after snapshot row insert
-    strategy_id: str
     deployment_id: str
     cycle_id: str
     timestamp: datetime
@@ -98,7 +97,6 @@ def materialise_position_state(
     position: Any,
     market: Any,
     prices: dict[str, Any] | None,
-    strategy_id: str,
     deployment_id: str,
     cycle_id: str,
     timestamp: datetime,
@@ -126,7 +124,7 @@ def materialise_position_state(
         # distinguish "no positions" from "positions exist but
         # continuous-accrual is short-circuited".
         primitive = _classify_position(position) or "unknown"
-        report_continuous_fields_unavailable(strategy_id, primitive.lower())
+        report_continuous_fields_unavailable(deployment_id, primitive.lower())
         return None
 
     pos_type = _classify_position(position)
@@ -170,7 +168,6 @@ def materialise_position_state(
 
     common = {
         "snapshot_id": None,  # caller sets after parent insert
-        "strategy_id": strategy_id,
         "deployment_id": deployment_id,
         "cycle_id": cycle_id,
         "timestamp": timestamp,
@@ -347,7 +344,7 @@ def _confidence_from(details: dict[str, Any], prices: dict[str, Any] | None) -> 
 class _GaugeState:
     """Module-level state for the hosted no-op gauge.
 
-    The metric `accounting_continuous_fields_unavailable{strategy_id, primitive}`
+    The metric `accounting_continuous_fields_unavailable{deployment_id, primitive}`
     is `1` whenever the materializer is short-circuited and `0` otherwise.
     Hosted dashboards page when ANY leveraged strategy's gauge is `>0`.
     """
@@ -358,31 +355,31 @@ class _GaugeState:
 _gauge = _GaugeState()
 
 
-def report_continuous_fields_unavailable(strategy_id: str, primitive: str) -> None:
-    """Set the gauge to 1 for (strategy, primitive). Idempotent per process.
+def report_continuous_fields_unavailable(deployment_id: str, primitive: str) -> None:
+    """Set the gauge to 1 for (deployment, primitive). Idempotent per process.
 
-    Called once per startup per (strategy, primitive). The gateway's metrics
+    Called once per startup per (deployment, primitive). The gateway's metrics
     publisher polls this state. Wiring the actual prom_client / OpenTelemetry
     publish lives in the gateway side; this module just owns the state map
     so framework code has a single import surface.
     """
-    key = (strategy_id, primitive)
+    key = (deployment_id, primitive)
     if _gauge.fired.get(key) == 1:
         return
     _gauge.fired[key] = 1
     logger.info(
-        "accounting_continuous_fields_unavailable strategy_id=%s primitive=%s — "
+        "accounting_continuous_fields_unavailable deployment_id=%s primitive=%s - "
         "hosted-mode position-state materializer is no-op pending Track B "
         "(metrics-db migration). Continuous-accrual cells will report "
-        "confidence=UNAVAILABLE on the Accountant Test for this strategy.",
-        strategy_id,
+        "confidence=UNAVAILABLE on the Accountant Test for this deployment.",
+        deployment_id,
         primitive,
     )
 
 
-def report_continuous_fields_writing(strategy_id: str, primitive: str) -> None:
+def report_continuous_fields_writing(deployment_id: str, primitive: str) -> None:
     """Set the gauge to 0 — local-mode runs OR post-Track-B hosted runs."""
-    _gauge.fired[(strategy_id, primitive)] = 0
+    _gauge.fired[(deployment_id, primitive)] = 0
 
 
 def get_gauge_state() -> dict[tuple[str, str], int]:

@@ -37,7 +37,7 @@ def config() -> CircuitBreakerConfig:
 @pytest.fixture
 def breaker(config: CircuitBreakerConfig) -> CircuitBreaker:
     """Create a test circuit breaker."""
-    return CircuitBreaker(strategy_id="test_strategy", config=config)
+    return CircuitBreaker(deployment_id="test_strategy", config=config)
 
 
 @pytest.fixture
@@ -346,7 +346,7 @@ class TestStatus:
 
         status = breaker.get_status()
 
-        assert status["strategy_id"] == "test_strategy"
+        assert status["deployment_id"] == "test_strategy"
         assert status["state"] == "closed"
         assert status["consecutive_failures"] == 1
         assert status["cumulative_loss_usd"] == "100"

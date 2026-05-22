@@ -29,7 +29,7 @@ def _make_strategy():
     from almanak.framework.intents.vocabulary import HoldIntent
 
     strategy = MagicMock()
-    strategy.strategy_id = "test_vault_strategy"
+    strategy.deployment_id = "test_vault_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0xWALLET"
     strategy.decide.return_value = HoldIntent(reason="No action")

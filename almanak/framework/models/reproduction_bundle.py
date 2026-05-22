@@ -157,7 +157,7 @@ class ReproductionBundle:
     - Debug with full context
 
     Attributes:
-        strategy_id: Unique identifier for the strategy
+        deployment_id: Unique identifier for the strategy
         failure_timestamp: When the failure occurred
         block_number: Block number at time of failure
         chain: Chain identifier (e.g., "arbitrum", "ethereum")
@@ -175,7 +175,7 @@ class ReproductionBundle:
     """
 
     # Required identifiers
-    strategy_id: str
+    deployment_id: str
     failure_timestamp: datetime
     block_number: int
     chain: str
@@ -208,7 +208,7 @@ class ReproductionBundle:
         if not self.bundle_id:
             # Generate a unique bundle ID based on strategy, timestamp, and block
             ts = self.failure_timestamp.strftime("%Y%m%d_%H%M%S")
-            self.bundle_id = f"{self.strategy_id}_{ts}_{self.block_number}"
+            self.bundle_id = f"{self.deployment_id}_{ts}_{self.block_number}"
 
     def to_replay_command(self) -> str:
         """Generate a CLI command to replay this failure locally.
@@ -235,7 +235,7 @@ class ReproductionBundle:
         """Convert the bundle to a dictionary for serialization."""
         return {
             "bundle_id": self.bundle_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "failure_timestamp": self.failure_timestamp.isoformat(),
             "block_number": self.block_number,
             "chain": self.chain,
@@ -252,6 +252,7 @@ class ReproductionBundle:
             "replay_command": self.to_replay_command(),
         }
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReproductionBundle":
         """Create a ReproductionBundle from a dictionary.
@@ -312,7 +313,7 @@ class ReproductionBundle:
 
         return cls(
             bundle_id=data["bundle_id"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             failure_timestamp=datetime.fromisoformat(data["failure_timestamp"]),
             block_number=data["block_number"],
             chain=data["chain"],
@@ -377,7 +378,7 @@ class FailureContext:
     a reproduction bundle from a failure.
     """
 
-    strategy_id: str
+    deployment_id: str
     chain: str
     error: Exception
     persistent_state: dict[str, Any]
@@ -492,7 +493,7 @@ def on_failure(context: FailureContext) -> ReproductionBundle:
 
     # Create the bundle
     bundle = ReproductionBundle(
-        strategy_id=context.strategy_id,
+        deployment_id=context.deployment_id,
         failure_timestamp=datetime.now(UTC),
         block_number=block_number,
         chain=context.chain,

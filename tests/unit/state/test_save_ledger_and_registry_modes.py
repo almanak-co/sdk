@@ -45,7 +45,6 @@ def _ledger(id_: str = "ledger-1", tx: str = "0xtxhash") -> LedgerEntry:
     return LedgerEntry(
         id=id_,
         cycle_id="cycle-1",
-        strategy_id="TestStrat:abc",
         deployment_id="TestStrat:abc",
         execution_mode="live",
         timestamp=datetime(2026, 5, 12, 12, 0, 0, tzinfo=UTC),

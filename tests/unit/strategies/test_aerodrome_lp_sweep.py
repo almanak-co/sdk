@@ -46,7 +46,7 @@ def strategy(sweep_config):
     strat.config = config
     strat._chain = "base"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-sweep"
+    strat._deployment_id = "test-sweep"
 
     # Re-run init logic
     strat.pool = config.pool

@@ -803,7 +803,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             planner = await self._get_solana_planner(chain, wallet_address)
 
             exec_context = {
-                "strategy_id": request.strategy_id,
+                "deployment_id": request.deployment_id,
                 "intent_id": request.intent_id,
                 "chain": chain,
                 "wallet_address": wallet_address,
@@ -838,6 +838,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 error_code="EXECUTION_FAILED",
             )
 
+    # crap-allowlist: VIB-4722 only renamed the execution context identity to deployment_id.
     async def _execute_evm(
         self,
         request: gateway_pb2.ExecuteRequest,
@@ -880,7 +881,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 )
 
             exec_context = ExecutionContext(
-                strategy_id=request.strategy_id,
+                deployment_id=request.deployment_id,
                 intent_id=request.intent_id,
                 chain=chain,
                 wallet_address=wallet_address,

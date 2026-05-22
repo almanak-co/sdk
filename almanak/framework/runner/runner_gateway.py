@@ -63,6 +63,22 @@ def get_gateway_client(runner: Any) -> Any | None:
 # -------------------------------------------------------------------------
 
 
+def _strategy_display_name(strategy: StrategyProtocol) -> str:
+    config = getattr(strategy, "config", None)
+    metadata = getattr(strategy, "STRATEGY_METADATA", None)
+    metadata_name = getattr(metadata, "name", "")
+    if not metadata_name and isinstance(metadata, dict):
+        metadata_name = metadata.get("name") or metadata.get("canonical_name", "")
+
+    return (
+        getattr(strategy, "strategy_display_name", "")
+        or getattr(config, "strategy_display_name", "")
+        or getattr(strategy, "STRATEGY_NAME", "")
+        or metadata_name
+        or type(strategy).__name__
+    )
+
+
 def register_with_gateway(runner: Any, strategy: StrategyProtocol) -> None:
     """Register this strategy instance with the gateway's instance registry.
 
@@ -77,12 +93,8 @@ def register_with_gateway(runner: Any, strategy: StrategyProtocol) -> None:
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.RegisterInstanceRequest(
-            strategy_id=strategy.strategy_id,
-            strategy_name=getattr(
-                strategy,
-                "strategy_display_name",
-                getattr(getattr(strategy, "config", None), "strategy_display_name", strategy.strategy_id),
-            ),
+            deployment_id=strategy.deployment_id,
+            strategy_name=_strategy_display_name(strategy),
             template_name=type(strategy).__name__,
             chain=getattr(strategy, "chain", ""),
             protocol=getattr(strategy, "protocol", ""),
@@ -93,14 +105,14 @@ def register_with_gateway(runner: Any, strategy: StrategyProtocol) -> None:
         response = client.dashboard.RegisterStrategyInstance(request)
         if response.success:
             verb = "Re-registered" if response.already_existed else "Registered"
-            logger.info(f"{verb} strategy instance with gateway: {strategy.strategy_id}")
+            logger.info(f"{verb} strategy instance with gateway: {strategy.deployment_id}")
         else:
             logger.warning(f"Failed to register with gateway: {response.error}")
     except Exception as e:
         logger.debug(f"Failed to register with gateway (non-fatal): {e}")
 
 
-def deregister_from_gateway(runner: Any, strategy_id: str) -> None:
+def deregister_from_gateway(runner: Any, deployment_id: str) -> None:
     """Mark this strategy instance as INACTIVE in the gateway registry.
 
     Non-fatal: catches all exceptions.
@@ -113,12 +125,12 @@ def deregister_from_gateway(runner: Any, strategy_id: str) -> None:
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.UpdateInstanceStatusRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             status="INACTIVE",
             reason="Strategy runner stopped",
         )
         client.dashboard.UpdateStrategyInstanceStatus(request)
-        logger.debug(f"Deregistered strategy instance from gateway: {strategy_id}")
+        logger.debug(f"Deregistered strategy instance from gateway: {deployment_id}")
     except Exception as e:
         logger.debug(f"Failed to deregister from gateway (non-fatal): {e}")
 
@@ -128,7 +140,7 @@ def deregister_from_gateway(runner: Any, strategy_id: str) -> None:
 # -------------------------------------------------------------------------
 
 
-def gateway_update_status(runner: Any, strategy_id: str, status: str) -> None:
+def gateway_update_status(runner: Any, deployment_id: str, status: str) -> None:
     """Update instance status in the gateway registry (non-heartbeat).
 
     Used to flip status (e.g. INACTIVE on shutdown) so that
@@ -142,7 +154,7 @@ def gateway_update_status(runner: Any, strategy_id: str, status: str) -> None:
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.UpdateInstanceStatusRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             status=status,
             heartbeat_only=False,
         )
@@ -151,19 +163,19 @@ def gateway_update_status(runner: Any, strategy_id: str, status: str) -> None:
             logger.warning(
                 "Gateway rejected status update to %s for %s: %s",
                 status,
-                strategy_id,
+                deployment_id,
                 response.error,
             )
     except Exception as e:
         logger.debug(f"Failed to update gateway status to {status} (non-fatal): {e}")
 
 
-def gateway_heartbeat(runner: Any, strategy_id: str, positions: list | None = None) -> None:
+def gateway_heartbeat(runner: Any, deployment_id: str, positions: list | None = None) -> None:
     """Send a heartbeat to the gateway for this strategy instance.
 
     Args:
         runner: StrategyRunner instance.
-        strategy_id: Strategy instance ID.
+        deployment_id: Strategy instance ID.
         positions: Optional list of StrategyPosition protos to cache in the dashboard.
 
     Non-fatal: catches all exceptions.
@@ -176,7 +188,7 @@ def gateway_heartbeat(runner: Any, strategy_id: str, positions: list | None = No
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.UpdateInstanceStatusRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             heartbeat_only=True,
         )
         if positions:
@@ -261,12 +273,12 @@ except Exception:
     _REPORTED_ALMANAK_VERSION = None
 
 # Process-lifetime cache: hosted V2 runs one strategy per process, so reporting
-# once per agent avoids rewriting the same package version on every RUNNING write.
-_RUNNING_VERSION_REPORTED_AGENT_IDS: set[str] = set()
+# once per deployment avoids rewriting the same package version on every RUNNING write.
+_RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS: set[str] = set()
 
 
-def lifecycle_write_state(runner: Any, agent_id: str, state: str, error_message: str | None = None) -> None:
-    """Write agent state to LifecycleStore via gateway.
+def lifecycle_write_state(runner: Any, deployment_id: str, state: str, error_message: str | None = None) -> None:
+    """Write deployment lifecycle state via gateway.
 
     Non-fatal: catches all exceptions.
     """
@@ -277,23 +289,27 @@ def lifecycle_write_state(runner: Any, agent_id: str, state: str, error_message:
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.WriteAgentStateRequest(
-            agent_id=agent_id,
+            deployment_id=deployment_id,
             state=state,
             error_message=error_message or "",
         )
         reported_version = _REPORTED_ALMANAK_VERSION
         reported_running_version = False
-        if state == "RUNNING" and reported_version is not None and agent_id not in _RUNNING_VERSION_REPORTED_AGENT_IDS:
+        if (
+            state == "RUNNING"
+            and reported_version is not None
+            and deployment_id not in _RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS
+        ):
             request.running_almanak_version = reported_version
             reported_running_version = True
         client.lifecycle.WriteState(request)
         if reported_running_version:
-            _RUNNING_VERSION_REPORTED_AGENT_IDS.add(agent_id)
+            _RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS.add(deployment_id)
     except Exception as e:
         logger.debug(f"Failed to write lifecycle state (non-fatal): {e}")
 
 
-def lifecycle_heartbeat(runner: Any, agent_id: str) -> None:
+def lifecycle_heartbeat(runner: Any, deployment_id: str) -> None:
     """Send lifecycle heartbeat via gateway.
 
     Non-fatal: catches all exceptions.
@@ -304,13 +320,13 @@ def lifecycle_heartbeat(runner: Any, agent_id: str) -> None:
     try:
         from almanak.gateway.proto import gateway_pb2
 
-        request = gateway_pb2.HeartbeatRequest(agent_id=agent_id)
+        request = gateway_pb2.HeartbeatRequest(deployment_id=deployment_id)
         client.lifecycle.Heartbeat(request)
     except Exception as e:
         logger.debug(f"Failed to send lifecycle heartbeat (non-fatal): {e}")
 
 
-def lifecycle_poll_command(runner: Any, agent_id: str) -> str | None:
+def lifecycle_poll_command(runner: Any, deployment_id: str) -> str | None:
     """Poll for pending command from LifecycleStore.
 
     Returns command string (STOP) or None.
@@ -325,7 +341,7 @@ def lifecycle_poll_command(runner: Any, agent_id: str) -> str | None:
     try:
         from almanak.gateway.proto import gateway_pb2
 
-        request = gateway_pb2.ReadAgentCommandRequest(agent_id=agent_id)
+        request = gateway_pb2.ReadAgentCommandRequest(deployment_id=deployment_id)
         response = client.lifecycle.ReadCommand(request)
         if response.found:
             command = response.command
@@ -343,7 +359,7 @@ def lifecycle_poll_command(runner: Any, agent_id: str) -> str | None:
         return None
 
 
-def lifecycle_handle_stop(runner: Any, strategy_id: str, strategy: Any) -> None:
+def lifecycle_handle_stop(runner: Any, deployment_id: str, strategy: Any) -> None:
     """Handle STOP command: bridge into teardown.
 
     Shared by both the normal STOP path and the STOP-while-paused path.
@@ -359,20 +375,20 @@ def lifecycle_handle_stop(runner: Any, strategy_id: str, strategy: Any) -> None:
         get_teardown_state_manager_for_runtime,
     )
 
-    runner._lifecycle_write_state(strategy_id, "STOPPING")
+    runner._lifecycle_write_state(deployment_id, "STOPPING")
 
     try:
         manager = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
         teardown_request = TeardownRequest(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=TeardownMode.SOFT,
             reason="Lifecycle STOP command",
             requested_by="lifecycle",
         )
         manager.create_request(teardown_request)
-        logger.info("Created teardown request for %s from STOP command", strategy_id)
+        logger.info("Created teardown request for %s from STOP command", deployment_id)
     except Exception as e:  # noqa: BLE001
-        logger.error("Failed to create teardown request for %s: %s; hard-stopping", strategy_id, e)
+        logger.error("Failed to create teardown request for %s: %s; hard-stopping", deployment_id, e)
         runner._shutdown_requested = True
     # Don't break -- let the next iteration pick up the teardown request
     # via _check_teardown_request(), which will execute teardown intents
@@ -410,9 +426,9 @@ def setup_gateway_integration(runner: Any, strategy: StrategyProtocol) -> None:
     runner._register_with_gateway(strategy)
 
 
-def teardown_gateway_integration(runner: Any, strategy_id: str) -> None:
+def teardown_gateway_integration(runner: Any, deployment_id: str) -> None:
     """Mark instance as INACTIVE and clear gateway dual-write.
 
     Call this after run_iteration() when running outside run_loop().
     """
-    runner._deregister_from_gateway(strategy_id)
+    runner._deregister_from_gateway(deployment_id)

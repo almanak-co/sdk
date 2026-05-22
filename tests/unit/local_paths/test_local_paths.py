@@ -10,7 +10,6 @@ Test IDs T-3761-1..T-3761-12.
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import subprocess
@@ -40,7 +39,8 @@ from almanak.framework.local_paths import (
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Clear every env var the resolver consults so each test starts neutral."""
     for var in (
-        "AGENT_ID",
+        "ALMANAK_IS_HOSTED",
+        "ALMANAK_DEPLOYMENT_ID",
         "ALMANAK_STATE_DB",
         "ALMANAK_STRATEGY_FOLDER",
         "ALMANAK_GATEWAY_DB_PATH",
@@ -72,9 +72,7 @@ def test_t_3761_2_strategy_folder_wins_over_utility(clean_env, tmp_path) -> None
     assert local_db_path() == folder.resolve() / LOCAL_DB_FILENAME
 
 
-def test_t_3761_3_gateway_db_path_used_when_no_strategy_folder(
-    clean_env, tmp_path
-) -> None:
+def test_t_3761_3_gateway_db_path_used_when_no_strategy_folder(clean_env, tmp_path) -> None:
     """T-3761-3: ALMANAK_GATEWAY_DB_PATH wins over the utility default."""
     explicit_gw = tmp_path / "gateway.db"
     clean_env.setenv("ALMANAK_GATEWAY_DB_PATH", str(explicit_gw))
@@ -135,7 +133,8 @@ def test_t_3761_7_hosted_mode_refuses(clean_env) -> None:
     Hosted mode reads/writes Postgres; calling local_db_path() from there
     is a programmer error and must surface, not silently return a path.
     """
-    clean_env.setenv("AGENT_ID", "agent-test")
+    clean_env.setenv("ALMANAK_IS_HOSTED", "true")
+    clean_env.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test")
     with pytest.raises(LocalPathError, match=r"hosted mode"):
         local_db_path()
     with pytest.raises(LocalPathError, match=r"hosted mode"):
@@ -333,7 +332,8 @@ def test_strategy_db_path_ignores_gateway_db_path_env(clean_env, tmp_path) -> No
 
 def test_strategy_db_path_hosted_mode_refuses(clean_env) -> None:
     """VIB-3835: like local_db_path, the strict variant refuses in hosted mode."""
-    clean_env.setenv("AGENT_ID", "agent-test")
+    clean_env.setenv("ALMANAK_IS_HOSTED", "true")
+    clean_env.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test")
     with pytest.raises(LocalPathError, match=r"hosted mode"):
         local_strategy_db_path()
 

@@ -32,7 +32,7 @@ def strategy():
     ):
         s = GMXPerpLifecycleStrategy.__new__(GMXPerpLifecycleStrategy)
         # Attributes normally populated by the framework / the strategy __init__
-        s._strategy_id = "test_gmx_perp_lifecycle"
+        s._deployment_id = "test_gmx_perp_lifecycle"
         s._chain = "arbitrum"
         s.market = "ETH/USD"
         s.collateral_token = "USDC"

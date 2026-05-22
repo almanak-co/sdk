@@ -211,7 +211,7 @@ class TestRunIterationAccountingFailed:
         must return ACCOUNTING_FAILED — not STRATEGY_ERROR and not crash."""
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x" + "ab" * 20
 
@@ -250,7 +250,7 @@ class TestRunIterationAccountingFailed:
         """Non-accounting exceptions should still map to STRATEGY_ERROR."""
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x" + "ab" * 20
 
@@ -280,7 +280,7 @@ class TestRunIterationAccountingFailed:
         """
         runner = _make_runner()
         strategy = MagicMock()
-        strategy.strategy_id = "test-strategy"
+        strategy.deployment_id = "test-strategy"
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x" + "ab" * 20
 
@@ -293,7 +293,7 @@ class TestRunIterationAccountingFailed:
 
         finalize_called = []
 
-        async def _fake_finalize(runner_self: Any, strategy: Any, strategy_id: Any) -> None:
+        async def _fake_finalize(runner_self: Any, strategy: Any, deployment_id: Any) -> None:
             finalize_called.append(True)
 
         runner._recover_incomplete_sessions = AsyncMock(return_value=0)

@@ -771,7 +771,7 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     # the two-DB split that produced the May 2 dashboard miscount
     # (NAV $35.62 / Lifetime PnL +14238% / Cash 195% of NAV).
     #
-    # Hosted mode (AGENT_ID set) uses Postgres, so the local-path branch
+    # Hosted mode (ALMANAK_IS_HOSTED set) uses Postgres, so the local-path branch
     # is skipped entirely.
     from almanak.framework.local_paths import auto_detect_strategy_folder, state_db_env, strategy_folder_env
     from almanak.gateway.server import serve
@@ -1471,7 +1471,6 @@ def strategy_test(
             max_iterations=None,
             teardown_after=teardown,
             working_dir=working_dir,
-            strategy_id_override=None,
             anvil_ports=anvil_ports,
             test_actions=parsed_actions,
             test_json=json_output,
@@ -1522,12 +1521,6 @@ def strategy_test(
     type=click.Path(exists=True),
     default=".",
     help="Working directory containing the strategy files. Defaults to the current directory.",
-)
-@click.option(
-    "--id",
-    type=str,
-    default=None,
-    help="Strategy instance ID to resume a previous run.",
 )
 @click.option(
     "--config",
@@ -1671,7 +1664,6 @@ def strategy_run(
     fresh,
     verbose,
     network,
-    id,
     gateway_host,
     gateway_port,
     no_gateway,
@@ -1714,9 +1706,6 @@ def strategy_run(
 
         # Dry run (no transactions)
         almanak strat run --dry-run --once
-
-        # Resume a previous run
-        almanak strat run --id abc123 --once
 
         # Fresh start (clear stale state, useful for Anvil forks)
         almanak strat run --fresh --once
@@ -1791,7 +1780,6 @@ def strategy_run(
             max_iterations=max_iterations,
             teardown_after=teardown_after,
             working_dir=working_dir,
-            strategy_id_override=id,
             anvil_ports=anvil_ports,
         )
     except click.Abort:

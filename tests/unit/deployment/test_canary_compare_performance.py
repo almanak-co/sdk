@@ -84,7 +84,7 @@ def _make_deployment(
         promotion_criteria=criteria or PromotionCriteria(),
     )
     deployment = CanaryDeployment(
-        strategy_id="s1",
+        deployment_id="s1",
         stable_version_id="v_stable",
         canary_version_id="v_canary",
         config=config,

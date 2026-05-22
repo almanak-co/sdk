@@ -197,22 +197,22 @@ class SimpleSwapStrategy:
     def __init__(
         self,
         swap_interval: int = 24,  # Swap every 24 ticks
-        strategy_id: str = "benchmark_swap_strategy",
+        deployment_id: str = "benchmark_swap_strategy",
     ):
         """Initialize benchmark strategy.
 
         Args:
             swap_interval: Number of ticks between swaps
-            strategy_id: Identifier for the strategy
+            deployment_id: Identifier for the strategy
         """
         self._swap_interval = swap_interval
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._tick_count = 0
         self._in_eth = False  # Track if we're holding ETH or USDC
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> MockSwapIntent | None:
         """Decide whether to swap based on tick count."""
@@ -373,7 +373,7 @@ class TestPnLBacktesterPerformance:
 
         # Strategy that never trades (always holds)
         class HoldStrategy:
-            strategy_id = "hold_benchmark"
+            deployment_id = "hold_benchmark"
 
             def decide(self, market: Any) -> None:
                 return None

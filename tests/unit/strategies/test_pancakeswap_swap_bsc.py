@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "bsc"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-pancakeswap-swap-bsc"
+    strat._deployment_id = "test-pancakeswap-swap-bsc"
     strat.trade_size_usd = Decimal("10")
     strat.max_slippage = Decimal("0.01")
     strat.base_token = "WBNB"

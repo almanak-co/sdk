@@ -45,7 +45,7 @@ from almanak.framework.state.exceptions import (
 
 @pytest.fixture
 def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "state.db"))
     return tmp_path
 
@@ -53,7 +53,6 @@ def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 @pytest.fixture
 def fake_strategy() -> SimpleNamespace:
     return SimpleNamespace(
-        strategy_id="strat-1",
         deployment_id="dep-1",
         chain="arbitrum",
         wallet_address="0xWALLET",
@@ -93,7 +92,7 @@ async def test_t7_pre_and_post_bracket_persist_snapshots(
             (runner_arg._last_cycle_id, get_cycle_id())
         )
         # Return a truthy snapshot to signal "captured".
-        return SimpleNamespace(strategy_id=strategy.strategy_id)
+        return SimpleNamespace(deployment_id=strategy.deployment_id)
 
     monkeypatch.setattr(
         "almanak.framework.runner.runner_state.capture_portfolio_snapshot", _fake_capture
@@ -145,7 +144,7 @@ async def test_t8_live_persistence_error_degrades_does_not_raise(
     async def _fail_capture(*args, **kwargs):
         raise AccountingPersistenceError(
             write_kind=AccountingWriteKind.SNAPSHOT,
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             message="snapshot save returned False",
         )
 
@@ -219,7 +218,7 @@ async def test_cycle_id_dual_surface_swap_and_restore(
     set_cycle_id("outer-cycle")
 
     async def _fake_capture(runner_arg, strategy, *, iteration_number, force_snapshot):
-        return SimpleNamespace(strategy_id=strategy.strategy_id)
+        return SimpleNamespace(deployment_id=strategy.deployment_id)
 
     monkeypatch.setattr(
         "almanak.framework.runner.runner_state.capture_portfolio_snapshot", _fake_capture
@@ -251,7 +250,7 @@ async def test_cycle_id_restored_to_none_when_no_outer(
     assert get_cycle_id() is None
 
     async def _fake_capture(*args, **kwargs):
-        return SimpleNamespace(strategy_id="strat-1")
+        return SimpleNamespace(deployment_id="strat-1")
 
     monkeypatch.setattr(
         "almanak.framework.runner.runner_state.capture_portfolio_snapshot", _fake_capture

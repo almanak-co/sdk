@@ -3,9 +3,9 @@
 Issue #1701 consolidated three near-duplicate mock classes (previously
 inline in ``almanak/framework/cli/backtest/sweep.py``):
 
-- ``MockSweepStrategy`` (strategy_id="mock-sweep")
-- ``MockOptimizeStrategy`` (strategy_id="mock-optimize")
-- ``MockWorkerStrategy`` (strategy_id="mock-worker")
+- ``MockSweepStrategy`` (deployment_id="mock-sweep")
+- ``MockOptimizeStrategy`` (deployment_id="mock-optimize")
+- ``MockWorkerStrategy`` (deployment_id="mock-worker")
 
 All three were behaviourally identical. These tests lock in the
 consolidated class's behaviour: configurable id, config retention,
@@ -21,13 +21,13 @@ from almanak.framework.backtesting import (
 
 
 class TestMockBacktestStrategy:
-    def test_default_strategy_id(self) -> None:
+    def test_default_deployment_id(self) -> None:
         s = MockBacktestStrategy()
-        assert s.strategy_id == "mock-backtest"
+        assert s.deployment_id == "mock-backtest"
 
-    def test_custom_strategy_id(self) -> None:
-        s = MockBacktestStrategy(strategy_id="mock-sweep")
-        assert s.strategy_id == "mock-sweep"
+    def test_custom_deployment_id(self) -> None:
+        s = MockBacktestStrategy(deployment_id="mock-sweep")
+        assert s.deployment_id == "mock-sweep"
 
     def test_config_defaults_to_empty_dict(self) -> None:
         s = MockBacktestStrategy()
@@ -45,10 +45,10 @@ class TestMockBacktestStrategy:
 
 
 class TestMakeMockStrategyClass:
-    def test_preserves_strategy_id_on_instances(self) -> None:
+    def test_preserves_deployment_id_on_instances(self) -> None:
         cls = make_mock_strategy_class("mock-sweep")
         instance = cls({"cfg": True})
-        assert instance.strategy_id == "mock-sweep"
+        assert instance.deployment_id == "mock-sweep"
         assert instance.config == {"cfg": True}
 
     def test_each_id_gets_independent_class(self) -> None:
@@ -58,9 +58,9 @@ class TestMakeMockStrategyClass:
 
         assert sweep_cls is not optimize_cls
         assert optimize_cls is not worker_cls
-        assert sweep_cls().strategy_id == "mock-sweep"
-        assert optimize_cls().strategy_id == "mock-optimize"
-        assert worker_cls().strategy_id == "mock-worker"
+        assert sweep_cls().deployment_id == "mock-sweep"
+        assert optimize_cls().deployment_id == "mock-optimize"
+        assert worker_cls().deployment_id == "mock-worker"
 
     def test_generated_class_name_is_descriptive(self) -> None:
         cls = make_mock_strategy_class("mock-sweep")
@@ -73,7 +73,7 @@ class TestMakeMockStrategyClass:
         """Old mocks accepted `config` as the sole positional arg.
 
         Sweep / optimize / worker call sites pass the dict positionally and
-        do not know about the `strategy_id` kwarg. The bound subclass must
+        do not know about the `deployment_id` kwarg. The bound subclass must
         not regress that contract.
         """
         cls = make_mock_strategy_class("mock-worker")

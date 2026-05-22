@@ -148,7 +148,7 @@ class PancakeSwapPaperTradeBscStrategy(IntentStrategy):
             add_event(TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
-                strategy_id=getattr(self, "strategy_id", "demo_pancakeswap_paper_trade_bsc"),
+                deployment_id=getattr(self, "deployment_id", "demo_pancakeswap_paper_trade_bsc"),
                 description=f"BUY {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
             ))
 
@@ -180,7 +180,7 @@ class PancakeSwapPaperTradeBscStrategy(IntentStrategy):
             add_event(TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.POSITION_MODIFIED,
-                strategy_id=getattr(self, "strategy_id", "demo_pancakeswap_paper_trade_bsc"),
+                deployment_id=getattr(self, "deployment_id", "demo_pancakeswap_paper_trade_bsc"),
                 description=f"SELL {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
             ))
 
@@ -256,7 +256,7 @@ class PancakeSwapPaperTradeBscStrategy(IntentStrategy):
             logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_pancakeswap_paper_trade_bsc"),
+            deployment_id=getattr(self, "deployment_id", "demo_pancakeswap_paper_trade_bsc"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

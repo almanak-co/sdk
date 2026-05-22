@@ -97,12 +97,14 @@ _BASELINE_VIOLATIONS: frozenset[tuple[str, str]] = frozenset(
 def _path_suffix(path: Path) -> str:
     """Return the POSIX-suffix used for allowlist / baseline matching."""
     # Find "almanak/framework/dashboard/..." anchored at the package root so
-    # results don't depend on the absolute checkout path or worktree slug.
+    # results don't depend on the absolute checkout path or worktree slug. The
+    # checkout itself may live under a directory named "almanak", so do not use
+    # the first matching path component.
     parts = path.parts
-    if "almanak" not in parts:  # pragma: no cover
-        return path.as_posix()
-    idx = parts.index("almanak")
-    return "/".join(parts[idx:])
+    for idx in range(len(parts) - 2):
+        if parts[idx : idx + 3] == ("almanak", "framework", "dashboard"):
+            return "/".join(parts[idx:])
+    return path.as_posix()  # pragma: no cover
 
 
 def _is_operator_scope(path: Path) -> bool:

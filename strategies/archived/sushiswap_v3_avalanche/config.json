@@ -1,5 +1,5 @@
 {
-    "strategy_id": "sushiswap_v3_avalanche",
+    "deployment_id": "sushiswap_v3_avalanche",
     "strategy_name": "sushiswap_v3_avalanche",
     "description": "Kitchen Loop iter 66: SushiSwap V3 Swap + LP on Avalanche",
     "chain": "avalanche",

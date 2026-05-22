@@ -47,7 +47,7 @@ def _make_teardown_state(*, teardown_id: str = "td-uuid-13") -> TeardownState:
     now = datetime.now(UTC)
     return TeardownState(
         teardown_id=teardown_id,
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=1,
@@ -62,7 +62,7 @@ def _make_teardown_result(*, accounting_degraded: bool = False) -> TeardownResul
     now = datetime.now(UTC)
     return TeardownResult(
         success=True,
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         mode="graceful",
         started_at=now,
         completed_at=now,
@@ -81,12 +81,11 @@ def _make_teardown_result(*, accounting_degraded: bool = False) -> TeardownResul
 
 def _strategy() -> Any:
     return SimpleNamespace(
-        strategy_id="strat-1",
         deployment_id="dep-1",
         chain="arbitrum",
         wallet_address="0xWALLET",
         get_open_positions=lambda: TeardownPositionSummary(
-            strategy_id="strat-1",
+            deployment_id="strat-1",
             timestamp=datetime.now(UTC),
             positions=[],
             total_value_usd=Decimal("4.0"),
@@ -182,7 +181,7 @@ def patched_helpers(monkeypatch: pytest.MonkeyPatch):
     fake_iter_result = IterationResult(
         status=IterationStatus.TEARDOWN,
         intent=None,
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         duration_ms=2500,
     )
     monkeypatch.setattr(_h, "map_teardown_result", MagicMock(return_value=fake_iter_result))
@@ -315,7 +314,7 @@ async def test_degraded_snapshot_bracket_increments_result_count(
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=None,
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 duration_ms=2500,
             )
         ),

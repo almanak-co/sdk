@@ -80,7 +80,7 @@ class BorrowPosition:
 class FullPositionSummary:
     """Complete position summary including all tokens, LP positions, and borrows."""
 
-    strategy_id: str
+    deployment_id: str
     chain: str
     timestamp: datetime
 
@@ -184,7 +184,7 @@ class FullPositionSummary:
     def to_dict(self) -> dict[str, Any]:
         """Convert the full position summary to a dictionary for serialization."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self.chain,
             "timestamp": self.timestamp.isoformat(),
             "token_positions": [
@@ -243,7 +243,7 @@ class EmergencyResult:
     """Result of an emergency stop operation."""
 
     success: bool
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     position_summary: FullPositionSummary
     operator_card: OperatorCard
@@ -256,7 +256,7 @@ class EmergencyResult:
         """Convert the emergency result to a dictionary for serialization."""
         return {
             "success": self.success,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat(),
             "position_summary": self.position_summary.to_dict(),
             "operator_card": self.operator_card.to_dict(),
@@ -276,10 +276,10 @@ class EmergencyResult:
 
 # Type aliases for callbacks
 PauseStrategyCallback = Callable[[str], bool]
-"""Callback to pause a strategy. Takes strategy_id, returns success bool."""
+"""Callback to pause a strategy. Takes deployment_id, returns success bool."""
 
 GetPositionCallback = Callable[[str], FullPositionSummary]
-"""Callback to get position summary. Takes strategy_id, returns FullPositionSummary."""
+"""Callback to get position summary. Takes deployment_id, returns FullPositionSummary."""
 
 
 class EmergencyManager:
@@ -318,9 +318,10 @@ class EmergencyManager:
         self.position_callback = position_callback
         self.dashboard_base_url = dashboard_base_url
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def emergency_stop(
         self,
-        strategy_id: str,
+        deployment_id: str,
         reason: str,
         chain: str = "",
         trigger_context: dict[str, Any] | None = None,
@@ -336,7 +337,7 @@ class EmergencyManager:
         6. Returns EmergencyResult with position summary
 
         Args:
-            strategy_id: The ID of the strategy to stop
+            deployment_id: The ID of the strategy to stop
             reason: Human-readable reason for the emergency stop
             chain: The blockchain network the strategy operates on
             trigger_context: Optional additional context about what triggered the emergency
@@ -345,28 +346,28 @@ class EmergencyManager:
             EmergencyResult with full details of the emergency stop operation
         """
         timestamp = datetime.now(UTC)
-        logger.warning(f"EMERGENCY STOP initiated for strategy {strategy_id}: {reason}")
+        logger.warning(f"EMERGENCY STOP initiated for strategy {deployment_id}: {reason}")
 
         # Step 1: Immediately pause the strategy
         pause_successful = False
         if self.pause_callback:
             try:
-                pause_successful = self.pause_callback(strategy_id)
+                pause_successful = self.pause_callback(deployment_id)
                 if pause_successful:
-                    logger.info(f"Strategy {strategy_id} paused successfully")
+                    logger.info(f"Strategy {deployment_id} paused successfully")
                 else:
-                    logger.error(f"Failed to pause strategy {strategy_id}")
+                    logger.error(f"Failed to pause strategy {deployment_id}")
             except Exception as e:
-                logger.exception(f"Error pausing strategy {strategy_id}: {e}")
+                logger.exception(f"Error pausing strategy {deployment_id}: {e}")
         else:
             logger.warning("No pause callback configured, skipping pause step")
 
         # Step 2: Get position summary
-        position_summary = self._get_position_summary(strategy_id, chain, timestamp)
+        position_summary = self._get_position_summary(deployment_id, chain, timestamp)
 
         # Step 3: Generate OperatorCard with EMERGENCY_STOP event
         operator_card = self._generate_emergency_card(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             reason=reason,
             position_summary=position_summary,
             timestamp=timestamp,
@@ -375,7 +376,7 @@ class EmergencyManager:
 
         # Step 4: Emit timeline event
         self._emit_emergency_event(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             reason=reason,
             position_summary=position_summary,
@@ -399,7 +400,7 @@ class EmergencyManager:
 
         result = EmergencyResult(
             success=success,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=timestamp,
             position_summary=position_summary,
             operator_card=operator_card,
@@ -410,15 +411,16 @@ class EmergencyManager:
         )
 
         logger.info(
-            f"Emergency stop completed for {strategy_id}: "
+            f"Emergency stop completed for {deployment_id}: "
             f"success={success}, pause={pause_successful}, alerts={alerts_sent}"
         )
 
         return result
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def emergency_stop_async(
         self,
-        strategy_id: str,
+        deployment_id: str,
         reason: str,
         chain: str = "",
         trigger_context: dict[str, Any] | None = None,
@@ -426,7 +428,7 @@ class EmergencyManager:
         """Async version of emergency_stop.
 
         Args:
-            strategy_id: The ID of the strategy to stop
+            deployment_id: The ID of the strategy to stop
             reason: Human-readable reason for the emergency stop
             chain: The blockchain network the strategy operates on
             trigger_context: Optional additional context about what triggered the emergency
@@ -435,28 +437,28 @@ class EmergencyManager:
             EmergencyResult with full details of the emergency stop operation
         """
         timestamp = datetime.now(UTC)
-        logger.warning(f"EMERGENCY STOP (async) initiated for strategy {strategy_id}: {reason}")
+        logger.warning(f"EMERGENCY STOP (async) initiated for strategy {deployment_id}: {reason}")
 
         # Step 1: Immediately pause the strategy
         pause_successful = False
         if self.pause_callback:
             try:
-                pause_successful = self.pause_callback(strategy_id)
+                pause_successful = self.pause_callback(deployment_id)
                 if pause_successful:
-                    logger.info(f"Strategy {strategy_id} paused successfully")
+                    logger.info(f"Strategy {deployment_id} paused successfully")
                 else:
-                    logger.error(f"Failed to pause strategy {strategy_id}")
+                    logger.error(f"Failed to pause strategy {deployment_id}")
             except Exception as e:
-                logger.exception(f"Error pausing strategy {strategy_id}: {e}")
+                logger.exception(f"Error pausing strategy {deployment_id}: {e}")
         else:
             logger.warning("No pause callback configured, skipping pause step")
 
         # Step 2: Get position summary
-        position_summary = self._get_position_summary(strategy_id, chain, timestamp)
+        position_summary = self._get_position_summary(deployment_id, chain, timestamp)
 
         # Step 3: Generate OperatorCard with EMERGENCY_STOP event
         operator_card = self._generate_emergency_card(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             reason=reason,
             position_summary=position_summary,
             timestamp=timestamp,
@@ -465,7 +467,7 @@ class EmergencyManager:
 
         # Step 4: Emit timeline event
         self._emit_emergency_event(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             reason=reason,
             position_summary=position_summary,
@@ -489,7 +491,7 @@ class EmergencyManager:
 
         result = EmergencyResult(
             success=success,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=timestamp,
             position_summary=position_summary,
             operator_card=operator_card,
@@ -500,7 +502,7 @@ class EmergencyManager:
         )
 
         logger.info(
-            f"Emergency stop (async) completed for {strategy_id}: "
+            f"Emergency stop (async) completed for {deployment_id}: "
             f"success={success}, pause={pause_successful}, alerts={alerts_sent}"
         )
 
@@ -508,14 +510,14 @@ class EmergencyManager:
 
     def _get_position_summary(
         self,
-        strategy_id: str,
+        deployment_id: str,
         chain: str,
         timestamp: datetime,
     ) -> FullPositionSummary:
         """Get the full position summary for a strategy.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             chain: The blockchain network
             timestamp: Current timestamp
 
@@ -524,20 +526,20 @@ class EmergencyManager:
         """
         if self.position_callback:
             try:
-                return self.position_callback(strategy_id)
+                return self.position_callback(deployment_id)
             except Exception as e:
-                logger.exception(f"Error getting position summary for {strategy_id}: {e}")
+                logger.exception(f"Error getting position summary for {deployment_id}: {e}")
 
         # Return empty summary if callback not available or fails
         return FullPositionSummary(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             timestamp=timestamp,
         )
 
     def _generate_emergency_card(
         self,
-        strategy_id: str,
+        deployment_id: str,
         reason: str,
         position_summary: FullPositionSummary,
         timestamp: datetime,
@@ -546,7 +548,7 @@ class EmergencyManager:
         """Generate an OperatorCard for the emergency stop.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             reason: Human-readable reason for the emergency
             position_summary: Full position summary
             timestamp: When the emergency was triggered
@@ -607,7 +609,7 @@ class EmergencyManager:
         ]
 
         return OperatorCard(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=timestamp,
             event_type=EventType.EMERGENCY_STOP,
             reason=StuckReason.CIRCUIT_BREAKER,  # Emergency stops typically from circuit breaker or similar
@@ -661,7 +663,7 @@ class EmergencyManager:
 
     def _emit_emergency_event(
         self,
-        strategy_id: str,
+        deployment_id: str,
         chain: str,
         reason: str,
         position_summary: FullPositionSummary,
@@ -670,7 +672,7 @@ class EmergencyManager:
         """Emit a timeline event for the emergency stop.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             chain: The blockchain network
             reason: Emergency stop reason
             position_summary: Full position summary
@@ -680,7 +682,7 @@ class EmergencyManager:
             timestamp=timestamp,
             event_type=TimelineEventType.CIRCUIT_BREAKER_TRIGGERED,
             description=f"EMERGENCY STOP: {reason}",
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             chain=chain,
             details={
                 "emergency_reason": reason,
@@ -691,8 +693,9 @@ class EmergencyManager:
             },
         )
         add_event(event)
-        logger.info(f"Emergency stop event emitted for {strategy_id}")
+        logger.info(f"Emergency stop event emitted for {deployment_id}")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _send_critical_alerts(
         self,
         operator_card: OperatorCard,
@@ -734,11 +737,13 @@ class EmergencyManager:
             # Log result
             if result.success:
                 logger.info(
-                    f"CRITICAL alerts sent for {operator_card.strategy_id}: "
+                    f"CRITICAL alerts sent for {operator_card.deployment_id}: "
                     f"channels={[c.value for c in result.channels_sent]}"
                 )
             else:
-                logger.error(f"Failed to send CRITICAL alerts for {operator_card.strategy_id}: errors={result.errors}")
+                logger.error(
+                    f"Failed to send CRITICAL alerts for {operator_card.deployment_id}: errors={result.errors}"
+                )
 
             return result
 
@@ -750,6 +755,7 @@ class EmergencyManager:
                 skipped_reason=str(e),
             )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _send_critical_alerts_async(
         self,
         operator_card: OperatorCard,
@@ -806,12 +812,12 @@ class EmergencyManager:
             # Log result
             if result.success:
                 logger.info(
-                    f"CRITICAL alerts sent (async) for {operator_card.strategy_id}: "
+                    f"CRITICAL alerts sent (async) for {operator_card.deployment_id}: "
                     f"channels={[c.value for c in result.channels_sent]}"
                 )
             else:
                 logger.error(
-                    f"Failed to send CRITICAL alerts (async) for {operator_card.strategy_id}: errors={result.errors}"
+                    f"Failed to send CRITICAL alerts (async) for {operator_card.deployment_id}: errors={result.errors}"
                 )
 
             return result

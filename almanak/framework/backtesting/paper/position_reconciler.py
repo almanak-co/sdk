@@ -1529,7 +1529,7 @@ def emit_reconciliation_alerts(
     events: list["ReconciliationEvent"],
     alert_threshold_pct: Decimal = Decimal("0.05"),
     critical_threshold_pct: Decimal = Decimal("0.20"),
-    strategy_id: str = "unknown",
+    deployment_id: str = "unknown",
 ) -> list[ReconciliationAlert]:
     """Emit alerts for reconciliation events that exceed thresholds.
 
@@ -1541,7 +1541,7 @@ def emit_reconciliation_alerts(
         events: List of ReconciliationEvent objects from compare_positions()
         alert_threshold_pct: Threshold for WARNING alerts (default: 5%)
         critical_threshold_pct: Threshold for CRITICAL alerts (default: 20%)
-        strategy_id: Strategy identifier for logging context
+        deployment_id: Deployment identifier for logging context
 
     Returns:
         List of ReconciliationAlert objects for events exceeding thresholds
@@ -1552,7 +1552,7 @@ def emit_reconciliation_alerts(
         ...     events,
         ...     alert_threshold_pct=Decimal("0.05"),
         ...     critical_threshold_pct=Decimal("0.20"),
-        ...     strategy_id="my_strategy",
+        ...     deployment_id="my_strategy",
         ... )
         >>> for alert in alerts:
         ...     print(f"[{alert.severity}] {alert.message}")
@@ -1599,7 +1599,7 @@ def emit_reconciliation_alerts(
         alerts.append(alert)
 
         # Log the alert
-        log_msg = f"[{strategy_id}] Reconciliation {severity}: {message}"
+        log_msg = f"[{deployment_id}] Reconciliation {severity}: {message}"
         if event.auto_corrected:
             log_msg += " (auto-corrected)"
 
@@ -1611,7 +1611,7 @@ def emit_reconciliation_alerts(
     if alerts:
         logger.info(
             "[%s] Reconciliation generated %d alerts (%d CRITICAL, %d WARNING)",
-            strategy_id,
+            deployment_id,
             len(alerts),
             sum(1 for a in alerts if a.severity == "CRITICAL"),
             sum(1 for a in alerts if a.severity == "WARNING"),
@@ -1619,7 +1619,7 @@ def emit_reconciliation_alerts(
     else:
         logger.debug(
             "[%s] Reconciliation completed with no alerts above threshold",
-            strategy_id,
+            deployment_id,
         )
 
     return alerts
@@ -1632,7 +1632,7 @@ def reconcile_and_correct(
     alert_threshold_pct: Decimal = Decimal("0.05"),
     critical_threshold_pct: Decimal = Decimal("0.20"),
     tolerance_pct: Decimal = Decimal("0.01"),
-    strategy_id: str = "unknown",
+    deployment_id: str = "unknown",
 ) -> tuple[list["ReconciliationEvent"], list[ReconciliationAlert]]:
     """Full reconciliation workflow: compare, optionally correct, and emit alerts.
 
@@ -1647,7 +1647,7 @@ def reconcile_and_correct(
         alert_threshold_pct: Threshold for WARNING alerts (default: 5%)
         critical_threshold_pct: Threshold for CRITICAL alerts (default: 20%)
         tolerance_pct: Tolerance for numeric comparisons (default: 1%)
-        strategy_id: Strategy identifier for logging context
+        deployment_id: Deployment identifier for logging context
 
     Returns:
         Tuple of:
@@ -1660,7 +1660,7 @@ def reconcile_and_correct(
         ...     actual=on_chain_positions,
         ...     auto_correct=True,
         ...     alert_threshold_pct=Decimal("0.05"),
-        ...     strategy_id="momentum_v1",
+        ...     deployment_id="momentum_v1",
         ... )
         >>> print(f"Found {len(events)} discrepancies, emitted {len(alerts)} alerts")
     """
@@ -1676,13 +1676,13 @@ def reconcile_and_correct(
         events,
         alert_threshold_pct=alert_threshold_pct,
         critical_threshold_pct=critical_threshold_pct,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
     )
 
     # Log reconciliation summary
     logger.info(
         "[%s] Reconciliation complete: %d tracked, %d actual, %d discrepancies, %d auto-corrected, %d alerts",
-        strategy_id,
+        deployment_id,
         len(tracked),
         len(actual),
         len(events),

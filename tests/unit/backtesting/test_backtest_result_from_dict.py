@@ -51,12 +51,12 @@ def _minimal_dict(**overrides: Any) -> dict[str, Any]:
     """Build a minimal valid serialized BacktestResult dict.
 
     Mirrors the smallest shape that `from_dict` is expected to accept in
-    production (engine + strategy_id + start/end time + metrics + trades +
+    production (engine + deployment_id + start/end time + metrics + trades +
     equity_curve). Additional fields can be added via kwargs.
     """
     base: dict[str, Any] = {
         "engine": "pnl",
-        "strategy_id": "test_strategy",
+        "deployment_id": "test_strategy",
         "start_time": "2024-01-01T00:00:00",
         "end_time": "2024-01-31T00:00:00",
         "metrics": {},
@@ -203,7 +203,7 @@ class TestOptionalFieldHandling:
         result = BacktestResult.from_dict(_minimal_dict())
 
         assert result.engine == BacktestEngine.PNL
-        assert result.strategy_id == "test_strategy"
+        assert result.deployment_id == "test_strategy"
         assert result.initial_capital_usd == Decimal("10000")
         assert result.final_capital_usd == Decimal("10000")
         assert result.chain == "arbitrum"
@@ -304,9 +304,9 @@ class TestMalformedInput:
         with pytest.raises(ValueError):
             BacktestResult.from_dict(data)
 
-    def test_missing_strategy_id_raises_keyerror(self) -> None:
+    def test_missing_deployment_id_raises_keyerror(self) -> None:
         data = _minimal_dict()
-        del data["strategy_id"]
+        del data["deployment_id"]
         with pytest.raises(KeyError):
             BacktestResult.from_dict(data)
 
@@ -628,7 +628,7 @@ class TestRoundTripStability:
     def _make_populated_result(self) -> BacktestResult:
         return BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="round_trip_strategy",
+            deployment_id="round_trip_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(
@@ -688,7 +688,7 @@ class TestRoundTripStability:
         restored = BacktestResult.from_dict(original.to_dict())
 
         assert restored.engine == original.engine
-        assert restored.strategy_id == original.strategy_id
+        assert restored.deployment_id == original.deployment_id
         assert restored.start_time == original.start_time
         assert restored.end_time == original.end_time
         assert restored.initial_capital_usd == original.initial_capital_usd

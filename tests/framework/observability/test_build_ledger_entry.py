@@ -89,7 +89,7 @@ class TestIntentTypeDispatch:
 
     def test_enum_like_intent_type_with_value_attr(self):
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=None)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=None)
         assert entry.intent_type == "SWAP"
 
     def test_raw_string_intent_type_falls_through_to_str(self):
@@ -99,14 +99,14 @@ class TestIntentTypeDispatch:
             intent_type = "LP_OPEN"  # not an enum
             protocol = "uniswap_v3"
 
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=StrTypeIntent(), result=None)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=StrTypeIntent(), result=None)
         assert entry.intent_type == "LP_OPEN"
 
     def test_missing_intent_type_attr_yields_empty_string(self):
         class NoType:
             protocol = ""
 
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=NoType(), result=None)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=NoType(), result=None)
         assert entry.intent_type == ""
 
 
@@ -146,7 +146,7 @@ class TestHappyPathsPerIntentType:
             to_token="ETH",
         )
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -197,7 +197,7 @@ class TestHappyPathsPerIntentType:
             amount=Decimal("100"),
         )
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -246,7 +246,7 @@ class TestHappyPathsPerIntentType:
             },
         )
         intent = _make_intent("LP_CLOSE", protocol="uniswap_v3")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "LP_CLOSE"
         assert entry.token_in == "NFT-12345"
         assert entry.token_out == "USDC"
@@ -279,7 +279,7 @@ class TestHappyPathsPerIntentType:
             amount=Decimal("500"),
         )
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -307,7 +307,7 @@ class TestHappyPathsPerIntentType:
             supply_token="USDC",
             amount_usd=Decimal("250.50"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "WITHDRAW"
         assert entry.token_in == "USDC"
         assert entry.amount_in == "250.50"
@@ -334,7 +334,7 @@ class TestHappyPathsPerIntentType:
             borrow_token="USDC",
             borrow_amount=Decimal("1000"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "BORROW"
         assert entry.token_in == "USDC"
         assert entry.amount_in == "1000"
@@ -354,7 +354,7 @@ class TestHappyPathsPerIntentType:
             borrow_token="USDC",
             amount=Decimal("500"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "REPAY"
         assert entry.token_in == "USDC"
         assert entry.amount_in == "500"
@@ -393,7 +393,7 @@ class TestLPOpenExtraction:
             },
         )
         intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == "1000000"
         assert entry.amount_out == "2500000"
 
@@ -418,7 +418,7 @@ class TestLPOpenExtraction:
             token0="0xWETH",
             token1="0xUSDC",
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "0xWETH"
         assert entry.token_out == "0xUSDC"
 
@@ -443,7 +443,7 @@ class TestLPOpenExtraction:
             from_token="WETH",
             to_token="USDC",
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "WETH"
         assert entry.token_out == "USDC"
 
@@ -462,7 +462,7 @@ class TestLPOpenExtraction:
             amount0=Decimal("0.5"),
             amount1=Decimal("1000"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == "0.5"
         assert entry.amount_out == "1000"
 
@@ -476,7 +476,7 @@ class TestLPOpenExtraction:
             extracted_data={},
         )
         intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == ""
         assert entry.amount_out == ""
 
@@ -496,7 +496,7 @@ class TestLPOpenExtraction:
             },
         )
         intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == "0"
         assert entry.amount_out == "500"
 
@@ -510,7 +510,7 @@ class TestLPOpenExtraction:
             amount0=Decimal("1"),
             amount1=Decimal("2000"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=None)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=None)
         assert entry.token_in == "WETH"
         assert entry.token_out == "USDC"
         assert entry.amount_in == "1"
@@ -541,7 +541,7 @@ class TestLPOpenExtraction:
             amount0=Decimal("3.5"),   # fallback for the missing side
             amount1=Decimal("999"),   # should NOT win; lp_open_data.amount1 = 250
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         # token0 side: lp_open_data.amount0 is None → fallback to intent.amount0
         assert entry.amount_in == "3.5"
         # token1 side: lp_open_data.amount1 is 250 → on-chain value wins
@@ -579,7 +579,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP", from_token="FALLBACK_IN", to_token="SHOULDNT_SEE")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "FALLBACK_IN"
         # token_out already set on swap_amounts, does NOT fall back.
         assert entry.token_out == "ETH"
@@ -607,7 +607,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == ""
         assert entry.amount_out == "0.5"
 
@@ -628,7 +628,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.effective_price == ""
         assert entry.slippage_bps == 7
 
@@ -650,7 +650,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.slippage_bps is None
 
     def test_swap_amounts_unresolved_decimals_yield_empty_string(self):
@@ -684,7 +684,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         # Unresolved side: suppressed to "" regardless of Decimal value.
         assert entry.amount_in == ""
         # Resolved side: measured value preserved.
@@ -713,7 +713,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == "0"
         assert entry.amount_out == "0.5"
 
@@ -744,7 +744,7 @@ class TestSwapAmountsExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         # getattr fallback => both sides treated as resolved.
         assert entry.amount_in == "0"
         assert entry.amount_out == "0.5"
@@ -782,7 +782,7 @@ class TestFallbackExtraction:
             extracted_data={},
         )
         intent = _make_intent("ANY_TYPE", **{attr: value})
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "USDC"
 
     def test_token_in_from_token_wins_over_borrow_token(self):
@@ -801,7 +801,7 @@ class TestFallbackExtraction:
             supply_token="ALSOLOSES",
             token="ALSOLOSES",
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "WINS"
 
     @pytest.mark.parametrize(
@@ -823,7 +823,7 @@ class TestFallbackExtraction:
             extracted_data={},
         )
         intent = _make_intent("ANY", token="USDC", **{attr: value})
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.amount_in == expected
 
     def test_no_tokens_and_no_amounts_leaves_empty_strings(self):
@@ -835,7 +835,7 @@ class TestFallbackExtraction:
             extracted_data={},
         )
         intent = _make_intent("HOLD")  # no token attrs, no amount attrs
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == ""
         assert entry.token_out == ""
         assert entry.amount_in == ""
@@ -856,7 +856,7 @@ class TestFallbackExtraction:
             to_token="ETH",
             amount=Decimal("100"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.token_in == "USDC"
         assert entry.token_out == "ETH"
 
@@ -884,7 +884,7 @@ class TestTxAndGasExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.tx_hash == "0xfirst"
         assert entry.gas_used == 100
         assert entry.gas_usd == "0.10"
@@ -898,7 +898,7 @@ class TestTxAndGasExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.tx_hash == ""
         assert entry.gas_used == 0
         assert entry.gas_usd == ""
@@ -913,7 +913,7 @@ class TestTxAndGasExtraction:
             # deliberately no transaction_results
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.tx_hash == ""
 
     def test_none_tx_hash_coalesces_to_empty_string(self):
@@ -926,7 +926,7 @@ class TestTxAndGasExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.tx_hash == ""
 
     def test_total_gas_used_none_coalesces_to_zero(self):
@@ -939,7 +939,7 @@ class TestTxAndGasExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.gas_used == 0
 
     def test_gas_cost_usd_zero_stringified(self):
@@ -952,7 +952,7 @@ class TestTxAndGasExtraction:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.gas_usd == "0"
 
     def test_gas_cost_usd_missing_yields_empty_string(self):
@@ -965,7 +965,7 @@ class TestTxAndGasExtraction:
             # gas_cost_usd deliberately missing
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.gas_usd == ""
 
 
@@ -990,7 +990,7 @@ class TestErrorCoalescing:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -1012,7 +1012,7 @@ class TestErrorCoalescing:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -1033,7 +1033,7 @@ class TestErrorCoalescing:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -1046,7 +1046,7 @@ class TestErrorCoalescing:
         """result=None short-circuits the `and result` branch."""
         intent = _make_intent("HOLD")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=None,
@@ -1068,7 +1068,7 @@ class TestErrorCoalescing:
         )
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=result,
@@ -1097,7 +1097,7 @@ class TestExtractedDataSerialization:
             extracted_data={"supply": SupplyData(supply_amount=100, a_token_received=99)},
         )
         intent = _make_intent("SUPPLY")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json
         restored = deserialize_extracted_data(entry.extracted_data_json)
         assert isinstance(restored["supply"], SupplyData)
@@ -1113,7 +1113,7 @@ class TestExtractedDataSerialization:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json == ""
 
     def test_missing_extracted_data_attr_yields_empty_string(self):
@@ -1126,7 +1126,7 @@ class TestExtractedDataSerialization:
             # no extracted_data attribute
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json == ""
 
 
@@ -1158,7 +1158,7 @@ class TestMultiTxBundle:
             supply_token="USDC",
             amount=Decimal("100"),
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         parsed = json.loads(entry.extracted_data_json)
         assert "all_tx_results" in parsed
         assert len(parsed["all_tx_results"]) == 2
@@ -1177,7 +1177,7 @@ class TestMultiTxBundle:
             extracted_data={"supply": SupplyData(supply_amount=1, a_token_received=1)},
         )
         intent = _make_intent("SUPPLY")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         parsed = json.loads(entry.extracted_data_json)
         assert "all_tx_results" not in parsed
 
@@ -1205,7 +1205,7 @@ class TestMultiTxBundle:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json != ""
         parsed = json.loads(entry.extracted_data_json)
         assert "sub_transactions" in parsed
@@ -1224,7 +1224,7 @@ class TestMultiTxBundle:
             extracted_data={},
         )
         intent = _make_intent("SWAP")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json == ""
 
     def test_multi_tx_missing_attrs_default_to_empty_string_zero_true(self):
@@ -1248,7 +1248,7 @@ class TestMultiTxBundle:
             extracted_data={"supply": SupplyData(supply_amount=1, a_token_received=1)},
         )
         intent = _make_intent("SUPPLY")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         parsed = json.loads(entry.extracted_data_json)
         # Second (bare) tx surfaces the three getattr defaults.
         assert parsed["all_tx_results"][1] == {
@@ -1285,7 +1285,7 @@ class TestMultiTxBundle:
             extracted_data={"supply": SupplyData(supply_amount=1, a_token_received=1)},
         )
         intent = _make_intent("SUPPLY")
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
 
         # Except branch hit: original (unparseable) serialization preserved
         # byte-for-byte -- no "all_tx_results" key injected, no reserialization.
@@ -1305,7 +1305,7 @@ class TestResultNoneEdgeCases:
     def test_none_result_produces_minimal_entry(self):
         intent = _make_intent("HOLD", protocol="")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=None,
@@ -1330,7 +1330,7 @@ class TestResultNoneEdgeCases:
             amount=Decimal("50"),
         )
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=None,
@@ -1349,7 +1349,7 @@ class TestProtocolFallback:
             protocol = None
 
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=NoProto(),
             result=None,
@@ -1362,7 +1362,7 @@ class TestProtocolFallback:
             # no .protocol attr at all
 
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=NoProto(),
             result=None,
@@ -1371,28 +1371,28 @@ class TestProtocolFallback:
 
 
 # ---------------------------------------------------------------------------
-# Wiring — strategy_id / cycle_id / chain threaded into the entry verbatim.
+# Wiring — deployment_id / cycle_id / chain threaded into the entry verbatim.
 # ---------------------------------------------------------------------------
 
 
 class TestWiringFields:
     """Strategy/cycle/chain are pass-through, not extracted."""
 
-    def test_strategy_id_and_cycle_id_wired_through(self):
+    def test_deployment_id_and_cycle_id_wired_through(self):
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="strat:abc",
+            deployment_id="strat:abc",
             cycle_id="cycle-42",
             intent=intent,
             result=None,
         )
-        assert entry.strategy_id == "strat:abc"
+        assert entry.deployment_id == "strat:abc"
         assert entry.cycle_id == "cycle-42"
 
     def test_chain_wired_through(self):
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=None,
@@ -1403,7 +1403,7 @@ class TestWiringFields:
     def test_success_defaults_to_true(self):
         intent = _make_intent("SWAP")
         entry = build_ledger_entry(
-            strategy_id="s",
+            deployment_id="s",
             cycle_id="c",
             intent=intent,
             result=None,
@@ -1427,7 +1427,6 @@ _LEDGER_ENTRY_GOLDEN_KEYS: frozenset[str] = frozenset(
     {
         "id",
         "cycle_id",
-        "strategy_id",
         "deployment_id",
         "execution_mode",
         "timestamp",
@@ -1475,8 +1474,8 @@ class TestLedgerEntryGoldenKeyset:
         )
         assert actual == _LEDGER_ENTRY_GOLDEN_KEYS
 
-    def test_dataclass_field_count_is_24(self):
-        assert len(fields(LedgerEntry)) == 24
+    def test_dataclass_field_count_is_23(self):
+        assert len(fields(LedgerEntry)) == 23
 
     def test_to_dict_and_asdict_keys_match(self):
         e = LedgerEntry()
@@ -1505,7 +1504,7 @@ class TestPerpOpenExtraction:
             gas_cost_usd=None,
             extracted_data={},
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "PERP_OPEN"
         assert entry.token_in == "WETH"
         assert entry.amount_in == "0.005"
@@ -1521,7 +1520,7 @@ class TestPerpOpenExtraction:
             gas_cost_usd=None,
             extracted_data={},
         )
-        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "PERP_OPEN"
         assert entry.token_in == ""
         assert entry.amount_in == ""

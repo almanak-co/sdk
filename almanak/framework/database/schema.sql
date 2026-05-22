@@ -181,10 +181,10 @@ CREATE TABLE IF NOT EXISTS strategies (
 -- --------------------------------------------------------------------------
 -- strategy_state: Single row per strategy with CAS (Compare-And-Swap) via version
 -- --------------------------------------------------------------------------
--- This relational schema is distinct from the deployed gateway PostgreSQL
--- schema in almanak.gateway.database, which uses agent_id for platform mode.
+-- This legacy relational metadata schema is distinct from the deployed gateway
+-- state schema. Deployment-scoped runtime state uses deployment_id elsewhere.
 CREATE TABLE IF NOT EXISTS strategy_state (
-    strategy_id UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
+    deployment_id UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Version for CAS semantics - incremented on each update
     version BIGINT NOT NULL DEFAULT 1,
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS strategy_state (
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS strategy_events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+    deployment_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Event information
     event_type event_type NOT NULL,
@@ -242,7 +242,7 @@ CREATE TABLE IF NOT EXISTS strategy_events (
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+    deployment_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Version identification
     version_id VARCHAR(100) NOT NULL,  -- e.g., v_strategy_20260115120000
@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
 
 -- Unique partial index for active version per strategy
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_versions_active
-    ON strategy_versions (strategy_id)
+    ON strategy_versions (deployment_id)
     WHERE is_active = TRUE;
 
 -- --------------------------------------------------------------------------
@@ -286,10 +286,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_versions_active
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS alerts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+    deployment_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Alert identification
-    alert_key VARCHAR(255) NOT NULL,  -- e.g., strategy_id:condition:timestamp
+    alert_key VARCHAR(255) NOT NULL,  -- e.g., deployment_id:condition:timestamp
 
     -- Alert content
     condition VARCHAR(100) NOT NULL,  -- AlertCondition enum value
@@ -334,7 +334,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS operator_cards (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+    deployment_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Card identification
     event_type card_event_type NOT NULL,
@@ -372,7 +372,7 @@ CREATE TABLE IF NOT EXISTS operator_cards (
 
 -- Unique partial index for active card per strategy
 CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_cards_active
-    ON operator_cards (strategy_id)
+    ON operator_cards (deployment_id)
     WHERE is_active = TRUE;
 
 -- ============================================================================
@@ -387,40 +387,40 @@ CREATE INDEX IF NOT EXISTS idx_strategies_owner ON strategies (owner_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_updated_at ON strategies (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategies_tags ON strategies USING GIN (tags);
 
--- strategy_state indexes (strategy_id is PK, no extra index needed)
+-- strategy_state indexes (deployment_id is PK, no extra index needed)
 CREATE INDEX IF NOT EXISTS idx_strategy_state_created_at ON strategy_state (created_at DESC);
 
 -- strategy_events indexes
-CREATE INDEX IF NOT EXISTS idx_strategy_events_strategy_id ON strategy_events (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_events_deployment_id ON strategy_events (deployment_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_events_type ON strategy_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_strategy_events_timestamp ON strategy_events (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_events_strategy_timestamp
-    ON strategy_events (strategy_id, timestamp DESC);
+    ON strategy_events (deployment_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_events_tx_hash ON strategy_events (tx_hash)
     WHERE tx_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_strategy_events_severity ON strategy_events (severity)
     WHERE severity IS NOT NULL;
 
 -- strategy_versions indexes
-CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_id ON strategy_versions (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_versions_deployment_id ON strategy_versions (deployment_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_code_hash ON strategy_versions (code_hash);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_created_at ON strategy_versions (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created
-    ON strategy_versions (strategy_id, created_at DESC);
+    ON strategy_versions (deployment_id, created_at DESC);
 
 -- alerts indexes
-CREATE INDEX IF NOT EXISTS idx_alerts_strategy_id ON alerts (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_deployment_id ON alerts (deployment_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_condition ON alerts (condition);
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_strategy_status
-    ON alerts (strategy_id, status);
+    ON alerts (deployment_id, status);
 CREATE INDEX IF NOT EXISTS idx_alerts_expires_at ON alerts (expires_at)
     WHERE expires_at IS NOT NULL;
 
 -- operator_cards indexes
-CREATE INDEX IF NOT EXISTS idx_operator_cards_strategy_id ON operator_cards (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_operator_cards_deployment_id ON operator_cards (deployment_id);
 CREATE INDEX IF NOT EXISTS idx_operator_cards_event_type ON operator_cards (event_type);
 CREATE INDEX IF NOT EXISTS idx_operator_cards_severity ON operator_cards (severity);
 CREATE INDEX IF NOT EXISTS idx_operator_cards_created_at ON operator_cards (created_at DESC);
@@ -485,7 +485,7 @@ CREATE TRIGGER trigger_strategy_state_checksum
 -- Single-row-per-agent model: updates only if version matches.
 -- Returns true if update succeeded, false if version conflict.
 CREATE OR REPLACE FUNCTION cas_update_state(
-    p_strategy_id UUID,
+    p_deployment_id UUID,
     p_expected_version BIGINT,
     p_new_state JSONB
 )
@@ -497,7 +497,7 @@ BEGIN
     SET state_data = p_new_state,
         version = version + 1,
         updated_at = NOW()
-    WHERE strategy_id = p_strategy_id
+    WHERE deployment_id = p_deployment_id
       AND version = p_expected_version;
 
     GET DIAGNOSTICS v_updated = ROW_COUNT;
@@ -506,7 +506,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to get state with version
-CREATE OR REPLACE FUNCTION get_latest_state(p_strategy_id UUID)
+CREATE OR REPLACE FUNCTION get_latest_state(p_deployment_id UUID)
 RETURNS TABLE (
     version BIGINT,
     state_data JSONB,
@@ -517,13 +517,13 @@ BEGIN
     RETURN QUERY
     SELECT ss.version, ss.state_data, ss.schema_version, ss.created_at
     FROM strategy_state ss
-    WHERE ss.strategy_id = p_strategy_id;
+    WHERE ss.deployment_id = p_deployment_id;
 END;
 $$ LANGUAGE plpgsql;
 
 -- Function to get event timeline with pagination
 CREATE OR REPLACE FUNCTION get_event_timeline(
-    p_strategy_id UUID,
+    p_deployment_id UUID,
     p_event_type event_type DEFAULT NULL,
     p_limit INTEGER DEFAULT 50,
     p_offset INTEGER DEFAULT 0
@@ -540,7 +540,7 @@ BEGIN
     RETURN QUERY
     SELECT se.id, se.event_type, se.event_data, se.description, se.tx_hash, se.timestamp
     FROM strategy_events se
-    WHERE se.strategy_id = p_strategy_id
+    WHERE se.deployment_id = p_deployment_id
       AND (p_event_type IS NULL OR se.event_type = p_event_type)
     ORDER BY se.timestamp DESC
     LIMIT p_limit
@@ -549,7 +549,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to get active operator card for strategy
-CREATE OR REPLACE FUNCTION get_active_operator_card(p_strategy_id UUID)
+CREATE OR REPLACE FUNCTION get_active_operator_card(p_deployment_id UUID)
 RETURNS TABLE (
     card_id UUID,
     event_type card_event_type,
@@ -580,7 +580,7 @@ BEGIN
         oc.auto_remediation_scheduled_at,
         oc.created_at
     FROM operator_cards oc
-    WHERE oc.strategy_id = p_strategy_id
+    WHERE oc.deployment_id = p_deployment_id
       AND oc.is_active = TRUE;
 END;
 $$ LANGUAGE plpgsql;
@@ -646,19 +646,19 @@ SELECT
     s.last_active_at,
     ss.version as state_version,
     ss.schema_version,
-    (SELECT COUNT(*) FROM strategy_events se WHERE se.strategy_id = s.id) as event_count,
-    (SELECT MAX(timestamp) FROM strategy_events se WHERE se.strategy_id = s.id) as last_event_at,
-    (SELECT COUNT(*) FROM alerts a WHERE a.strategy_id = s.id AND a.status = 'PENDING') as pending_alerts,
+    (SELECT COUNT(*) FROM strategy_events se WHERE se.deployment_id = s.id) as event_count,
+    (SELECT MAX(timestamp) FROM strategy_events se WHERE se.deployment_id = s.id) as last_event_at,
+    (SELECT COUNT(*) FROM alerts a WHERE a.deployment_id = s.id AND a.status = 'PENDING') as pending_alerts,
     CASE WHEN oc.id IS NOT NULL THEN TRUE ELSE FALSE END as has_active_card
 FROM strategies s
-LEFT JOIN strategy_state ss ON s.id = ss.strategy_id
-LEFT JOIN operator_cards oc ON s.id = oc.strategy_id AND oc.is_active = TRUE;
+LEFT JOIN strategy_state ss ON s.id = ss.deployment_id
+LEFT JOIN operator_cards oc ON s.id = oc.deployment_id AND oc.is_active = TRUE;
 
 -- View for recent events across all strategies
 CREATE OR REPLACE VIEW recent_events AS
 SELECT
     se.id as event_id,
-    se.strategy_id,
+    se.deployment_id,
     s.name as strategy_name,
     se.event_type,
     se.description,
@@ -666,7 +666,7 @@ SELECT
     se.tx_hash,
     se.timestamp
 FROM strategy_events se
-JOIN strategies s ON se.strategy_id = s.id
+JOIN strategies s ON se.deployment_id = s.id
 ORDER BY se.timestamp DESC
 LIMIT 1000;
 
@@ -674,7 +674,7 @@ LIMIT 1000;
 CREATE OR REPLACE VIEW active_alerts AS
 SELECT
     a.id as alert_id,
-    a.strategy_id,
+    a.deployment_id,
     s.name as strategy_name,
     a.condition,
     a.severity,
@@ -685,7 +685,7 @@ SELECT
     a.created_at,
     a.expires_at
 FROM alerts a
-JOIN strategies s ON a.strategy_id = s.id
+JOIN strategies s ON a.deployment_id = s.id
 WHERE a.status IN ('PENDING', 'SENT', 'ESCALATED')
 ORDER BY
     CASE a.severity
@@ -710,9 +710,9 @@ SELECT
     oc.auto_remediation_scheduled_at,
     oc.created_at as card_created_at,
     (SELECT COUNT(*) FROM alerts a
-     WHERE a.strategy_id = s.id AND a.status IN ('PENDING', 'ESCALATED')) as alert_count
+     WHERE a.deployment_id = s.id AND a.status IN ('PENDING', 'ESCALATED')) as alert_count
 FROM strategies s
-JOIN operator_cards oc ON s.id = oc.strategy_id AND oc.is_active = TRUE
+JOIN operator_cards oc ON s.id = oc.deployment_id AND oc.is_active = TRUE
 ORDER BY
     CASE oc.severity
         WHEN 'CRITICAL' THEN 1

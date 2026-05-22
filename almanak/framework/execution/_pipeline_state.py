@@ -50,7 +50,7 @@ class ExecutionPipelineState:
     Attributes:
         action_bundle: The ActionBundle being executed. May be replaced by
             ``_phase_build`` after ``refresh_deferred_bundle`` runs.
-        context: Execution context (strategy_id, chain, wallet, dry_run, ...).
+        context: Execution context (deployment_id, chain, wallet, dry_run, ...).
         result: ExecutionResult accumulator. Phases mutate this in place;
             the driver returns either the short-circuit result or this final
             accumulator.

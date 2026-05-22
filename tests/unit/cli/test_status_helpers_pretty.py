@@ -40,13 +40,13 @@ def _make_summary(**overrides: Any) -> SimpleNamespace:
     """Build a minimal `StrategySummary`-like object for pretty-print.
 
     Mirrors the proto fields actually read by the pretty-print path:
-    strategy_id, name, status, chain(s), is_multi_chain, protocol,
+    deployment_id, name, status, chain(s), is_multi_chain, protocol,
     total_value_usd, pnl_24h_usd, pnl_since_deploy_usd, last_action_at,
     last_iteration_at, consecutive_errors, attention_required,
     attention_reason.
     """
     defaults = {
-        "strategy_id": "demo",
+        "deployment_id": "demo",
         "name": "Demo Strategy",
         "status": "RUNNING",
         "chain": "arbitrum",
@@ -68,7 +68,7 @@ def _make_summary(**overrides: Any) -> SimpleNamespace:
 
 def _make_operator_card(**overrides: Any) -> SimpleNamespace:
     defaults = {
-        "strategy_id": "demo",
+        "deployment_id": "demo",
         "severity": "HIGH",
         "reason": "Stuck",
         "risk_description": "",
@@ -168,8 +168,8 @@ def test_print_summary_header_minimal_fields() -> None:
     assert "PnL (total): -" in out  # empty string -> dash
 
 
-def test_print_summary_header_fallback_to_strategy_id() -> None:
-    """When `name` is empty, header falls back to `strategy_id`."""
+def test_print_summary_header_fallback_to_deployment_id() -> None:
+    """When `name` is empty, header falls back to `deployment_id`."""
     runner = CliRunner()
     out = _invoke(runner, status_helpers._print_summary_header, _make_summary(name=""))
     assert "Strategy: demo" in out
@@ -228,10 +228,10 @@ def test_print_operator_card_noop_when_none(capsys: pytest.CaptureFixture) -> No
     assert capsys.readouterr().out == ""
 
 
-def test_print_operator_card_renders_even_when_strategy_id_empty() -> None:
-    """Empty `strategy_id` no longer suppresses the card (#1704).
+def test_print_operator_card_renders_even_when_deployment_id_empty() -> None:
+    """Empty `deployment_id` no longer suppresses the card (#1704).
 
-    Previously `_print_operator_card` bailed when `oc.strategy_id` was the
+    Previously `_print_operator_card` bailed when `oc.deployment_id` was the
     empty string, using proto3's empty-string-as-falsy default as a presence
     sentinel. That conflates "unset" with "intentionally empty" and would
     silently drop a legitimately-empty card. The #1704 fix moves presence
@@ -239,7 +239,7 @@ def test_print_operator_card_renders_even_when_strategy_id_empty() -> None:
     direct helper renders whatever non-None card it receives.
     """
     runner = CliRunner()
-    oc = _make_operator_card(strategy_id="", severity="LOW", reason="note")
+    oc = _make_operator_card(deployment_id="", severity="LOW", reason="note")
     out = _invoke(runner, status_helpers._print_operator_card, oc)
     assert "Operator Alert [LOW]: note" in out
 
@@ -600,7 +600,7 @@ def test_render_details_pretty_kitchen_sink_section_order() -> None:
         )
     ]
     health = {"arbitrum": SimpleNamespace(status="HEALTHY", rpc_latency_ms=1, gas_price_gwei="0.1")}
-    oc = _make_operator_card(severity="HIGH", reason="Stuck", strategy_id="demo")
+    oc = _make_operator_card(severity="HIGH", reason="Stuck", deployment_id="demo")
     details = _make_details(
         position=pos, timeline=events, chain_health=health, operator_card=oc
     )
@@ -1103,7 +1103,7 @@ def test_render_details_pretty_operator_card_none_skipped() -> None:
     After the #1704 fix presence is determined by the parent message via
     `HasField("operator_card")` (authoritative) or, for test fakes lacking
     that method, by `operator_card is not None` (fallback). We no longer
-    use the sub-field `strategy_id` emptiness as a presence sentinel — a
+    use the sub-field `deployment_id` emptiness as a presence sentinel — a
     separate test covers that case.
     """
     runner = CliRunner()
@@ -1112,17 +1112,17 @@ def test_render_details_pretty_operator_card_none_skipped() -> None:
     assert "Operator Alert" not in out
 
 
-def test_render_details_pretty_operator_card_empty_strategy_id_now_renders() -> None:
-    """Empty `strategy_id` no longer suppresses the operator card (#1704).
+def test_render_details_pretty_operator_card_empty_deployment_id_now_renders() -> None:
+    """Empty `deployment_id` no longer suppresses the operator card (#1704).
 
     Regression guard for the fix: previously, a legitimately-empty
-    `strategy_id` would silently hide the card because proto3 scalars are
+    `deployment_id` would silently hide the card because proto3 scalars are
     falsy. Now the pretty-print path relies on parent presence semantics,
-    so a present card with empty `strategy_id` DOES render. For test
+    so a present card with empty `deployment_id` DOES render. For test
     fakes (no `HasField`), the fallback is `operator_card is not None`.
     """
     runner = CliRunner()
-    oc = _make_operator_card(strategy_id="", severity="MEDIUM", reason="watchlist")
+    oc = _make_operator_card(deployment_id="", severity="MEDIUM", reason="watchlist")
     details = _make_details(operator_card=oc)
     out = _invoke(runner, status_helpers._render_details_pretty, details, True)
     assert "Operator Alert [MEDIUM]: watchlist" in out
@@ -1136,7 +1136,7 @@ def test_render_details_pretty_operator_card_hasfield_respected() -> None:
             return name in getattr(self, "_present", ())
 
     runner = CliRunner()
-    oc = _make_operator_card(strategy_id="x", severity="HIGH", reason="stuck")
+    oc = _make_operator_card(deployment_id="x", severity="HIGH", reason="stuck")
     details = _ProtoLikeDetails(
         summary=_make_summary(),
         position=None,

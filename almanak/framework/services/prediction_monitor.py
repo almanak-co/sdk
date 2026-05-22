@@ -305,7 +305,7 @@ class PredictionPositionMonitor:
 
     Example:
         monitor = PredictionPositionMonitor(
-            strategy_id="my-strategy",
+            deployment_id="my-strategy",
             check_interval=60,
             default_exit_before_resolution_hours=24,  # Strategy-level default
         )
@@ -352,7 +352,7 @@ class PredictionPositionMonitor:
 
     def __init__(
         self,
-        strategy_id: str = "",
+        deployment_id: str = "",
         check_interval: int = DEFAULT_CHECK_INTERVAL,
         emit_events: bool = True,
         event_callback: EventCallback | None = None,
@@ -363,7 +363,7 @@ class PredictionPositionMonitor:
         """Initialize the position monitor.
 
         Args:
-            strategy_id: Strategy identifier for event emission.
+            deployment_id: Deployment identifier for event emission.
             check_interval: Seconds between position checks.
             emit_events: Whether to emit timeline events.
             event_callback: Optional callback for events.
@@ -392,7 +392,7 @@ class PredictionPositionMonitor:
                 f"default_exit_before_resolution_seconds must be >= 0, got {default_exit_before_resolution_seconds}"
             )
 
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self.check_interval = check_interval
         self.emit_events = emit_events
         self.event_callback = event_callback
@@ -891,7 +891,7 @@ class PredictionPositionMonitor:
             timestamp=datetime.now(UTC),
             event_type=timeline_type,
             description=description,
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             chain="polygon",  # Polymarket is on Polygon
             details={
                 "prediction_event": result.event.value,

@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "base"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aerodrome-lp-paper-trade-base"
+    strat._deployment_id = "test-aerodrome-lp-paper-trade-base"
     strat.pool = "WETH/USDC"
     strat.token0 = "WETH"
     strat.token1 = "USDC"

@@ -129,15 +129,15 @@ class UniswapRSIBacktestAdapter:
         buy_threshold: Decimal = Decimal("2800"),
         sell_threshold: Decimal = Decimal("3200"),
     ):
-        self._strategy_id = "demo_uniswap_rsi"
+        self._deployment_id = "demo_uniswap_rsi"
         self.trade_size_usd = trade_size_usd
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
         self.tick_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> MockSwapIntent | None:
         """RSI-like logic: buy low, sell high."""

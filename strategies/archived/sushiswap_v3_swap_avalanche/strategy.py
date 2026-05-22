@@ -201,7 +201,7 @@ class SushiSwapV3SwapAvalancheStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "sushiswap_v3_swap_avalanche"),
+            deployment_id=getattr(self, "deployment_id", "sushiswap_v3_swap_avalanche"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

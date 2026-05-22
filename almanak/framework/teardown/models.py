@@ -197,7 +197,7 @@ def calculate_max_acceptable_loss(position_value_usd: Decimal) -> Decimal:
 class TeardownPositionSummary:
     """Complete summary of positions for teardown."""
 
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     positions: list[PositionInfo] = field(default_factory=list)
 
@@ -250,9 +250,9 @@ class TeardownPositionSummary:
         return sorted(self.positions, key=lambda p: p.position_type.priority)
 
     @classmethod
-    def empty(cls, strategy_id: str) -> "TeardownPositionSummary":
+    def empty(cls, deployment_id: str) -> "TeardownPositionSummary":
         """Create an empty position summary (no open positions)."""
-        return cls(strategy_id=strategy_id, timestamp=datetime.now(UTC), positions=[])
+        return cls(deployment_id=deployment_id, timestamp=datetime.now(UTC), positions=[])
 
 
 @dataclass
@@ -262,7 +262,7 @@ class TeardownPreview:
     This is the key UX element - it shows protections clearly.
     """
 
-    strategy_id: str
+    deployment_id: str
     strategy_name: str
     mode: str  # "graceful" or "emergency" (user-facing)
 
@@ -306,7 +306,7 @@ class TeardownResult:
     """Result of a completed teardown operation."""
 
     success: bool
-    strategy_id: str
+    deployment_id: str
     mode: str
 
     # Timing
@@ -379,7 +379,7 @@ class TeardownState:
     """
 
     teardown_id: str
-    strategy_id: str
+    deployment_id: str
     mode: TeardownMode
     status: TeardownStatus
 
@@ -485,7 +485,7 @@ class ApprovalRequest:
     """
 
     teardown_id: str
-    strategy_id: str
+    deployment_id: str
     current_level: EscalationLevel
     current_slippage: Decimal
     estimated_loss_usd: Decimal
@@ -546,7 +546,7 @@ class TeardownRequest:
     and initiates teardown if found.
     """
 
-    strategy_id: str
+    deployment_id: str
     mode: TeardownMode
     asset_policy: TeardownAssetPolicy = TeardownAssetPolicy.TARGET_TOKEN
     target_token: str = "USDC"
@@ -595,7 +595,7 @@ class TeardownRequest:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for storage."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "mode": self.mode.value,
             "asset_policy": self.asset_policy.value,
             "target_token": self.target_token,
@@ -618,7 +618,7 @@ class TeardownRequest:
     def from_dict(cls, data: dict[str, Any]) -> "TeardownRequest":
         """Deserialize from dictionary."""
         return cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             mode=TeardownMode(data["mode"]),
             asset_policy=TeardownAssetPolicy(data.get("asset_policy", "target_token")),
             target_token=data.get("target_token", "USDC"),

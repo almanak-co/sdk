@@ -230,20 +230,20 @@ class MorphoBlueCrisisLendingStrategy:
         withdraw_threshold: Decimal = Decimal("0.15"),
         resupply_threshold: Decimal = Decimal("0.08"),
         supply_amount: Decimal = Decimal("2"),
-        strategy_id: str = "morpho_blue_crisis_ethereum",
+        deployment_id: str = "morpho_blue_crisis_ethereum",
     ):
         self._initial_eth_price = initial_eth_price
         self._withdraw_threshold = withdraw_threshold
         self._resupply_threshold = resupply_threshold
         self._supply_amount = supply_amount
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._state = "idle"  # idle, supplied
         self._peak_price = initial_eth_price
         self._cycle_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         eth_price = self._get_eth_price(market)
@@ -299,12 +299,12 @@ class MorphoBlueCrisisLendingStrategy:
 class HoldOnlyStrategy:
     """Strategy that never trades -- baseline for comparison."""
 
-    def __init__(self, strategy_id: str = "hold_baseline_ethereum"):
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "hold_baseline_ethereum"):
+        self._deployment_id = deployment_id
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> None:
         return None

@@ -20,7 +20,7 @@ def _make_config(**overrides) -> VaultConfig:
 
 def _make_manager(
     vault_config: VaultConfig | None = None,
-    strategy_id: str = "test-strategy-1",
+    deployment_id: str = "test-strategy-1",
     initial_vault_state: dict | None = None,
 ) -> VaultLifecycleManager:
     """Create a VaultLifecycleManager with mocked dependencies."""
@@ -34,7 +34,7 @@ def _make_manager(
         vault_sdk=sdk,
         vault_adapter=adapter,
         execution_orchestrator=orchestrator,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         initial_vault_state=initial_vault_state,
     )
     return manager
@@ -214,7 +214,7 @@ class TestVaultStatePersistence:
             vault_sdk=manager._vault_sdk,
             vault_adapter=manager._vault_adapter,
             execution_orchestrator=manager._execution_orchestrator,
-            strategy_id="test-strategy-1",
+            deployment_id="test-strategy-1",
             initial_vault_state=vault_dict,
         )
 

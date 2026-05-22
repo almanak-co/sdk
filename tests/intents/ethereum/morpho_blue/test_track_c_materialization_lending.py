@@ -131,7 +131,7 @@ def ctx() -> MagicMock:
     return c
 
 
-def _seed_parent_snapshot(store: SQLiteStore, strategy_id: str, deployment_id: str) -> int:
+def _seed_parent_snapshot(store: SQLiteStore, deployment_id: str) -> int:
     """Insert a parent ``portfolio_snapshots`` row directly so the
     ``snapshot_id`` FK on the Track-C row resolves to a real parent. We
     only need the parent to exist; we don't exercise the full
@@ -140,7 +140,7 @@ def _seed_parent_snapshot(store: SQLiteStore, strategy_id: str, deployment_id: s
         cur = store._conn.execute(  # type: ignore[union-attr]
             """
             INSERT INTO portfolio_snapshots (
-                strategy_id, timestamp, iteration_number, total_value_usd,
+                deployment_id, timestamp, iteration_number, total_value_usd,
                 available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                 value_confidence, positions_json, token_prices_json,
                 wallet_balances_json, chain, created_at,
@@ -149,7 +149,7 @@ def _seed_parent_snapshot(store: SQLiteStore, strategy_id: str, deployment_id: s
             RETURNING id
             """,
             (
-                strategy_id,
+                deployment_id,
                 "2026-05-17T12:00:00+00:00",
                 1,
                 "100.0",
@@ -195,9 +195,8 @@ async def test_morpho_supply_position_materialises_and_lands_in_sqlite(  # noqa:
     ``position_state_snapshots`` for the deployment. Pre-VIB-4541 the
     runner-side capability gate at runner_state.py:480 returned 0 silently,
     so the count stayed at 0 forever — this test is the regression seal."""
-    strategy_id = "MorphoLoopingStrategy:vib-4541-track-c-integration"
     deployment_id = "vib-4541-track-c-integration"
-    snapshot_id = _seed_parent_snapshot(sqlite_store, strategy_id, deployment_id)
+    snapshot_id = _seed_parent_snapshot(sqlite_store, deployment_id)
 
     # Step 1: real materialiser produces a PositionStateRow.
     position = _morpho_supply_position()
@@ -205,7 +204,6 @@ async def test_morpho_supply_position_materialises_and_lands_in_sqlite(  # noqa:
         position=position,
         market=None,
         prices=None,
-        strategy_id=strategy_id,
         deployment_id=deployment_id,
         cycle_id="cycle-1",
         timestamp=datetime(2026, 5, 17, 12, 0, tzinfo=UTC),
@@ -237,16 +235,16 @@ async def test_morpho_supply_position_materialises_and_lands_in_sqlite(  # noqa:
     # Step 4: query SQLite directly — the row landed bound to the parent.
     with sqlite3.connect(sqlite_store._config.db_path) as conn:
         cursor = conn.execute(
-            "SELECT snapshot_id, strategy_id, deployment_id, position_type, "
+            "SELECT snapshot_id, deployment_id, deployment_id, position_type, "
             "supply_balance, borrow_balance, health_factor "
             "FROM position_state_snapshots WHERE deployment_id = ?",
             (deployment_id,),
         )
         rows = cursor.fetchall()
     assert len(rows) == 1, f"expected 1 Track-C row for {deployment_id}, got {len(rows)}"
-    pss_snapshot_id, pss_strategy_id, pss_deployment_id, position_type, supply, borrow, hf = rows[0]
+    pss_snapshot_id, pss_deployment_id, pss_deployment_id, position_type, supply, borrow, hf = rows[0]
     assert pss_snapshot_id == snapshot_id  # FK to parent portfolio_snapshots row
-    assert pss_strategy_id == strategy_id
+    assert pss_deployment_id == deployment_id
     assert pss_deployment_id == deployment_id
     assert position_type == "LENDING"
     # SQLite stored NULL on unmeasured fields — Empty != Zero held across the

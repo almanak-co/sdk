@@ -121,7 +121,7 @@ class TestInstantiateStrategy:
                     "label": "override",
                     "chain": "arbitrum",
                     "wallet_address": "0xabc",
-                    "strategy_id": "ignored-runtime-field",
+                    "deployment_id": "ignored-runtime-field",
                 },
                 runtime_config=runtime_config,
                 multi_chain=False,
@@ -750,7 +750,7 @@ def _make_strategy_instance() -> Any:
         # Remove to make hasattr() return False
         if hasattr(instance, attr):
             delattr(instance, attr)
-    instance.strategy_id = "test-strat"
+    instance.deployment_id = "test-strat"
     return instance
 
 
@@ -774,7 +774,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="deploy-1",
+                deployment_id="deploy-1",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -815,7 +815,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="deploy-m",
+                deployment_id="deploy-m",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -899,7 +899,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="vault-test",
+                deployment_id="vault-test",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -983,7 +983,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="ct-test",
+                deployment_id="ct-test",
                 normalized_copy_mode="live",
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -1037,7 +1037,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="ct-legacy",
+                deployment_id="ct-legacy",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -1085,7 +1085,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="ct-strict",
+                deployment_id="ct-strict",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -1120,7 +1120,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="err",
+                deployment_id="err",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -1158,7 +1158,7 @@ class TestBuildComponents:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=True,  # dry-run + placeholder -> raises for cleanup
-                strategy_id="dryrun",
+                deployment_id="dryrun",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,

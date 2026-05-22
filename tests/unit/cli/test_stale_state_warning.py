@@ -16,13 +16,13 @@ def state_db(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         """CREATE TABLE strategy_state (
-            strategy_id TEXT PRIMARY KEY,
+            deployment_id TEXT PRIMARY KEY,
             version INTEGER DEFAULT 1,
             state_data TEXT
         )"""
     )
     conn.execute(
-        "INSERT INTO strategy_state (strategy_id, version, state_data) VALUES (?, ?, ?)",
+        "INSERT INTO strategy_state (deployment_id, version, state_data) VALUES (?, ?, ?)",
         ("test-strategy", 1, json.dumps({"buy_executed": True})),
     )
     conn.commit()

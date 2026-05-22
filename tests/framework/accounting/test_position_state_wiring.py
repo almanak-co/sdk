@@ -15,7 +15,6 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import os
 import sqlite3
 import tempfile
 from datetime import UTC, datetime
@@ -32,7 +31,6 @@ from almanak.framework.accounting.position_state import (
 from almanak.framework.runner.runner_state import _persist_position_state_snapshots
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
-
 # ─── SQLite save path ─────────────────────────────────────────────────────
 
 
@@ -43,11 +41,11 @@ def _insert_parent_snapshot(path: Path, snapshot_id: int) -> None:
     full PortfolioSnapshot dataclass)."""
     conn = sqlite3.connect(path)
     conn.execute(
-        "INSERT OR REPLACE INTO portfolio_snapshots (id, strategy_id, deployment_id, "
+        "INSERT OR REPLACE INTO portfolio_snapshots (id, deployment_id, "
         "execution_mode, timestamp, iteration_number, total_value_usd, "
         "available_cash_usd, deployed_capital_usd, value_confidence, "
         "positions_json, token_prices_json, wallet_balances_json, chain, created_at) "
-        "VALUES (?, 'strat-A', 'dep-A', 'live', '2026-05-01T00:00:00Z', 0, '10', '0', '10', "
+        "VALUES (?, 'dep-A', 'live', '2026-05-01T00:00:00Z', 0, '10', '0', '10', "
         "'HIGH', '[]', '{}', '{}', 'arbitrum', '2026-05-01T00:00:00Z')",
         (snapshot_id,),
     )
@@ -73,7 +71,6 @@ def sqlite_store():
 def _row(**overrides) -> PositionStateRow:
     base = {
         "snapshot_id": None,
-        "strategy_id": "strat-A",
         "deployment_id": "dep-A",
         "cycle_id": "cyc-1",
         "timestamp": datetime(2026, 5, 1, tzinfo=UTC),
@@ -197,7 +194,6 @@ def test_materializer_extracts_position_id_from_details():
         position=pos,
         market=None,
         prices=None,
-        strategy_id="s",
         deployment_id="d",
         cycle_id="c",
         timestamp=datetime.now(UTC),
@@ -222,7 +218,6 @@ def test_materializer_falls_back_to_protocol_chain_label():
         position=pos,
         market=None,
         prices=None,
-        strategy_id="s",
         deployment_id="d",
         cycle_id="c",
         timestamp=datetime.now(UTC),
@@ -240,7 +235,6 @@ def test_materializer_returns_none_for_unrecognised_position_type():
         position=pos,
         market=None,
         prices=None,
-        strategy_id="s",
         deployment_id="d",
         cycle_id="c",
         timestamp=datetime.now(UTC),
@@ -255,7 +249,8 @@ def test_materializer_short_circuits_in_hosted_mode(monkeypatch):
     """VIB-3866 / Codex Finding 2: hosted mode returns None and fires
     the unavailability gauge — Track C cannot write until VIB-3871's
     metrics-database PR ships."""
-    monkeypatch.setenv("AGENT_ID", "agent-test-hosted")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test-hosted")
     pos = _PositionValueLike(
         position_type="LP",
         details={"position_id": "p", "current_tick": 1, "in_range": True},
@@ -264,7 +259,6 @@ def test_materializer_short_circuits_in_hosted_mode(monkeypatch):
         position=pos,
         market=None,
         prices=None,
-        strategy_id="s",
         deployment_id="d",
         cycle_id="c",
         timestamp=datetime.now(UTC),
@@ -273,10 +267,11 @@ def test_materializer_short_circuits_in_hosted_mode(monkeypatch):
 
 
 def test_materializer_runs_in_local_mode(monkeypatch):
-    """Local mode (no AGENT_ID env) must produce a row when the position
+    """Local mode (no ALMANAK_IS_HOSTED env) must produce a row when the position
     is recognised — proves the hosted short-circuit doesn't fire on the
     happy path."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     pos = _PositionValueLike(
         position_type="LP",
         details={"position_id": "p", "current_tick": 1, "in_range": True},
@@ -285,7 +280,6 @@ def test_materializer_runs_in_local_mode(monkeypatch):
         position=pos,
         market=None,
         prices=None,
-        strategy_id="s",
         deployment_id="d",
         cycle_id="c",
         timestamp=datetime.now(UTC),
@@ -309,7 +303,6 @@ async def test_runner_caller_noops_when_state_manager_lacks_method():
     runner._current_strategy = None
 
     snapshot = MagicMock()
-    snapshot.strategy_id = "strat"
     snapshot.timestamp = datetime.now(UTC)
     snapshot.deployment_id = "dep"
     snapshot.cycle_id = "cyc"
@@ -330,8 +323,8 @@ async def test_runner_caller_noops_when_no_open_positions():
     runner._last_cycle_id = "cyc"
 
     snapshot = MagicMock()
-    snapshot.strategy_id = "strat"
     snapshot.timestamp = datetime.now(UTC)
+    snapshot.deployment_id = "dep"
     snapshot.positions = []
 
     result = await _persist_position_state_snapshots(runner, snapshot, snapshot_id=1)
@@ -343,7 +336,8 @@ async def test_runner_caller_noops_when_no_open_positions():
 async def test_runner_caller_writes_rows_for_open_positions(monkeypatch):
     """Happy path: state manager has the method, snapshot has 2
     positions, both materialize, one save call lands with both rows."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
 
     saved_rows: list = []
 
@@ -371,8 +365,8 @@ async def test_runner_caller_writes_rows_for_open_positions(monkeypatch):
     )
 
     snapshot = MagicMock()
-    snapshot.strategy_id = "strat"
     snapshot.timestamp = datetime.now(UTC)
+    snapshot.deployment_id = "dep"
     snapshot.positions = [pos1, pos2]
 
     result = await _persist_position_state_snapshots(runner, snapshot, snapshot_id=99)
@@ -386,7 +380,8 @@ async def test_runner_caller_swallows_save_errors(monkeypatch):
     """A Track C save failure must not regress the equity curve (the
     parent snapshot has already been persisted at this point). Caller
     logs and returns 0."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
 
     async def _save(snapshot_id, rows):
         raise RuntimeError("disk full")
@@ -403,8 +398,8 @@ async def test_runner_caller_swallows_save_errors(monkeypatch):
         details={"position_id": "p", "in_range": True},
     )
     snapshot = MagicMock()
-    snapshot.strategy_id = "s"
     snapshot.timestamp = datetime.now(UTC)
+    snapshot.deployment_id = "dep"
     snapshot.positions = [pos]
 
     # Must NOT raise.

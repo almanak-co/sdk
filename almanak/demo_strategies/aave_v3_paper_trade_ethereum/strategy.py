@@ -352,7 +352,7 @@ class AaveV3PaperTradeEthereumStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "aave_v3_paper_trade_ethereum"),
+            deployment_id=getattr(self, "deployment_id", "aave_v3_paper_trade_ethereum"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

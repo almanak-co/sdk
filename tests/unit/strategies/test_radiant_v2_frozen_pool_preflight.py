@@ -47,7 +47,7 @@ def _build_strategy(strategy_cls, *, chain: str):
     with patch.object(strategy_cls, "__init__", lambda self, *a, **kw: None):
         strategy = strategy_cls.__new__(strategy_cls)
 
-    strategy._strategy_id = f"test-{chain}"
+    strategy._deployment_id = f"test-{chain}"
     strategy._chain = chain
     strategy._wallet_address = _wallet()
     strategy._config = cfg

@@ -78,7 +78,7 @@ async def run_agent_loop(
     *,
     max_rounds: int = 10,
     trace_sink: TraceSink | None = None,
-    strategy_id: str = "",
+    deployment_id: str = "",
 ) -> str:
     """Run one iteration of the agent loop.
 
@@ -86,13 +86,13 @@ async def run_agent_loop(
         llm_client: LLM client (real or mock) implementing chat().
         executor: ToolExecutor wired to the gateway.
         tools_openai: Tool definitions in OpenAI function-calling format.
-        system_prompt: System prompt with agent identity and rules.
+        system_prompt: System prompt with runtime identity and rules.
         user_prompt: User prompt with current market context / instructions.
         max_rounds: Maximum LLM round-trips before forcing a hold.
         trace_sink: Optional callback for decision tracing / audit logging.
             Receives a structured dict for every tool call, tool result,
             and loop end. See module docstring for event schema.
-        strategy_id: Strategy identifier for telemetry logging.
+        deployment_id: Deployment identifier for telemetry logging.
 
     Returns:
         The LLM's final text response (after all tool calls complete).
@@ -122,7 +122,7 @@ async def run_agent_loop(
             content = choice.get("content", "")
             logger.info("Agent finished in %d rounds", round_num + 1)
             _emit_telemetry(trace_sink, {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "rounds": round_num + 1,
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
@@ -228,7 +228,7 @@ async def run_agent_loop(
 
     logger.warning("Agent hit max_rounds=%d, forcing hold", max_rounds)
     _emit_telemetry(trace_sink, {
-        "strategy_id": strategy_id,
+        "deployment_id": deployment_id,
         "rounds": max_rounds,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
@@ -261,7 +261,7 @@ def _emit_telemetry(sink: TraceSink | None, telemetry: dict[str, Any]) -> None:
     # Always log telemetry (even without a sink) for operational visibility
     logger.info(
         "Telemetry: strategy=%s rounds=%d input_tokens=%d output_tokens=%d tool_calls=%d tools=%d decision=%s",
-        telemetry.get("strategy_id", ""),
+        telemetry.get("deployment_id", ""),
         telemetry.get("rounds", 0),
         telemetry.get("total_input_tokens", 0),
         telemetry.get("total_output_tokens", 0),

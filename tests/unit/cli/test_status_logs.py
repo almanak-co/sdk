@@ -165,7 +165,7 @@ def test_strategy_logs_happy_path_pretty() -> None:
     assert client.disconnect_called == 1
     # Default request fields
     req = client.dashboard.last_request
-    assert req.strategy_id == "demo"
+    assert req.deployment_id == "demo"
     assert req.event_type_filter == ""
     assert req.since_timestamp == 0
     assert req.limit == 50

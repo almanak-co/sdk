@@ -155,7 +155,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         # for accounting writes) so the call site doesn't have to recompute
         # it, and pass the runner's **accounting** StateManager — the
         # teardown lifecycle SM does not expose ``get_accounting_events_sync``.
-        deployment_id = getattr(strategy, "deployment_id", "") or getattr(strategy, "strategy_id", "") or ""
+        deployment_id = strategy.deployment_id
         warn_if_sweep_non_strategy_balance(
             state_manager=getattr(runner, "state_manager", None),
             deployment_id=deployment_id,

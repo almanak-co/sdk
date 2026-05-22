@@ -300,7 +300,6 @@ def _make_lp_event_for_round_trip(intent_type: str) -> LPAccountingEvent:
     identity = AccountingIdentity(
         id=f"test-{intent_type}-id",
         deployment_id="TestStrat:abc123",
-        strategy_id="TestStrat:abc123",
         cycle_id="cycle-1",
         execution_mode="paper",
         timestamp=datetime(2026, 5, 10, 0, 0, 0, tzinfo=UTC),
@@ -501,7 +500,6 @@ async def test_migration_backfill(tmp_path) -> None:
     CREATE TABLE accounting_events (
         id TEXT PRIMARY KEY,
         deployment_id TEXT NOT NULL,
-        strategy_id TEXT NOT NULL,
         cycle_id TEXT NOT NULL,
         execution_mode TEXT NOT NULL,
         timestamp TEXT NOT NULL,
@@ -530,11 +528,11 @@ async def test_migration_backfill(tmp_path) -> None:
             conn.execute(
                 """
                 INSERT INTO accounting_events
-                (id, deployment_id, strategy_id, cycle_id, execution_mode,
+                (id, deployment_id, cycle_id, execution_mode,
                  timestamp, chain, protocol, wallet_address, event_type,
                  position_key, ledger_entry_id, tx_hash, confidence,
                  payload_json, schema_version)
-                VALUES (?, 'd', 's', 'c', 'paper', '2026-01-01T00:00:00+00:00',
+                VALUES (?, 'd', 'c', 'paper', '2026-01-01T00:00:00+00:00',
                         'arbitrum', 'p', '0x', ?, 'pos', 'l', '0x', 'HIGH', '{}', 1)
                 """,
                 (row_id, event_type),

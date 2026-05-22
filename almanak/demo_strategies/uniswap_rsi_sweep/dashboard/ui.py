@@ -27,14 +27,14 @@ from almanak.framework.data.indicators.rsi import RSICalculator
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
 ) -> None:
     """Render the Uniswap RSI Sweep custom dashboard."""
     st.title("Uniswap RSI Sweep Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
     base_token = strategy_config.get("base_token", "WETH")
     quote_token = strategy_config.get("quote_token", "USDC")
@@ -43,7 +43,7 @@ def render_custom_dashboard(
     rsi_oversold = float(strategy_config.get("rsi_oversold", 30))
     rsi_overbought = float(strategy_config.get("rsi_overbought", 70))
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pair:** {base_token}/{quote_token} | **Chain:** {chain} | **DEX:** Uniswap V3")
     st.markdown(f"**RSI({rsi_period}):** oversold ≤ {rsi_oversold:.0f}, overbought ≥ {rsi_overbought:.0f}")
 
@@ -59,8 +59,8 @@ def render_custom_dashboard(
 
     st.divider()
     st.markdown("## Audit")
-    render_cost_stack_section(strategy_id, heading="")
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id, heading="")
+    render_trade_tape_section(deployment_id)
 
 
 def _render_indicator_section(

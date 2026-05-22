@@ -123,14 +123,14 @@ class HighThroughputStrategy:
     backtest load without complex decision logic.
     """
 
-    def __init__(self, strategy_id: str = "benchmark_strategy", trade_every_n_ticks: int = 24):
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "benchmark_strategy", trade_every_n_ticks: int = 24):
+        self._deployment_id = deployment_id
         self._trade_every_n_ticks = trade_every_n_ticks
         self._tick_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> MockSwapIntent | None:
         """Return a swap intent at configured interval, otherwise None.

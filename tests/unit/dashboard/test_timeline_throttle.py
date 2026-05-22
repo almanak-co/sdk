@@ -46,7 +46,7 @@ def _clean_timeline_state():
 
 def _make_event(
     event_type: TimelineEventType = TimelineEventType.STRATEGY_STUCK,
-    strategy_id: str = "test-strat",
+    deployment_id: str = "test-strat",
     description: str = "Circuit breaker open: too many failures",
     ts: datetime | None = None,
 ) -> TimelineEvent:
@@ -54,7 +54,7 @@ def _make_event(
         timestamp=ts or datetime.now(UTC),
         event_type=event_type,
         description=description,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
     )
 
 
@@ -114,9 +114,9 @@ class TestTimelineEventThrottle:
 
     @patch("almanak.framework.api.timeline._persist_events_to_file")
     def test_different_strategies_throttled_independently(self, _mock_persist):
-        add_event(_make_event(strategy_id="strat-a"))
-        add_event(_make_event(strategy_id="strat-b"))
-        # Both should be stored (different strategy IDs)
+        add_event(_make_event(deployment_id="strat-a"))
+        add_event(_make_event(deployment_id="strat-b"))
+        # Both should be stored (different deployment IDs)
         assert len(_event_store.get("strat-a", [])) == 1
         assert len(_event_store.get("strat-b", [])) == 1
 
@@ -162,8 +162,8 @@ class TestTimelineEventThrottle:
     @patch("almanak.framework.api.timeline._persist_events_to_file")
     def test_clear_all_events_resets_all_throttle_state(self, _mock_persist):
         """clear_events() with no args resets all throttle state."""
-        add_event(_make_event(strategy_id="a"))
-        add_event(_make_event(strategy_id="b"))
+        add_event(_make_event(deployment_id="a"))
+        add_event(_make_event(deployment_id="b"))
         assert len(_throttle_last_emitted) == 2
 
         clear_events()
@@ -236,8 +236,8 @@ class TestCoalesceConsecutiveEvents:
     def test_different_strategies_not_coalesced(self):
         now = datetime.now(UTC)
         events = [
-            _make_event(strategy_id="a", ts=now),
-            _make_event(strategy_id="b", ts=now - timedelta(minutes=1)),
+            _make_event(deployment_id="a", ts=now),
+            _make_event(deployment_id="b", ts=now - timedelta(minutes=1)),
         ]
         result = _coalesce_consecutive_events(events)
         assert len(result) == 2

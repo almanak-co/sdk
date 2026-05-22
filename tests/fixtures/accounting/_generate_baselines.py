@@ -56,7 +56,6 @@ except ImportError:  # pragma: no cover — defensive
 # ─── Fixed determinism inputs ────────────────────────────────────────────
 _BASE_TIMESTAMP = "2026-05-09T00:00:00+00:00"
 _DEPLOYMENT_ID = "AccountantBaseline:fixture"
-_STRATEGY_ID = "AccountantBaseline:fixture"
 _WALLET = "0x0000000000000000000000000000000000000abc"
 _EXECUTION_MODE = "paper"
 
@@ -100,8 +99,7 @@ _DDL: tuple[str, ...] = (
     CREATE TABLE transaction_ledger (
         id TEXT PRIMARY KEY,
         cycle_id TEXT NOT NULL,
-        strategy_id TEXT NOT NULL,
-        deployment_id TEXT DEFAULT '',
+        deployment_id TEXT NOT NULL,
         execution_mode TEXT DEFAULT '',
         timestamp TEXT NOT NULL,
         intent_type TEXT NOT NULL,
@@ -128,7 +126,6 @@ _DDL: tuple[str, ...] = (
     CREATE TABLE accounting_events (
         id TEXT PRIMARY KEY,
         deployment_id TEXT NOT NULL,
-        strategy_id TEXT NOT NULL,
         cycle_id TEXT NOT NULL,
         execution_mode TEXT NOT NULL,
         timestamp TEXT NOT NULL,
@@ -147,8 +144,7 @@ _DDL: tuple[str, ...] = (
     """
     CREATE TABLE portfolio_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy_id TEXT NOT NULL,
-        deployment_id TEXT DEFAULT '',
+        deployment_id TEXT NOT NULL,
         cycle_id TEXT DEFAULT '',
         execution_mode TEXT DEFAULT '',
         timestamp TEXT NOT NULL,
@@ -203,7 +199,7 @@ _DDL: tuple[str, ...] = (
     """,
     """
     CREATE TABLE portfolio_metrics (
-        strategy_id TEXT PRIMARY KEY,
+        deployment_id TEXT PRIMARY KEY,
         initial_value_usd TEXT NOT NULL,
         initial_timestamp TEXT NOT NULL,
         deposits_usd TEXT DEFAULT '0',
@@ -212,7 +208,6 @@ _DDL: tuple[str, ...] = (
         total_value_usd TEXT DEFAULT '0',
         positions_json TEXT DEFAULT '[]',
         cycle_id TEXT,
-        deployment_id TEXT DEFAULT '',
         execution_mode TEXT DEFAULT '',
         is_complete BOOLEAN DEFAULT 1,
         updated_at TEXT NOT NULL
@@ -221,7 +216,6 @@ _DDL: tuple[str, ...] = (
     """
     CREATE TABLE position_state_snapshots (
         snapshot_id INTEGER,
-        strategy_id TEXT,
         deployment_id TEXT,
         cycle_id TEXT,
         timestamp TEXT,
@@ -300,17 +294,16 @@ def _insert_ledger(
     conn.execute(
         """
         INSERT INTO transaction_ledger
-        (id, cycle_id, strategy_id, deployment_id, execution_mode, timestamp,
+        (id, cycle_id, deployment_id, execution_mode, timestamp,
          intent_type, token_in, amount_in, token_out, amount_out,
          effective_price, slippage_bps, gas_used, gas_usd, tx_hash, chain, protocol,
          success, error, extracted_data_json, price_inputs_json,
          pre_state_json, post_state_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', ?, ?, ?, ?)
         """,
         (
             row_id,
             cycle_id,
-            _STRATEGY_ID,
             _DEPLOYMENT_ID,
             _EXECUTION_MODE,
             timestamp,
@@ -353,15 +346,14 @@ def _insert_acct_event(
     conn.execute(
         """
         INSERT INTO accounting_events
-        (id, deployment_id, strategy_id, cycle_id, execution_mode, timestamp,
+        (id, deployment_id, cycle_id, execution_mode, timestamp,
          chain, protocol, wallet_address, event_type, position_key,
          ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row_id,
             _DEPLOYMENT_ID,
-            _STRATEGY_ID,
             cycle_id,
             _EXECUTION_MODE,
             timestamp,
@@ -460,14 +452,13 @@ def _insert_portfolio_snapshot(
     conn.execute(
         """
         INSERT INTO portfolio_snapshots
-        (strategy_id, deployment_id, cycle_id, execution_mode, timestamp,
+        (deployment_id, cycle_id, execution_mode, timestamp,
          iteration_number, total_value_usd, available_cash_usd, deployed_capital_usd,
          wallet_total_value_usd, value_confidence, positions_json, token_prices_json,
          wallet_balances_json, chain, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            _STRATEGY_ID,
             _DEPLOYMENT_ID,
             cycle_id,
             _EXECUTION_MODE,
@@ -491,13 +482,13 @@ def _insert_portfolio_metrics(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         INSERT INTO portfolio_metrics
-        (strategy_id, initial_value_usd, initial_timestamp, deposits_usd,
+        (deployment_id, initial_value_usd, initial_timestamp, deposits_usd,
          withdrawals_usd, gas_spent_usd, total_value_usd, positions_json,
-         cycle_id, deployment_id, execution_mode, is_complete, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         cycle_id, execution_mode, is_complete, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            _STRATEGY_ID,
+            _DEPLOYMENT_ID,
             "1000.00",
             _ts(0),
             "0",
@@ -506,7 +497,6 @@ def _insert_portfolio_metrics(conn: sqlite3.Connection) -> None:
             "1010.00",
             "[]",
             "cycle-001",
-            _DEPLOYMENT_ID,
             _EXECUTION_MODE,
             1,
             _ts(3600),

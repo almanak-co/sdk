@@ -11,7 +11,7 @@ Usage:
     from almanak.framework.testing.ab_test import ABTestManager, ABTestConfig
 
     # Create an A/B test manager
-    manager = ABTestManager(strategy_id="my_strategy")
+    manager = ABTestManager(deployment_id="my_strategy")
 
     # Create a new A/B test
     result = manager.create_ab_test(
@@ -346,7 +346,7 @@ class ABTest:
 
     Attributes:
         test_id: Unique identifier for this test
-        strategy_id: Strategy being tested
+        deployment_id: Strategy being tested
         variant_a_id: Version ID of variant A (control)
         variant_b_id: Version ID of variant B (treatment)
         status: Current test status
@@ -362,7 +362,7 @@ class ABTest:
     """
 
     test_id: str
-    strategy_id: str
+    deployment_id: str
     variant_a_id: str
     variant_b_id: str
     status: ABTestStatus = ABTestStatus.PENDING
@@ -380,7 +380,7 @@ class ABTest:
         """Generate test ID and set created_at if not provided."""
         if not self.test_id:
             ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-            self.test_id = f"abtest_{self.strategy_id}_{ts}"
+            self.test_id = f"abtest_{self.deployment_id}_{ts}"
         if self.created_at is None:
             self.created_at = datetime.now(UTC)
 
@@ -414,7 +414,7 @@ class ABTest:
         """Convert to dictionary for serialization."""
         return {
             "test_id": self.test_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "variant_a_id": self.variant_a_id,
             "variant_b_id": self.variant_b_id,
             "status": self.status.value,
@@ -432,6 +432,7 @@ class ABTest:
             "duration_seconds": self.duration_seconds,
         }
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ABTest":
         """Create from dictionary."""
@@ -445,7 +446,7 @@ class ABTest:
 
         return cls(
             test_id=data["test_id"],
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             variant_a_id=data["variant_a_id"],
             variant_b_id=data["variant_b_id"],
             status=ABTestStatus(data["status"]),
@@ -660,13 +661,13 @@ class ABTestManager:
     5. End test and select winner
 
     Attributes:
-        strategy_id: ID of the strategy being tested
+        deployment_id: ID of the strategy being tested
         test: Current active test (if any)
     """
 
     def __init__(
         self,
-        strategy_id: str,
+        deployment_id: str,
         on_test_start: ABTestCallback | None = None,
         on_test_end: ABTestCallback | None = None,
         on_comparison: ABTestCallback | None = None,
@@ -675,13 +676,13 @@ class ABTestManager:
         """Initialize the A/B test manager.
 
         Args:
-            strategy_id: ID of the strategy being tested
+            deployment_id: ID of the strategy being tested
             on_test_start: Callback when test starts
             on_test_end: Callback when test ends
             on_comparison: Callback when comparison is made
             chain: Blockchain network for event emission
         """
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self._chain = chain
 
         # Callbacks
@@ -692,8 +693,9 @@ class ABTestManager:
         # Current test state
         self.test: ABTest | None = None
 
-        logger.info(f"ABTestManager initialized for strategy {strategy_id}")
+        logger.info(f"ABTestManager initialized for strategy {deployment_id}")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def create_ab_test(
         self,
         variant_a: str,
@@ -753,7 +755,7 @@ class ABTestManager:
         # Create the test
         self.test = ABTest(
             test_id="",  # Will be generated in __post_init__
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             variant_a_id=variant_a,
             variant_b_id=variant_b,
             config=config,
@@ -1175,6 +1177,7 @@ class ABTestManager:
             final_comparison=self.compare() if self.test.variant_a_metrics else None,
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def get_status(self) -> dict[str, Any]:
         """Get the current status of the A/B test.
 
@@ -1184,7 +1187,7 @@ class ABTestManager:
         if not self.test:
             return {
                 "has_active_test": False,
-                "strategy_id": self.strategy_id,
+                "deployment_id": self.deployment_id,
             }
 
         comparison = None
@@ -1194,7 +1197,7 @@ class ABTestManager:
         return {
             "has_active_test": True,
             "test_id": self.test.test_id,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "status": self.test.status.value,
             "variant_a_id": self.test.variant_a_id,
             "variant_b_id": self.test.variant_b_id,
@@ -1226,7 +1229,7 @@ class ABTestManager:
             timestamp=datetime.now(UTC),
             event_type=TimelineEventType.CUSTOM,
             description=description,
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             chain=self._chain,
             details={
                 "ab_test_event_type": event_type.value,
@@ -1245,7 +1248,7 @@ class ABTestManager:
             Dictionary containing manager state
         """
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self._chain,
             "test": self.test.to_dict() if self.test else None,
         }
@@ -1270,7 +1273,7 @@ class ABTestManager:
             ABTestManager instance with restored state
         """
         manager = cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             on_test_start=on_test_start,
             on_test_end=on_test_end,
             on_comparison=on_comparison,

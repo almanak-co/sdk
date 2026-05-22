@@ -79,18 +79,7 @@ def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
             cycle_id = ""
     snapshot.cycle_id = cycle_id or existing_cycle_id
 
-    # deployment_id: prefer runner.deployment_id; then any value already
-    # on the snapshot (callers may have pre-stamped it); finally
-    # snapshot.strategy_id. The runner may not have its deployment_id set
-    # yet on the very first capture (May 7 Anvil verification:
-    # portfolio_metrics correctly used this fallback at
-    # _build_metrics_for_snapshot but the snapshot path did not, so
-    # portfolio_snapshots.deployment_id came out empty while
-    # portfolio_metrics.deployment_id was populated). Mirroring the
-    # metrics path keeps the two tables joinable on deployment_id.
-    snapshot.deployment_id = (
-        getattr(runner, "deployment_id", "") or getattr(snapshot, "deployment_id", "") or snapshot.strategy_id or ""
-    )
+    snapshot.deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id
 
     existing_mode = getattr(snapshot, "execution_mode", "") or ""
     try:
@@ -102,7 +91,7 @@ def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
         # value the caller already stamped rather than blanking it.
         logger.warning(
             "_stamp_snapshot_identity: could not derive execution_mode for %s; preserving existing value",
-            getattr(snapshot, "strategy_id", "?"),
+            getattr(snapshot, "deployment_id", "?"),
         )
         snapshot.execution_mode = existing_mode
 
@@ -164,13 +153,13 @@ def _enforce_native_gas_status_in_live(runner: Any, snapshot: PortfolioSnapshot)
             "gas_native_status=%s on %s in mode=%s — snapshot persists with typed-status trail; "
             "live mode would have halted with ACCOUNTING_FAILED here.",
             status,
-            getattr(snapshot, "strategy_id", "?"),
+            snapshot.deployment_id,
             mode_value or "(unknown)",
         )
         return
     raise AccountingPersistenceError(
         write_kind=AccountingWriteKind.SNAPSHOT,
-        strategy_id=getattr(snapshot, "strategy_id", "") or "",
+        deployment_id=snapshot.deployment_id,
         message=(
             f"native-gas append failed in live mode "
             f"(gas_native_status={status!r}) — runner halts with ACCOUNTING_FAILED "
@@ -181,7 +170,7 @@ def _enforce_native_gas_status_in_live(runner: Any, snapshot: PortfolioSnapshot)
 
 async def update_state(
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     result: IterationResult,
     strategy: object | None = None,
 ) -> None:
@@ -189,20 +178,20 @@ async def update_state(
     try:
         # Try to load current state, create new if not found
         try:
-            state = await runner.state_manager.load_state(strategy_id)
+            state = await runner.state_manager.load_state(deployment_id)
             # GatewayStateManager returns None instead of raising StateNotFoundError
             if state is None:
-                raise StateNotFoundError(strategy_id)
+                raise StateNotFoundError(deployment_id)
             expected_version = state.version
         except StateNotFoundError:
             # First run - create new state
             state = StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=1,
                 state={},
             )
             expected_version = None  # No version check for new state
-            logger.debug(f"Creating initial state for {strategy_id}")
+            logger.debug(f"Creating initial state for {deployment_id}")
 
         # Merge strategy's persistent state first (position_id, etc.)
         # strategy.save_state() uses ensure_future (fire-and-forget) which
@@ -215,7 +204,7 @@ async def update_state(
             except Exception:
                 logger.warning(
                     "Failed to merge strategy persistent state for %s, position tracking data may be stale",
-                    strategy_id,
+                    deployment_id,
                     exc_info=True,
                 )
 
@@ -233,20 +222,20 @@ async def update_state(
         # Save with CAS (or create if new)
         await runner.state_manager.save_state(state, expected_version=expected_version)
 
-        logger.debug(f"State updated for {strategy_id}")
+        logger.debug(f"State updated for {deployment_id}")
 
     except Exception as e:
-        logger.error(f"Failed to update state for {strategy_id}: {e}")
+        logger.error(f"Failed to update state for {deployment_id}: {e}")
 
 
 async def persist_copy_trading_state(
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     activity_provider: StatefulActivityProviderProtocol,
 ) -> None:
     """Persist copy trading cursor state into the strategy state dict."""
     try:
-        state = await runner.state_manager.load_state(strategy_id)
+        state = await runner.state_manager.load_state(deployment_id)
         if state is None:
             return
         expected_version = state.version
@@ -259,17 +248,17 @@ async def persist_copy_trading_state(
 
 async def persist_vault_state(
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     vault_state_dict: dict,
     vault_state_key: str,
 ) -> None:
     """Persist vault lifecycle state into the strategy state dict."""
     try:
-        state = await runner.state_manager.load_state(strategy_id)
+        state = await runner.state_manager.load_state(deployment_id)
         if state is None:
             # First run -- create state so vault lifecycle is not lost
             state = StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=1,
                 state={},
             )
@@ -338,11 +327,7 @@ def _value_via_portfolio_valuer(
         if gw is not None:
             runner._portfolio_valuer.set_gateway_client(gw)
 
-        # VIB-3424: wire accounting context so PositionValue gets PnL fields
-        # Prefer runner's deployment_id (authoritative) over strategy's, then fall back to strategy_id.
-        deployment_id = (
-            getattr(runner, "deployment_id", "") or getattr(strategy, "deployment_id", "") or strategy.strategy_id
-        )
+        deployment_id = getattr(runner, "deployment_id", "") or strategy.deployment_id
         state_manager = getattr(runner, "state_manager", None)
         if state_manager is not None and deployment_id:
             runner._portfolio_valuer.set_accounting_context(state_manager, deployment_id)
@@ -368,7 +353,7 @@ def _value_via_portfolio_valuer(
     if snapshot and snapshot.value_confidence != ValueConfidence.UNAVAILABLE:
         logger.debug(
             "Portfolio valued by PortfolioValuer for %s: $%.2f (%s)",
-            strategy.strategy_id,
+            strategy.deployment_id,
             snapshot.total_value_usd,
             snapshot.value_confidence.value,
         )
@@ -398,7 +383,7 @@ def _value_via_strategy_fallback(
     if fallback is not None and fallback.value_confidence != ValueConfidence.UNAVAILABLE:
         logger.debug(
             "Portfolio valued by strategy fallback for %s: $%.2f",
-            strategy.strategy_id,
+            strategy.deployment_id,
             fallback.total_value_usd,
         )
         return fallback
@@ -422,7 +407,7 @@ def _make_unavailable_snapshot(
     """
     return PortfolioSnapshot(
         timestamp=now,
-        strategy_id=getattr(strategy, "strategy_id", "unknown"),
+        deployment_id=getattr(strategy, "deployment_id", "unknown"),
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("0"),
         value_confidence=ValueConfidence.UNAVAILABLE,
@@ -432,6 +417,7 @@ def _make_unavailable_snapshot(
     )
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def _persist_position_state_snapshots(  # noqa: C901
     runner: Any,
     snapshot: PortfolioSnapshot,
@@ -515,9 +501,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
         except Exception:  # noqa: BLE001
             prices = None
 
-    deployment_id = (
-        getattr(runner, "deployment_id", "") or getattr(snapshot, "deployment_id", "") or snapshot.strategy_id
-    )
+    deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id
     cycle_id = getattr(runner, "_last_cycle_id", "") or getattr(snapshot, "cycle_id", "") or ""
 
     from almanak.framework.accounting.position_state import materialise_position_state
@@ -529,7 +513,6 @@ async def _persist_position_state_snapshots(  # noqa: C901
                 position=position,
                 market=market,
                 prices=prices,
-                strategy_id=snapshot.strategy_id,
                 deployment_id=deployment_id,
                 cycle_id=cycle_id,
                 timestamp=snapshot.timestamp,
@@ -545,7 +528,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
             if is_live:
                 raise AccountingPersistenceError(
                     AccountingWriteKind.SNAPSHOT,
-                    strategy_id=snapshot.strategy_id,
+                    deployment_id=deployment_id,
                     cause=e,
                 ) from e
             logger.error(
@@ -570,7 +553,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
         logger.error(
             "Track C: AccountingPersistenceError saving %d rows for %s (non-live, continuing)",
             len(rows),
-            snapshot.strategy_id,
+            snapshot.deployment_id,
             exc_info=True,
         )
         return 0
@@ -582,7 +565,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
         if is_live:
             raise AccountingPersistenceError(
                 AccountingWriteKind.SNAPSHOT,
-                strategy_id=snapshot.strategy_id,
+                deployment_id=deployment_id,
                 cause=e,
             ) from e
         # Per CLAUDE.md §A4: paper/dry-run modes "log ERROR and continue" —
@@ -592,7 +575,7 @@ async def _persist_position_state_snapshots(  # noqa: C901
         logger.error(
             "Track C: failed to persist %d position_state_snapshot rows for %s: %s",
             len(rows),
-            snapshot.strategy_id,
+            snapshot.deployment_id,
             e,
             exc_info=True,
         )
@@ -631,7 +614,7 @@ async def _persist_snapshot_and_metrics(
         except Exception as exc:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=snapshot.strategy_id,
+                deployment_id=snapshot.deployment_id,
                 message=str(exc),
                 cause=exc,
             ) from exc
@@ -640,7 +623,7 @@ async def _persist_snapshot_and_metrics(
 
 async def _write_valuation_into_strategy_state(
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     snapshot: PortfolioSnapshot,
 ) -> None:
     """Mirror valuation + reconciliation fields into ``StateData.state``.
@@ -651,7 +634,7 @@ async def _write_valuation_into_strategy_state(
     record -- but surfaced as a debug log for observability.
     """
     try:
-        state = await runner.state_manager.load_state(strategy_id)
+        state = await runner.state_manager.load_state(deployment_id)
         if state is None:
             return
         state.state["total_value_usd"] = str(snapshot.total_value_usd)
@@ -766,14 +749,14 @@ async def capture_portfolio_snapshot(
         # Build metrics for atomic co-write (VIB-2765).
         # VIB-3882: pass the strategy so its declared ``allocation_usd``
         # anchors the portfolio baseline.
-        metrics = await _build_metrics_for_snapshot(runner, strategy.strategy_id, snapshot, strategy=strategy)
+        metrics = await _build_metrics_for_snapshot(runner, strategy.deployment_id, snapshot, strategy=strategy)
         snapshot_id = await _persist_snapshot_and_metrics(runner, snapshot, metrics)
 
         if snapshot_id > 0:
             runner._last_snapshot_time = now
             logger.debug(
                 "Portfolio snapshot persisted for %s: $%.2f (id=%d, confidence=%s)",
-                strategy.strategy_id,
+                strategy.deployment_id,
                 snapshot.total_value_usd,
                 snapshot_id,
                 snapshot.value_confidence.value,
@@ -793,7 +776,7 @@ async def capture_portfolio_snapshot(
 
         # Mirror valuation fields onto strategy state (always persist, even zero,
         # to avoid stale dashboard values).
-        await _write_valuation_into_strategy_state(runner, strategy.strategy_id, snapshot)
+        await _write_valuation_into_strategy_state(runner, strategy.deployment_id, snapshot)
 
         return snapshot
 
@@ -815,7 +798,6 @@ async def _populate_gas_spent_usd(
     snapshot: PortfolioSnapshot,
     *,
     deployment_id: str,
-    strategy_id: str,
     is_live: bool,
 ) -> None:
     """Populate ``metrics.gas_spent_usd = Σ transaction_ledger.gas_usd`` (VIB-4225 ACC-02).
@@ -869,7 +851,7 @@ async def _populate_gas_spent_usd(
         return
 
     try:
-        total = await aggregator(deployment_id, strategy_id)
+        total = await aggregator(deployment_id)
     except NotImplementedError:
         # F4b — explicit hosted-mode deferred surface. Type-narrow catch.
         metrics.gas_spent_usd = Decimal("0")
@@ -893,7 +875,7 @@ async def _populate_gas_spent_usd(
         if is_live:
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.METRICS,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 message=f"sum_ledger_gas_usd failed for {deployment_id}",
                 cause=e,
             ) from e
@@ -906,7 +888,7 @@ async def _populate_gas_spent_usd(
 # crap-allowlist: VIB-4248 — function predates VIB-4225 (cc=24 on main); branches are mode-aware accounting-failure paths covered by test_portfolio_baseline.py + test_stamp_snapshot_identity.py + test_portfolio_metrics_gas_aggregator.py. Refactor protocol (.claude/rules/crap-refactor.md) requires fresh-context Plan agent; deferred to VIB-4248 alongside other test-quality follow-ups.
 async def _build_metrics_for_snapshot(  # noqa: C901
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     snapshot: PortfolioSnapshot,
     strategy: Any | None = None,
 ) -> PortfolioMetrics | None:
@@ -930,7 +912,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             return None
 
         if snapshot.error or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
-            logger.info(f"Skipping portfolio metrics for {strategy_id}: snapshot unavailable")
+            logger.info(f"Skipping portfolio metrics for {deployment_id}: snapshot unavailable")
             return None
 
         # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context.
@@ -951,10 +933,9 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             except Exception as e:
                 logger.debug("cycle_id context fallback failed: %s", e)
 
-        # Resolve deployment_id: prefer runner's deployment_id, fall back to strategy_id
-        deployment_id = getattr(runner, "deployment_id", "") or snapshot.strategy_id
+        deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id or deployment_id
 
-        existing = await runner.state_manager.get_portfolio_metrics(strategy_id)
+        existing = await runner.state_manager.get_portfolio_metrics(deployment_id)
 
         if existing is None:
             # VIB-3882 (H1): the strategy can declare its allocation
@@ -989,7 +970,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                         "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s "
                         "(explicit allocation contract)",
                         initial,
-                        strategy_id,
+                        deployment_id,
                     )
             if initial is None:
                 initial = snapshot.total_value_usd or snapshot.available_cash_usd
@@ -999,10 +980,9 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                     "are zero on the first snapshot. PnL will be computed relative to zero until "
                     "a non-zero snapshot is taken. Check that the wallet is funded before the "
                     "first strategy iteration.",
-                    strategy_id,
+                    deployment_id,
                 )
             metrics = PortfolioMetrics(
-                strategy_id=strategy_id,
                 timestamp=snapshot.timestamp,
                 total_value_usd=initial,
                 initial_value_usd=initial,
@@ -1010,13 +990,12 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                 execution_mode=execution_mode,
                 cycle_id=cycle_id,
             )
-            logger.info(f"Portfolio baseline established for {strategy_id}: ${initial:.2f}")
+            logger.info(f"Portfolio baseline established for {deployment_id}: ${initial:.2f}")
             await _populate_gas_spent_usd(
                 runner,
                 metrics,
                 snapshot,
                 deployment_id=deployment_id,
-                strategy_id=strategy_id,
                 is_live=execution_mode == "live",
             )
             return metrics
@@ -1032,8 +1011,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             runner,
             existing,
             snapshot,
-            deployment_id=existing.deployment_id or deployment_id,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             is_live=execution_mode == "live",
         )
         return existing
@@ -1050,7 +1028,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
 
 async def update_portfolio_metrics(
     runner: Any,
-    strategy_id: str,
+    deployment_id: str,
     snapshot: PortfolioSnapshot,
 ) -> None:
     """Update portfolio metrics for PnL tracking (legacy entry point).
@@ -1059,7 +1037,7 @@ async def update_portfolio_metrics(
     Kept for backward compatibility with code paths that don't use
     the atomic co-write.
     """
-    metrics = await _build_metrics_for_snapshot(runner, strategy_id, snapshot)
+    metrics = await _build_metrics_for_snapshot(runner, deployment_id, snapshot)
     if metrics is not None:
         try:
             await runner.state_manager.save_portfolio_metrics(metrics)
@@ -1069,7 +1047,7 @@ async def update_portfolio_metrics(
         except Exception as e:
             # VIB-3762 §C2: any accounting drift surfaces at ERROR level so
             # operators see it on the dashboard, not buried in WARNING logs.
-            logger.error("Failed to save portfolio metrics for %s: %s", strategy_id, e, exc_info=True)
+            logger.error("Failed to save portfolio metrics for %s: %s", deployment_id, e, exc_info=True)
 
 
 # -------------------------------------------------------------------------
@@ -1099,13 +1077,13 @@ def get_metrics(runner: Any) -> dict[str, Any]:
 # -------------------------------------------------------------------------
 
 
-async def is_strategy_paused(runner: Any, strategy_id: str) -> tuple[bool, str | None]:
+async def is_strategy_paused(runner: Any, deployment_id: str) -> tuple[bool, str | None]:
     """Check persisted control state to determine if strategy is paused."""
     try:
-        state_obj = await runner.state_manager.load_state(strategy_id)
+        state_obj = await runner.state_manager.load_state(deployment_id)
     except Exception as e:  # noqa: BLE001
         # Fail-open by design: if state is temporarily unavailable, continue strategy execution.
-        logger.warning("Unable to load pause state for %s; continuing as unpaused: %s", strategy_id, e)
+        logger.warning("Unable to load pause state for %s; continuing as unpaused: %s", deployment_id, e)
         return False, None
 
     if state_obj is None or not isinstance(state_obj.state, dict):
@@ -1252,13 +1230,13 @@ async def reconcile_post_execution_balances(
             if report.incident:
                 logger.error(
                     "Balance reconciliation incident for %s: %s",
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     recon["mismatches"],
                 )
             elif report.warnings:
                 logger.warning(
                     "Balance reconciliation warnings for %s: %s",
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     report.warnings,
                 )
 
@@ -1287,7 +1265,7 @@ async def reconcile_post_execution_balances(
         if recon["warnings"]:
             logger.warning(
                 "Balance reconciliation warnings for %s: %s",
-                strategy.strategy_id,
+                strategy.deployment_id,
                 recon["warnings"],
             )
 
@@ -1432,6 +1410,7 @@ def calculate_duration_ms(runner: Any, start_time: datetime) -> float:
 # -------------------------------------------------------------------------
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result: IterationResult) -> None:
     """Run stuck detection on a failed iteration and generate an OperatorCard if stuck.
 
@@ -1460,7 +1439,7 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
         # Build a lightweight snapshot from available runner state
         state_entered_at = runner._first_error_at or datetime.now(UTC)
         snapshot = StrategySnapshot(
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             chain=getattr(strategy, "chain", "unknown"),
             current_state=result.status.value,
             state_entered_at=state_entered_at,
@@ -1476,7 +1455,7 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
 
         logger.warning(
             "StuckDetector: %s is stuck (reason=%s, duration=%.0fs)",
-            strategy.strategy_id,
+            strategy.deployment_id,
             detection.reason.value if detection.reason else "unknown",
             detection.time_in_state_seconds,
         )
@@ -1486,7 +1465,7 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
 
         total_value, available_balance = runner._query_portfolio_value(strategy)
         strategy_state = StrategyState(
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             status="stuck",
             total_value_usd=total_value,
             available_balance_usd=available_balance,
@@ -1640,8 +1619,8 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
         )
         logger.warning(
             "Faux SUCCESS detected: re-classifying iteration_summary status to "
-            "EXECUTION_NOOP — strategy_id=%s decision=%s txs_sent=0",
-            result.strategy_id,
+            "EXECUTION_NOOP — deployment_id=%s decision=%s txs_sent=0",
+            result.deployment_id,
             intent_type,
         )
 
@@ -1652,7 +1631,7 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
     logger.info(
         "iteration_summary",
         event_type="iteration_summary",
-        strategy_id=result.strategy_id,
+        deployment_id=result.deployment_id,
         chain=chain,
         iteration=runner._total_iterations,
         decision=intent_type,

@@ -44,9 +44,7 @@ def _settings(**kwargs) -> GatewaySettings:
 # ---------------------------------------------------------------------------
 class TestBuildInterceptors:
     def test_insecure_anvil_no_interceptors(self) -> None:
-        interceptors = build_interceptors(
-            _settings(allow_insecure=True, network="anvil", auth_token=None)
-        )
+        interceptors = build_interceptors(_settings(allow_insecure=True, network="anvil", auth_token=None))
         assert interceptors == []
 
     def test_insecure_mainnet_with_auth_token_raises(self) -> None:
@@ -57,15 +55,11 @@ class TestBuildInterceptors:
 
     def test_insecure_mainnet_no_token_warns(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
-            interceptors = build_interceptors(
-                _settings(allow_insecure=True, network="mainnet", auth_token=None)
-            )
+            interceptors = build_interceptors(_settings(allow_insecure=True, network="mainnet", auth_token=None))
         assert interceptors == []
         assert any("INSECURE MODE on network 'mainnet'" in r.message for r in caplog.records)
 
-    def test_insecure_anvil_with_auth_token_ignored(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_insecure_anvil_with_auth_token_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
             interceptors = build_interceptors(
                 _settings(allow_insecure=True, network="anvil", auth_token="tok")  # noqa: S106
@@ -75,9 +69,7 @@ class TestBuildInterceptors:
 
     def test_no_auth_token_and_not_insecure_raises(self) -> None:
         with pytest.raises(RuntimeError, match="No auth_token configured"):
-            build_interceptors(
-                _settings(allow_insecure=False, auth_token=None)
-            )
+            build_interceptors(_settings(allow_insecure=False, auth_token=None))
 
     def test_auth_token_adds_auth_interceptor(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_auth = MagicMock()
@@ -102,12 +94,8 @@ class TestBuildInterceptors:
     def test_metrics_interceptor_appended(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_metrics = MagicMock()
         fake_metrics_cls = MagicMock(return_value=fake_metrics)
-        monkeypatch.setattr(
-            "almanak.gateway._server_start_helpers.MetricsInterceptor", fake_metrics_cls
-        )
-        interceptors = build_interceptors(
-            _settings(metrics_enabled=True, allow_insecure=True, network="anvil")
-        )
+        monkeypatch.setattr("almanak.gateway._server_start_helpers.MetricsInterceptor", fake_metrics_cls)
+        interceptors = build_interceptors(_settings(metrics_enabled=True, allow_insecure=True, network="anvil"))
         fake_metrics_cls.assert_called_once_with()
         assert fake_metrics in interceptors
 
@@ -209,12 +197,8 @@ class TestInitializeLifecycleStore:
     def test_passes_database_url_and_sqlite_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_store = MagicMock()
         factory = MagicMock(return_value=fake_store)
-        monkeypatch.setattr(
-            "almanak.gateway._server_start_helpers.get_lifecycle_store", factory
-        )
-        result = initialize_lifecycle_store(
-            _settings(database_url="postgres://x/y", gateway_db_path="/tmp/gw.db")
-        )
+        monkeypatch.setattr("almanak.gateway._server_start_helpers.get_lifecycle_store", factory)
+        result = initialize_lifecycle_store(_settings(database_url="postgres://x/y", gateway_db_path="/tmp/gw.db"))
         assert result is fake_store
         factory.assert_called_once_with(database_url="postgres://x/y", sqlite_path="/tmp/gw.db")
 
@@ -277,9 +261,7 @@ class TestLoadWalletRegistry:
         monkeypatch.delenv("SAFE_WALLET_ADDRESS", raising=False)
         fake_registry = MagicMock()
         fake_registry.all_chains.return_value = ["arbitrum"]
-        fake_registry.resolve.return_value = _FakeResolved(
-            account_address="0x1234567890abcdef", kind="eoa"
-        )
+        fake_registry.resolve.return_value = _FakeResolved(account_address="0x1234567890abcdef", kind="eoa")
         registry_cls = MagicMock(__name__="FakeRegistry")
         registry_cls.from_env.return_value = fake_registry
         fake_ep = MagicMock()
@@ -321,9 +303,7 @@ class TestLoadWalletRegistry:
         with caplog.at_level(logging.INFO, logger="almanak.gateway._server_start_helpers"):
             load_wallet_registry(_settings())
         # The short address must appear whole (no "..." suffix) in the log.
-        wallet_log = [
-            r.message for r in caplog.records if "Wallet config" in r.getMessage()
-        ]
+        wallet_log = [r.message for r in caplog.records if "Wallet config" in r.getMessage()]
         assert wallet_log, "expected a 'Wallet config' log line"
         assert "0xabc" in wallet_log[0]
         assert "..." not in wallet_log[0]
@@ -385,8 +365,8 @@ class TestBuildReflectionServiceNames:
 # validate_deployment_invariants — VIB-3760, plan §A4
 #
 # Test IDs: T-3760-1..T-3760-10. These pin the boot-time invariants that
-# AGENT_ID and the gateway's deployment-shape settings must agree, in BOTH
-# directions. Silent fallback is the bug we are removing.
+# Hosted-mode env and the gateway's deployment-shape settings must agree in
+# both directions. Silent fallback is the bug we are removing.
 # ---------------------------------------------------------------------------
 def _hosted_settings(**overrides) -> GatewaySettings:
     """Settings shaped like a hosted deployment (DB url, auth, secure)."""
@@ -416,29 +396,37 @@ def _local_settings(**overrides) -> GatewaySettings:
     return GatewaySettings(**base)
 
 
+@pytest.fixture(autouse=True)
+def _clear_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test sets its own deployment-mode env explicitly."""
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
+
+
 class TestValidateDeploymentInvariants:
+    """VIB-4722: hosted mode is signalled by ``ALMANAK_IS_HOSTED``."""
+
     # ---- T-3760-1: hosted, all consistent → passes ------------------------
     def test_t_3760_1_hosted_all_consistent_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("AGENT_ID", "agent-1")
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-1")
         # Should not raise.
         validate_deployment_invariants(_hosted_settings())
 
     # ---- T-3760-2: hosted + DATABASE_URL unset → refuse -------------------
-    def test_t_3760_2_hosted_missing_database_url_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AGENT_ID", "agent-2")
+    def test_t_3760_2_hosted_missing_database_url_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-2")
         with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
             validate_deployment_invariants(_hosted_settings(database_url=None))
         msg = str(exc.value)
-        assert "AGENT_ID is set (hosted mode)" in msg
+        assert "ALMANAK_IS_HOSTED is set (hosted mode)" in msg
         assert "ALMANAK_GATEWAY_DATABASE_URL is unset" in msg
 
     # ---- T-3760-3: hosted + allow_insecure=True → refuse ------------------
-    def test_t_3760_3_hosted_allow_insecure_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AGENT_ID", "agent-3")
+    def test_t_3760_3_hosted_allow_insecure_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-3")
         with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
             validate_deployment_invariants(_hosted_settings(allow_insecure=True))
         msg = str(exc.value)
@@ -446,71 +434,67 @@ class TestValidateDeploymentInvariants:
         assert "Hosted mode forbids insecure" in msg
 
     # ---- T-3760-4: hosted + AUTH_TOKEN unset → refuse ---------------------
-    def test_t_3760_4_hosted_missing_auth_token_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AGENT_ID", "agent-4")
+    def test_t_3760_4_hosted_missing_auth_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-4")
         with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
             validate_deployment_invariants(_hosted_settings(auth_token=None))
         msg = str(exc.value)
         assert "ALMANAK_GATEWAY_AUTH_TOKEN is unset" in msg
         assert "Hosted mode requires an auth token" in msg
 
-    # ---- T-3760-5: local + DATABASE_URL set → refuse ----------------------
-    def test_t_3760_5_local_with_database_url_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("AGENT_ID", raising=False)
+    # ---- VIB-4722 review F1: hosted + ALMANAK_DEPLOYMENT_ID blank → refuse -
+    def test_hosted_missing_deployment_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ALMANAK_DEPLOYMENT_ID is left unset by the _clear_mode_env fixture.
+        # The joint invariant (blueprint 29 §2.3) must be enforced at this
+        # boot guard — a hosted pod with no id cannot stamp deployment-scoped
+        # rows, and a read-only dashboard pod never reaches the lazy check
+        # inside mode.deployment_id().
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
         with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
-            validate_deployment_invariants(
-                _local_settings(database_url="postgres://x")
-            )
+            validate_deployment_invariants(_hosted_settings())
         msg = str(exc.value)
-        assert "ALMANAK_GATEWAY_DATABASE_URL is set but AGENT_ID is not" in msg
+        assert "ALMANAK_DEPLOYMENT_ID is blank" in msg
+
+    # ---- T-3760-5: local + DATABASE_URL set → refuse ----------------------
+    def test_t_3760_5_local_with_database_url_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
+            validate_deployment_invariants(_local_settings(database_url="postgres://x"))
+        msg = str(exc.value)
+        assert "ALMANAK_GATEWAY_DATABASE_URL is set but ALMANAK_IS_HOSTED is not" in msg
         assert "Silent fallback removed" in msg
 
     # ---- T-3760-6: local default → passes ---------------------------------
-    def test_t_3760_6_local_default_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("AGENT_ID", raising=False)
+    def test_t_3760_6_local_default_passes(self) -> None:
         # Should not raise.
         validate_deployment_invariants(_local_settings())
 
-    # ---- T-3760-7: empty AGENT_ID is treated as local ---------------------
-    def test_t_3760_7_empty_agent_id_is_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An accidentally-empty AGENT_ID must NOT trigger hosted-mode checks.
+    # ---- T-3760-7: falsey ALMANAK_IS_HOSTED is treated as local -----------
+    def test_t_3760_7_falsey_is_hosted_is_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A falsey/empty ALMANAK_IS_HOSTED must NOT trigger hosted-mode checks.
 
-        Catches the shortcut `"AGENT_ID" in os.environ`. If the helper used
-        that shortcut, the local-mode DATABASE_URL check would not fire and
-        we'd silently proceed in a half-hosted state.
+        If the helper treated mere presence as hosted, the local-mode
+        DATABASE_URL check would not fire and we'd silently proceed in a
+        half-hosted state.
         """
-        monkeypatch.setenv("AGENT_ID", "")
-        # Empty AGENT_ID + DATABASE_URL set → must raise the LOCAL message,
-        # not any hosted message.
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "")
         with pytest.raises(RuntimeError, match=r"Gateway startup aborted") as exc:
-            validate_deployment_invariants(
-                _local_settings(database_url="postgres://x")
-            )
+            validate_deployment_invariants(_local_settings(database_url="postgres://x"))
         msg = str(exc.value)
-        assert "ALMANAK_GATEWAY_DATABASE_URL is set but AGENT_ID is not" in msg
+        assert "ALMANAK_GATEWAY_DATABASE_URL is set but ALMANAK_IS_HOSTED is not" in msg
 
-    # ---- T-3760-8: whitespace AGENT_ID is treated as local ----------------
-    def test_t_3760_8_whitespace_agent_id_is_local(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AGENT_ID", "   ")
-        # Whitespace AGENT_ID + clean local config → passes.
+    # ---- T-3760-8: whitespace ALMANAK_IS_HOSTED is treated as local -------
+    def test_t_3760_8_whitespace_is_hosted_is_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "   ")
         validate_deployment_invariants(_local_settings())
 
     # ---- T-3760-9: multiple mismatches → all reported in one error -------
-    def test_t_3760_9_multiple_mismatches_reported_together(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_t_3760_9_multiple_mismatches_reported_together(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Operator gets every issue in one pass — not N restart cycles."""
-        monkeypatch.setenv("AGENT_ID", "agent-9")
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-9")
         with pytest.raises(RuntimeError) as exc:
-            validate_deployment_invariants(
-                _hosted_settings(database_url=None, allow_insecure=True, auth_token=None)
-            )
+            validate_deployment_invariants(_hosted_settings(database_url=None, allow_insecure=True, auth_token=None))
         msg = str(exc.value)
         assert "multiple deployment-config mismatches detected" in msg
         assert "ALMANAK_GATEWAY_DATABASE_URL is unset" in msg

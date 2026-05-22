@@ -18,7 +18,7 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -33,7 +33,7 @@ def render_custom_dashboard(
     - Estimated APR
     """
     st.title("Aerodrome LP Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values
@@ -44,7 +44,7 @@ def render_custom_dashboard(
     token1 = pool_parts[1] if len(pool_parts) > 1 else "USDC"
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1}")
     st.markdown("**Protocol:** Aerodrome")
     st.markdown("**Chain:** Base")
@@ -78,8 +78,8 @@ def render_custom_dashboard(
     st.subheader("APR Estimate")
     _render_apr_estimate(session_state, stable)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_lp_position(session_state: dict[str, Any], token0: str, token1: str) -> None:

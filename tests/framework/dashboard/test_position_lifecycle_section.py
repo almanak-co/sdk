@@ -136,7 +136,7 @@ class _FakeDashboardServiceClient:
         self.connect_calls += 1
         self.is_connected = True
 
-    def get_positions(self, _strategy_id: str):
+    def get_positions(self, _deployment_id: str):
         return _FakePositionsResult(positions=self._positions)
 
 
@@ -286,7 +286,7 @@ def test_handles_tolerate_missing_positions_attribute() -> None:
         def connect(self):
             pass
 
-        def get_positions(self, _strategy_id):
+        def get_positions(self, _deployment_id):
             return _BadPositionsResult()
 
     out = _fetch_registry_handles_via_gateway("strat", lambda: _ClientReturningBadResult())

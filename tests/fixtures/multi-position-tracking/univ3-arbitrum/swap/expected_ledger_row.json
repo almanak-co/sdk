@@ -2,7 +2,6 @@
   "_comment": "Expected `transaction_ledger` row after build_ledger_entry() runs against the receipt + intent. Mirror of `LedgerEntry` dataclass at almanak/framework/observability/ledger.py:50. UUID + timestamp pinned for determinism (UAT-card §D4.A3).",
   "id": "00000000-0000-0000-0000-000000004194",
   "cycle_id": "vib-4194-swap-cycle",
-  "strategy_id": "FluidSwapStrategy:eb3fdf7cf762",
   "deployment_id": "FluidSwapStrategy:eb3fdf7cf762",
   "execution_mode": "live",
   "timestamp": "2026-05-04T19:32:39.000000+00:00",

@@ -326,7 +326,7 @@ class SparkLenderStrategy(IntentStrategy):
             "Implement get_open_positions() and generate_teardown_intents() for real teardown.",
             self.__class__.__name__,
         )
-        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+        return TeardownPositionSummary.empty(self.deployment_id or self.STRATEGY_NAME)
 
     def generate_teardown_intents(self, mode=None, market=None):
         """Return intents to close all positions."""

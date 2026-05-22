@@ -1,5 +1,5 @@
 {
-    "strategy_id": "metamorpho_eth_yield",
+    "deployment_id": "metamorpho_eth_yield",
     "strategy_name": "metamorpho_eth_yield",
     "description": "MetaMorpho ERC-4626 yield strategy on Ethereum - deposits USDC into Steakhouse USDC vault for optimized lending yield across Morpho Blue markets",
     "vault_address": "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",

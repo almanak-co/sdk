@@ -17,7 +17,7 @@ async def test_transient_compilation_failure_reaches_slippage_manager_as_retryab
     del intent.max_slippage
 
     strategy = MagicMock()
-    strategy.strategy_id = "tjv2_strat"
+    strategy.deployment_id = "tjv2_strat"
     strategy.chain = "avalanche"
 
     compiler = MagicMock()
@@ -42,14 +42,14 @@ async def test_transient_compilation_failure_reaches_slippage_manager_as_retryab
     manager.slippage_manager = _CapturingSlippageManager()
 
     positions = TeardownPositionSummary(
-        strategy_id="tjv2_strat",
+        deployment_id="tjv2_strat",
         timestamp=datetime.now(UTC),
         positions=[],
         total_value_usd=Decimal("100"),
     )
     state = TeardownState(
         teardown_id="td_1",
-        strategy_id="tjv2_strat",
+        deployment_id="tjv2_strat",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=1,

@@ -150,7 +150,7 @@ def _position_row(p: PositionEntry) -> dict[str, str]:
 
 
 def render_positions_section(
-    strategy_id: str,
+    deployment_id: str,
     client: DashboardServiceClient,
     *,
     heading: str = "### Positions",
@@ -165,7 +165,7 @@ def render_positions_section(
     (mid-migration).
 
     Args:
-        strategy_id: Strategy identifier (e.g. ``"aave-avax"``).
+        deployment_id: Deployment identifier (e.g. ``"aave-avax"``).
         client: Read-only dashboard client. Operator client also accepts;
             see ``sections_operator.py`` for mutation surfaces.
         heading: Section heading. Empty string suppresses the heading
@@ -179,7 +179,7 @@ def render_positions_section(
 
     try:
         result = client.get_positions(
-            strategy_id,
+            deployment_id,
             chain=chain,
             primitive=primitive,
         )
@@ -212,7 +212,7 @@ def _render_position_groups(result: GetPositionsResult) -> None:
 
 
 def render_position_range_history_section(
-    strategy_id: str,
+    deployment_id: str,
     client: DashboardServiceClient,
     *,
     chain: str,
@@ -232,7 +232,7 @@ def render_position_range_history_section(
     we render in place of an empty table.
 
     Args:
-        strategy_id: Strategy identifier.
+        deployment_id: Deployment identifier.
         client: Read-only dashboard client.
         chain: Chain identifier (required — history is per-chain).
         accounting_category: e.g. ``"LP_UNIV3"`` or ``"AAVE_COLLATERAL"``.
@@ -253,7 +253,7 @@ def render_position_range_history_section(
 
     try:
         result = client.get_position_range_history(
-            strategy_id,
+            deployment_id,
             chain=chain,
             accounting_category=accounting_category,
             handle=handle,
@@ -289,7 +289,7 @@ def render_position_range_history_section(
 
 
 def render_reconciliation_report_section(
-    strategy_id: str,
+    deployment_id: str,
     client: DashboardServiceClient,
     *,
     heading: str = "### Reconciliation Report",
@@ -301,7 +301,7 @@ def render_reconciliation_report_section(
     de-bouncing.
 
     Args:
-        strategy_id: Strategy identifier.
+        deployment_id: Deployment identifier.
         client: Read-only dashboard client.
         heading: Section heading override.
     """
@@ -310,7 +310,7 @@ def render_reconciliation_report_section(
         st.markdown(heading)
 
     try:
-        report = client.get_reconciliation_report(strategy_id)
+        report = client.get_reconciliation_report(deployment_id)
     except DashboardClientError as exc:
         st.info(f"Reconciliation report temporarily unavailable: {exc}")
         return

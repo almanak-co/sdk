@@ -424,7 +424,7 @@ class TestReconciliationAlerts:
             [event],
             alert_threshold_pct=Decimal("0.05"),  # 5%
             critical_threshold_pct=Decimal("0.20"),  # 20%
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         assert len(alerts) == 1
@@ -452,7 +452,7 @@ class TestReconciliationAlerts:
             [event],
             alert_threshold_pct=Decimal("0.05"),
             critical_threshold_pct=Decimal("0.20"),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         assert len(alerts) == 1
@@ -478,7 +478,7 @@ class TestReconciliationAlerts:
             [event],
             alert_threshold_pct=Decimal("0.05"),
             critical_threshold_pct=Decimal("0.20"),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         assert len(alerts) == 0
@@ -542,7 +542,7 @@ class TestReconcileAndCorrectWorkflow:
             alert_threshold_pct=Decimal("0.05"),
             critical_threshold_pct=Decimal("0.20"),
             tolerance_pct=Decimal("0.01"),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Should have events and alerts
@@ -589,7 +589,7 @@ class TestReconcileAndCorrectWorkflow:
             auto_correct=False,  # Disabled
             alert_threshold_pct=Decimal("0.05"),
             tolerance_pct=Decimal("0.01"),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # Events should NOT be marked as auto-corrected
@@ -629,7 +629,7 @@ class TestReconcileAndCorrectWorkflow:
             auto_correct=True,
             alert_threshold_pct=Decimal("0.05"),
             tolerance_pct=Decimal("0.01"),
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
         )
 
         # No discrepancies
@@ -721,7 +721,7 @@ class TestMultiPositionReconciliation:
             alert_threshold_pct=Decimal("0.05"),
             critical_threshold_pct=Decimal("0.20"),
             tolerance_pct=Decimal("0.01"),
-            strategy_id="multi_test",
+            deployment_id="multi_test",
         )
 
         # Should detect discrepancies in spot and perp, not LP
@@ -808,7 +808,7 @@ class TestEdgeCases:
             actual=[],
             auto_correct=True,
             alert_threshold_pct=Decimal("0.05"),
-            strategy_id="empty_test",
+            deployment_id="empty_test",
         )
 
         assert len(events) == 0

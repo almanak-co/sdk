@@ -13,14 +13,14 @@ from almanak.framework.teardown.state_manager import TeardownStateManager
 @pytest.mark.asyncio
 async def test_start_close_persists_teardown_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """start_close should persist a TeardownRequest for StrategyRunner pickup."""
-    strategy_id = "test_strategy"
-    teardown_api._teardown_state.remove_teardown(strategy_id)
+    deployment_id = "test_strategy"
+    teardown_api._teardown_state.remove_teardown(deployment_id)
 
     monkeypatch.setattr(
         teardown_api,
         "_get_strategy_data",
         lambda _: {
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "name": "Test",
             "chain": "arbitrum",
             "total_value_usd": 1000.0,
@@ -32,12 +32,12 @@ async def test_start_close_persists_teardown_request(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(teardown_api, "get_teardown_state_manager", lambda: manager)
 
     request = teardown_api.CloseRequest(mode="graceful")
-    response = await teardown_api.start_close(strategy_id, request, api_key="test-key")
+    response = await teardown_api.start_close(deployment_id, request, api_key="test-key")
 
     assert response.status == "cancel_window"
     manager.create_request.assert_called_once()
     persisted_request = manager.create_request.call_args[0][0]
-    assert persisted_request.strategy_id == strategy_id
+    assert persisted_request.deployment_id == deployment_id
     assert persisted_request.mode.value == "SOFT"
     assert persisted_request.status.value == "cancel_window"
 
@@ -45,12 +45,12 @@ async def test_start_close_persists_teardown_request(monkeypatch: pytest.MonkeyP
 @pytest.mark.asyncio
 async def test_cancel_close_marks_persisted_request_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     """cancel_close should mark persisted teardown request as cancelled."""
-    strategy_id = "test_strategy_cancel"
+    deployment_id = "test_strategy_cancel"
     teardown_api._teardown_state.set_teardown(
-        strategy_id,
+        deployment_id,
         {
             "teardown_id": "td_123",
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             "mode": "graceful",
             "status": "cancel_window",
             "cancel_until": "2100-01-01T00:00:00+00:00",
@@ -60,10 +60,10 @@ async def test_cancel_close_marks_persisted_request_cancelled(monkeypatch: pytes
     manager = MagicMock()
     monkeypatch.setattr(teardown_api, "get_teardown_state_manager", lambda: manager)
 
-    response = await teardown_api.cancel_close(strategy_id, api_key="test-key")
+    response = await teardown_api.cancel_close(deployment_id, api_key="test-key")
 
     assert response.success is True
-    manager.mark_cancelled.assert_called_once_with(strategy_id)
+    manager.mark_cancelled.assert_called_once_with(deployment_id)
 
 
 class TestResolveDbPath:
@@ -84,29 +84,25 @@ class TestResolveDbPath:
         result = TeardownStateManager._resolve_db_path("/custom/state.db")
         assert result == Path("/custom/state.db")
 
-    def test_explicit_state_db_env_wins(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
+    def test_explicit_state_db_env_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         """``ALMANAK_STATE_DB`` is the explicit-override branch. With it set
         the strict resolver returns that path verbatim — no folder needed.
         """
         explicit = tmp_path / "explicit.db"
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
         monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.setenv("ALMANAK_STATE_DB", str(explicit))
 
         assert TeardownStateManager._resolve_db_path(None) == explicit.resolve()
 
-    def test_strategy_folder_env_wins(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
+    def test_strategy_folder_env_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         """With ``ALMANAK_STRATEGY_FOLDER`` set to a real directory, the
         resolver returns ``<folder>/almanak_state.db``.
         """
         folder = tmp_path / "strategy"
         folder.mkdir()
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
         monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.setenv("ALMANAK_STRATEGY_FOLDER", str(folder))
@@ -124,18 +120,22 @@ class TestResolveDbPath:
         (polling the strategy-folder DB) never saw the request. The strict
         resolver eliminates that branch.
         """
-        for var in ("AGENT_ID", "ALMANAK_STATE_DB", "ALMANAK_STRATEGY_FOLDER", "ALMANAK_GATEWAY_DB_PATH"):
+        for var in (
+            "ALMANAK_IS_HOSTED",
+            "ALMANAK_DEPLOYMENT_ID",
+            "ALMANAK_STATE_DB",
+            "ALMANAK_STRATEGY_FOLDER",
+            "ALMANAK_GATEWAY_DB_PATH",
+        ):
             monkeypatch.delenv(var, raising=False)
 
         with pytest.raises(LocalPathError, match=r"no strategy folder resolved"):
             TeardownStateManager._resolve_db_path(None)
 
-    def test_gateway_db_path_does_not_satisfy_strict_resolver(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
+    def test_gateway_db_path_does_not_satisfy_strict_resolver(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         """``ALMANAK_GATEWAY_DB_PATH`` is a gateway-only override — strategy-
         scoped writers must not honour it (VIB-3835)."""
-        for var in ("AGENT_ID", "ALMANAK_STATE_DB", "ALMANAK_STRATEGY_FOLDER"):
+        for var in ("ALMANAK_IS_HOSTED", "ALMANAK_DEPLOYMENT_ID", "ALMANAK_STATE_DB", "ALMANAK_STRATEGY_FOLDER"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("ALMANAK_GATEWAY_DB_PATH", str(tmp_path / "gateway-only.db"))
 

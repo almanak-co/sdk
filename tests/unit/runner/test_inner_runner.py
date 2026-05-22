@@ -43,7 +43,7 @@ def service(mock_gateway):
         mock_gateway,
         chain="arbitrum",
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         retry_policy=RetryPolicy(
             max_retries=2,
             initial_delay_seconds=0.01,  # Fast for tests
@@ -293,7 +293,7 @@ class TestIntentExecutionServiceSadflow:
             mock_gateway,
             chain="arbitrum",
             wallet_address="0x1234",
-            strategy_id="test",
+            deployment_id="test",
             retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
             on_sadflow=sadflow_events.append,
         )
@@ -327,7 +327,7 @@ class TestIntentExecutionServiceSadflow:
             mock_gateway,
             chain="arbitrum",
             wallet_address="0x1234",
-            strategy_id="test",
+            deployment_id="test",
             retry_policy=RetryPolicy(max_retries=1, initial_delay_seconds=0.01),
             on_sadflow=sadflow_events.append,
         )
@@ -358,7 +358,7 @@ class TestIntentExecutionServiceSadflow:
             mock_gateway,
             chain="arbitrum",
             wallet_address="0x1234",
-            strategy_id="test",
+            deployment_id="test",
             retry_policy=RetryPolicy(max_retries=0),
             on_sadflow=bad_callback,
         )
@@ -576,7 +576,7 @@ class TestRetryLogLevelMatrix:
         """Retryable compile RPC error on final attempt -> WARNING."""
         service = IntentExecutionService(
             mock_gateway, chain="arbitrum", wallet_address="0x1234",
-            strategy_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
+            deployment_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
         )
         mock_gateway.execution.CompileIntent.side_effect = Exception("gateway timeout")
 
@@ -626,7 +626,7 @@ class TestRetryLogLevelMatrix:
         """Retryable execution failure on final attempt -> WARNING."""
         service = IntentExecutionService(
             mock_gateway, chain="arbitrum", wallet_address="0x1234",
-            strategy_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
+            deployment_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
         )
         mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
         mock_gateway.execution.Execute.return_value = _make_exec_resp(

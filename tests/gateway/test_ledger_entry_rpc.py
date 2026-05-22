@@ -46,28 +46,27 @@ _ENTRY_UUID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 def _base_request(**overrides) -> gateway_pb2.SaveLedgerEntryRequest:
-    defaults = dict(
-        id=_ENTRY_UUID,
-        cycle_id="cycle-1",
-        strategy_id="test-strategy",
-        deployment_id="deploy-1",
-        execution_mode="live",
-        timestamp=1712000000,
-        intent_type="SWAP",
-        token_in="USDC",
-        amount_in="100",
-        token_out="ETH",
-        amount_out="0.05",
-        effective_price="2000",
-        gas_used=21000,
-        gas_usd="1.50",
-        tx_hash="0xabc",
-        chain="arbitrum",
-        protocol="uniswap_v3",
-        success=True,
-        error="",
-        extracted_data_json=b"",
-    )
+    defaults = {
+        "id": _ENTRY_UUID,
+        "cycle_id": "cycle-1",
+        "deployment_id": "deploy-1",
+        "execution_mode": "live",
+        "timestamp": 1712000000,
+        "intent_type": "SWAP",
+        "token_in": "USDC",
+        "amount_in": "100",
+        "token_out": "ETH",
+        "amount_out": "0.05",
+        "effective_price": "2000",
+        "gas_used": 21000,
+        "gas_usd": "1.50",
+        "tx_hash": "0xabc",
+        "chain": "arbitrum",
+        "protocol": "uniswap_v3",
+        "success": True,
+        "error": "",
+        "extracted_data_json": b"",
+    }
     defaults.update(overrides)
     req = gateway_pb2.SaveLedgerEntryRequest(**defaults)
     # slippage_bps is ``optional``; only set if the caller wants it present.
@@ -80,9 +79,9 @@ class TestSaveLedgerEntryValidation:
     """Handler rejects malformed requests before touching the backend."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("strategy_id", ["", "   "])
-    async def test_missing_strategy_id(self, state_service, mock_context, strategy_id):
-        request = _base_request(strategy_id=strategy_id)
+    @pytest.mark.parametrize("deployment_id", ["", "   "])
+    async def test_missing_deployment_id(self, state_service, mock_context, deployment_id):
+        request = _base_request(deployment_id=deployment_id)
         response = await state_service.SaveLedgerEntry(request, mock_context)
 
         assert response.success is False
@@ -150,7 +149,8 @@ class TestSaveLedgerEntryValidation:
         response = await state_service.SaveLedgerEntry(request, mock_context)
 
         assert response.success is False
-        assert "deployment_id is required" in response.error
+        assert "deployment_id" in response.error
+        assert "required" in response.error
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
 
@@ -175,7 +175,6 @@ class TestSaveLedgerEntrySqliteDelegate:
         entry: LedgerEntry = warm.save_ledger_entry.call_args[0][0]
         assert isinstance(entry, LedgerEntry)
         assert entry.id == _ENTRY_UUID
-        assert entry.strategy_id == "test-strategy"
         assert entry.cycle_id == "cycle-1"
         assert entry.deployment_id == "deploy-1"
         assert entry.execution_mode == "live"
@@ -275,9 +274,12 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
     pre-VIB-3503 rows and rows where the SDK chose not to capture replay
     inputs both store NULL rather than the JSON-invalid empty string.
 
-    These tests pin the positional argument layout of the INSERT — slots 21
-    (extracted_data_json) through 24 (post_state_json) — so a future column
-    re-order or insertion is caught immediately.
+    These tests pin the positional argument layout of the INSERT — slots 20
+    (extracted_data_json) through 23 (post_state_json) — so a future column
+    re-order or insertion is caught immediately. VIB-4721/4722:
+    ``transaction_ledger`` has a single identity column, ``deployment_id``
+    (the legacy ``deployment_id`` column was DROPPED), so the slots shifted down
+    by one from the legacy 24-column shape.
     """
 
     @pytest.fixture
@@ -292,7 +294,7 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
 
     @pytest.mark.asyncio
     async def test_all_four_jsonb_fields_populated(self, pg_service, mock_context):
-        """All 4 JSON fields populated → bound as JSON strings at slots 21-24."""
+        """All 4 JSON fields populated → bound as JSON strings at slots 20-23."""
         request = _base_request(
             extracted_data_json=b'{"foo": 1}',
             price_inputs_json=b'{"USDC": "1.00"}',
@@ -305,11 +307,11 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
         assert response.success is True
         pg_service._snapshot_execute.assert_awaited_once()
         args = pg_service._snapshot_execute.call_args.args
-        # args[0] is SQL, then 24 positional values
-        assert args[21] == '{"foo": 1}'
-        assert args[22] == '{"USDC": "1.00"}'
-        assert args[23] == '{"hf": "1.5"}'
-        assert args[24] == '{"hf": "1.4"}'
+        # args[0] is SQL, then 23 positional values
+        assert args[20] == '{"foo": 1}'
+        assert args[21] == '{"USDC": "1.00"}'
+        assert args[22] == '{"hf": "1.5"}'
+        assert args[23] == '{"hf": "1.4"}'
 
     @pytest.mark.asyncio
     async def test_all_four_jsonb_fields_empty_bind_none(self, pg_service, mock_context):
@@ -320,14 +322,14 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
 
         assert response.success is True
         args = pg_service._snapshot_execute.call_args.args
+        assert args[20] is None
         assert args[21] is None
         assert args[22] is None
         assert args[23] is None
-        assert args[24] is None
 
     @pytest.mark.asyncio
     async def test_mixed_populated_and_empty_jsonb_fields(self, pg_service, mock_context):
-        """Mixed: 2 populated, 2 empty → mix of JSON strings and None at slots 21-24."""
+        """Mixed: 2 populated, 2 empty → mix of JSON strings and None at slots 20-23."""
         request = _base_request(
             extracted_data_json=b'{"a": 1}',
             pre_state_json=b'{"b": 2}',
@@ -338,10 +340,10 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
 
         assert response.success is True
         args = pg_service._snapshot_execute.call_args.args
-        assert args[21] == '{"a": 1}'
-        assert args[22] is None
-        assert args[23] == '{"b": 2}'
-        assert args[24] is None
+        assert args[20] == '{"a": 1}'
+        assert args[21] is None
+        assert args[22] == '{"b": 2}'
+        assert args[23] is None
 
     @pytest.mark.asyncio
     async def test_insert_uses_jsonb_cast(self, pg_service, mock_context):
@@ -351,14 +353,16 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
         await pg_service.SaveLedgerEntry(request, mock_context)
 
         sql = pg_service._snapshot_execute.call_args.args[0]
+        assert "$20::jsonb" in sql
         assert "$21::jsonb" in sql
         assert "$22::jsonb" in sql
         assert "$23::jsonb" in sql
-        assert "$24::jsonb" in sql
         assert "extracted_data_json" in sql
         assert "price_inputs_json" in sql
         assert "pre_state_json" in sql
         assert "post_state_json" in sql
+        assert "strategy_id" not in sql
+        assert "agent_id" not in sql
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

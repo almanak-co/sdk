@@ -231,21 +231,21 @@ class DeterministicStrategy:
     def __init__(
         self,
         intents: list[Any | None],
-        strategy_id: str = "deterministic_strategy",
+        deployment_id: str = "deterministic_strategy",
     ):
         """Initialize with pre-defined intent sequence.
 
         Args:
             intents: List of intents to return in order (None = hold)
-            strategy_id: Identifier for the strategy
+            deployment_id: Identifier for the strategy
         """
         self._intents = intents
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         """Return next intent from sequence."""
@@ -720,11 +720,11 @@ class TestMetricsCalculation:
         )
         strategy_stable = DeterministicStrategy(
             intents=[swap_intent] + [None] * 24,
-            strategy_id="stable",
+            deployment_id="stable",
         )
         strategy_volatile = DeterministicStrategy(
             intents=[swap_intent] + [None] * 24,
-            strategy_id="volatile",
+            deployment_id="volatile",
         )
 
         # Run with stable uptrend
@@ -926,7 +926,7 @@ class TestBacktestResultSerialization:
         result_dict = result.to_dict()
 
         # Verify key fields are present
-        assert "strategy_id" in result_dict
+        assert "deployment_id" in result_dict
         assert "metrics" in result_dict
         assert "equity_curve" in result_dict
         assert "trades" in result_dict
@@ -935,7 +935,7 @@ class TestBacktestResultSerialization:
         restored = BacktestResult.from_dict(result_dict)
 
         # Verify restoration
-        assert restored.strategy_id == result.strategy_id
+        assert restored.deployment_id == result.deployment_id
         assert restored.engine == result.engine
         assert restored.metrics.total_trades == result.metrics.total_trades
         assert len(restored.equity_curve) == len(result.equity_curve)
@@ -1324,7 +1324,7 @@ class TestAdapterIntegration:
 
         # Create strategy that does a swap to create a position
         class SwapStrategy:
-            strategy_id = "test_tracking"
+            deployment_id = "test_tracking"
             name = "Tracking Strategy"
             _swapped = False
 
@@ -1449,7 +1449,7 @@ class TestAdapterIntegration:
 
         # Create strategy that holds only (no trades)
         class HoldStrategy:
-            strategy_id = "test_hold"
+            deployment_id = "test_hold"
             name = "Hold Strategy"
 
             def decide(self, snapshot):

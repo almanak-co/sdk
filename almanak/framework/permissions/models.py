@@ -62,7 +62,7 @@ class PermissionManifest:
     Attributes:
         version: Manifest schema version
         chain: Target chain name
-        strategy: Strategy identifier
+        strategy: Deployment identifier
         generated_at: ISO-8601 timestamp of generation
         warnings: Non-fatal issues encountered during generation
         permissions: List of contract permissions

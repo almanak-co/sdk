@@ -86,6 +86,7 @@ async def recover_incomplete_sessions(runner: Any) -> int:
     return recovered_count
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def recover_session(runner: Any, session: ExecutionSession) -> bool:
     """Recover a single incomplete execution session.
 
@@ -98,20 +99,20 @@ async def recover_session(runner: Any, session: ExecutionSession) -> bool:
     """
     logger.info(
         f"Recovering session {session.session_id} "
-        f"(strategy={session.strategy_id}, phase={session.phase.value}, "
+        f"(strategy={session.deployment_id}, phase={session.phase.value}, "
         f"attempt={session.attempt_number})"
     )
 
     # Track nonces from this session for duplicate prevention
-    strategy_id = session.strategy_id
-    if strategy_id not in runner._recovered_nonces:
-        runner._recovered_nonces[strategy_id] = set()
+    deployment_id = session.deployment_id
+    if deployment_id not in runner._recovered_nonces:
+        runner._recovered_nonces[deployment_id] = set()
 
     for tx_state in session.transactions:
         if tx_state.tx_hash:
             runner._recovered_tx_hashes.add(tx_state.tx_hash)
         if tx_state.nonce > 0:
-            runner._recovered_nonces[strategy_id].add(tx_state.nonce)
+            runner._recovered_nonces[deployment_id].add(tx_state.nonce)
 
     # Handle based on session phase
     if session.phase in (SessionPhase.SUBMITTED, SessionPhase.CONFIRMING):
@@ -281,10 +282,10 @@ async def update_recovered_state(runner: Any, session: ExecutionSession) -> None
         session: Successfully recovered session
     """
     try:
-        state = await runner.state_manager.load_state(session.strategy_id)
+        state = await runner.state_manager.load_state(session.deployment_id)
         # GatewayStateManager returns None instead of raising StateNotFoundError
         if state is None:
-            logger.debug(f"No state found for {session.strategy_id} during recovery marking")
+            logger.debug(f"No state found for {session.deployment_id} during recovery marking")
             return
 
         # Record the recovered session in state
@@ -301,7 +302,7 @@ async def update_recovered_state(runner: Any, session: ExecutionSession) -> None
 
         await runner.state_manager.save_state(state, expected_version=state.version)
 
-        logger.debug(f"Updated state for strategy {session.strategy_id} with recovered session {session.session_id}")
+        logger.debug(f"Updated state for strategy {session.deployment_id} with recovered session {session.session_id}")
 
     except Exception as e:
         logger.error(
@@ -310,11 +311,12 @@ async def update_recovered_state(runner: Any, session: ExecutionSession) -> None
         )
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def is_duplicate_transaction(
     runner: Any,
     tx_hash: str | None = None,
     nonce: int | None = None,
-    strategy_id: str | None = None,
+    deployment_id: str | None = None,
 ) -> bool:
     """Check if a transaction would be a duplicate of a recovered session.
 
@@ -325,7 +327,7 @@ def is_duplicate_transaction(
         runner: StrategyRunner instance
         tx_hash: Transaction hash to check
         nonce: Transaction nonce to check
-        strategy_id: Strategy ID for nonce check
+        deployment_id: Deployment ID for nonce check
 
     Returns:
         True if transaction would be a duplicate
@@ -334,11 +336,11 @@ def is_duplicate_transaction(
         logger.warning(f"Transaction {tx_hash} was already recovered - skipping to prevent duplicate")
         return True
 
-    if nonce is not None and strategy_id:
-        recovered_nonces = runner._recovered_nonces.get(strategy_id, set())
+    if nonce is not None and deployment_id:
+        recovered_nonces = runner._recovered_nonces.get(deployment_id, set())
         if nonce in recovered_nonces:
             logger.warning(
-                f"Nonce {nonce} for strategy {strategy_id} was already used "
+                f"Nonce {nonce} for strategy {deployment_id} was already used "
                 f"in a recovered session - skipping to prevent duplicate"
             )
             return True
@@ -369,18 +371,18 @@ def compute_intents_hash(runner: Any, intents: list) -> str:
     return hashlib.sha256(intent_str.encode()).hexdigest()[:16]
 
 
-async def load_execution_progress(runner: Any, strategy_id: str) -> ExecutionProgress | None:
+async def load_execution_progress(runner: Any, deployment_id: str) -> ExecutionProgress | None:
     """Load execution progress from persisted state.
 
     Args:
         runner: StrategyRunner instance
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
 
     Returns:
         ExecutionProgress if found, None otherwise
     """
     try:
-        state = await runner.state_manager.load_state(strategy_id)
+        state = await runner.state_manager.load_state(deployment_id)
         # GatewayStateManager returns None instead of raising StateNotFoundError
         if state is None:
             return None
@@ -388,62 +390,62 @@ async def load_execution_progress(runner: Any, strategy_id: str) -> ExecutionPro
         if progress_data:
             return ExecutionProgress.from_dict(progress_data)
     except Exception as e:
-        logger.debug(f"No execution progress found for {strategy_id}: {e}")
+        logger.debug(f"No execution progress found for {deployment_id}: {e}")
     return None
 
 
-async def save_execution_progress(runner: Any, strategy_id: str, progress: ExecutionProgress) -> None:
+async def save_execution_progress(runner: Any, deployment_id: str, progress: ExecutionProgress) -> None:
     """Save execution progress to persisted state.
 
     Args:
         runner: StrategyRunner instance
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         progress: Execution progress to save
     """
     try:
         # Try to load existing state, create if it doesn't exist
         try:
-            state = await runner.state_manager.load_state(strategy_id)
+            state = await runner.state_manager.load_state(deployment_id)
             # GatewayStateManager returns None instead of raising StateNotFoundError
             if state is None:
-                raise StateNotFoundError(strategy_id)
+                raise StateNotFoundError(deployment_id)
             expected_version = state.version
         except StateNotFoundError:
             # Create initial state for this strategy
             state = StateData(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 version=1,
                 state={},
             )
             expected_version = None  # No version check for new state
-            logger.debug(f"Creating initial state for {strategy_id}")
+            logger.debug(f"Creating initial state for {deployment_id}")
 
         progress.last_updated = datetime.now(UTC)
         state.state["execution_progress"] = progress.to_dict()
         await runner.state_manager.save_state(state, expected_version=expected_version)
         logger.debug(
-            f"Saved execution progress for {strategy_id}: "
+            f"Saved execution progress for {deployment_id}: "
             f"step {progress.completed_step_index + 1}/{progress.total_steps}"
         )
     except Exception as e:
         logger.error(f"Failed to save execution progress: {e}")
 
 
-async def clear_execution_progress(runner: Any, strategy_id: str) -> None:
+async def clear_execution_progress(runner: Any, deployment_id: str) -> None:
     """Clear execution progress from state (after completion or abort).
 
     Args:
         runner: StrategyRunner instance
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
     """
     try:
-        state = await runner.state_manager.load_state(strategy_id)
+        state = await runner.state_manager.load_state(deployment_id)
         # GatewayStateManager returns None instead of raising StateNotFoundError
         if state is None:
             return
         if "execution_progress" in state.state:
             del state.state["execution_progress"]
             await runner.state_manager.save_state(state, expected_version=state.version)
-            logger.debug(f"Cleared execution progress for {strategy_id}")
+            logger.debug(f"Cleared execution progress for {deployment_id}")
     except Exception as e:
         logger.debug(f"Could not clear execution progress: {e}")

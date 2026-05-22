@@ -38,7 +38,7 @@ def _make_runner() -> StrategyRunner:
 def _make_strategy() -> MagicMock:
     """Create a mock strategy with required protocol attributes."""
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.decide = AsyncMock()
     return strategy
 

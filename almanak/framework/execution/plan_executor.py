@@ -24,7 +24,7 @@ Example:
     )
 
     # Create deterministic plan with pinned quotes
-    plan = await executor.create_plan(intents, strategy_id="my-strategy")
+    plan = await executor.create_plan(intents, deployment_id="my-strategy")
 
     # On restart, reconcile plan with on-chain state
     reconciliation = await executor.reconcile_plan(plan, chain_states)
@@ -525,7 +525,7 @@ class PlanExecutor:
     def create_plan_from_steps(
         self,
         steps: list[PlanStep],
-        strategy_id: str | None = None,
+        deployment_id: str | None = None,
         description: str | None = None,
     ) -> PlanBundle:
         """Create a plan bundle from pre-built steps.
@@ -536,7 +536,7 @@ class PlanExecutor:
 
         Args:
             steps: List of plan steps
-            strategy_id: Optional strategy identifier
+            deployment_id: Optional deployment identifier
             description: Optional plan description
 
         Returns:
@@ -547,7 +547,7 @@ class PlanExecutor:
         plan = PlanBundle(
             plan_id=plan_id,
             steps=steps,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             description=description,
         )
 

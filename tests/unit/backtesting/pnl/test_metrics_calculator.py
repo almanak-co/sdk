@@ -97,7 +97,7 @@ class TestVIB2915SchemaMigration:
     def _legacy_payload(self, total_return_ratio: str, annualized_ratio: str) -> dict:
         return {
             "engine": "pnl",
-            "strategy_id": "legacy",
+            "deployment_id": "legacy",
             "start_time": "2024-01-01T00:00:00+00:00",
             "end_time": "2024-12-31T00:00:00+00:00",
             "initial_capital_usd": "10000",

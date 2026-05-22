@@ -390,7 +390,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_OPENED,
                     description=f"Aerodrome LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool, "stable": self.stable},
                 )
             )
@@ -502,7 +502,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
         total_value = sum(p.value_usd for p in positions)
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             total_value_usd=total_value,
             positions=positions,

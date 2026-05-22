@@ -58,7 +58,7 @@ def dashboard_service(settings: GatewaySettings) -> DashboardServiceServicer:
 
 def _portfolio_snapshot(*, chain: str = "base", wallet: str = "0xwallet") -> PortfolioSnapshot:
     snap = PortfolioSnapshot(
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         timestamp=datetime(2026, 5, 17, 12, 0, tzinfo=UTC),
         total_value_usd=1000.0,
         available_cash_usd=100.0,
@@ -170,41 +170,41 @@ class TestPreviewTokenStore:
     def test_issue_returns_unique_tokens(self) -> None:
         store = PreviewTokenStore()
         fp = StateFingerprint(registry_row_count=1, registry_max_block=100, ledger_max_id="L1", source_block_number=200)
-        t1, _ = store.issue(strategy_id="s1", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
-        t2, _ = store.issue(strategy_id="s1", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
+        t1, _ = store.issue(deployment_id="s1", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
+        t2, _ = store.issue(deployment_id="s1", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
         assert t1 != t2
         assert t1.startswith("preview-")
 
     def test_consume_ok_removes_entry(self) -> None:
         store = PreviewTokenStore()
         fp = StateFingerprint(1, 100, "L1", 200)
-        t, _ = store.issue(strategy_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
-        status, entry = store.consume(token=t, strategy_id="s1", now_unix_seconds=1100)
+        t, _ = store.issue(deployment_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
+        status, entry = store.consume(token=t, deployment_id="s1", now_unix_seconds=1100)
         assert status == "OK"
         assert entry is not None
         assert entry.reconcile_response == "rr"
         # Second consume → NOT_FOUND.
-        status2, _ = store.consume(token=t, strategy_id="s1", now_unix_seconds=1100)
+        status2, _ = store.consume(token=t, deployment_id="s1", now_unix_seconds=1100)
         assert status2 == "NOT_FOUND"
 
     def test_consume_expired(self) -> None:
         store = PreviewTokenStore(default_ttl_seconds=10)
         fp = StateFingerprint(1, 100, "L1", 200)
-        t, _ = store.issue(strategy_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
+        t, _ = store.issue(deployment_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
         # 20 seconds later, well past TTL.
-        status, entry = store.consume(token=t, strategy_id="s1", now_unix_seconds=1020)
+        status, entry = store.consume(token=t, deployment_id="s1", now_unix_seconds=1020)
         assert status == "EXPIRED"
         assert entry is None
 
     def test_consume_wrong_strategy(self) -> None:
         store = PreviewTokenStore()
         fp = StateFingerprint(1, 100, "L1", 200)
-        t, _ = store.issue(strategy_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
-        status, entry = store.consume(token=t, strategy_id="other", now_unix_seconds=1000)
+        t, _ = store.issue(deployment_id="s1", fingerprint=fp, reconcile_response="rr", now_unix_seconds=1000)
+        status, entry = store.consume(token=t, deployment_id="other", now_unix_seconds=1000)
         assert status == "WRONG_STRATEGY"
         assert entry is None
         # Token NOT consumed — original strategy can still use it.
-        status2, entry2 = store.consume(token=t, strategy_id="s1", now_unix_seconds=1000)
+        status2, entry2 = store.consume(token=t, deployment_id="s1", now_unix_seconds=1000)
         assert status2 == "OK"
         assert entry2 is not None
 
@@ -212,7 +212,7 @@ class TestPreviewTokenStore:
         store = PreviewTokenStore(default_ttl_seconds=5)
         fp = StateFingerprint(1, 100, "L1", 200)
         for i in range(3):
-            store.issue(strategy_id=f"s{i}", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
+            store.issue(deployment_id=f"s{i}", fingerprint=fp, reconcile_response=None, now_unix_seconds=1000)
         purged = store.gc_expired(now_unix_seconds=2000)
         assert purged == 3
         purged_again = store.gc_expired(now_unix_seconds=2000)
@@ -339,9 +339,9 @@ class TestCategorizeApplyResult:
 
 @pytest.mark.asyncio
 class TestGetReconciliationReport:
-    async def test_invalid_strategy_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_invalid_deployment_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
         dashboard_service._initialized = True
-        req = gateway_pb2.GetReconciliationReportRequest(strategy_id="")
+        req = gateway_pb2.GetReconciliationReportRequest(deployment_id="")
         resp = await dashboard_service.GetReconciliationReport(req, mock_context)
         assert isinstance(resp, gateway_pb2.GetReconciliationReportResponse)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -349,7 +349,7 @@ class TestGetReconciliationReport:
     async def test_no_chain_wallet_returns_empty_report(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=None)
-        req = gateway_pb2.GetReconciliationReportRequest(strategy_id="test_strategy")
+        req = gateway_pb2.GetReconciliationReportRequest(deployment_id="test_strategy")
         resp = await dashboard_service.GetReconciliationReport(req, mock_context)
         assert len(resp.findings) == 0
         assert resp.as_of != ""  # timestamp set even when degraded
@@ -360,7 +360,7 @@ class TestGetReconciliationReport:
         rr = _reconcile_response(matched_count=2, phantom_count=1)
         ps = _wire_position_servicer(dashboard_service, rr)
 
-        req = gateway_pb2.GetReconciliationReportRequest(strategy_id="test_strategy")
+        req = gateway_pb2.GetReconciliationReportRequest(deployment_id="test_strategy")
         resp = await dashboard_service.GetReconciliationReport(req, mock_context)
 
         assert len(resp.findings) == 3  # 2 matched + 1 phantom
@@ -376,7 +376,7 @@ class TestGetReconciliationReport:
         rr = _reconcile_response(matched_count=1)
         ps = _wire_position_servicer(dashboard_service, rr)
 
-        req = gateway_pb2.GetReconciliationReportRequest(strategy_id="test_strategy")
+        req = gateway_pb2.GetReconciliationReportRequest(deployment_id="test_strategy")
         await dashboard_service.GetReconciliationReport(req, mock_context)
         await dashboard_service.GetReconciliationReport(req, mock_context)
         # Only one upstream call despite two requests.
@@ -396,7 +396,7 @@ class TestPreviewApplyReconcile:
         rr = _reconcile_response(matched_count=1, phantom_count=2)
         _wire_position_servicer(dashboard_service, rr)
 
-        req = gateway_pb2.PreviewReconcileRequest(strategy_id="test_strategy")
+        req = gateway_pb2.PreviewReconcileRequest(deployment_id="test_strategy")
         resp = await dashboard_service.PreviewReconcile(req, mock_context)
 
         assert resp.preview_token.startswith("preview-")
@@ -413,7 +413,7 @@ class TestPreviewApplyReconcile:
 
         # 1) Preview.
         preview_resp = await dashboard_service.PreviewReconcile(
-            gateway_pb2.PreviewReconcileRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.PreviewReconcileRequest(deployment_id="test_strategy"), mock_context
         )
         # 2) Switch the position_servicer mock to return the apply-shaped response
         #    with the SAME source_block_number (no drift) and a rebuilt row.
@@ -421,7 +421,7 @@ class TestPreviewApplyReconcile:
         ps.Reconcile = AsyncMock(return_value=rr_apply)
 
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(strategy_id="test_strategy", preview_token=preview_resp.preview_token),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=preview_resp.preview_token),
             mock_context,
         )
         assert apply_resp.result == "SUCCESS"
@@ -434,14 +434,14 @@ class TestPreviewApplyReconcile:
         ps = _wire_position_servicer(dashboard_service, rr_preview)
 
         preview_resp = await dashboard_service.PreviewReconcile(
-            gateway_pb2.PreviewReconcileRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.PreviewReconcileRequest(deployment_id="test_strategy"), mock_context
         )
         # Apply returns a DIFFERENT source_block_number → fingerprint mismatch.
         rr_apply = _reconcile_response(source_block_number=1100)
         ps.Reconcile = AsyncMock(return_value=rr_apply)
 
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(strategy_id="test_strategy", preview_token=preview_resp.preview_token),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=preview_resp.preview_token),
             mock_context,
         )
         assert apply_resp.result == "STATE_DRIFT"
@@ -463,7 +463,7 @@ class TestPreviewApplyReconcile:
         ps = _wire_position_servicer(dashboard_service, rr_preview)
 
         preview_resp = await dashboard_service.PreviewReconcile(
-            gateway_pb2.PreviewReconcileRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.PreviewReconcileRequest(deployment_id="test_strategy"), mock_context
         )
 
         # After preview, every Reconcile invocation (dry-run AND any apply)
@@ -474,7 +474,7 @@ class TestPreviewApplyReconcile:
 
         apply_resp = await dashboard_service.ApplyReconcile(
             gateway_pb2.ApplyReconcileRequest(
-                strategy_id="test_strategy", preview_token=preview_resp.preview_token
+                deployment_id="test_strategy", preview_token=preview_resp.preview_token
             ),
             mock_context,
         )
@@ -503,14 +503,14 @@ class TestPreviewApplyReconcile:
         ps = _wire_position_servicer(dashboard_service, rr)
 
         preview_resp = await dashboard_service.PreviewReconcile(
-            gateway_pb2.PreviewReconcileRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.PreviewReconcileRequest(deployment_id="test_strategy"), mock_context
         )
         # Reconcile always returns block=1000 → no drift between preview and apply.
         ps.Reconcile = AsyncMock(return_value=rr)
 
         apply_resp = await dashboard_service.ApplyReconcile(
             gateway_pb2.ApplyReconcileRequest(
-                strategy_id="test_strategy", preview_token=preview_resp.preview_token
+                deployment_id="test_strategy", preview_token=preview_resp.preview_token
             ),
             mock_context,
         )
@@ -527,7 +527,7 @@ class TestPreviewApplyReconcile:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(strategy_id="test_strategy", preview_token="preview-bogus"),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token="preview-bogus"),
             mock_context,
         )
         assert apply_resp.result == "NOT_FOUND"
@@ -535,7 +535,7 @@ class TestPreviewApplyReconcile:
     async def test_apply_missing_token_returns_invalid_argument(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
         dashboard_service._initialized = True
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(strategy_id="test_strategy", preview_token=""),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=""),
             mock_context,
         )
         assert apply_resp.result == "INVALID_ARGUMENT"
@@ -549,10 +549,10 @@ class TestPreviewApplyReconcile:
 
 @pytest.mark.asyncio
 class TestRefreshRegistryFromChain:
-    async def test_invalid_strategy_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_invalid_deployment_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
         dashboard_service._initialized = True
         resp = await dashboard_service.RefreshRegistryFromChain(
-            gateway_pb2.RefreshRegistryFromChainRequest(strategy_id=""), mock_context
+            gateway_pb2.RefreshRegistryFromChainRequest(deployment_id=""), mock_context
         )
         assert resp.result == "INVALID_ARGUMENT"
 
@@ -563,7 +563,7 @@ class TestRefreshRegistryFromChain:
         _wire_position_servicer(dashboard_service, rr)
 
         resp = await dashboard_service.RefreshRegistryFromChain(
-            gateway_pb2.RefreshRegistryFromChainRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.RefreshRegistryFromChainRequest(deployment_id="test_strategy"), mock_context
         )
         assert resp.result == "SUCCESS"
         assert resp.positions_refreshed == 5  # matched + rebuilt
@@ -574,7 +574,7 @@ class TestRefreshRegistryFromChain:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=None)
         resp = await dashboard_service.RefreshRegistryFromChain(
-            gateway_pb2.RefreshRegistryFromChainRequest(strategy_id="test_strategy"), mock_context
+            gateway_pb2.RefreshRegistryFromChainRequest(deployment_id="test_strategy"), mock_context
         )
         assert resp.result == "FAILED"
 
@@ -592,7 +592,7 @@ class TestRefreshRegistryFromChain:
         ps.Reconcile = AsyncMock(side_effect=slow_reconcile)
         dashboard_service.position_servicer = ps
 
-        req = gateway_pb2.RefreshRegistryFromChainRequest(strategy_id="test_strategy")
+        req = gateway_pb2.RefreshRegistryFromChainRequest(deployment_id="test_strategy")
         first_task = asyncio.create_task(dashboard_service.RefreshRegistryFromChain(req, mock_context))
         # Yield once so the first task acquires the lock before we call again.
         await asyncio.sleep(0.01)

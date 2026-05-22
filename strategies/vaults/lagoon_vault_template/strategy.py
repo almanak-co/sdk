@@ -230,7 +230,7 @@ class LagoonVaultMomentum(IntentStrategy):
 
         from datetime import UTC, datetime as dt
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=dt.now(UTC),
             positions=positions,
         )

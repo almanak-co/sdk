@@ -853,7 +853,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -870,7 +870,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -887,7 +887,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -905,7 +905,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=None,
             success=True,
@@ -923,7 +923,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=False),
             success=True,  # framework verdict — but chain truth wins
@@ -941,7 +941,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="unknown"),
+            strategy=SimpleNamespace(deployment_id="s", chain="unknown"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -959,7 +959,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -980,7 +980,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -1001,7 +1001,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -1034,7 +1034,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,
@@ -1071,7 +1071,7 @@ class TestMaybeSaveLedgerWithRegistry:
         )
         out = await StrategyRunner._maybe_save_ledger_with_registry(
             runner,
-            strategy=SimpleNamespace(deployment_id="dep:1", strategy_id="s", chain="arbitrum"),
+            strategy=SimpleNamespace(deployment_id="s", chain="arbitrum"),
             intent=intent,
             result=SimpleNamespace(success=True),
             success=True,

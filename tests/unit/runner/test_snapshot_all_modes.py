@@ -51,7 +51,7 @@ def _make_runner(enable_state_persistence: bool = True, dry_run: bool = False) -
 def _make_strategy() -> MagicMock:
     """Create a mock strategy."""
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.config = {}
     strategy._wallet_activity_provider = None
     return strategy
@@ -60,7 +60,7 @@ def _make_strategy() -> MagicMock:
 def _make_result(status: IterationStatus = IterationStatus.SUCCESS) -> IterationResult:
     return IterationResult(
         status=status,
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         duration_ms=10,
     )
 

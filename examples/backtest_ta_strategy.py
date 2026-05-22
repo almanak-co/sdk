@@ -131,7 +131,7 @@ class RSIMeanReversionStrategy:
         self._in_position = False
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         return "rsi_mean_reversion_demo"
 
     def _calculate_rsi(self) -> float | None:

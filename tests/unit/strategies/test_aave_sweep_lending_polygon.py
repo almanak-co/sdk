@@ -22,7 +22,7 @@ def strategy():
     strat.config = {}
     strat._chain = "polygon"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aave-sweep-polygon"
+    strat._deployment_id = "test-aave-sweep-polygon"
     strat.supply_token = "WETH"
     strat.borrow_token = "USDC"
     strat.supply_amount = Decimal("0.01")

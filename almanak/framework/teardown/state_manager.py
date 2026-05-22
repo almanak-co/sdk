@@ -18,13 +18,14 @@ This decoupled design allows multiple triggers:
 
 Backend topology (VIB-4049):
 
-- Local SDK keeps using SQLite, keyed by ``TeardownRequest.strategy_id``.
-- Hosted gateway uses PostgreSQL, keyed by ``agent_id``. The Postgres
-  implementation lives in ``platform-plugins/almanak_platform/teardown_store.py``
-  and is loaded via the ``almanak.teardown`` entry point. The dataclass
-  field is still ``strategy_id`` end-to-end; the Postgres backend maps it
-  to the ``agent_id`` column at the write/read boundary using
-  ``framework/deployment/mode.py:agent_id()``.
+- Local SDK keeps using SQLite; rows carry a ``deployment_id`` column.
+- Hosted gateway uses PostgreSQL; rows carry a ``deployment_id`` column
+  too. The Postgres implementation lives in
+  ``platform-plugins/almanak_platform/teardown_store.py`` and is loaded
+  via the ``almanak.teardown`` entry point. The dataclass field is still
+  named ``deployment_id`` end-to-end (VIB-4726 will reconcile the Python
+  identifier); both backends bind that value straight to the
+  ``deployment_id`` column.
 
 The Protocols below pin the public surface both backends must implement.
 ``TeardownStateManager`` / ``TeardownStateAdapter`` are now backwards-compat
@@ -78,9 +79,9 @@ class TeardownStateManagerProtocol(Protocol):
 
     def create_request(self, request: TeardownRequest) -> None: ...
 
-    def get_request(self, strategy_id: str) -> TeardownRequest | None: ...
+    def get_request(self, deployment_id: str) -> TeardownRequest | None: ...
 
-    def get_active_request(self, strategy_id: str) -> TeardownRequest | None: ...
+    def get_active_request(self, deployment_id: str) -> TeardownRequest | None: ...
 
     def get_pending_requests(self) -> list[TeardownRequest]: ...
 
@@ -90,13 +91,13 @@ class TeardownStateManagerProtocol(Protocol):
 
     def update_request(self, request: TeardownRequest) -> None: ...
 
-    def acknowledge_request(self, strategy_id: str) -> TeardownRequest | None: ...
+    def acknowledge_request(self, deployment_id: str) -> TeardownRequest | None: ...
 
-    def mark_started(self, strategy_id: str, total_positions: int = 0) -> TeardownRequest | None: ...
+    def mark_started(self, deployment_id: str, total_positions: int = 0) -> TeardownRequest | None: ...
 
     def update_progress(
         self,
-        strategy_id: str,
+        deployment_id: str,
         positions_closed: int,
         positions_failed: int = 0,
         current_phase: TeardownPhase | None = None,
@@ -104,13 +105,13 @@ class TeardownStateManagerProtocol(Protocol):
 
     def mark_completed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         result: dict | None = None,
     ) -> TeardownRequest | None: ...
 
     def mark_failed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         error: str,
         *,
         positions_closed: int | None = None,
@@ -124,11 +125,11 @@ class TeardownStateManagerProtocol(Protocol):
         SQLite and gateway-backed adapters share this contract."""
         ...
 
-    def request_cancel(self, strategy_id: str) -> bool: ...
+    def request_cancel(self, deployment_id: str) -> bool: ...
 
-    def mark_cancelled(self, strategy_id: str) -> TeardownRequest | None: ...
+    def mark_cancelled(self, deployment_id: str) -> TeardownRequest | None: ...
 
-    def delete_request(self, strategy_id: str) -> bool: ...
+    def delete_request(self, deployment_id: str) -> bool: ...
 
 
 @runtime_checkable
@@ -141,14 +142,14 @@ class TeardownStateAdapterProtocol(Protocol):
 
     async def save_teardown_state(self, state: TeardownState) -> None: ...
 
-    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None: ...
+    async def get_teardown_state(self, deployment_id: str) -> TeardownState | None: ...
 
     async def delete_teardown_state(self, teardown_id: str) -> None: ...
 
     def create_approval_request(
         self,
         teardown_id: str,
-        strategy_id: str,
+        deployment_id: str,
         level: EscalationLevel | str,
         request_json: str,
         expires_at: str,
@@ -167,11 +168,11 @@ class TeardownStateAdapterProtocol(Protocol):
         response_json: str,
     ) -> bool: ...
 
-    def get_latest_pending_approval(self, strategy_id: str) -> dict[str, Any] | None: ...
+    def get_latest_pending_approval(self, deployment_id: str) -> dict[str, Any] | None: ...
 
     def write_approval_response_by_strategy(
         self,
-        strategy_id: str,
+        deployment_id: str,
         response_json: str,
     ) -> bool: ...
 
@@ -314,7 +315,7 @@ class SQLiteTeardownStateManager:
             with _open_connection(self.db_path) as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS teardown_requests (
-                        strategy_id TEXT PRIMARY KEY,
+                        deployment_id TEXT PRIMARY KEY,
                         mode TEXT NOT NULL,
                         asset_policy TEXT NOT NULL,
                         target_token TEXT NOT NULL,
@@ -336,6 +337,12 @@ class SQLiteTeardownStateManager:
                         updated_at TEXT NOT NULL
                     )
                 """)
+                # Migration (VIB-4722): rename strategy_id -> deployment_id on
+                # existing local DBs to match the unified identity column.
+                try:
+                    conn.execute("ALTER TABLE teardown_requests RENAME COLUMN strategy_id TO deployment_id")
+                except sqlite3.OperationalError:
+                    pass  # Already renamed (or fresh DB created with deployment_id)
                 conn.commit()
                 logger.debug(f"Initialized teardown state database at {self.db_path}")
 
@@ -354,7 +361,7 @@ class SQLiteTeardownStateManager:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO teardown_requests (
-                    strategy_id, mode, asset_policy, target_token,
+                    deployment_id, mode, asset_policy, target_token,
                     reason, requested_at, requested_by, status,
                     acknowledged_at, started_at, completed_at,
                     current_phase, positions_total, positions_closed,
@@ -363,7 +370,7 @@ class SQLiteTeardownStateManager:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    request.strategy_id,
+                    request.deployment_id,
                     request.mode.value,
                     request.asset_policy.value,
                     request.target_token,
@@ -385,15 +392,15 @@ class SQLiteTeardownStateManager:
             )
             conn.commit()
             logger.info(
-                f"Created teardown request for {request.strategy_id}: "
+                f"Created teardown request for {request.deployment_id}: "
                 f"mode={request.mode.value}, by={request.requested_by}"
             )
 
-    def get_request(self, strategy_id: str) -> TeardownRequest | None:
+    def get_request(self, deployment_id: str) -> TeardownRequest | None:
         """Get the current teardown request for a strategy.
 
         Args:
-            strategy_id: The strategy ID to look up
+            deployment_id: The deployment ID to look up
 
         Returns:
             TeardownRequest if one exists, None otherwise
@@ -401,8 +408,8 @@ class SQLiteTeardownStateManager:
         with _open_connection(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT * FROM teardown_requests WHERE strategy_id = ?",
-                (strategy_id,),
+                "SELECT * FROM teardown_requests WHERE deployment_id = ?",
+                (deployment_id,),
             )
             row = cursor.fetchone()
 
@@ -411,16 +418,16 @@ class SQLiteTeardownStateManager:
 
             return self._row_to_request(row)
 
-    def get_active_request(self, strategy_id: str) -> TeardownRequest | None:
+    def get_active_request(self, deployment_id: str) -> TeardownRequest | None:
         """Get an active (non-completed) teardown request.
 
         Args:
-            strategy_id: The strategy ID to look up
+            deployment_id: The deployment ID to look up
 
         Returns:
             TeardownRequest if an active one exists, None otherwise
         """
-        request = self.get_request(strategy_id)
+        request = self.get_request(deployment_id)
         if request and request.is_active:
             return request
         return None
@@ -487,7 +494,7 @@ class SQLiteTeardownStateManager:
                     positions_total = ?, positions_closed = ?,
                     positions_failed = ?, cancel_requested = ?,
                     cancel_deadline = ?, updated_at = ?
-                WHERE strategy_id = ?
+                WHERE deployment_id = ?
                 """,
                 (
                     request.mode.value,
@@ -504,24 +511,24 @@ class SQLiteTeardownStateManager:
                     1 if request.cancel_requested else 0,
                     request.cancel_deadline.isoformat() if request.cancel_deadline else None,
                     datetime.now(UTC).isoformat(),
-                    request.strategy_id,
+                    request.deployment_id,
                 ),
             )
             conn.commit()
-            logger.debug(f"Updated teardown request for {request.strategy_id}: status={request.status.value}")
+            logger.debug(f"Updated teardown request for {request.deployment_id}: status={request.status.value}")
 
-    def acknowledge_request(self, strategy_id: str) -> TeardownRequest | None:
+    def acknowledge_request(self, deployment_id: str) -> TeardownRequest | None:
         """Acknowledge a pending teardown request.
 
         Called when a strategy picks up the request and begins processing.
 
         Args:
-            strategy_id: The strategy acknowledging the request
+            deployment_id: The strategy acknowledging the request
 
         Returns:
             The acknowledged request, or None if not found
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -529,20 +536,20 @@ class SQLiteTeardownStateManager:
         request.status = TeardownStatus.CANCEL_WINDOW
         self.update_request(request)
 
-        logger.info(f"Acknowledged teardown request for {strategy_id}")
+        logger.info(f"Acknowledged teardown request for {deployment_id}")
         return request
 
-    def mark_started(self, strategy_id: str, total_positions: int = 0) -> TeardownRequest | None:
+    def mark_started(self, deployment_id: str, total_positions: int = 0) -> TeardownRequest | None:
         """Mark a teardown as started (after cancel window).
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             total_positions: Total number of positions to close
 
         Returns:
             The updated request, or None if not found
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -552,12 +559,12 @@ class SQLiteTeardownStateManager:
         request.positions_total = total_positions
         self.update_request(request)
 
-        logger.info(f"Started teardown for {strategy_id}: {total_positions} positions")
+        logger.info(f"Started teardown for {deployment_id}: {total_positions} positions")
         return request
 
     def update_progress(
         self,
-        strategy_id: str,
+        deployment_id: str,
         positions_closed: int,
         positions_failed: int = 0,
         current_phase: TeardownPhase | None = None,
@@ -565,7 +572,7 @@ class SQLiteTeardownStateManager:
         """Update teardown progress.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             positions_closed: Number of positions successfully closed
             positions_failed: Number of positions that failed to close
             current_phase: Current phase of the teardown
@@ -573,7 +580,7 @@ class SQLiteTeardownStateManager:
         Returns:
             The updated request, or None if not found
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -587,13 +594,13 @@ class SQLiteTeardownStateManager:
 
     def mark_completed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         result: dict | None = None,
     ) -> TeardownRequest | None:
         """Mark a teardown as completed.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             result: Optional result details (final balances, costs, etc.)
                 If ``result["intents"]`` is set, it's lifted onto
                 ``positions_closed`` (VIB-3920) so dashboard tabs and the
@@ -604,7 +611,7 @@ class SQLiteTeardownStateManager:
         Returns:
             The updated request, or None if not found
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -623,18 +630,18 @@ class SQLiteTeardownStateManager:
         if result:
             with _open_connection(self.db_path) as conn:
                 conn.execute(
-                    "UPDATE teardown_requests SET result_json = ? WHERE strategy_id = ?",
-                    (json.dumps(result), strategy_id),
+                    "UPDATE teardown_requests SET result_json = ? WHERE deployment_id = ?",
+                    (json.dumps(result), deployment_id),
                 )
                 conn.commit()
 
         self.update_request(request)
-        logger.info(f"Completed teardown for {strategy_id} (positions_closed={request.positions_closed})")
+        logger.info(f"Completed teardown for {deployment_id} (positions_closed={request.positions_closed})")
         return request
 
     def mark_failed(
         self,
-        strategy_id: str,
+        deployment_id: str,
         error: str,
         *,
         positions_closed: int | None = None,
@@ -643,7 +650,7 @@ class SQLiteTeardownStateManager:
         """Mark a teardown as failed.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
             error: Error message describing the failure
             positions_closed: (VIB-4542) intents that landed on-chain before
                 the failure. ``None`` preserves the row's pre-call value
@@ -664,7 +671,7 @@ class SQLiteTeardownStateManager:
         intent can affect multiple positions. Follow-up tracks the
         column rename / position-level bookkeeping; out of scope here.
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -677,8 +684,8 @@ class SQLiteTeardownStateManager:
 
         with _open_connection(self.db_path) as conn:
             conn.execute(
-                "UPDATE teardown_requests SET error_message = ? WHERE strategy_id = ?",
-                (error, strategy_id),
+                "UPDATE teardown_requests SET error_message = ? WHERE deployment_id = ?",
+                (error, deployment_id),
             )
             conn.commit()
 
@@ -691,49 +698,49 @@ class SQLiteTeardownStateManager:
         # error-path log (gemini review on PR #2343).
         logger.error(
             "Failed teardown for %s (closed=%s, failed=%s): %s",
-            strategy_id,
+            deployment_id,
             request.positions_closed,
             request.positions_failed,
             error,
         )
         return request
 
-    def request_cancel(self, strategy_id: str) -> bool:
+    def request_cancel(self, deployment_id: str) -> bool:
         """Request cancellation of a teardown.
 
         This sets the cancel_requested flag, which will be checked
         by the strategy during the next iteration.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
 
         Returns:
             True if cancel request was recorded, False if not cancellable
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return False
 
         if not request.can_cancel:
-            logger.warning(f"Cannot cancel teardown for {strategy_id}: past cancel deadline")
+            logger.warning(f"Cannot cancel teardown for {deployment_id}: past cancel deadline")
             return False
 
         request.cancel_requested = True
         self.update_request(request)
 
-        logger.info(f"Cancel requested for teardown {strategy_id}")
+        logger.info(f"Cancel requested for teardown {deployment_id}")
         return True
 
-    def mark_cancelled(self, strategy_id: str) -> TeardownRequest | None:
+    def mark_cancelled(self, deployment_id: str) -> TeardownRequest | None:
         """Mark a teardown as cancelled.
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
 
         Returns:
             The updated request, or None if not found
         """
-        request = self.get_active_request(strategy_id)
+        request = self.get_active_request(deployment_id)
         if not request:
             return None
 
@@ -741,34 +748,34 @@ class SQLiteTeardownStateManager:
         request.completed_at = datetime.now(UTC)
         self.update_request(request)
 
-        logger.info(f"Cancelled teardown for {strategy_id}")
+        logger.info(f"Cancelled teardown for {deployment_id}")
         return request
 
-    def delete_request(self, strategy_id: str) -> bool:
+    def delete_request(self, deployment_id: str) -> bool:
         """Delete a teardown request (usually after completion).
 
         Args:
-            strategy_id: The strategy ID
+            deployment_id: The deployment ID
 
         Returns:
             True if deleted, False if not found
         """
         with _open_connection(self.db_path) as conn:
             cursor = conn.execute(
-                "DELETE FROM teardown_requests WHERE strategy_id = ?",
-                (strategy_id,),
+                "DELETE FROM teardown_requests WHERE deployment_id = ?",
+                (deployment_id,),
             )
             conn.commit()
             deleted = cursor.rowcount > 0
 
         if deleted:
-            logger.debug(f"Deleted teardown request for {strategy_id}")
+            logger.debug(f"Deleted teardown request for {deployment_id}")
         return deleted
 
     def _row_to_request(self, row: sqlite3.Row) -> TeardownRequest:
         """Convert a database row to a TeardownRequest."""
         return TeardownRequest(
-            strategy_id=row["strategy_id"],
+            deployment_id=row["deployment_id"],
             mode=TeardownMode(row["mode"]),
             asset_policy=TeardownAssetPolicy(row["asset_policy"]),
             target_token=row["target_token"],
@@ -846,7 +853,7 @@ class SQLiteTeardownStateAdapter:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS teardown_execution_state (
                         teardown_id TEXT PRIMARY KEY,
-                        strategy_id TEXT NOT NULL,
+                        deployment_id TEXT NOT NULL,
                         mode TEXT NOT NULL,
                         status TEXT NOT NULL,
                         total_intents INTEGER NOT NULL,
@@ -869,7 +876,7 @@ class SQLiteTeardownStateAdapter:
                     CREATE TABLE IF NOT EXISTS teardown_approvals (
                         teardown_id TEXT NOT NULL,
                         level TEXT NOT NULL,
-                        strategy_id TEXT NOT NULL,
+                        deployment_id TEXT NOT NULL,
                         request_json TEXT NOT NULL,
                         response_json TEXT,
                         created_at TEXT NOT NULL,
@@ -878,9 +885,19 @@ class SQLiteTeardownStateAdapter:
                         PRIMARY KEY (teardown_id, level)
                     )
                 """)
+                # Migration (VIB-4722): rename strategy_id -> deployment_id on
+                # existing local DBs to match the unified identity column.
+                try:
+                    conn.execute("ALTER TABLE teardown_execution_state RENAME COLUMN strategy_id TO deployment_id")
+                except sqlite3.OperationalError:
+                    pass  # Already renamed (or fresh DB created with deployment_id)
+                try:
+                    conn.execute("ALTER TABLE teardown_approvals RENAME COLUMN strategy_id TO deployment_id")
+                except sqlite3.OperationalError:
+                    pass  # Already renamed (or fresh DB created with deployment_id)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_approvals_strategy_pending "
-                    "ON teardown_approvals(strategy_id, responded_at)"
+                    "ON teardown_approvals(deployment_id, responded_at)"
                 )
                 conn.commit()
 
@@ -917,7 +934,7 @@ class SQLiteTeardownStateAdapter:
                     CREATE TABLE teardown_approvals (
                         teardown_id TEXT NOT NULL,
                         level TEXT NOT NULL,
-                        strategy_id TEXT NOT NULL,
+                        deployment_id TEXT NOT NULL,
                         request_json TEXT NOT NULL,
                         response_json TEXT,
                         created_at TEXT NOT NULL,
@@ -928,7 +945,7 @@ class SQLiteTeardownStateAdapter:
                 """)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_approvals_strategy_pending "
-                    "ON teardown_approvals(strategy_id, responded_at)"
+                    "ON teardown_approvals(deployment_id, responded_at)"
                 )
                 conn.commit()
 
@@ -956,7 +973,7 @@ class SQLiteTeardownStateAdapter:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO teardown_execution_state (
-                        teardown_id, strategy_id, mode, status,
+                        teardown_id, deployment_id, mode, status,
                         total_intents, completed_intents, current_intent_index,
                         started_at, updated_at, completed_at,
                         pending_intents_json, intent_results_json,
@@ -965,7 +982,7 @@ class SQLiteTeardownStateAdapter:
                     """,
                     (
                         state.teardown_id,
-                        state.strategy_id,
+                        state.deployment_id,
                         state.mode.value,
                         state.status.value,
                         state.total_intents,
@@ -984,17 +1001,17 @@ class SQLiteTeardownStateAdapter:
 
         _with_retry(_op, description="save_teardown_state")
 
-    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None:
-        """Load TeardownState from SQLite by strategy_id."""
-        return await asyncio.to_thread(self._get_teardown_state_sync, strategy_id)
+    async def get_teardown_state(self, deployment_id: str) -> TeardownState | None:
+        """Load TeardownState from SQLite by deployment_id."""
+        return await asyncio.to_thread(self._get_teardown_state_sync, deployment_id)
 
-    def _get_teardown_state_sync(self, strategy_id: str) -> TeardownState | None:
+    def _get_teardown_state_sync(self, deployment_id: str) -> TeardownState | None:
         def _op() -> TeardownState | None:
             with _open_connection(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
-                    "SELECT * FROM teardown_execution_state WHERE strategy_id = ? ORDER BY updated_at DESC LIMIT 1",
-                    (strategy_id,),
+                    "SELECT * FROM teardown_execution_state WHERE deployment_id = ? ORDER BY updated_at DESC LIMIT 1",
+                    (deployment_id,),
                 ).fetchone()
 
             if not row:
@@ -1026,7 +1043,7 @@ class SQLiteTeardownStateAdapter:
 
             return TeardownState(
                 teardown_id=row["teardown_id"],
-                strategy_id=row["strategy_id"],
+                deployment_id=row["deployment_id"],
                 mode=TeardownMode(row["mode"]),
                 status=TeardownStatus(row["status"]),
                 total_intents=row["total_intents"],
@@ -1065,7 +1082,7 @@ class SQLiteTeardownStateAdapter:
     def create_approval_request(
         self,
         teardown_id: str,
-        strategy_id: str,
+        deployment_id: str,
         level: EscalationLevel | str,
         request_json: str,
         expires_at: str,
@@ -1087,12 +1104,12 @@ class SQLiteTeardownStateAdapter:
                 conn.execute(
                     """
                     INSERT INTO teardown_approvals
-                        (teardown_id, level, strategy_id, request_json,
+                        (teardown_id, level, deployment_id, request_json,
                          response_json, created_at, responded_at, expires_at)
                     VALUES (?, ?, ?, ?, NULL, ?, NULL, ?)
                     ON CONFLICT(teardown_id, level) DO UPDATE SET
                         request_json = excluded.request_json,
-                        strategy_id = excluded.strategy_id,
+                        deployment_id = excluded.deployment_id,
                         created_at = excluded.created_at,
                         expires_at = excluded.expires_at
                     WHERE teardown_approvals.response_json IS NULL
@@ -1100,7 +1117,7 @@ class SQLiteTeardownStateAdapter:
                     (
                         teardown_id,
                         level_key,
-                        strategy_id,
+                        deployment_id,
                         request_json,
                         datetime.now(UTC).isoformat(),
                         expires_at,
@@ -1177,10 +1194,10 @@ class SQLiteTeardownStateAdapter:
         )
         return False
 
-    def get_latest_pending_approval(self, strategy_id: str) -> dict[str, Any] | None:
+    def get_latest_pending_approval(self, deployment_id: str) -> dict[str, Any] | None:
         """Return the oldest unresponded, non-expired approval request for a strategy.
 
-        Used by API/CLI endpoints that only know the strategy_id — they look up
+        Used by API/CLI endpoints that only know the deployment_id — they look up
         the currently-pending approval, then write the response keyed by
         (teardown_id, level). Oldest-first so operators respond to the request
         that triggered the alert, even if the escalation loop has advanced.
@@ -1197,21 +1214,21 @@ class SQLiteTeardownStateAdapter:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     """
-                    SELECT teardown_id, level, strategy_id, request_json, created_at, expires_at
+                    SELECT teardown_id, level, deployment_id, request_json, created_at, expires_at
                     FROM teardown_approvals
-                    WHERE strategy_id = ?
+                    WHERE deployment_id = ?
                       AND response_json IS NULL
                       AND expires_at > ?
                     ORDER BY created_at ASC LIMIT 1
                     """,
-                    (strategy_id, now_iso),
+                    (deployment_id, now_iso),
                 ).fetchone()
             if not row:
                 return None
             return {
                 "teardown_id": row["teardown_id"],
                 "level": row["level"],
-                "strategy_id": row["strategy_id"],
+                "deployment_id": row["deployment_id"],
                 "request_json": row["request_json"],
                 "created_at": row["created_at"],
                 "expires_at": row["expires_at"],
@@ -1221,17 +1238,17 @@ class SQLiteTeardownStateAdapter:
 
     def write_approval_response_by_strategy(
         self,
-        strategy_id: str,
+        deployment_id: str,
         response_json: str,
     ) -> bool:
-        """Write an approval response by strategy_id (convenience for API callers).
+        """Write an approval response by deployment_id (convenience for API callers).
 
         Looks up the oldest pending approval for the strategy and writes to it.
         Returns False if no pending approval exists.
         """
-        pending = self.get_latest_pending_approval(strategy_id)
+        pending = self.get_latest_pending_approval(deployment_id)
         if pending is None:
-            logger.warning("No pending approval for strategy %s", strategy_id)
+            logger.warning("No pending approval for strategy %s", deployment_id)
             return False
         return self.write_approval_response(
             teardown_id=pending["teardown_id"],

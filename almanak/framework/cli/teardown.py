@@ -154,7 +154,7 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
     raise click.ClickException(f"no strategy folder resolved.\n  {_STRATEGY_FOLDER_HINT}")
 
 
-def _build_no_op_teardown_message(strategy_id: str) -> str:
+def _build_no_op_teardown_message(deployment_id: str) -> str:
     """Canonical no-op teardown log line (VIB-3705).
 
     Single source of truth so the two CLI call sites (the empty-positions
@@ -162,7 +162,7 @@ def _build_no_op_teardown_message(strategy_id: str) -> str:
     produce byte-identical output. QA harnesses grep this line to
     distinguish "no work was required" from a real teardown completion.
     """
-    return f"Teardown: no open positions for strategy {strategy_id}; nothing to close. Exiting 0."
+    return f"Teardown: no open positions for strategy {deployment_id}; nothing to close. Exiting 0."
 
 
 def _reset_teardown_state_singleton() -> None:
@@ -399,8 +399,8 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         return None, f"Error loading strategy: {str(e)}"
 
 
-def _build_strategy_id_candidates(strategy: Any, strategy_class: type, config_dict: dict[str, Any]) -> list[str]:
-    """Build strategy_id candidates for state restore."""
+def _build_deployment_id_candidates(strategy: Any, config_dict: dict[str, Any]) -> list[str]:
+    """Build deployment_id candidates for state restore."""
     candidates: list[str] = []
 
     def _add_candidate(value: Any) -> None:
@@ -408,16 +408,9 @@ def _build_strategy_id_candidates(strategy: Any, strategy_class: type, config_di
             return
         clean_value = value.strip()
         candidates.append(clean_value)
-        if ":" in clean_value:
-            prefix = clean_value.split(":", maxsplit=1)[0].strip()
-            if prefix:
-                candidates.append(prefix)
 
-    _add_candidate(config_dict.get("strategy_id"))
-    _add_candidate(getattr(strategy, "strategy_id", ""))
-    _add_candidate(getattr(strategy, "name", ""))
-    _add_candidate(getattr(strategy, "STRATEGY_NAME", ""))
-    _add_candidate(strategy_class.__name__)
+    _add_candidate(config_dict.get("deployment_id"))
+    _add_candidate(getattr(strategy, "deployment_id", ""))
 
     seen: set[str] = set()
     unique_candidates: list[str] = []
@@ -441,18 +434,18 @@ def _restore_strategy_state_for_teardown(
 
     from ..state.gateway_state_manager import GatewayStateManager
 
-    candidates = _build_strategy_id_candidates(strategy, strategy_class, config_dict)
+    candidates = _build_deployment_id_candidates(strategy, config_dict)
     if not candidates:
-        logger.info("No strategy_id candidates available for teardown state restore")
+        logger.info("No deployment_id candidates available for teardown state restore")
         return
 
     state_manager = GatewayStateManager(gateway_client)
-    for strategy_id in candidates:
-        logger.info("Attempting teardown state restore for strategy_id=%s", strategy_id)
+    for deployment_id in candidates:
+        logger.info("Attempting teardown state restore for deployment_id=%s", deployment_id)
         try:
-            strategy.set_state_manager(state_manager, strategy_id)
+            strategy.set_state_manager(state_manager, deployment_id)
         except Exception as e:
-            logger.warning("Failed to inject state manager for strategy_id=%s: %s", strategy_id, e)
+            logger.warning("Failed to inject state manager for deployment_id=%s: %s", deployment_id, e)
             continue
 
         try:
@@ -464,11 +457,11 @@ def _restore_strategy_state_for_teardown(
                 loaded = False
 
             if loaded:
-                logger.info("Restored strategy state for teardown (strategy_id=%s)", strategy_id)
+                logger.info("Restored strategy state for teardown (deployment_id=%s)", deployment_id)
                 return
-            logger.info("No persisted strategy state for strategy_id=%s", strategy_id)
+            logger.info("No persisted strategy state for deployment_id=%s", deployment_id)
         except Exception as e:
-            logger.warning("State restore failed for strategy_id=%s: %s", strategy_id, e)
+            logger.warning("State restore failed for deployment_id=%s: %s", deployment_id, e)
 
     logger.info("No persisted strategy state restored for teardown (candidates=%s)", candidates)
 
@@ -889,10 +882,10 @@ def execute_teardown(  # noqa: C901
             update_teardown_requests_lifecycle,
         )
 
-        strategy_id_for_log = getattr(strategy, "strategy_id", strategy_class.__name__)
-        display_teardown_result(result, strategy_id_for_log, _build_no_op_teardown_message)
+        deployment_id_for_log = strategy.deployment_id
+        display_teardown_result(result, deployment_id_for_log, _build_no_op_teardown_message)
         update_teardown_requests_lifecycle(
-            strategy_id_for_log,
+            deployment_id_for_log,
             mode,
             result,
             _get_teardown_state_manager_or_die,
@@ -927,7 +920,7 @@ def execute_teardown(  # noqa: C901
     "--strategy",
     "-s",
     required=True,
-    help="Strategy ID or name to teardown",
+    help="Deployment ID or name to teardown",
 )
 @click.option(
     "--mode",
@@ -1059,7 +1052,7 @@ def request(
             return
 
     teardown_request = TeardownRequest(
-        strategy_id=strategy,
+        deployment_id=strategy,
         mode=mode_enum,
         asset_policy=asset_policy_enum,
         target_token=target_token,
@@ -1083,7 +1076,7 @@ def request(
         sys.exit(exit_code)
 
 
-def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> int:
+def _wait_for_terminal_state(manager: Any, deployment_id: str, timeout: int) -> int:
     """Poll ``teardown_requests`` until terminal status or timeout.
 
     Surfaces state transitions progressively (acknowledged, started, phase
@@ -1106,7 +1099,7 @@ def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> in
     click.echo("  pending — request created, waiting for runner to pick up")
 
     try:
-        return _poll_for_terminal_state(manager, strategy_id, timeout, poll_interval, deadline)
+        return _poll_for_terminal_state(manager, deployment_id, timeout, poll_interval, deadline)
     except KeyboardInterrupt:
         # VIB-3837: the runner is the only writer of the teardown_requests
         # row, so interrupting the CLI's wait does NOT cancel or partially
@@ -1124,7 +1117,7 @@ def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> in
         click.echo(
             click.style(
                 "Interrupted. The runner will continue executing the teardown — "
-                f"check 'almanak strat teardown status -d {strategy_folder} -s {strategy_id}'.",
+                f"check 'almanak strat teardown status -d {strategy_folder} -s {deployment_id}'.",
                 fg="yellow",
             )
         )
@@ -1133,7 +1126,7 @@ def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> in
 
 def _poll_for_terminal_state(
     manager: Any,
-    strategy_id: str,
+    deployment_id: str,
     timeout: int,
     poll_interval: float,
     deadline: float,
@@ -1149,7 +1142,7 @@ def _poll_for_terminal_state(
     last_progress: tuple[int, int, int] | None = None
 
     while True:
-        request_row = manager.get_request(strategy_id)
+        request_row = manager.get_request(deployment_id)
         if request_row is None:
             # Production code never deletes terminal rows — `mark_completed` /
             # `mark_failed` / `mark_cancelled` preserve them. So a missing row
@@ -1160,7 +1153,7 @@ def _poll_for_terminal_state(
             # class VIB-3835 closes. Surface as a non-zero error instead.
             click.echo()
             click.secho(
-                f"Error: teardown_requests row for {strategy_id} disappeared while waiting.",
+                f"Error: teardown_requests row for {deployment_id} disappeared while waiting.",
                 fg="red",
                 bold=True,
             )
@@ -1204,7 +1197,7 @@ def _poll_for_terminal_state(
         status = request_row.status
         if status == TeardownStatus.COMPLETED:
             click.echo()
-            click.echo(click.style(f"Teardown completed for {strategy_id}.", fg="green"))
+            click.echo(click.style(f"Teardown completed for {deployment_id}.", fg="green"))
             click.echo(
                 f"  positions_closed={request_row.positions_closed}, "
                 f"positions_failed={request_row.positions_failed}, "
@@ -1213,7 +1206,7 @@ def _poll_for_terminal_state(
             return 0
         if status == TeardownStatus.FAILED:
             click.echo()
-            click.secho(f"Teardown FAILED for {strategy_id}.", fg="red", bold=True)
+            click.secho(f"Teardown FAILED for {deployment_id}.", fg="red", bold=True)
             click.echo(
                 f"  positions_closed={request_row.positions_closed}, "
                 f"positions_failed={request_row.positions_failed}, "
@@ -1222,7 +1215,7 @@ def _poll_for_terminal_state(
             return 1
         if status == TeardownStatus.CANCELLED:
             click.echo()
-            click.secho(f"Teardown CANCELLED for {strategy_id}.", fg="yellow", bold=True)
+            click.secho(f"Teardown CANCELLED for {deployment_id}.", fg="yellow", bold=True)
             return 1
 
         # Timeout. Distinguish "runner never picked up" from "runner is
@@ -1237,7 +1230,7 @@ def _poll_for_terminal_state(
                     bold=True,
                 )
                 click.echo(
-                    f"  The runner is still working. Check progress: 'almanak strat teardown status -d <folder> -s {strategy_id}'."
+                    f"  The runner is still working. Check progress: 'almanak strat teardown status -d <folder> -s {deployment_id}'."
                 )
             else:
                 click.secho(
@@ -1246,7 +1239,7 @@ def _poll_for_terminal_state(
                     bold=True,
                 )
                 click.echo(
-                    f"  Is the runner running? Check 'almanak strat teardown status -d <folder> -s {strategy_id}'."
+                    f"  Is the runner running? Check 'almanak strat teardown status -d <folder> -s {deployment_id}'."
                 )
             return 1
 
@@ -1268,7 +1261,7 @@ def _poll_for_terminal_state(
     "--strategy",
     "-s",
     required=True,
-    help="Strategy ID or name to check",
+    help="Deployment ID or name to check",
 )
 @click.option(
     "--json",
@@ -1346,7 +1339,7 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
     "--strategy",
     "-s",
     required=True,
-    help="Strategy ID or name to cancel",
+    help="Deployment ID or name to cancel",
 )
 @click.option(
     "--force",
@@ -1471,7 +1464,7 @@ def list_teardowns(working_dir: str | None, show_all: bool, as_json: bool):
         phase = req.current_phase.value if req.current_phase else "-"
         progress = format_progress(req)
         click.echo(
-            f"{req.strategy_id:<25} "
+            f"{req.deployment_id:<25} "
             f"{format_status(req.status):<15} "
             f"{format_mode(req.mode):<12} "
             f"{phase:<20} "

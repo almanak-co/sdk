@@ -32,7 +32,8 @@ ARBITRUM_PUBLIC_URL = PUBLIC_RPC_URLS["arbitrum"]
 @pytest.fixture
 def no_rpc_credentials(monkeypatch):
     """Hosted mode with no provider credentials of any kind for arbitrum."""
-    monkeypatch.setenv("AGENT_ID", "test-agent")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "test-agent")
     for var in (*ALCHEMY_ENV_VARS, *ARBITRUM_URL_VARS, ARBITRUM_TENDERLY_VAR):
         monkeypatch.delenv(var, raising=False)
 
@@ -99,7 +100,8 @@ def test_distinct_chains_each_log_once(no_rpc_credentials, caplog):
 
 def test_local_mode_does_not_log(monkeypatch, caplog):
     """In local mode the strategy/gateway boundary doesn't apply — no ERROR."""
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     service = _service()
     with caplog.at_level(logging.ERROR):
         service._warn_if_resolved_to_public_rpc("arbitrum", ARBITRUM_PUBLIC_URL)

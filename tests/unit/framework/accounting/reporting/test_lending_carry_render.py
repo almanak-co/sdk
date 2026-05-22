@@ -43,7 +43,6 @@ def _identity() -> AccountingIdentity:
     return AccountingIdentity(
         id="evt-001",
         deployment_id=DEPLOYMENT_ID,
-        strategy_id=DEPLOYMENT_ID,
         cycle_id="cycle-001",
         execution_mode="live",
         timestamp=datetime.now(UTC),
@@ -122,7 +121,7 @@ def _borrow_snapshot_position(
 def _snapshot(*positions: PositionValue) -> PortfolioSnapshot:
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=DEPLOYMENT_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("10.3746640"),
         available_cash_usd=Decimal("0"),
         value_confidence=ValueConfidence.HIGH,
@@ -409,7 +408,7 @@ def _repay_event(asset: str = "USDT") -> LendingAccountingEvent:
 def _empty_snapshot() -> PortfolioSnapshot:
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=DEPLOYMENT_ID,
+        deployment_id=DEPLOYMENT_ID,
         total_value_usd=Decimal("0"),
         available_cash_usd=Decimal("0"),
         value_confidence=ValueConfidence.HIGH,

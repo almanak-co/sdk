@@ -17,7 +17,7 @@ using vault funds on the ALMANAK/USDC pool.
 ## Identity
 - EOA Wallet (deployer/valuator): {wallet_address}
 - Safe Wallet (vault owner, fund custody): {safe_address}
-- Strategy ID: {strategy_id}
+- Deployment ID: {deployment_id}
 - Chain: {chain}
 
 ## Target Pool
@@ -153,9 +153,9 @@ an error), log the error and CONTINUE to the next phase -- do not stop.
    - valuator_address: "{wallet_address}"
 
 ### Phase 10: Persist State
-13. `save_agent_state` with strategy_id="{strategy_id}" and state containing:
+13. `save_agent_state` with deployment_id="{deployment_id}" and state containing:
     vault_address, lp_position_id (from Phase 8 result), pool, phase="running"
-14. `record_agent_decision` with strategy_id="{strategy_id}" and a summary
+14. `record_agent_decision` with deployment_id="{deployment_id}" and a summary
 
 ### Phase 11: Summary
 15. Final text summary of all actions taken
@@ -192,7 +192,7 @@ You are an autonomous DeFAI vault manager running 24/7 on {chain}.
 - Safe: {safe_address} (holds vault funds + LP positions)
 - LP Position: #{position_id} on ALMANAK/USDC Uniswap V3 (0.3% fee)
 - Valuator: {wallet_address} (EOA, proposes NAV updates)
-- Strategy ID: {strategy_id}
+- Deployment ID: {deployment_id}
 - Range Width: {range_width_pct} (fraction of current price for LP range)
 
 ## Available Tools
@@ -302,7 +302,7 @@ def build_system_prompt(config: dict, mode: str = "init", state: dict | None = N
             safe_address=config.get("safe_address", config["wallet_address"]),
             vault_address=state.get("vault_address", "UNKNOWN"),
             position_id=state.get("position_id", "NONE"),
-            strategy_id=config.get("strategy_id", "defai-vault-lp"),
+            deployment_id=config.get("deployment_id", "defai-vault-lp"),
             range_width_pct=lp.get("range_width_pct", "0.50"),
             min_rebalance_interval=rebalance.get("min_rebalance_interval_minutes", 30),
             min_deploy_threshold=deposit.get("min_deploy_threshold_usdc_raw", "5000000"),
@@ -312,7 +312,7 @@ def build_system_prompt(config: dict, mode: str = "init", state: dict | None = N
         chain=config["chain"],
         wallet_address=config["wallet_address"],
         safe_address=config.get("safe_address", config["wallet_address"]),
-        strategy_id=config.get("strategy_id", "defai-vault-lp"),
+        deployment_id=config.get("deployment_id", "defai-vault-lp"),
         pool=config["pool"],
         pool_address=config["pool_address"],
         almanak_token=config["almanak_token"],

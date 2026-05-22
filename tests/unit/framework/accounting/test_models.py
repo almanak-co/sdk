@@ -34,8 +34,7 @@ from almanak.framework.accounting.models import (
 def _identity() -> AccountingIdentity:
     return AccountingIdentity(
         id="test-id",
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cycle-1",
         execution_mode="live",
         timestamp=datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC),

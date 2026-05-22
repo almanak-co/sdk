@@ -328,7 +328,7 @@ def run_strategy_via_cli(force_action: str = "open", position_id: str | None = N
     import tempfile
 
     config = {
-        "strategy_id": "demo_uniswap_lp",
+        "deployment_id": "demo_uniswap_lp",
         "strategy_name": "demo_uniswap_lp",
         "pool": "WETH/USDC/500",
         "range_width_pct": 0.20,

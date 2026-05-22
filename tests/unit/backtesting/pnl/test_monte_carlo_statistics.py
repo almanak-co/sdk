@@ -348,7 +348,7 @@ class TestBacktestResultMonteCarloResults:
 
         backtest_result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 12, 31),
             metrics=BacktestMetrics(),
@@ -362,7 +362,7 @@ class TestBacktestResultMonteCarloResults:
         """Test that monte_carlo_results defaults to None."""
         backtest_result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 12, 31),
             metrics=BacktestMetrics(),
@@ -398,7 +398,7 @@ class TestBacktestResultMonteCarloResults:
 
         backtest_result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 12, 31),
             metrics=BacktestMetrics(),
@@ -415,7 +415,7 @@ class TestBacktestResultMonteCarloResults:
         """Test that monte_carlo_results serializes as None when not set."""
         backtest_result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 12, 31),
             metrics=BacktestMetrics(),
@@ -429,7 +429,7 @@ class TestBacktestResultMonteCarloResults:
         """Test that monte_carlo_results deserializes correctly."""
         data = {
             "engine": "pnl",
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "start_time": "2024-01-01T00:00:00",
             "end_time": "2024-12-31T00:00:00",
             "metrics": {},
@@ -471,7 +471,7 @@ class TestBacktestResultMonteCarloResults:
         """Test that monte_carlo_results deserializes as None when not in data."""
         data = {
             "engine": "pnl",
-            "strategy_id": "test_strategy",
+            "deployment_id": "test_strategy",
             "start_time": "2024-01-01T00:00:00",
             "end_time": "2024-12-31T00:00:00",
             "metrics": {},
@@ -515,7 +515,7 @@ class TestBacktestResultMonteCarloResults:
 
         original = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="roundtrip_test",
+            deployment_id="roundtrip_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 12, 31),
             metrics=BacktestMetrics(),

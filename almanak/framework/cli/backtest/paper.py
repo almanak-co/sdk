@@ -237,7 +237,7 @@ def paper_start(
         paper_config = PaperTraderConfig(
             chain=chain,
             rpc_url=rpc_url,
-            strategy_id=strategy,
+            deployment_id=strategy,
             initial_eth=Decimal(str(initial_eth)),
             initial_tokens=parsed_tokens,
             bootstrap=config_bootstrap,
@@ -288,7 +288,7 @@ def paper_start(
         class MockPaperStrategy:
             """Mock strategy for paper trading demonstration."""
 
-            strategy_id: str = strategy
+            deployment_id: str = strategy
 
             def __init__(self) -> None:
                 self._iteration = 0
@@ -303,9 +303,9 @@ def paper_start(
     strategy_config = load_strategy_config(strategy, chain)
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)
 
-    # Ensure strategy has strategy_id
-    if not hasattr(strategy_instance, "strategy_id"):
-        strategy_instance.strategy_id = strategy
+    # Ensure strategy has deployment_id
+    if not hasattr(strategy_instance, "deployment_id"):
+        strategy_instance.deployment_id = strategy
 
     if foreground:
         # Run in foreground (blocking)
@@ -371,7 +371,7 @@ def paper_start(
         # Also save to the CLI session state for backwards compatibility
         start_time = datetime.now(UTC)
         save_paper_session_state(
-            strategy_id=strategy,
+            deployment_id=strategy,
             pid=pid,
             config=paper_config,
             start_time=start_time,
@@ -408,7 +408,7 @@ async def _run_paper_trading_foreground(
     )
 
     portfolio_tracker = PaperPortfolioTracker(
-        strategy_id=paper_config.strategy_id,
+        deployment_id=paper_config.deployment_id,
         chain=paper_config.chain,
     )
 
@@ -426,6 +426,7 @@ async def _run_paper_trading_foreground(
     return summary
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @paper.command("stop")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to stop")
 @click.option("--force", is_flag=True, default=False, help="Force stop (kill process)")
@@ -451,7 +452,7 @@ def paper_stop(strategy: str, force: bool) -> None:
         config=PaperTraderConfig(
             chain="arbitrum",
             rpc_url="http://localhost:8545",
-            strategy_id=strategy,
+            deployment_id=strategy,
         ),
     )
 
@@ -639,7 +640,7 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
     # Update CLI session state
     update_paper_session_status(strategy, "running")
     save_paper_session_state(
-        strategy_id=strategy,
+        deployment_id=strategy,
         pid=pid,
         config=resume_config,
         start_time=state.session_start,
@@ -686,15 +687,15 @@ def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
     render_single_session_status(strategy)
 
 
-def get_paper_log_file(strategy_id: str) -> Path:
+def get_paper_log_file(deployment_id: str) -> Path:
     """Get the log file path for a paper trading session."""
     from .helpers import PAPER_STATE_DIR
 
-    background_log = Path.home() / ".almanak" / "paper" / f"{strategy_id}.log"
+    background_log = Path.home() / ".almanak" / "paper" / f"{deployment_id}.log"
     if background_log.exists():
         return background_log
 
-    session_log = PAPER_STATE_DIR / f"{strategy_id}.log"
+    session_log = PAPER_STATE_DIR / f"{deployment_id}.log"
     return session_log
 
 

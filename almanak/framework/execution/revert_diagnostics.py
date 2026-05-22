@@ -1071,7 +1071,7 @@ class VerboseRevertReport:
     """
 
     # Execution context
-    strategy_id: str
+    deployment_id: str
     chain: str
     wallet_address: str
     correlation_id: str
@@ -1104,7 +1104,7 @@ class VerboseRevertReport:
             separator,
             "",
             "--- EXECUTION CONTEXT ---",
-            f"Strategy ID: {self.strategy_id}",
+            f"Deployment ID: {self.deployment_id}",
             f"Chain: {self.chain}",
             f"Wallet: {self.wallet_address}",
             f"Correlation ID: {self.correlation_id}",
@@ -1154,7 +1154,7 @@ class VerboseRevertReport:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "chain": self.chain,
             "wallet_address": self.wallet_address,
             "correlation_id": self.correlation_id,
@@ -1351,7 +1351,7 @@ def build_verbose_revert_report(
     dashboards scrape ``format()`` lines directly.
 
     Args:
-        context: ExecutionContext with strategy_id, chain, wallet, etc.
+        context: ExecutionContext with deployment_id, chain, wallet, etc.
         action_bundle: The ActionBundle that was being executed
         transaction_results: List of TransactionResult from execution
         intent: Optional original intent object (SwapIntent, LPOpenIntent, etc.)
@@ -1372,7 +1372,7 @@ def build_verbose_revert_report(
     """
     now = datetime.now(UTC)
     return VerboseRevertReport(
-        strategy_id=getattr(context, "strategy_id", "unknown"),
+        deployment_id=getattr(context, "deployment_id", "unknown"),
         chain=getattr(context, "chain", "unknown"),
         wallet_address=getattr(context, "wallet_address", "unknown"),
         correlation_id=getattr(context, "correlation_id", ""),

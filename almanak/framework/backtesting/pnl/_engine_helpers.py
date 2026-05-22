@@ -573,7 +573,7 @@ def build_error_result(
     error_fallback_usage = backtester._fallback_usage.copy() if backtester._fallback_usage else {}
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         start_time=config.start_time,
         end_time=config.end_time,
         metrics=BacktestMetrics(),
@@ -707,7 +707,7 @@ def finalize_backtest_result(
     run_ended_at = datetime.now(UTC)
 
     bt_logger.info(
-        f"Backtest completed for {strategy.strategy_id}: "
+        f"Backtest completed for {strategy.deployment_id}: "
         f"PnL=${metrics.net_pnl_usd:,.2f}, "
         f"Return={metrics.total_return_pct:.2f}%, "
         f"Sharpe={metrics.sharpe_ratio:.3f}"
@@ -736,7 +736,7 @@ def finalize_backtest_result(
 
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         start_time=config.start_time,
         end_time=config.end_time,
         metrics=metrics,

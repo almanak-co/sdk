@@ -43,7 +43,7 @@ def executor(mock_gateway):
         mock_gateway,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         default_chain="base",
     )
 
@@ -403,7 +403,7 @@ class TestAgentStateRoundTrip:
         mock_gateway.state.SaveState.return_value = save_resp
 
         save_result = await executor.execute("save_agent_state", {
-            "strategy_id": "defai-vault-lp",
+            "deployment_id": "defai-vault-lp",
             "state": state_payload,
         })
 
@@ -423,7 +423,7 @@ class TestAgentStateRoundTrip:
         mock_gateway.state.LoadState.return_value = load_resp
 
         load_result = await executor.execute("load_agent_state", {
-            "strategy_id": "defai-vault-lp",
+            "deployment_id": "defai-vault-lp",
         })
 
         assert load_result.status == "success"
@@ -437,7 +437,7 @@ class TestAgentStateRoundTrip:
         mock_gateway.state.LoadState.side_effect = Exception("NOT_FOUND: no state for strategy")
 
         result = await executor.execute("load_agent_state", {
-            "strategy_id": "brand-new-strategy",
+            "deployment_id": "brand-new-strategy",
         })
 
         assert result.status == "success"
@@ -450,7 +450,7 @@ class TestAgentStateRoundTrip:
         mock_gateway.state.LoadState.side_effect = Exception("UNAVAILABLE: gateway down")
 
         result = await executor.execute("load_agent_state", {
-            "strategy_id": "defai-vault-lp",
+            "deployment_id": "defai-vault-lp",
         })
 
         assert result.status == "error"
@@ -484,7 +484,7 @@ class TestAlertingOnFailures:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             default_chain="base",
             alert_manager=alert_mgr,
         )

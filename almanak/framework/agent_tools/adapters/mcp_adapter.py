@@ -103,6 +103,7 @@ class AlmanakMCPServer:
             },
         ]
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def resources_read(self, uri: str) -> dict:
         """Read an MCP resource by URI."""
         from almanak.core.enums import Chain, Protocol
@@ -163,7 +164,7 @@ class AlmanakMCPServer:
                         "text": json.dumps(
                             {
                                 "wallet_address": self._executor._wallet_address,
-                                "strategy_id": self._executor._strategy_id,
+                                "deployment_id": self._executor._deployment_id,
                                 "tools_available": self._catalog.list_names(),
                             }
                         ),

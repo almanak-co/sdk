@@ -127,8 +127,9 @@ def resolve_wallet_address(
     """
     if wallet_address := config_dict.get("wallet_address"):
         return wallet_address
-    private_key = (env or {}).get("ALMANAK_PRIVATE_KEY") if env is not None else None
-    if private_key is None:
+    if env is not None:
+        private_key = env.get("ALMANAK_PRIVATE_KEY", "")
+    else:
         # No explicit env dict supplied — read the typed boundary value.
         # We narrow to ``gateway_config_from_env`` instead of ``load_config``
         # so an unrelated submodel validation error (e.g. a malformed
@@ -687,8 +688,11 @@ def discover_positions(
             logger.error("On-chain discovery failed", exc_info=True)
             raise click.ClickException(f"On-chain discovery failed: {e}") from e
 
+        deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
+        if not deployment_id:
+            raise click.ClickException("Teardown discovery requires a resolved deployment_id")
         positions = to_teardown_summary(
-            strategy_id=getattr(strategy, "strategy_id", strategy_class.__name__),
+            deployment_id=deployment_id,
             chain=chain,  # type: ignore[arg-type]  # See note above on _do_discover
             positions=discovered,
         )
@@ -726,8 +730,8 @@ def print_no_op_if_empty_and_signal_return(
     """
     if positions.positions:
         return False
-    strategy_id_for_log = getattr(strategy, "strategy_id", strategy_class.__name__)
-    no_op_msg = no_op_message_builder(strategy_id_for_log)
+    deployment_id_for_log = strategy.deployment_id
+    no_op_msg = no_op_message_builder(deployment_id_for_log)
     click.echo()
     click.secho(no_op_msg, fg="green")
     logger.info(no_op_msg)
@@ -1168,7 +1172,7 @@ async def run_teardown_with_brackets(
             if pre_outcome.accounting_degraded:
                 logger.error(
                     "CLI pre-teardown snapshot accounting degraded for %s — %s",
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     pre_outcome.degraded_reason or "unknown",
                 )
 
@@ -1184,7 +1188,7 @@ async def run_teardown_with_brackets(
             if post_outcome.accounting_degraded:
                 logger.error(
                     "CLI post-teardown snapshot accounting degraded for %s — %s",
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     post_outcome.degraded_reason or "unknown",
                 )
     finally:
@@ -1204,7 +1208,7 @@ async def run_teardown_with_brackets(
 
 def display_teardown_result(
     result: TeardownResult,
-    strategy_id: str,
+    deployment_id: str,
     no_op_message_builder,
 ) -> None:
     """Print the post-execution summary. ``no_op_message_builder`` is the
@@ -1218,7 +1222,7 @@ def display_teardown_result(
     """
     click.echo("\n" + "=" * 60)
     if result.success and result.intents_total == 0:
-        no_op_msg = no_op_message_builder(strategy_id)
+        no_op_msg = no_op_message_builder(deployment_id)
         click.secho(no_op_msg, fg="green")
         logger.info(no_op_msg)
     elif result.success:
@@ -1242,7 +1246,7 @@ def display_teardown_result(
 
 
 def update_teardown_requests_lifecycle(
-    strategy_id: str,
+    deployment_id: str,
     mode: str,
     result: TeardownResult,
     state_manager_provider,
@@ -1274,7 +1278,7 @@ def update_teardown_requests_lifecycle(
         from ..teardown.models import TeardownStatus as _TS
 
         tsm = state_manager_provider()
-        existing = tsm.get_active_request(strategy_id)
+        existing = tsm.get_active_request(deployment_id)
         if existing is None:
             # Create-then-mark to keep the lifecycle queryable. Use the
             # asset_policy default; the execute lane doesn't surface
@@ -1282,7 +1286,7 @@ def update_teardown_requests_lifecycle(
             # request lane), so the safe default mirrors the request-
             # lane DEFAULTS.
             existing = _TR(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 mode=_TM(mode),
                 asset_policy=_TAP.TARGET_TOKEN,
                 target_token="USDC",

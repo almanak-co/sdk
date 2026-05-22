@@ -148,7 +148,7 @@ def _make_ledger_row(led_id: str, *, price_inputs_json: str) -> dict:
         "extracted_data_json": "",
         "price_inputs_json": price_inputs_json,
         "deployment_id": "d",
-        "strategy_id": "s",
+        "deployment_id": "s",
         "cycle_id": "c",
         "execution_mode": "live",
         "tx_hash": "0xtx",
@@ -231,8 +231,7 @@ def _identity(intent_type: str = "SWAP"):
 
     return AccountingIdentity(
         id=str(uuid.uuid4()),
-        deployment_id="dep:test",
-        strategy_id="StratTest:vib3938",
+        deployment_id="StratTest:vib3938",
         cycle_id="cycle-test",
         execution_mode="live",
         timestamp=datetime(2026, 5, 4, tzinfo=UTC),

@@ -58,7 +58,6 @@ def handle_pendle_lp(
     event_type = PendleEventType.PENDLE_LP_OPEN if intent_type_str == "LP_OPEN" else PendleEventType.PENDLE_LP_CLOSE
 
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
-    strategy_id = ledger_row.get("strategy_id") or outbox_row.get("strategy_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     execution_mode = ledger_row.get("execution_mode") or ""
     chain = ledger_row.get("chain") or ""
@@ -104,7 +103,6 @@ def handle_pendle_lp(
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         timestamp=timestamp,
@@ -172,7 +170,6 @@ def handle_pendle_pt(  # noqa: C901
         return None
 
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
-    strategy_id = ledger_row.get("strategy_id") or outbox_row.get("strategy_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     execution_mode = ledger_row.get("execution_mode") or ""
     chain = ledger_row.get("chain") or ""
@@ -248,7 +245,6 @@ def handle_pendle_pt(  # noqa: C901
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, "PT_BUY", _id_seed, position_key),
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
         timestamp=now,

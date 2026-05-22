@@ -4,8 +4,8 @@ Export strategy data (trades, timeline, PnL) to CSV or JSON.
 
 Examples::
 
-    almanak strat export --strategy-id my-strat --data trades --format csv -o trades.csv
-    almanak strat export --strategy-id my-strat --data pnl --format json
+    almanak strat export --deployment-id my-strat --data trades --format csv -o trades.csv
+    almanak strat export --deployment-id my-strat --data pnl --format json
 """
 
 import sys
@@ -13,8 +13,9 @@ import sys
 import click
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("export")
-@click.option("--strategy-id", "-s", required=True, help="Strategy ID to export data for.")
+@click.option("--deployment-id", "-s", required=True, help="Deployment ID to export data for.")
 @click.option(
     "--data",
     "-d",
@@ -34,7 +35,7 @@ import click
 @click.option("--limit", type=int, default=10000, help="Maximum records to export.")
 @click.option("--host", default="localhost", help="Gateway host.")
 @click.option("--port", type=int, default=50051, help="Gateway port.")
-def export(strategy_id: str, data: str, fmt: str, output: str | None, limit: int, host: str, port: int) -> None:
+def export(deployment_id: str, data: str, fmt: str, output: str | None, limit: int, host: str, port: int) -> None:
     """Export strategy data to CSV or JSON."""
     from almanak.framework.dashboard.data_client import DashboardDataClient
     from almanak.framework.dashboard.export import export_pnl, export_timeline, export_trades
@@ -48,11 +49,11 @@ def export(strategy_id: str, data: str, fmt: str, output: str | None, limit: int
 
     try:
         if data == "trades":
-            result = export_trades(client, strategy_id, limit=limit, fmt=fmt)
+            result = export_trades(client, deployment_id, limit=limit, fmt=fmt)
         elif data == "timeline":
-            result = export_timeline(client, strategy_id, limit=limit, fmt=fmt)
+            result = export_timeline(client, deployment_id, limit=limit, fmt=fmt)
         elif data == "pnl":
-            result = export_pnl(client, strategy_id, fmt=fmt)
+            result = export_pnl(client, deployment_id, fmt=fmt)
         else:
             click.echo(f"Unknown data type: {data}", err=True)
             sys.exit(1)

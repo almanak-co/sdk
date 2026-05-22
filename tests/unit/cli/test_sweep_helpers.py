@@ -76,7 +76,7 @@ def _make_result(
     )
     bt = BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test",
+        deployment_id="test",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
         metrics=metrics,
@@ -839,7 +839,7 @@ class TestRunParallelSweep:
                 return _FakeFuture()
 
         class StratClass:
-            strategy_id = "dummy"
+            deployment_id = "dummy"
 
         with (
             patch(
@@ -870,13 +870,13 @@ class TestRunParallelSweep:
         assert sr.result.success is False
         # Required BacktestResult constructor fields must be populated so the
         # failed-result contract matches the successful-result contract
-        # (engine tag, strategy_id sentinel, time range, metrics instance)
+        # (engine tag, deployment_id sentinel, time range, metrics instance)
         # and downstream consumers of the error SweepResult never hit
         # MissingFieldError on a failure record. Chain + capital metadata
         # must propagate from pnl_config rather than falling back to the
         # BacktestResult dataclass defaults (arbitrum / 10k USD).
         assert sr.result.engine == BacktestEngine.PNL
-        assert sr.result.strategy_id == "error"
+        assert sr.result.deployment_id == "error"
         assert sr.result.start_time == pnl_config.start_time
         assert sr.result.end_time == pnl_config.end_time
         assert isinstance(sr.result.metrics, BacktestMetrics)
@@ -924,7 +924,7 @@ class TestRunParallelSweep:
                 return _GoodFuture(good_results[task.task_index])
 
         class StratClass:
-            strategy_id = "dummy"
+            deployment_id = "dummy"
 
         with (
             patch(
@@ -974,7 +974,7 @@ class TestRunParallelSweep:
                 return _GoodFuture()
 
         class StratClass:
-            strategy_id = "dummy"
+            deployment_id = "dummy"
 
         with (
             patch(
@@ -1154,8 +1154,8 @@ class TestRunSweepBacktestCoro:
             include_gas_costs=True,
         )
 
-    def test_sweep_sets_fallback_strategy_id(self) -> None:
-        """Strategy without strategy_id gets `sweep-<params>` fallback."""
+    def test_sweep_sets_fallback_deployment_id(self) -> None:
+        """Strategy without deployment_id gets `sweep-<params>` fallback."""
         import asyncio as _asyncio
 
         pnl_config = self._build_pnl_config()
@@ -1192,13 +1192,13 @@ class TestRunSweepBacktestCoro:
         # Pin the params contract
         assert result.params == {"threshold": "0.02"}
 
-        # Strong assertion: verify the fallback strategy_id was set on the
+        # Strong assertion: verify the fallback deployment_id was set on the
         # instance that was handed to PnLBacktester.backtest. Production
         # (sweep.py:88-96) derives `sweep-<k><v>` joined by `_` for multi-key.
         mock_backtester.backtest.assert_awaited_once()
         passed_strategy = mock_backtester.backtest.await_args.args[0]
         assert passed_strategy is bare_instance
-        assert passed_strategy.strategy_id == "sweep-threshold0.02"
+        assert passed_strategy.deployment_id == "sweep-threshold0.02"
 
     def test_numeric_coercion_of_param_value(self) -> None:
         """Numeric string values are coerced to float in strategy_config."""
@@ -1210,7 +1210,7 @@ class TestRunSweepBacktestCoro:
         class WithDictConfig:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
-                self.strategy_id = "wdc"
+                self.deployment_id = "wdc"
 
         def _track_create(strategy_class: Any, config: dict, chain: str) -> Any:
             captured_configs.append(config)
@@ -1255,7 +1255,7 @@ class TestRunSweepBacktestCoro:
 
         class NoConfigStrategy:
             # No `config` attribute at all
-            strategy_id = "ncs"
+            deployment_id = "ncs"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 # Intentionally does NOT store config
@@ -1296,14 +1296,14 @@ class TestRunSweepBacktestCoro:
         assert inst.numeric == 1.5
         assert inst.text == "mode_a"
 
-    def test_public_strategy_id_attr_used_when_no_private(self) -> None:
-        """Fallback strategy_id assignment uses public attr when no _strategy_id."""
+    def test_public_deployment_id_attr_used_when_no_private(self) -> None:
+        """Fallback deployment_id assignment uses public attr when no _deployment_id."""
         import asyncio as _asyncio
 
         pnl_config = self._build_pnl_config()
 
         class PlainStrategy:
-            strategy_id = ""  # Empty → triggers fallback
+            deployment_id = ""  # Empty → triggers fallback
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -1339,11 +1339,11 @@ class TestRunSweepBacktestCoro:
                 )
             )
         inst = created[0]
-        # Falls back to public attr since no _strategy_id
-        assert inst.strategy_id == "sweep-x1"
+        # Falls back to public attr since no _deployment_id
+        assert inst.deployment_id == "sweep-x1"
 
-    def test_private_strategy_id_preferred(self) -> None:
-        """Private `_strategy_id` attr is set when present (IntentStrategy-style)."""
+    def test_private_deployment_id_preferred(self) -> None:
+        """Private `_deployment_id` attr is set when present (IntentStrategy-style)."""
         import asyncio as _asyncio
 
         pnl_config = self._build_pnl_config()
@@ -1351,11 +1351,11 @@ class TestRunSweepBacktestCoro:
         class WithPrivateId:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
-                self._strategy_id = ""
+                self._deployment_id = ""
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
         created: list[WithPrivateId] = []
 
@@ -1387,7 +1387,7 @@ class TestRunSweepBacktestCoro:
                     params={"threshold": "0.02"},
                 )
             )
-        assert created[0]._strategy_id == "sweep-threshold0.02"
+        assert created[0]._deployment_id == "sweep-threshold0.02"
 
 
 class TestRunParallelSweepsCoro:
@@ -1535,7 +1535,7 @@ class TestSweepTaskAndWorker:
         # Fake the strategy factory and chain resolver so we don't actually
         # call Decimal(...) as a strategy.
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         with (
@@ -1574,10 +1574,10 @@ class TestSweepTaskAndWorker:
         )
 
         class _RegisteredClass:
-            strategy_id = "reg"
+            deployment_id = "reg"
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         mock_backtester = MagicMock()
@@ -1621,7 +1621,7 @@ class TestSweepTaskAndWorker:
         )
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         mock_backtester = MagicMock()
@@ -1671,7 +1671,7 @@ class TestSweepTaskAndWorker:
         )
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         mock_backtester = MagicMock()
@@ -1712,7 +1712,7 @@ class TestSweepTaskAndWorker:
         )
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         captured_configs: list[dict[str, Any]] = []
@@ -1749,7 +1749,7 @@ class TestSweepTaskAndWorker:
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
         class NoConfigStrategy:
-            strategy_id = "ncs"
+            deployment_id = "ncs"
             # No config attribute
 
         backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
@@ -1794,18 +1794,18 @@ class TestSweepTaskAndWorker:
         assert inst.numeric == 0.1
         assert inst.text == "xx"
 
-    def test_worker_sets_private_strategy_id_fallback(self) -> None:
-        """When strategy_id is empty and _strategy_id exists, private attr is set."""
+    def test_worker_sets_private_deployment_id_fallback(self) -> None:
+        """When deployment_id is empty and _deployment_id exists, private attr is set."""
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
         class WithPrivate:
             def __init__(self) -> None:
-                self._strategy_id = ""
+                self._deployment_id = ""
                 self.config: dict[str, Any] = {}
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
         backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
         task = _SweepTask(
@@ -1846,14 +1846,14 @@ class TestSweepTaskAndWorker:
             _run_sweep_task_worker(task)
         # Private attr received the fallback (covers lines 508-511)
         inst = instances[0]
-        assert inst._strategy_id == "sweep-threshold0.02"
+        assert inst._deployment_id == "sweep-threshold0.02"
 
-    def test_worker_sets_public_strategy_id_fallback(self) -> None:
-        """When no _strategy_id attr exists, public `strategy_id` is set directly."""
+    def test_worker_sets_public_deployment_id_fallback(self) -> None:
+        """When no _deployment_id attr exists, public `deployment_id` is set directly."""
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
         class PlainStrat:
-            strategy_id = ""  # empty → triggers fallback
+            deployment_id = ""  # empty → triggers fallback
 
             def __init__(self) -> None:
                 self.config: dict[str, Any] = {}
@@ -1897,7 +1897,7 @@ class TestSweepTaskAndWorker:
             _run_sweep_task_worker(task)
         # Public attr received the fallback (covers line 513)
         inst = instances[0]
-        assert inst.strategy_id == "sweep-x1"
+        assert inst.deployment_id == "sweep-x1"
 
     def test_worker_mock_strategy_class_instantiable(self) -> None:
         """MockWorkerStrategy fallback is instantiable with dict config."""
@@ -1916,7 +1916,7 @@ class TestSweepTaskAndWorker:
         captured_classes: list[Any] = []
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         def _capture(cls: Any, cfg: dict, chain: str) -> Any:
@@ -1954,7 +1954,7 @@ class TestSweepTaskAndWorker:
         # Instantiate it to cover __init__ + decide (lines 476, 479)
         inst = mock_cls({"foo": "bar"})
         assert inst.config == {"foo": "bar"}
-        assert inst.strategy_id == "mock-worker"
+        assert inst.deployment_id == "mock-worker"
         assert inst.decide(market=None) is None  # type: ignore[arg-type]
 
     def test_worker_chain_resolution_priority(self) -> None:
@@ -1974,7 +1974,7 @@ class TestSweepTaskAndWorker:
         )
 
         class _FakeStrategy:
-            strategy_id = "fake"
+            deployment_id = "fake"
             config: dict[str, Any] = {}
 
         mock_backtester = MagicMock()

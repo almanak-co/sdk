@@ -346,7 +346,7 @@ class TestUSDC6DecimalHandling:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="usdc_decimal_test",
+            deployment_id="usdc_decimal_test",
             chain="arbitrum",
         )
 
@@ -400,7 +400,7 @@ class TestUSDC6DecimalHandling:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="usdc_precision_test",
+            deployment_id="usdc_precision_test",
             chain="arbitrum",
         )
 
@@ -484,7 +484,7 @@ class TestUSDT6DecimalHandling:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="usdt_decimal_test",
+            deployment_id="usdt_decimal_test",
             chain="arbitrum",
         )
 
@@ -557,7 +557,7 @@ class TestCrossTokenDecimals:
         from almanak.framework.backtesting.paper.models import PaperTrade
 
         tracker = PaperPortfolioTracker(
-            strategy_id="mixed_decimal_test",
+            deployment_id="mixed_decimal_test",
             chain="arbitrum",
         )
 

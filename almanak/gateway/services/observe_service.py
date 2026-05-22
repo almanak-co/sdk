@@ -119,16 +119,16 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         """
         level = request.level.upper()
         message = request.message
-        strategy_id = request.strategy_id
+        deployment_id = request.deployment_id
         log_context = dict(request.context)
         logger_name = request.logger_name or "strategy"
 
         # Get appropriate logger
-        strategy_logger = logging.getLogger(f"almanak.strategy.{strategy_id}.{logger_name}")
+        strategy_logger = logging.getLogger(f"almanak.strategy.{deployment_id}.{logger_name}")
 
         # Add context as extra
         extra = {
-            "strategy_id": strategy_id,
+            "deployment_id": deployment_id,
             **log_context,
         }
 
@@ -147,11 +147,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
 
         return gateway_pb2.Empty()
 
+    # crap-allowlist: VIB-4722 only renamed alert scoping to deployment_id.
     async def _send_slack_alert(
         self,
         message: str,
         severity: str,
-        strategy_id: str,
+        deployment_id: str,
         metadata: dict,
     ) -> tuple[bool, str | None]:
         """Send alert to Slack webhook.
@@ -166,7 +167,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         color = SLACK_SEVERITY_COLORS.get(severity, "#808080")
 
         # Escape user-provided content for Slack mrkdwn format
-        escaped_strategy_id = escape_mrkdwn(strategy_id)
+        escaped_deployment_id = escape_mrkdwn(deployment_id)
         escaped_message = escape_mrkdwn(message)
 
         # Build Slack Block Kit payload
@@ -182,7 +183,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*Strategy:*\n{escaped_strategy_id}"},
+                    {"type": "mrkdwn", "text": f"*Strategy:*\n{escaped_deployment_id}"},
                     {"type": "mrkdwn", "text": f"*Severity:*\n{severity.upper()}"},
                 ],
             },
@@ -203,7 +204,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             )
 
         # Use escaped values in fallback text as well
-        fallback_text = f"{severity.upper()}: {escaped_strategy_id} - {escaped_message}"
+        fallback_text = f"{severity.upper()}: {escaped_deployment_id} - {escaped_message}"
         payload = {
             "blocks": blocks,
             "attachments": [{"color": color, "fallback": fallback_text}],
@@ -229,11 +230,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         except (TimeoutError, aiohttp.ClientError) as e:
             return False, f"Slack request failed: {e}"
 
+    # crap-allowlist: VIB-4722 only renamed alert scoping to deployment_id.
     async def _send_telegram_alert(
         self,
         message: str,
         severity: str,
-        strategy_id: str,
+        deployment_id: str,
         metadata: dict,
     ) -> tuple[bool, str | None]:
         """Send alert to Telegram.
@@ -247,12 +249,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         # Build Telegram message with HTML formatting
         # Escape user-provided content to prevent HTML injection
         severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🔴"}.get(severity, "❓")  # noqa: RUF001
-        escaped_strategy_id = html.escape(strategy_id)
+        escaped_deployment_id = html.escape(deployment_id)
         escaped_message = html.escape(message)
 
         text_lines = [
             f"{severity_emoji} <b>{severity.upper()} Alert</b>",
-            f"<b>Strategy:</b> <code>{escaped_strategy_id}</code>",
+            f"<b>Strategy:</b> <code>{escaped_deployment_id}</code>",
             "",
             escaped_message,
         ]
@@ -283,6 +285,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         except (TimeoutError, aiohttp.ClientError) as e:
             return False, f"Telegram request failed: {e}"
 
+    # crap-allowlist: VIB-4722 only renamed alert request identity to deployment_id.
     async def Alert(
         self,
         request: gateway_pb2.AlertRequest,
@@ -303,7 +306,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         channel = request.channel.lower()
         message = request.message
         severity = request.severity.lower()
-        strategy_id = request.strategy_id
+        deployment_id = request.deployment_id
         metadata = dict(request.metadata)
 
         if not message:
@@ -316,33 +319,35 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         try:
             # Route to appropriate channel
             if channel == "slack":
-                success, error = await self._send_slack_alert(message, severity, strategy_id, metadata)
+                success, error = await self._send_slack_alert(message, severity, deployment_id, metadata)
             elif channel == "telegram":
-                success, error = await self._send_telegram_alert(message, severity, strategy_id, metadata)
+                success, error = await self._send_telegram_alert(message, severity, deployment_id, metadata)
             else:
                 # Try all configured channels
                 errors = []
 
                 if self._slack_available:
-                    slack_success, slack_error = await self._send_slack_alert(message, severity, strategy_id, metadata)
+                    slack_success, slack_error = await self._send_slack_alert(
+                        message, severity, deployment_id, metadata
+                    )
                     if not slack_success:
                         errors.append(f"Slack: {slack_error}")
 
                 if self._telegram_available:
-                    tg_success, tg_error = await self._send_telegram_alert(message, severity, strategy_id, metadata)
+                    tg_success, tg_error = await self._send_telegram_alert(message, severity, deployment_id, metadata)
                     if not tg_success:
                         errors.append(f"Telegram: {tg_error}")
 
                 # If no channels configured, fall back to logging
                 if not self._slack_available and not self._telegram_available:
-                    logger.warning(f"Alert [{severity}] from {strategy_id}: {message}")
+                    logger.warning(f"Alert [{severity}] from {deployment_id}: {message}")
                     return gateway_pb2.AlertResponse(success=True, alert_id=alert_id)
 
                 success = len(errors) == 0
                 error = "; ".join(errors) if errors else None
 
             if success:
-                logger.info(f"Alert sent via {channel}: strategy={strategy_id}, severity={severity}")
+                logger.info(f"Alert sent via {channel}: strategy={deployment_id}, severity={severity}")
             else:
                 logger.warning(f"Alert failed via {channel}: {error}")
 
@@ -438,16 +443,16 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         Returns:
             RecordTimelineEventResponse with success status and event ID
         """
-        strategy_id = request.strategy_id
+        deployment_id = request.deployment_id
         event_type = request.event_type
         description = request.description
 
-        if not strategy_id:
+        if not deployment_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("strategy_id is required")
+            context.set_details("deployment_id is required")
             return gateway_pb2.RecordTimelineEventResponse(
                 success=False,
-                error="strategy_id is required",
+                error="deployment_id is required",
             )
 
         if not event_type:
@@ -502,7 +507,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         event_id = str(uuid4())
         event = TimelineEvent(
             event_id=event_id,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             timestamp=timestamp,
             event_type=event_type,
             description=description,
@@ -519,7 +524,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             store = get_timeline_store()
             store.add_event(event)
 
-            logger.info(f"Recorded timeline event: {event_type} for {strategy_id}")
+            logger.info(f"Recorded timeline event: {event_type} for {deployment_id}")
 
             return gateway_pb2.RecordTimelineEventResponse(
                 success=True,

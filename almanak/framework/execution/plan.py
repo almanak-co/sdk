@@ -447,7 +447,7 @@ class PlanBundle:
         created_at: When plan was created
         started_at: When plan execution began
         completed_at: When plan execution completed
-        strategy_id: Associated strategy identifier
+        deployment_id: Associated deployment identifier
         description: Human-readable plan description
         metadata: Additional plan metadata
     """
@@ -459,7 +459,7 @@ class PlanBundle:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     completed_at: datetime | None = None
-    strategy_id: str | None = None
+    deployment_id: str | None = None
     description: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -697,7 +697,7 @@ class PlanBundle:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at is not None else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at is not None else None,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "description": self.description,
             "metadata": self.metadata,
             "step_count": self.step_count,
@@ -720,7 +720,7 @@ class PlanBundle:
             created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(UTC),
             started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
             completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
-            strategy_id=data.get("strategy_id"),
+            deployment_id=data.get("deployment_id"),
             description=data.get("description"),
             metadata=data.get("metadata", {}),
         )

@@ -111,7 +111,8 @@ _GATEWAY_ENV_VARS: tuple[str, ...] = (
     "POLYMARKET_PASSPHRASE",
     "ALMANAK_POLYMARKET_PASSPHRASE",
     # Deployment-mode discriminator.
-    "AGENT_ID",
+    "ALMANAK_IS_HOSTED",
+    "ALMANAK_DEPLOYMENT_ID",
     # Backtest env vars (Phase 5c). The factory ``backtest_config_from_env``
     # reads these eagerly via the LocalConfig / HostedConfig
     # ``default_factory`` path; if a developer's ``.env`` carries any of
@@ -243,15 +244,11 @@ def config_factory(
     (runtime, simulation, backtest) will accept the same kwargs shape.
     """
 
-    def _build(
-        *, mode: str = "local", **overrides: object
-    ) -> LocalConfig | HostedConfig:
+    def _build(*, mode: str = "local", **overrides: object) -> LocalConfig | HostedConfig:
         _scrub_env(monkeypatch)
         gateway_overrides = overrides.pop("gateway", {}) or {}
         if not isinstance(gateway_overrides, dict):
-            raise TypeError(
-                "config_factory(gateway=...) expects a dict of GatewayConfig kwargs."
-            )
+            raise TypeError("config_factory(gateway=...) expects a dict of GatewayConfig kwargs.")
         gateway = GatewayConfig(**gateway_overrides)
         if mode == "hosted":
             return HostedConfig(gateway=gateway, **overrides)

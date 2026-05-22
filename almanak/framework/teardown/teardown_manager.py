@@ -77,8 +77,8 @@ class IntentStrategy(Protocol):
     """Protocol for strategies that support teardown."""
 
     @property
-    def strategy_id(self) -> str:
-        """Get strategy ID."""
+    def deployment_id(self) -> str:
+        """Get deployment ID."""
         ...
 
     @property
@@ -116,7 +116,7 @@ class StateManager(Protocol):
         """Save teardown state."""
         ...
 
-    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None:
+    async def get_teardown_state(self, deployment_id: str) -> TeardownState | None:
         """Get teardown state."""
         ...
 
@@ -128,7 +128,7 @@ class StateManager(Protocol):
 class AlertManager(Protocol):
     """Protocol for alert management."""
 
-    async def send_teardown_started(self, strategy_id: str, mode: str) -> None:
+    async def send_teardown_started(self, deployment_id: str, mode: str) -> None:
         """Send teardown started alert."""
         ...
 
@@ -260,6 +260,7 @@ class TeardownManager:
         self.slippage_manager = EscalatingSlippageManager(self.config)
         self.cancel_window = CancelWindowManager(self.config)
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def preview(
         self,
         strategy: IntentStrategy,
@@ -311,7 +312,7 @@ class TeardownManager:
         warnings = self._generate_warnings(positions, internal_mode)
 
         return TeardownPreview(
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             strategy_name=strategy.name,
             mode=mode,
             positions=[self._serialize_position(p) for p in positions.positions],
@@ -326,6 +327,7 @@ class TeardownManager:
             warnings=warnings,
         )
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def execute(  # noqa: C901
         self,
         strategy: IntentStrategy,
@@ -386,12 +388,12 @@ class TeardownManager:
 
         try:
             # Step 1: Pause strategy
-            logger.info(f"Starting teardown {teardown_id} for {strategy.strategy_id}")
+            logger.info(f"Starting teardown {teardown_id} for {strategy.deployment_id}")
             await strategy.pause()
 
             # Send started alert
             if self.alert_manager:
-                await self.alert_manager.send_teardown_started(strategy.strategy_id, mode)
+                await self.alert_manager.send_teardown_started(strategy.deployment_id, mode)
 
             # Step 2: Get positions and generate intents. When the caller has
             # supplied precomputed_positions/intents (e.g. the CLI's --discover
@@ -416,15 +418,15 @@ class TeardownManager:
                         raise
 
             if not intents:
-                logger.info(f"No intents to execute for {strategy.strategy_id}")
-                return self._empty_result(strategy.strategy_id, mode, started_at)
+                logger.info(f"No intents to execute for {strategy.deployment_id}")
+                return self._empty_result(strategy.deployment_id, mode, started_at)
 
             # Step 3: Validate safety
             validation = self.safety_guard.validate_teardown_request(positions, internal_mode)
             if not validation.all_passed:
                 logger.error(f"Safety validation failed: {validation.blocked_reason}")
                 return self._failed_result(
-                    strategy.strategy_id,
+                    strategy.deployment_id,
                     mode,
                     started_at,
                     error=validation.blocked_reason or "Safety validation failed",
@@ -442,7 +444,7 @@ class TeardownManager:
 
             if cancel_result.was_cancelled:
                 logger.info(f"Teardown {teardown_id} cancelled during window")
-                return self._cancelled_result(strategy.strategy_id, mode, started_at)
+                return self._cancelled_result(strategy.deployment_id, mode, started_at)
 
             # Update state to executing
             teardown_state.status = TeardownStatus.EXECUTING
@@ -500,7 +502,7 @@ class TeardownManager:
                 except Exception as verify_err:
                     logger.exception(
                         "Post-teardown verification raised for %s — treating as verify-fail",
-                        strategy.strategy_id,
+                        strategy.deployment_id,
                     )
                     positions_closed = False
                     verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
@@ -509,7 +511,7 @@ class TeardownManager:
 
                 if not positions_closed:
                     logger.warning(
-                        f"Post-teardown verification: {strategy.strategy_id} still reports "
+                        f"Post-teardown verification: {strategy.deployment_id} still reports "
                         f"open positions (or verification errored). Marking teardown as incomplete."
                     )
                     result = replace(
@@ -546,20 +548,21 @@ class TeardownManager:
         except Exception as e:
             logger.exception(f"Teardown {teardown_id} failed with exception")
             return self._failed_result(
-                strategy.strategy_id,
+                strategy.deployment_id,
                 mode,
                 started_at,
                 error=str(e),
             )
 
-    async def cancel(self, strategy_id: str) -> bool:
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+    async def cancel(self, deployment_id: str) -> bool:
         """Cancel an in-progress teardown.
 
         Graceful mode: Cancellable anytime before completion.
         Emergency mode: Only during 10-second window.
 
         Args:
-            strategy_id: ID of the strategy being torn down
+            deployment_id: ID of the strategy being torn down
 
         Returns:
             True if cancellation succeeded
@@ -568,10 +571,10 @@ class TeardownManager:
             logger.warning("No state manager - cannot cancel")
             return False
 
-        state = await self.state_manager.get_teardown_state(strategy_id)
+        state = await self.state_manager.get_teardown_state(deployment_id)
 
         if not state:
-            logger.warning(f"No active teardown for {strategy_id}")
+            logger.warning(f"No active teardown for {deployment_id}")
             return False
 
         # Check if in cancel window (for HARD mode)
@@ -595,7 +598,7 @@ class TeardownManager:
 
     async def resume(
         self,
-        strategy_id: str,
+        deployment_id: str,
         strategy: IntentStrategy,
         on_approval_needed: ApprovalCallback | None = None,
         on_progress: Callable[[int, str], Awaitable[None]] | None = None,
@@ -607,7 +610,7 @@ class TeardownManager:
         Includes staleness check - re-generates intents if too old.
 
         Args:
-            strategy_id: ID of the strategy
+            deployment_id: ID of the strategy
             strategy: The strategy instance
             on_approval_needed: Callback for approval requests
             on_progress: Callback for progress updates
@@ -618,7 +621,7 @@ class TeardownManager:
         if self.state_manager is None:
             return None
 
-        state = await self.state_manager.get_teardown_state(strategy_id)
+        state = await self.state_manager.get_teardown_state(deployment_id)
 
         if not state or not state.is_resumable:
             return None
@@ -950,7 +953,7 @@ class TeardownManager:
                     from almanak.framework.execution.orchestrator import ExecutionContext
 
                     context = ExecutionContext(
-                        strategy_id=strategy.strategy_id,
+                        deployment_id=strategy.deployment_id,
                         intent_id=f"teardown_{teardown_id}_{intent_index}",
                         chain=getattr(intent_to_exec, "chain", None) or strategy.chain,
                         intent_description=self._describe_intent(intent_to_exec),
@@ -972,7 +975,7 @@ class TeardownManager:
                         except Exception as exc:  # noqa: BLE001 — best-effort
                             logger.debug(
                                 "teardown pre-intent balance snapshot failed for %s: %s",
-                                strategy.strategy_id,
+                                strategy.deployment_id,
                                 exc,
                             )
 
@@ -991,7 +994,7 @@ class TeardownManager:
                         except Exception as exc:  # noqa: BLE001 — best-effort
                             logger.debug(
                                 "teardown lending pre-state snapshot failed for %s: %s",
-                                strategy.strategy_id,
+                                strategy.deployment_id,
                                 exc,
                             )
 
@@ -1031,7 +1034,7 @@ class TeardownManager:
                             except Exception as exc:  # noqa: BLE001 — best-effort
                                 logger.debug(
                                     "teardown post-intent reconcile failed for %s: %s",
-                                    strategy.strategy_id,
+                                    strategy.deployment_id,
                                     exc,
                                 )
 
@@ -1106,7 +1109,7 @@ class TeardownManager:
                 execute_func=execute_at_slippage,
                 on_approval_needed=on_approval_needed,
                 teardown_id=teardown_id,
-                strategy_id=strategy.strategy_id,
+                deployment_id=strategy.deployment_id,
                 is_auto_mode=is_auto_mode,
                 intent_slippage=intent_slippage,
             )
@@ -1172,7 +1175,7 @@ class TeardownManager:
                     # Return partial result
                     return TeardownResult(
                         success=False,
-                        strategy_id=strategy.strategy_id,
+                        deployment_id=strategy.deployment_id,
                         mode=mode_str,
                         started_at=started_at,
                         completed_at=None,
@@ -1212,7 +1215,7 @@ class TeardownManager:
         if skipped:
             logger.info(
                 "Teardown for %s completed: %d executed, %d skipped (no-op), %d failed",
-                strategy.strategy_id,
+                strategy.deployment_id,
                 succeeded - skipped,
                 skipped,
                 failed,
@@ -1220,7 +1223,7 @@ class TeardownManager:
 
         return TeardownResult(
             success=failed == 0,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             mode=mode_str,
             started_at=started_at,
             completed_at=completed_at,
@@ -1249,7 +1252,7 @@ class TeardownManager:
 
         state = TeardownState(
             teardown_id=teardown_id,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             mode=mode,
             status=TeardownStatus.CANCEL_WINDOW,
             total_intents=len(intents),
@@ -1510,14 +1513,14 @@ class TeardownManager:
 
     def _empty_result(
         self,
-        strategy_id: str,
+        deployment_id: str,
         mode: str,
         started_at: datetime,
     ) -> TeardownResult:
         """Create a result for empty teardown (no positions)."""
         return TeardownResult(
             success=True,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=mode,
             started_at=started_at,
             completed_at=datetime.now(UTC),
@@ -1533,14 +1536,14 @@ class TeardownManager:
 
     def _cancelled_result(
         self,
-        strategy_id: str,
+        deployment_id: str,
         mode: str,
         started_at: datetime,
     ) -> TeardownResult:
         """Create a result for cancelled teardown."""
         return TeardownResult(
             success=False,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=mode,
             started_at=started_at,
             completed_at=datetime.now(UTC),
@@ -1557,7 +1560,7 @@ class TeardownManager:
 
     def _failed_result(
         self,
-        strategy_id: str,
+        deployment_id: str,
         mode: str,
         started_at: datetime,
         error: str,
@@ -1565,7 +1568,7 @@ class TeardownManager:
         """Create a result for failed teardown."""
         return TeardownResult(
             success=False,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             mode=mode,
             started_at=started_at,
             completed_at=datetime.now(UTC),

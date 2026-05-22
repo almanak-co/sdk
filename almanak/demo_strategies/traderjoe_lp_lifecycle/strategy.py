@@ -226,7 +226,7 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", self.STRATEGY_NAME),
+            deployment_id=getattr(self, "deployment_id", self.STRATEGY_NAME),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

@@ -31,7 +31,7 @@ def _create_strategy(config_overrides: dict | None = None):
     if config_overrides:
         config.update(config_overrides)
 
-    strategy._strategy_id = "test-compound-v3-pnl-polygon"
+    strategy._deployment_id = "test-compound-v3-pnl-polygon"
     strategy._chain = "polygon"
     strategy.supply_token = config["supply_token"]
     strategy.supply_amount = Decimal(str(config["supply_amount"]))

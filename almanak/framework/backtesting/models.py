@@ -1836,7 +1836,7 @@ class BacktestResult:
 
     Attributes:
         engine: Which backtesting engine was used (pnl or paper)
-        strategy_id: Identifier of the strategy being tested
+        deployment_id: Identifier of the strategy being tested
         start_time: When the backtest started (simulation time)
         end_time: When the backtest ended (simulation time)
         metrics: Calculated performance metrics
@@ -1911,7 +1911,7 @@ class BacktestResult:
     """
 
     engine: BacktestEngine
-    strategy_id: str
+    deployment_id: str
     start_time: datetime
     end_time: datetime
     metrics: BacktestMetrics
@@ -2068,6 +2068,7 @@ class BacktestResult:
         else:
             logger.info(f"Non-critical error at {timestamp}: {context_str}{error_type} - {error_message}{handled_str}")
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def summary(self) -> str:
         """Generate a human-readable summary of backtest results.
 
@@ -2081,7 +2082,7 @@ class BacktestResult:
             "",
             "CONFIGURATION",
             "-" * 70,
-            f"Strategy:           {self.strategy_id}",
+            f"Strategy:           {self.deployment_id}",
             f"Chain:              {self.chain}",
             f"Period:             {self.start_time.strftime('%Y-%m-%d')} to {self.end_time.strftime('%Y-%m-%d')}",
             f"Duration:           {self.simulation_duration_days:.1f} days",
@@ -2236,7 +2237,7 @@ class BacktestResult:
         """Serialize to dictionary."""
         return {
             "engine": self.engine.value,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "metrics": self.metrics.to_dict(),
@@ -2299,7 +2300,7 @@ class BacktestResult:
     #   * EquityPoint optional fields key off *key presence* in the source dict
     #     (historical quirk of to_dict -- it only emits the key when non-None).
     #   * from_dict tolerates a missing top-level `metrics` dict (older
-    #     artifacts); required fields (`engine`, `strategy_id`, `start_time`,
+    #     artifacts); required fields (`engine`, `deployment_id`, `start_time`,
     #     `end_time`) still raise if absent.
     # -------------------------------------------------------------------------
 
@@ -2502,13 +2503,13 @@ class BacktestResult:
 
         Raises:
             KeyError: when a required top-level field is missing
-                (`engine`, `strategy_id`, `start_time`, `end_time`).
+                (`engine`, `deployment_id`, `start_time`, `end_time`).
             ValueError: when a required field is present but malformed
                 (e.g. an unknown BacktestEngine value or a bad datetime).
         """
         return cls(
             engine=BacktestEngine(data["engine"]),
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             start_time=datetime.fromisoformat(data["start_time"]),
             end_time=datetime.fromisoformat(data["end_time"]),
             metrics=cls._parse_metrics(data.get("metrics")),

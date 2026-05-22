@@ -25,7 +25,7 @@ Usage:
     await store.initialize()
 
     # Save state
-    state = StateData(strategy_id="strat-1", version=1, state={"key": "value"})
+    state = StateData(deployment_id="strat-1", version=1, state={"key": "value"})
     await store.save(state)
 
     # CAS update
@@ -72,6 +72,18 @@ if TYPE_CHECKING:
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_deployment_id(obj: Any) -> str:
+    """Return the canonical deployment identity carried by a persistence model."""
+    return str(obj.deployment_id)
+
+
+def _require_deployment_id(value: str | None, *, operation: str) -> str:
+    deployment_id = (value or "").strip()
+    if not deployment_id:
+        raise ValueError(f"{operation}: deployment_id is required")
+    return deployment_id
 
 
 def _extract_position_reference_column(payload_json: str) -> str | None:
@@ -201,6 +213,95 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
     )
 
 
+def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> None:  # noqa: C901
+    """Collapse the remaining dual-identity tables to a single ``deployment_id``.
+
+    VIB-4722 — blueprint 29 §3: every deployment-scoped table carries exactly
+    one identity column, ``deployment_id``, identical in meaning on both
+    backends (the hosted-Postgres side already keys these on ``deployment_id``
+    per VIB-4721).
+
+    Six tables historically declared BOTH a live identity column AND a dead
+    one added under the abandoned "VIB-2835 Phase 4" migration:
+
+    * ``portfolio_snapshots`` / ``portfolio_metrics`` / ``transaction_ledger``
+      / ``position_state_snapshots``: live ``strategy_id``, dead
+      ``deployment_id`` — drop the dead ``deployment_id``, then rename
+      ``strategy_id`` into its place.
+    * ``accounting_events`` / ``accounting_outbox``: live ``deployment_id``,
+      dead ``strategy_id`` — drop the dead ``strategy_id`` only.
+
+    Each conversion inspects ``PRAGMA table_info`` first so an
+    already-converted DB, where only ``deployment_id`` remains, is a no-op.
+    When both legacy and canonical columns exist, the dead column is dropped
+    before the live column is renamed to avoid a name collision.
+    """
+
+    def _table_exists(table: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
+
+    def _drop_column_if_present(table: str, column: str) -> None:
+        try:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            logger.info("Migration: dropped dead %s.%s (VIB-4722)", table, column)
+        except sqlite3.OperationalError:
+            # Column already absent (fresh / converted DB) — no-op.
+            pass
+
+    def _rename_column_if_present(table: str, old: str, new: str) -> None:
+        try:
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+            logger.info("Migration: renamed %s.%s → %s (VIB-4722)", table, old, new)
+        except sqlite3.OperationalError:
+            # Source column already absent (already converted) — no-op.
+            pass
+
+    def _columns(table: str) -> set[str]:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _convert_strategy_key_table(table: str, *, drop_index: str | None = None) -> None:
+        if not _table_exists(table):
+            return
+        cols = _columns(table)
+        if "strategy_id" not in cols:
+            return
+        if "deployment_id" in cols:
+            if drop_index:
+                conn.execute(f"DROP INDEX IF EXISTS {drop_index}")
+            _drop_column_if_present(table, "deployment_id")
+        _rename_column_if_present(table, "strategy_id", "deployment_id")
+
+    # Tables whose dead column is `deployment_id` and whose live identity
+    # column `strategy_id` must be renamed into its place.
+    for table in ("portfolio_snapshots", "portfolio_metrics", "transaction_ledger"):
+        _convert_strategy_key_table(table)
+
+    # position_state_snapshots: same shape, but the dead `deployment_id`
+    # column carries `idx_pss_position` — SQLite refuses DROP COLUMN on an
+    # indexed column, so drop the index first. SCHEMA_SQL's
+    # CREATE INDEX IF NOT EXISTS recreates it on the renamed canonical
+    # column (this helper runs before executescript()).
+    _convert_strategy_key_table("position_state_snapshots", drop_index="idx_pss_position")
+
+    # accounting_events / accounting_outbox: modern dual-identity DBs already
+    # use `deployment_id` as the live key and carry `strategy_id` only as a
+    # dead column. Very old DBs may have only `strategy_id`; rename those
+    # instead of dropping the only identity column.
+    for table in ("accounting_events", "accounting_outbox"):
+        if _table_exists(table):
+            cols = _columns(table)
+            if "deployment_id" in cols:
+                _drop_column_if_present(table, "strategy_id")
+            else:
+                _rename_column_if_present(table, "strategy_id", "deployment_id")
+
+
 # =============================================================================
 # EXCEPTIONS
 # =============================================================================
@@ -273,10 +374,11 @@ class SQLiteConfig:
 
 SCHEMA_SQL = """
 -- Strategy state table for local SQLite mode.
--- Deployed PostgreSQL uses agent_id; local SQLite keeps strategy_id and
--- relies on resolve_agent_id() to make the logical identifier match.
+-- deployment_id is the single canonical identity column (blueprint 29 §3),
+-- identical in meaning on both backends. The Python StateData.deployment_id
+-- field still feeds it (the textual field rename is VIB-4726).
 CREATE TABLE IF NOT EXISTS strategy_state (
-    strategy_id TEXT PRIMARY KEY,
+    deployment_id TEXT PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 1,
     state_data TEXT NOT NULL,  -- JSON string
     schema_version INTEGER NOT NULL DEFAULT 1,
@@ -289,10 +391,13 @@ CREATE TABLE IF NOT EXISTS strategy_state (
 -- Gateway-side timeline_events lives in ~/.config/almanak/gateway.db (local)
 -- or hosted Postgres (deployed). See almanak/gateway/timeline/store.py.
 
--- CLOB orders table for Polymarket order tracking
+-- CLOB orders table for Polymarket order tracking.
+-- deployment_id is the single identity column (blueprint 29 §3): every
+-- deployment-scoped row carries the canonical deployment_id.
 CREATE TABLE IF NOT EXISTS clob_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT NOT NULL UNIQUE,
+    deployment_id TEXT NOT NULL,
+    order_id TEXT NOT NULL,
     market_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
     side TEXT NOT NULL,  -- BUY or SELL
@@ -329,12 +434,14 @@ ON clob_orders (intent_id);
 -- Composite index for open orders by market
 CREATE INDEX IF NOT EXISTS idx_clob_orders_market_status
 ON clob_orders (market_id, status);
+-- NOTE: deployment_id indexes are created in _run_migrations() AFTER the
+-- deployment_id column is added, so an upgraded DB (table predates the
+-- column) does not trip "no such column" while executing this script.
 
 -- Portfolio snapshots table for value tracking and PnL charts
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id TEXT NOT NULL,
-    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
+    deployment_id TEXT NOT NULL,  -- canonical identity column (blueprint 29 §3)
     cycle_id TEXT DEFAULT '',  -- Phase 4: correlation to iteration (VIB-2835)
     execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
@@ -351,22 +458,22 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     created_at TEXT NOT NULL
 );
 
--- Index for strategy + time queries (dashboard charts)
+-- Index for deployment + time queries (dashboard charts)
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_strategy_time
-ON portfolio_snapshots (strategy_id, timestamp DESC);
+ON portfolio_snapshots (deployment_id, timestamp DESC);
 
 -- Index for cleanup queries
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_created_at
 ON portfolio_snapshots (created_at);
 
--- Unique constraint to prevent duplicate timestamps per strategy
+-- Unique constraint to prevent duplicate timestamps per deployment
 CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_unique
-ON portfolio_snapshots (strategy_id, timestamp);
+ON portfolio_snapshots (deployment_id, timestamp);
 
 -- Portfolio metrics table for PnL baseline tracking
 -- Stores values that survive strategy restarts
 CREATE TABLE IF NOT EXISTS portfolio_metrics (
-    strategy_id TEXT PRIMARY KEY,
+    deployment_id TEXT PRIMARY KEY,  -- canonical identity column (blueprint 29 §3)
     initial_value_usd TEXT NOT NULL,  -- Decimal as string, set on first run
     initial_timestamp TEXT NOT NULL,
     deposits_usd TEXT DEFAULT '0',
@@ -375,7 +482,6 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     total_value_usd TEXT DEFAULT '0',  -- Current portfolio value (VIB-2765)
     positions_json TEXT DEFAULT '[]',  -- Snapshot of position state (VIB-2765)
     cycle_id TEXT,  -- Correlation to portfolio_snapshots (VIB-2765)
-    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
     execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     is_complete BOOLEAN DEFAULT 1,  -- Phase 4: all records for this cycle committed (VIB-2839)
     updated_at TEXT NOT NULL
@@ -385,8 +491,7 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
 CREATE TABLE IF NOT EXISTS transaction_ledger (
     id TEXT PRIMARY KEY,
     cycle_id TEXT NOT NULL,
-    strategy_id TEXT NOT NULL,
-    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
+    deployment_id TEXT NOT NULL,  -- canonical identity column (blueprint 29 §3)
     execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     intent_type TEXT NOT NULL,
@@ -409,9 +514,9 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
     post_state_json TEXT DEFAULT ''      -- on-chain state after execution (VIB-3480)
 );
 
--- Index for strategy + time queries
+-- Index for deployment + time queries
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_strategy_time
-ON transaction_ledger (strategy_id, timestamp DESC);
+ON transaction_ledger (deployment_id, timestamp DESC);
 
 -- Index for cycle correlation
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_cycle_id
@@ -419,7 +524,7 @@ ON transaction_ledger (cycle_id);
 
 -- Index for intent type filtering
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
-ON transaction_ledger (strategy_id, intent_type);
+ON transaction_ledger (deployment_id, intent_type);
 
 -- Position lifecycle events (Phase 2, VIB-2774)
 -- Tracks OPEN -> SNAPSHOT* -> CLOSE for immutable-ID positions (LP, perps).
@@ -475,8 +580,7 @@ ON position_events (position_id, timestamp);
 -- Local SQLite only; hosted Postgres requires metrics-database migration (IMPL-3).
 CREATE TABLE IF NOT EXISTS accounting_events (
     id TEXT PRIMARY KEY,
-    deployment_id TEXT NOT NULL,
-    strategy_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,  -- canonical identity column (blueprint 29 §3)
     cycle_id TEXT NOT NULL,
     execution_mode TEXT NOT NULL,
     timestamp TEXT NOT NULL,
@@ -520,8 +624,7 @@ ON accounting_events (ledger_entry_id);
 -- processor confirms successful write to accounting_events.
 CREATE TABLE IF NOT EXISTS accounting_outbox (
     id TEXT PRIMARY KEY,                     -- UUID, generated at write time
-    deployment_id TEXT NOT NULL,
-    strategy_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,             -- canonical identity column (blueprint 29 §3)
     cycle_id TEXT NOT NULL,
     ledger_entry_id TEXT NOT NULL,           -- FK to transaction_ledger.id
     intent_type TEXT NOT NULL,               -- e.g. "SUPPLY", "LP_OPEN"
@@ -554,8 +657,7 @@ WHERE status != 'processed';
 CREATE TABLE IF NOT EXISTS position_state_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id INTEGER NOT NULL,             -- FK → portfolio_snapshots.id
-    strategy_id TEXT NOT NULL,
-    deployment_id TEXT NOT NULL DEFAULT '',
+    deployment_id TEXT NOT NULL,              -- canonical identity column (blueprint 29 §3)
     cycle_id TEXT NOT NULL DEFAULT '',
     captured_at TEXT NOT NULL,                -- ISO-8601 UTC
     position_id TEXT NOT NULL,
@@ -600,7 +702,7 @@ CREATE INDEX IF NOT EXISTS idx_pss_snapshot
 ON position_state_snapshots (snapshot_id);
 
 CREATE INDEX IF NOT EXISTS idx_pss_strategy_time
-ON position_state_snapshots (strategy_id, captured_at DESC);
+ON position_state_snapshots (deployment_id, captured_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_pss_position
 ON position_state_snapshots (deployment_id, position_id, captured_at DESC);
@@ -759,7 +861,7 @@ class SQLiteStore:
         >>> await store.initialize()
         >>>
         >>> # Save new state
-        >>> state = StateData(strategy_id="strat-1", version=1, state={"key": "value"})
+        >>> state = StateData(deployment_id="strat-1", version=1, state={"key": "value"})
         >>> await store.save(state)
         >>>
         >>> # CAS update
@@ -870,6 +972,15 @@ class SQLiteStore:
             raise DatabaseInitializationError("Connection not established")
 
         def _sync_create_schema() -> None:
+            # VIB-4722: collapse the dual-identity tables to a single
+            # canonical `deployment_id` column BEFORE executescript() —
+            # SCHEMA_SQL creates indexes (idx_transaction_ledger_*,
+            # idx_portfolio_snapshots_*, idx_pss_position) on the
+            # deployment_id column, which would fail on a pre-rename DB
+            # whose tables still carry the old `deployment_id` identity
+            # column. Same ordering rationale as the gateway lifecycle
+            # store's legacy identity → deployment_id rename.
+            _convert_dual_identity_tables_to_deployment_id(self._conn)  # type: ignore[arg-type]
             self._conn.executescript(SCHEMA_SQL)  # type: ignore[union-attr]
             self._run_migrations()
             self._conn.commit()  # type: ignore[union-attr]
@@ -960,14 +1071,43 @@ class SQLiteStore:
             conn.execute("ROLLBACK")
             raise
 
-        # Phase 4: deployment_id, cycle_id, execution_mode across all tables (VIB-2835, VIB-2837)
-        _add_column_if_missing("portfolio_snapshots", "deployment_id", "TEXT DEFAULT ''")
+        # VIB-4722: strategy_state's identity column is renamed
+        # strategy_id → deployment_id (blueprint 29 §3 — one identity column,
+        # one name, both backends). Idempotent: the rename runs only when the
+        # legacy column is still present. SCHEMA_SQL's CREATE TABLE IF NOT
+        # EXISTS is a no-op on an upgraded DB, so this migration is the path
+        # that converges the column name.
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_state'").fetchone():
+            ss_cols = {row["name"] for row in conn.execute("PRAGMA table_info(strategy_state)").fetchall()}
+            if "strategy_id" in ss_cols and "deployment_id" not in ss_cols:
+                conn.execute("ALTER TABLE strategy_state RENAME COLUMN strategy_id TO deployment_id")
+                logger.info("Migration: renamed strategy_state.strategy_id → deployment_id")
+
+        # VIB-4722: clob_orders gains the canonical deployment_id identity
+        # column (blueprint 29 §3 — it previously had no identity column).
+        # The indexes are created here, after the column add, so an upgraded
+        # DB whose clob_orders predates the column does not trip "no such
+        # column" while SCHEMA_SQL runs (CREATE INDEX in SCHEMA_SQL would
+        # execute before this migration on an existing table).
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clob_orders'").fetchone():
+            _add_column_if_missing("clob_orders", "deployment_id", "TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_clob_orders_deployment ON clob_orders (deployment_id)")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_clob_orders_deployment_order "
+                "ON clob_orders (deployment_id, order_id)"
+            )
+
+        # Phase 4: cycle_id, execution_mode across all tables (VIB-2835, VIB-2837).
+        # The legacy `deployment_id TEXT DEFAULT ''` adds for portfolio_snapshots /
+        # portfolio_metrics / transaction_ledger were removed in VIB-4722 — that
+        # column was the abandoned dead identity column; the canonical
+        # deployment_id is now the renamed live key, converged by
+        # _convert_dual_identity_tables_to_deployment_id (run in
+        # _create_schema, before executescript()).
         _add_column_if_missing("portfolio_snapshots", "cycle_id", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_snapshots", "execution_mode", "TEXT DEFAULT ''")
-        _add_column_if_missing("portfolio_metrics", "deployment_id", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_metrics", "execution_mode", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_metrics", "is_complete", "BOOLEAN DEFAULT 1")
-        _add_column_if_missing("transaction_ledger", "deployment_id", "TEXT DEFAULT ''")
         _add_column_if_missing("transaction_ledger", "execution_mode", "TEXT DEFAULT ''")
         _add_column_if_missing("position_events", "cycle_id", "TEXT DEFAULT ''")
         _add_column_if_missing("position_events", "execution_mode", "TEXT DEFAULT ''")
@@ -1012,111 +1152,9 @@ class SQLiteStore:
                 conn.execute("ROLLBACK")
                 raise
 
-    async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
-        """Migrate data from a bare strategy name to the canonical deployment_id.
-
-        Rewrites ``strategy_id`` in all accounting tables so that data written
-        under the old bare name is accessible under the new deployment_id.
-
-        Idempotent: rows already using ``new_deployment_id`` are unaffected.
-        Skipped if ``old_strategy_id == new_deployment_id`` or if the old ID
-        doesn't match any existing rows.
-
-        Args:
-            old_strategy_id: The bare strategy name (e.g. "AaveYieldStrategy").
-            new_deployment_id: The new deployment_id (e.g. "AaveYieldStrategy:a1b2c3d4e5f6").
-
-        Returns:
-            Total number of rows migrated across all tables.
-        """
-        if old_strategy_id == new_deployment_id:
-            return 0
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_backfill() -> int:
-            conn = self._conn
-            assert conn is not None
-            total = 0
-
-            tables = [
-                "strategy_state",
-                "portfolio_snapshots",
-                "portfolio_metrics",
-                "transaction_ledger",
-                "accounting_outbox",
-            ]
-
-            with self._db_lock:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for table in tables:
-                        # Check table exists (some may not be present in older DBs)
-                        exists = conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                            (table,),
-                        ).fetchone()
-                        if not exists:
-                            continue
-
-                        # Only migrate if the old ID has data and the new one doesn't
-                        old_count = conn.execute(
-                            f"SELECT COUNT(*) FROM {table} WHERE strategy_id = ?",
-                            (old_strategy_id,),
-                        ).fetchone()[0]
-
-                        if old_count == 0:
-                            continue
-
-                        # Skip if target already has rows (avoids PK/unique-index collisions)
-                        new_count = conn.execute(
-                            f"SELECT COUNT(*) FROM {table} WHERE strategy_id = ?",
-                            (new_deployment_id,),
-                        ).fetchone()[0]
-                        if new_count > 0:
-                            continue
-
-                        cursor = conn.execute(
-                            f"UPDATE {table} SET strategy_id = ? WHERE strategy_id = ?",
-                            (new_deployment_id, old_strategy_id),
-                        )
-                        total += cursor.rowcount
-
-                    # position_events, accounting_events, and accounting_outbox use deployment_id
-                    for dep_id_table in ("position_events", "accounting_events", "accounting_outbox"):
-                        tbl_exists = conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                            (dep_id_table,),
-                        ).fetchone()
-                        if not tbl_exists:
-                            continue
-                        old_rows = conn.execute(
-                            f"SELECT COUNT(*) FROM {dep_id_table} WHERE deployment_id = ?",
-                            (old_strategy_id,),
-                        ).fetchone()[0]
-                        if old_rows > 0:
-                            cursor = conn.execute(
-                                f"UPDATE {dep_id_table} SET deployment_id = ? WHERE deployment_id = ?",
-                                (new_deployment_id, old_strategy_id),
-                            )
-                            total += cursor.rowcount
-
-                    conn.execute("COMMIT")
-                    if total > 0:
-                        logger.info(
-                            "Backfilled %d rows from '%s' to '%s'",
-                            total,
-                            old_strategy_id,
-                            new_deployment_id,
-                        )
-                except Exception:
-                    conn.execute("ROLLBACK")
-                    raise
-
-            return total
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_backfill)
+    # -------------------------------------------------------------------------
+    # State Operations
+    # -------------------------------------------------------------------------
 
     async def close(self) -> None:
         """Close database connection."""
@@ -1132,15 +1170,11 @@ class SQLiteStore:
             self._initialized = False
             logger.info("SQLite store closed")
 
-    # -------------------------------------------------------------------------
-    # State Operations
-    # -------------------------------------------------------------------------
-
-    async def get(self, strategy_id: str) -> StateData | None:
+    async def get(self, deployment_id: str) -> StateData | None:
         """Get state for a strategy (single row per agent).
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             StateData if found, None otherwise.
@@ -1151,12 +1185,12 @@ class SQLiteStore:
         def _sync_get() -> StateData | None:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT strategy_id, version, state_data, schema_version,
+                SELECT deployment_id, version, state_data, schema_version,
                        checksum, created_at
                 FROM strategy_state
-                WHERE strategy_id = ?
+                WHERE deployment_id = ?
                 """,
-                (strategy_id,),
+                (deployment_id,),
             )
             row = cursor.fetchone()
 
@@ -1172,7 +1206,7 @@ class SQLiteStore:
                 created_at = datetime.fromisoformat(created_at)
 
             return StateData(
-                strategy_id=row["strategy_id"],
+                deployment_id=row["deployment_id"],
                 version=row["version"],
                 state=state_data,
                 schema_version=row["schema_version"],
@@ -1226,7 +1260,7 @@ class SQLiteStore:
         # (e.g. non-deterministic serialization) BEFORE a version bump lands.
         if hashlib.sha256(state_json.encode()).hexdigest() != checksum:
             raise SQLiteBackendError(
-                f"Pre-commit checksum verification failed for {state.strategy_id}; refusing to write torn state"
+                f"Pre-commit checksum verification failed for {state.deployment_id}; refusing to write torn state"
             )
         now = datetime.now(UTC).isoformat()
 
@@ -1249,21 +1283,21 @@ class SQLiteStore:
                                 schema_version = ?,
                                 checksum = ?,
                                 updated_at = ?
-                            WHERE strategy_id = ? AND version = ?
+                            WHERE deployment_id = ? AND version = ?
                             """,
-                            (state_json, state.schema_version, checksum, now, state.strategy_id, expected_version),
+                            (state_json, state.schema_version, checksum, now, state.deployment_id, expected_version),
                         )
                         if cursor.rowcount == 0:
                             # Read actual version while still inside the
                             # transaction so the error is consistent with what
                             # the CAS saw.
                             row = conn.execute(
-                                "SELECT version FROM strategy_state WHERE strategy_id = ?",
-                                (state.strategy_id,),
+                                "SELECT version FROM strategy_state WHERE deployment_id = ?",
+                                (state.deployment_id,),
                             ).fetchone()
                             conn.execute("ROLLBACK")
                             raise StateConflictError(
-                                strategy_id=state.strategy_id,
+                                deployment_id=state.deployment_id,
                                 expected_version=expected_version,
                                 actual_version=row["version"] if row else 0,
                             )
@@ -1272,10 +1306,10 @@ class SQLiteStore:
                         conn.execute(
                             """
                             INSERT INTO strategy_state
-                            (strategy_id, version, state_data, schema_version, checksum,
+                            (deployment_id, version, state_data, schema_version, checksum,
                              created_at, updated_at)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT (strategy_id)
+                            ON CONFLICT (deployment_id)
                             DO UPDATE SET
                                 version = strategy_state.version + 1,
                                 state_data = excluded.state_data,
@@ -1284,7 +1318,7 @@ class SQLiteStore:
                                 updated_at = excluded.updated_at
                             """,
                             (
-                                state.strategy_id,
+                                state.deployment_id,
                                 state.version,
                                 state_json,
                                 state.schema_version,
@@ -1305,11 +1339,11 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
-    async def delete(self, strategy_id: str) -> bool:
+    async def delete(self, deployment_id: str) -> bool:
         """Delete state row for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             True if state was deleted, False if not found.
@@ -1319,8 +1353,8 @@ class SQLiteStore:
 
         def _sync_delete() -> bool:
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "DELETE FROM strategy_state WHERE strategy_id = ?",
-                (strategy_id,),
+                "DELETE FROM strategy_state WHERE deployment_id = ?",
+                (deployment_id,),
             )
             self._conn.commit()  # type: ignore[union-attr]
             return cursor.rowcount > 0
@@ -1328,20 +1362,20 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_delete)
 
-    async def get_all_strategy_ids(self) -> list[str]:
-        """Get all strategy IDs.
+    async def get_all_deployment_ids(self) -> list[str]:
+        """Get all deployment IDs.
 
         Returns:
-            List of strategy IDs.
+            List of deployment IDs.
         """
         if not self._initialized:
             await self.initialize()
 
         def _sync_get_ids() -> list[str]:
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT strategy_id FROM strategy_state ORDER BY strategy_id"
+                "SELECT deployment_id FROM strategy_state ORDER BY deployment_id"
             )
-            return [row["strategy_id"] for row in cursor.fetchall()]
+            return [row["deployment_id"] for row in cursor.fetchall()]
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get_ids)
@@ -1459,6 +1493,12 @@ class SQLiteStore:
             order. The transaction also makes the write atomic with
             respect to readers and crash-durable on ``synchronous=FULL``.
         """
+        # clob_orders is a deployment-scoped table (blueprint 29 §3): refuse
+        # to persist a row under a blank identity. The caller must stamp the
+        # order's deployment_id before it reaches persistence. (The CLOB
+        # execution path does not yet wire this call — the guard makes the
+        # latent empty-id footgun fail loudly if/when that wiring lands.)
+        order_deployment_id = _require_deployment_id(order.deployment_id, operation="save_clob_order")
         if not self._initialized:
             await self.initialize()
 
@@ -1474,8 +1514,13 @@ class SQLiteStore:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     cursor = conn.execute(
-                        "SELECT id FROM clob_orders WHERE order_id = ?",
-                        (order.order_id,),
+                        """
+                        SELECT id FROM clob_orders
+                        WHERE order_id = ?
+                          AND deployment_id = ?
+                        LIMIT 1
+                        """,
+                        (order.order_id, order_deployment_id),
                     )
                     existing = cursor.fetchone()
 
@@ -1483,13 +1528,14 @@ class SQLiteStore:
                         conn.execute(
                             """
                             UPDATE clob_orders
-                            SET market_id = ?, token_id = ?, side = ?, status = ?,
+                            SET deployment_id = ?, market_id = ?, token_id = ?, side = ?, status = ?,
                                 price = ?, size = ?, filled_size = ?, average_fill_price = ?,
                                 fills = ?, order_type = ?, intent_id = ?, error = ?,
                                 metadata = ?, updated_at = ?
-                            WHERE order_id = ?
+                            WHERE id = ?
                             """,
                             (
+                                order_deployment_id,
                                 order.market_id,
                                 order.token_id,
                                 order.side,
@@ -1504,19 +1550,21 @@ class SQLiteStore:
                                 order.error,
                                 metadata_json,
                                 now,
-                                order.order_id,
+                                existing["id"],
                             ),
                         )
                     else:
                         conn.execute(
                             """
                             INSERT INTO clob_orders
-                            (order_id, market_id, token_id, side, status, price, size,
-                             filled_size, average_fill_price, fills, order_type, intent_id,
-                             error, metadata, submitted_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (deployment_id, order_id, market_id, token_id, side, status,
+                             price, size, filled_size, average_fill_price, fills,
+                             order_type, intent_id, error, metadata, submitted_at,
+                             updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
+                                order_deployment_id,
                                 order.order_id,
                                 order.market_id,
                                 order.token_id,
@@ -1551,7 +1599,7 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
-    async def get_clob_order(self, order_id: str) -> "ClobOrderState | None":
+    async def get_clob_order(self, order_id: str, *, deployment_id: str) -> "ClobOrderState | None":
         """Get a CLOB order by order_id.
 
         Args:
@@ -1560,19 +1608,22 @@ class SQLiteStore:
         Returns:
             ClobOrderState if found, None otherwise.
         """
+        deployment_id = _require_deployment_id(deployment_id, operation="get_clob_order")
         if not self._initialized:
             await self.initialize()
 
         def _sync_get() -> "ClobOrderState | None":
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT order_id, market_id, token_id, side, status, price, size,
+                SELECT deployment_id, order_id, market_id, token_id, side, status, price, size,
                        filled_size, average_fill_price, fills, order_type, intent_id,
                        error, metadata, submitted_at, updated_at
                 FROM clob_orders
-                WHERE order_id = ?
+                WHERE order_id = ? AND deployment_id = ?
+                ORDER BY submitted_at DESC
+                LIMIT 1
                 """,
-                (order_id,),
+                (order_id, deployment_id),
             )
             row = cursor.fetchone()
 
@@ -1584,7 +1635,12 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
-    async def get_open_clob_orders(self, market_id: str | None = None) -> list["ClobOrderState"]:
+    async def get_open_clob_orders(
+        self,
+        market_id: str | None = None,
+        *,
+        deployment_id: str,
+    ) -> list["ClobOrderState"]:
         """Get all open CLOB orders, optionally filtered by market.
 
         Open orders are those with status: pending, submitted, live, partially_filled.
@@ -1595,38 +1651,30 @@ class SQLiteStore:
         Returns:
             List of open ClobOrderState, newest first.
         """
+        deployment_id = _require_deployment_id(deployment_id, operation="get_open_clob_orders")
         if not self._initialized:
             await self.initialize()
 
         open_statuses = ("pending", "submitted", "live", "partially_filled")
 
         def _sync_get() -> list["ClobOrderState"]:
+            placeholders = ",".join("?" * len(open_statuses))
+            where = [f"status IN ({placeholders})", "deployment_id = ?"]
+            params: list[Any] = [*open_statuses, deployment_id]
             if market_id:
-                placeholders = ",".join("?" * len(open_statuses))
-                cursor = self._conn.execute(  # type: ignore[union-attr]
-                    f"""
-                    SELECT order_id, market_id, token_id, side, status, price, size,
-                           filled_size, average_fill_price, fills, order_type, intent_id,
-                           error, metadata, submitted_at, updated_at
-                    FROM clob_orders
-                    WHERE market_id = ? AND status IN ({placeholders})
-                    ORDER BY submitted_at DESC
-                    """,
-                    (market_id, *open_statuses),
-                )
-            else:
-                placeholders = ",".join("?" * len(open_statuses))
-                cursor = self._conn.execute(  # type: ignore[union-attr]
-                    f"""
-                    SELECT order_id, market_id, token_id, side, status, price, size,
-                           filled_size, average_fill_price, fills, order_type, intent_id,
-                           error, metadata, submitted_at, updated_at
-                    FROM clob_orders
-                    WHERE status IN ({placeholders})
-                    ORDER BY submitted_at DESC
-                    """,
-                    open_statuses,
-                )
+                where.append("market_id = ?")
+                params.append(market_id)
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                f"""
+                SELECT deployment_id, order_id, market_id, token_id, side, status, price, size,
+                       filled_size, average_fill_price, fills, order_type, intent_id,
+                       error, metadata, submitted_at, updated_at
+                FROM clob_orders
+                WHERE {" AND ".join(where)}
+                ORDER BY submitted_at DESC
+                """,  # noqa: S608
+                params,
+            )
 
             return [self._row_to_clob_order(row) for row in cursor.fetchall()]
 
@@ -1641,6 +1689,8 @@ class SQLiteStore:
         filled_size: str | None = None,
         average_fill_price: str | None = None,
         error: str | None = None,
+        *,
+        deployment_id: str,
     ) -> bool:
         """Update the status and fill information of a CLOB order.
 
@@ -1655,6 +1705,7 @@ class SQLiteStore:
         Returns:
             True if order was found and updated.
         """
+        deployment_id = _require_deployment_id(deployment_id, operation="update_clob_order_status")
         if not self._initialized:
             await self.initialize()
 
@@ -1682,9 +1733,10 @@ class SQLiteStore:
                 updates.append("error = ?")
                 params.append(error)
 
-            params.append(order_id)
+            params.extend([order_id, deployment_id])
+            where = "order_id = ? AND deployment_id = ?"
 
-            query = f"UPDATE clob_orders SET {', '.join(updates)} WHERE order_id = ?"
+            query = f"UPDATE clob_orders SET {', '.join(updates)} WHERE {where}"
             cursor = self._conn.execute(query, params)  # type: ignore[union-attr]
             self._conn.commit()  # type: ignore[union-attr]
             return cursor.rowcount > 0
@@ -1692,7 +1744,7 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_update)
 
-    async def delete_clob_order(self, order_id: str) -> bool:
+    async def delete_clob_order(self, order_id: str, *, deployment_id: str) -> bool:
         """Delete a CLOB order from storage.
 
         Args:
@@ -1701,13 +1753,14 @@ class SQLiteStore:
         Returns:
             True if order was found and deleted.
         """
+        deployment_id = _require_deployment_id(deployment_id, operation="delete_clob_order")
         if not self._initialized:
             await self.initialize()
 
         def _sync_delete() -> bool:
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "DELETE FROM clob_orders WHERE order_id = ?",
-                (order_id,),
+                "DELETE FROM clob_orders WHERE order_id = ? AND deployment_id = ?",
+                (order_id, deployment_id),
             )
             self._conn.commit()  # type: ignore[union-attr]
             return cursor.rowcount > 0
@@ -1715,7 +1768,12 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_delete)
 
-    async def get_clob_orders_by_intent(self, intent_id: str) -> list["ClobOrderState"]:
+    async def get_clob_orders_by_intent(
+        self,
+        intent_id: str,
+        *,
+        deployment_id: str,
+    ) -> list["ClobOrderState"]:
         """Get all CLOB orders associated with an intent.
 
         Args:
@@ -1724,20 +1782,21 @@ class SQLiteStore:
         Returns:
             List of ClobOrderState, newest first.
         """
+        deployment_id = _require_deployment_id(deployment_id, operation="get_clob_orders_by_intent")
         if not self._initialized:
             await self.initialize()
 
         def _sync_get() -> list["ClobOrderState"]:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT order_id, market_id, token_id, side, status, price, size,
+                SELECT deployment_id, order_id, market_id, token_id, side, status, price, size,
                        filled_size, average_fill_price, fills, order_type, intent_id,
                        error, metadata, submitted_at, updated_at
                 FROM clob_orders
-                WHERE intent_id = ?
+                WHERE intent_id = ? AND deployment_id = ?
                 ORDER BY submitted_at DESC
                 """,
-                (intent_id,),
+                (intent_id, deployment_id),
             )
             return [self._row_to_clob_order(row) for row in cursor.fetchall()]
 
@@ -1794,6 +1853,7 @@ class SQLiteStore:
             updated_at = datetime.fromisoformat(updated_at)
 
         return ClobOrderState(
+            deployment_id=row["deployment_id"] or "",
             order_id=row["order_id"],
             market_id=row["market_id"],
             token_id=row["token_id"],
@@ -1834,7 +1894,7 @@ class SQLiteStore:
             fsync'd before returning.
 
         Note:
-            Uses INSERT OR REPLACE to handle unique constraint on (strategy_id, timestamp).
+            Uses INSERT OR REPLACE to handle unique constraint on (deployment_id, timestamp).
         """
 
         if not self._initialized:
@@ -1869,14 +1929,14 @@ class SQLiteStore:
                     cursor = conn.execute(
                         """
                         INSERT INTO portfolio_snapshots (
-                            strategy_id, timestamp, iteration_number, total_value_usd,
+                            deployment_id, timestamp, iteration_number, total_value_usd,
                             available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                             value_confidence, positions_json,
                             token_prices_json, wallet_balances_json,
                             chain, created_at,
-                            deployment_id, cycle_id, execution_mode
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
+                            cycle_id, execution_mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(deployment_id, timestamp) DO UPDATE SET
                             iteration_number = excluded.iteration_number,
                             total_value_usd = excluded.total_value_usd,
                             available_cash_usd = excluded.available_cash_usd,
@@ -1888,11 +1948,6 @@ class SQLiteStore:
                             wallet_balances_json = excluded.wallet_balances_json,
                             chain = excluded.chain,
                             created_at = excluded.created_at,
-                            deployment_id = CASE
-                                WHEN portfolio_snapshots.deployment_id = ''
-                                THEN excluded.deployment_id
-                                ELSE portfolio_snapshots.deployment_id
-                            END,
                             cycle_id = CASE
                                 WHEN portfolio_snapshots.cycle_id = ''
                                 THEN excluded.cycle_id
@@ -1906,7 +1961,7 @@ class SQLiteStore:
                         RETURNING id
                         """,
                         (
-                            snapshot.strategy_id,
+                            _canonical_deployment_id(snapshot),
                             snapshot.timestamp.isoformat(),
                             snapshot.iteration_number,
                             str(snapshot.total_value_usd),
@@ -1932,7 +1987,6 @@ class SQLiteStore:
                             else "[]",
                             snapshot.chain,
                             now,
-                            snapshot.deployment_id or "",
                             snapshot.cycle_id or "",
                             snapshot.execution_mode or "",
                         ),
@@ -1989,18 +2043,11 @@ class SQLiteStore:
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    # Phase 4 identity (VIB-4092/VIB-4099): snapshot is the
-                    # authoritative source — the runner stamps it via
-                    # _stamp_snapshot_identity before either writer is called.
-                    # Fall back to metrics for legacy callers that pre-date
-                    # the snapshot stamp.
-                    deployment_id = (
-                        getattr(snapshot, "deployment_id", "") or getattr(metrics, "deployment_id", "") or ""
-                    )
                     cycle_id = getattr(snapshot, "cycle_id", "") or getattr(metrics, "cycle_id", "") or ""
                     execution_mode = (
                         getattr(snapshot, "execution_mode", "") or getattr(metrics, "execution_mode", "") or ""
                     )
+                    deployment_id = snapshot.deployment_id or metrics.deployment_id
 
                     # 1. Save snapshot via INSERT ... ON CONFLICT DO UPDATE
                     # mirroring save_portfolio_snapshot (CodeRabbit). The
@@ -2018,14 +2065,14 @@ class SQLiteStore:
                     cursor = conn.execute(
                         """
                         INSERT INTO portfolio_snapshots (
-                            strategy_id, deployment_id, cycle_id, execution_mode,
+                            deployment_id, cycle_id, execution_mode,
                             timestamp, iteration_number, total_value_usd,
                             available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                             value_confidence, positions_json,
                             token_prices_json, wallet_balances_json,
                             chain, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(deployment_id, timestamp) DO UPDATE SET
                             iteration_number = excluded.iteration_number,
                             total_value_usd = excluded.total_value_usd,
                             available_cash_usd = excluded.available_cash_usd,
@@ -2037,11 +2084,6 @@ class SQLiteStore:
                             wallet_balances_json = excluded.wallet_balances_json,
                             chain = excluded.chain,
                             created_at = excluded.created_at,
-                            deployment_id = CASE
-                                WHEN portfolio_snapshots.deployment_id = ''
-                                THEN excluded.deployment_id
-                                ELSE portfolio_snapshots.deployment_id
-                            END,
                             cycle_id = CASE
                                 WHEN portfolio_snapshots.cycle_id = ''
                                 THEN excluded.cycle_id
@@ -2055,7 +2097,6 @@ class SQLiteStore:
                         RETURNING id
                         """,
                         (
-                            snapshot.strategy_id,
                             deployment_id,
                             cycle_id,
                             execution_mode,
@@ -2093,14 +2134,14 @@ class SQLiteStore:
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO portfolio_metrics (
-                            strategy_id, initial_value_usd, initial_timestamp,
+                            deployment_id, initial_value_usd, initial_timestamp,
                             deposits_usd, withdrawals_usd, gas_spent_usd,
                             total_value_usd, positions_json, cycle_id,
-                            deployment_id, execution_mode, is_complete, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            execution_mode, is_complete, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            metrics.strategy_id,
+                            _canonical_deployment_id(metrics),
                             str(metrics.initial_value_usd),
                             metrics.timestamp.isoformat(),
                             str(metrics.deposits_usd),
@@ -2109,7 +2150,6 @@ class SQLiteStore:
                             str(metrics.total_value_usd),
                             getattr(metrics, "positions_json", "[]"),
                             cycle_id,
-                            deployment_id,
                             execution_mode,
                             getattr(metrics, "is_complete", True),
                             now,
@@ -2125,11 +2165,11 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save_atomic)
 
-    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+    async def get_latest_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
         """Get the most recent portfolio snapshot for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             Most recent PortfolioSnapshot or None if not found.
@@ -2141,17 +2181,17 @@ class SQLiteStore:
         def _sync_get() -> "PortfolioSnapshot | None":
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT strategy_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE strategy_id = ?
+                WHERE deployment_id = ?
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """,
-                (strategy_id,),
+                (deployment_id,),
             )
             row = cursor.fetchone()
             if not row:
@@ -2163,7 +2203,7 @@ class SQLiteStore:
 
     async def get_snapshots_since(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime,
         limit: int = 168,
     ) -> list["PortfolioSnapshot"]:
@@ -2172,7 +2212,7 @@ class SQLiteStore:
         Used for building PnL charts in the dashboard.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
             since: Start timestamp (inclusive).
             limit: Maximum number of snapshots to return (default 168 = 7 days hourly).
 
@@ -2186,17 +2226,17 @@ class SQLiteStore:
         def _sync_get() -> list["PortfolioSnapshot"]:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT strategy_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE strategy_id = ? AND timestamp >= ?
+                WHERE deployment_id = ? AND timestamp >= ?
                 ORDER BY timestamp ASC
                 LIMIT ?
                 """,
-                (strategy_id, since.isoformat(), limit),
+                (deployment_id, since.isoformat(), limit),
             )
             return [self._row_to_portfolio_snapshot(row) for row in cursor.fetchall()]
 
@@ -2205,7 +2245,7 @@ class SQLiteStore:
 
     async def get_snapshot_at(
         self,
-        strategy_id: str,
+        deployment_id: str,
         timestamp: datetime,
     ) -> "PortfolioSnapshot | None":
         """Get the portfolio snapshot closest to a timestamp.
@@ -2213,7 +2253,7 @@ class SQLiteStore:
         Used for calculating PnL at specific points in time (e.g., 24h ago).
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
             timestamp: Target timestamp.
 
         Returns:
@@ -2227,17 +2267,17 @@ class SQLiteStore:
             # Get closest snapshot at or before the timestamp
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT strategy_id, timestamp, iteration_number, total_value_usd,
+                SELECT timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain,
                        deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
-                WHERE strategy_id = ? AND timestamp <= ?
+                WHERE deployment_id = ? AND timestamp <= ?
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """,
-                (strategy_id, timestamp.isoformat()),
+                (deployment_id, timestamp.isoformat()),
             )
             row = cursor.fetchone()
             if not row:
@@ -2306,13 +2346,9 @@ class SQLiteStore:
             positions_payload = json.loads(positions_payload)
         positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
-        # VIB-4097 identity columns and VIB-3614 cash split columns are read
-        # defensively because legacy DBs pre-date them. The model's
-        # ``from_dict`` accepts the ``""`` / ``"0"`` defaults emitted here.
         return PortfolioSnapshot.from_dict(
             {
                 "timestamp": timestamp.isoformat(),
-                "strategy_id": row["strategy_id"],
                 "total_value_usd": str(row["total_value_usd"]),
                 "available_cash_usd": str(row["available_cash_usd"]),
                 "deployed_capital_usd": self._safe_row_str(row, "deployed_capital_usd", "0"),
@@ -2353,14 +2389,14 @@ class SQLiteStore:
             self._conn.execute(  # type: ignore[union-attr]
                 """
                 INSERT OR REPLACE INTO portfolio_metrics (
-                    strategy_id, initial_value_usd, initial_timestamp,
+                    deployment_id, initial_value_usd, initial_timestamp,
                     deposits_usd, withdrawals_usd, gas_spent_usd,
                     total_value_usd, positions_json, cycle_id,
-                    deployment_id, execution_mode, is_complete, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    execution_mode, is_complete, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    metrics.strategy_id,
+                    _canonical_deployment_id(metrics),
                     str(metrics.initial_value_usd),
                     metrics.timestamp.isoformat(),
                     str(metrics.deposits_usd),
@@ -2369,7 +2405,6 @@ class SQLiteStore:
                     str(metrics.total_value_usd),
                     getattr(metrics, "positions_json", "[]"),
                     getattr(metrics, "cycle_id", None),
-                    getattr(metrics, "deployment_id", "") or "",
                     getattr(metrics, "execution_mode", "") or "",
                     getattr(metrics, "is_complete", True),
                     now,
@@ -2381,11 +2416,11 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+    async def get_portfolio_metrics(self, deployment_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics for a strategy.
 
         Args:
-            strategy_id: Strategy identifier.
+            deployment_id: Deployment identifier.
 
         Returns:
             PortfolioMetrics or None if not found.
@@ -2400,14 +2435,14 @@ class SQLiteStore:
         def _sync_get() -> "PortfolioMetrics | None":
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT strategy_id, initial_value_usd, initial_timestamp,
+                SELECT initial_value_usd, initial_timestamp,
                        deposits_usd, withdrawals_usd, gas_spent_usd,
                        total_value_usd, positions_json, cycle_id,
                        deployment_id, execution_mode, is_complete, updated_at
                 FROM portfolio_metrics
-                WHERE strategy_id = ?
+                WHERE deployment_id = ?
                 """,
-                (strategy_id,),
+                (deployment_id,),
             )
             row = cursor.fetchone()
             if not row:
@@ -2423,11 +2458,11 @@ class SQLiteStore:
                 updated_at = datetime.fromisoformat(updated_at)
 
             # Read Phase 4 fields safely (may not exist in old DBs)
-            deployment_id = ""
+            row_deployment_id = ""
             execution_mode = ""
             is_complete = True
             try:
-                deployment_id = row["deployment_id"] or ""
+                row_deployment_id = row["deployment_id"] or ""
             except (KeyError, IndexError):
                 pass
             try:
@@ -2440,7 +2475,6 @@ class SQLiteStore:
                 pass
 
             return PortfolioMetrics(
-                strategy_id=row["strategy_id"],
                 timestamp=updated_at,
                 total_value_usd=Decimal(row["total_value_usd"] or "0"),
                 initial_value_usd=Decimal(row["initial_value_usd"]),
@@ -2449,7 +2483,7 @@ class SQLiteStore:
                 gas_spent_usd=Decimal(row["gas_spent_usd"]),
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],
-                deployment_id=deployment_id,
+                deployment_id=row_deployment_id,
                 execution_mode=execution_mode,
                 is_complete=is_complete,
             )
@@ -2718,7 +2752,6 @@ class SQLiteStore:
             captured_rows.append(
                 (
                     snapshot_id,
-                    r.strategy_id,
                     r.deployment_id,
                     r.cycle_id,
                     r.timestamp.isoformat() if r.timestamp else "",
@@ -2754,7 +2787,7 @@ class SQLiteStore:
                 self._conn.executemany(  # type: ignore[union-attr]
                     """
                     INSERT INTO position_state_snapshots (
-                        snapshot_id, strategy_id, deployment_id, cycle_id,
+                        snapshot_id, deployment_id, cycle_id,
                         captured_at, position_id, position_type,
                         current_tick, in_range, liquidity, sqrt_price_x96,
                         supply_balance, borrow_balance, health_factor,
@@ -2765,7 +2798,7 @@ class SQLiteStore:
                         margin_utilisation_pct,
                         delta_vs_protocol_pct, value_confidence,
                         schema_version, formula_version, matching_policy_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     captured_rows,
                 )
@@ -2778,7 +2811,7 @@ class SQLiteStore:
     async def get_position_state_snapshots(
         self,
         snapshot_id: int | None = None,
-        strategy_id: str | None = None,
+        deployment_id: str | None = None,
         position_id: str | None = None,
         limit: int = 1000,
     ) -> list[dict]:
@@ -2797,9 +2830,12 @@ class SQLiteStore:
             if snapshot_id is not None:
                 where.append("snapshot_id = ?")
                 params.append(snapshot_id)
-            if strategy_id is not None:
-                where.append("strategy_id = ?")
-                params.append(strategy_id)
+            if deployment_id is not None:
+                # SQL column is the canonical `deployment_id` (blueprint 29
+                # §3); the method parameter is still named `deployment_id`
+                # (VIB-4726).
+                where.append("deployment_id = ?")
+                params.append(deployment_id)
             if position_id is not None:
                 where.append("position_id = ?")
                 params.append(position_id)
@@ -2833,19 +2869,18 @@ class SQLiteStore:
                 self._conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT OR REPLACE INTO transaction_ledger
-                    (id, cycle_id, strategy_id, deployment_id, execution_mode,
+                    (id, cycle_id, deployment_id, execution_mode,
                      timestamp, intent_type,
                      token_in, amount_in, token_out, amount_out,
                      effective_price, slippage_bps, gas_used, gas_usd,
                      tx_hash, chain, protocol, success, error,
                      extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id,
                         entry.cycle_id,
-                        entry.strategy_id,
-                        getattr(entry, "deployment_id", "") or "",
+                        _canonical_deployment_id(entry),
                         getattr(entry, "execution_mode", "") or "",
                         entry.timestamp.isoformat(),
                         entry.intent_type,
@@ -3004,19 +3039,18 @@ class SQLiteStore:
                         conn.execute(
                             """
                             INSERT OR REPLACE INTO transaction_ledger
-                            (id, cycle_id, strategy_id, deployment_id, execution_mode,
+                            (id, cycle_id, deployment_id, execution_mode,
                              timestamp, intent_type,
                              token_in, amount_in, token_out, amount_out,
                              effective_price, slippage_bps, gas_used, gas_usd,
                              tx_hash, chain, protocol, success, error,
                              extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 entry.id,
                                 entry.cycle_id,
-                                entry.strategy_id,
-                                getattr(entry, "deployment_id", "") or "",
+                                _canonical_deployment_id(entry),
                                 getattr(entry, "execution_mode", "") or "",
                                 entry.timestamp.isoformat(),
                                 entry.intent_type,
@@ -3302,7 +3336,7 @@ class SQLiteStore:
 
     async def get_ledger_entries(
         self,
-        strategy_id: str,
+        deployment_id: str,
         since: datetime | None = None,
         intent_type: str | None = None,
         limit: int = 100,
@@ -3311,7 +3345,7 @@ class SQLiteStore:
         """Query transaction ledger entries.
 
         Args:
-            strategy_id: Strategy to query.
+            deployment_id: Strategy to query.
             since: Only entries after this timestamp.
             intent_type: Filter by intent type.
             limit: Maximum entries to return.
@@ -3326,8 +3360,10 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_get() -> list[LedgerEntry]:
-            conditions = ["strategy_id = ?"]
-            params: list[Any] = [strategy_id]
+            # SQL column is the canonical `deployment_id` (blueprint 29 §3);
+            # the method parameter is still named `deployment_id` (VIB-4726).
+            conditions = ["deployment_id = ?"]
+            params: list[Any] = [deployment_id]
 
             if since is not None:
                 conditions.append("timestamp > ?")
@@ -3363,8 +3399,7 @@ class SQLiteStore:
                     LedgerEntry(
                         id=row["id"],
                         cycle_id=row["cycle_id"],
-                        strategy_id=row["strategy_id"],
-                        deployment_id=row["deployment_id"] if "deployment_id" in row_keys else "",
+                        deployment_id=row["deployment_id"],
                         execution_mode=row["execution_mode"] if "execution_mode" in row_keys else "",
                         timestamp=datetime.fromisoformat(row["timestamp"]),
                         intent_type=row["intent_type"],
@@ -3395,7 +3430,6 @@ class SQLiteStore:
     async def sum_ledger_gas_usd(
         self,
         deployment_id: str,
-        strategy_id: str | None = None,
     ) -> Decimal:
         """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
 
@@ -3403,10 +3437,8 @@ class SQLiteStore:
         empty-string case is the parser-didn't-emit signal — must not silently
         drop the row). Returns ``Decimal("0")`` on no rows.
 
-        The fallback to ``strategy_id`` covers the bootstrap window where a
-        ledger row was written before ``deployment_id`` was stamped (only
-        on the very first iteration pre-_stamp_snapshot_identity); without
-        the fallback that single row's gas_usd would be lost from the SUM.
+        VIB-4722 collapsed the table to a single ``deployment_id`` SQL column.
+        Reads filter that column directly; there is no legacy identity fallback.
         """
         if not self._initialized:
             await self.initialize()
@@ -3425,9 +3457,8 @@ class SQLiteStore:
                     SELECT gas_usd
                     FROM transaction_ledger
                     WHERE deployment_id = ?
-                       OR (deployment_id = '' AND strategy_id = ?)
                     """,
-                    (deployment_id, strategy_id or deployment_id),
+                    (deployment_id,),
                 )
                 rows = cursor.fetchall()
             total = Decimal("0")
@@ -3506,16 +3537,15 @@ class SQLiteStore:
                 self._conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT OR REPLACE INTO accounting_events
-                    (id, deployment_id, strategy_id, cycle_id, execution_mode,
+                    (id, deployment_id, cycle_id, execution_mode,
                      timestamp, chain, protocol, wallet_address, event_type, position_key,
                      ledger_entry_id, tx_hash, confidence, payload_json, schema_version,
                      position_reference)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identity.id,
                         identity.deployment_id,
-                        identity.strategy_id,
                         identity.cycle_id,
                         identity.execution_mode,
                         identity.timestamp.isoformat(),
@@ -3850,7 +3880,6 @@ class SQLiteStore:
         self,
         outbox_id: str,
         deployment_id: str,
-        strategy_id: str,
         cycle_id: str,
         ledger_entry_id: str,
         intent_type: str,
@@ -3862,8 +3891,12 @@ class SQLiteStore:
         """Write one row to accounting_outbox.  Called from the execution hot path via write_outbox_entry."""
         if not self._initialized:
             await self.initialize()
-        # Capture all args for the inner closure.
-        _outbox_id, _dep_id, _strat_id, _cycle_id = outbox_id, deployment_id, strategy_id, cycle_id
+        # Capture all args for the inner closure. VIB-4722 collapsed
+        # accounting_outbox to a single canonical `deployment_id` column
+        # (the dead `deployment_id` column was dropped), so the `deployment_id`
+        # method parameter (kept for the signature — VIB-4726) is no longer
+        # captured.
+        _outbox_id, _dep_id, _cycle_id = outbox_id, deployment_id, cycle_id
         _led_id, _intent, _wallet, _pos, _mkt = ledger_entry_id, intent_type, wallet_address, position_key, market_id
         _created = created_at
 
@@ -3874,15 +3907,14 @@ class SQLiteStore:
                 self._conn.execute(
                     """
                     INSERT OR IGNORE INTO accounting_outbox
-                    (id, deployment_id, strategy_id, cycle_id, ledger_entry_id,
+                    (id, deployment_id, cycle_id, ledger_entry_id,
                      intent_type, wallet_address, position_key, market_id,
                      status, attempts, error, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, '', ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, '', ?, ?)
                     """,
                     (
                         _outbox_id,
                         _dep_id,
-                        _strat_id,
                         _cycle_id,
                         _led_id,
                         _intent,

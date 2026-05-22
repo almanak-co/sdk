@@ -193,7 +193,7 @@ class TJTightScalperStrategy(IntentStrategy[TJTightScalperConfig]):
                             timestamp=datetime.now(UTC),
                             event_type=TimelineEventType.STATE_CHANGE,
                             description=f"Rebalancing: price moved {price_change_pct * 100:.2f}% from center",
-                            strategy_id=self.strategy_id,
+                            deployment_id=self.deployment_id,
                             details={
                                 "trigger": "price_deviation",
                                 "deviation_pct": str(price_change_pct * 100),
@@ -230,7 +230,7 @@ class TJTightScalperStrategy(IntentStrategy[TJTightScalperConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.STATE_CHANGE,
                     description="Opening new TraderJoe LP position",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "opening_new_position", "pool": self.pool},
                 )
             )
@@ -298,7 +298,7 @@ class TJTightScalperStrategy(IntentStrategy[TJTightScalperConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"TraderJoe tight-range LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "bin_step": self.bin_step,
@@ -330,7 +330,7 @@ class TJTightScalperStrategy(IntentStrategy[TJTightScalperConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"TraderJoe tight-range LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"pool": self.pool},
                 )
             )
@@ -392,7 +392,7 @@ class TJTightScalperStrategy(IntentStrategy[TJTightScalperConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

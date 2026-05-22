@@ -228,14 +228,14 @@ class MockSwapIntent:
 class DeterministicLendingStrategy:
     """Strategy that supplies to Aave V3 then holds through the crisis."""
 
-    def __init__(self, intents: list[Any | None], strategy_id: str = "aave_v3_crisis"):
+    def __init__(self, intents: list[Any | None], deployment_id: str = "aave_v3_crisis"):
         self._intents = intents
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         if self._call_count < len(self._intents):

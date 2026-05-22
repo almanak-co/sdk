@@ -10,7 +10,7 @@ Usage:
 
     # Create a canary deployment
     canary = CanaryDeployment(
-        strategy_id="my_strategy",
+        deployment_id="my_strategy",
         stable_version_id="v_123",
         canary_version_id="v_456",
     )
@@ -34,7 +34,8 @@ from .canary import (
 )
 from .mode import (
     DeploymentMode,
-    agent_id,
+    FatalBootError,
+    deployment_id,
     deployment_mode,
     is_hosted,
     is_local,
@@ -52,10 +53,12 @@ __all__ = [
     "CanaryEventType",
     "CanaryComparison",
     "PromotionCriteria",
-    # Deployment-mode helpers (VIB-3759 — AGENT_ID single signal).
-    "agent_id",
+    # Deployment-mode helpers (VIB-4722 — ALMANAK_IS_HOSTED signal,
+    # ALMANAK_DEPLOYMENT_ID value).
+    "deployment_id",
     "deployment_mode",
     "is_hosted",
     "is_local",
     "DeploymentMode",
+    "FatalBootError",
 ]

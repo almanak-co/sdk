@@ -74,7 +74,7 @@ async def test_missing_deployment_id_returns_invalid_argument() -> None:
     servicer = _make_servicer(rows=[])
     ctx = _make_context()
     req = gateway_pb2.GetPositionHistoryRequest(
-        strategy_id=_DEPLOYMENT_ID, deployment_id="", position_id=_POSITION_ID
+        deployment_id="", position_id=_POSITION_ID
     )
     resp = await servicer.GetPositionHistory(req, ctx)
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -86,7 +86,7 @@ async def test_missing_position_id_returns_invalid_argument() -> None:
     servicer = _make_servicer(rows=[])
     ctx = _make_context()
     req = gateway_pb2.GetPositionHistoryRequest(
-        strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID, position_id=""
+        deployment_id=_DEPLOYMENT_ID, position_id=""
     )
     resp = await servicer.GetPositionHistory(req, ctx)
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -98,7 +98,7 @@ async def test_warm_backend_missing_method_returns_empty_quietly() -> None:
     servicer = _make_servicer(has_method=False)
     ctx = _make_context()
     req = gateway_pb2.GetPositionHistoryRequest(
-        strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
+        deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
     )
     resp = await servicer.GetPositionHistory(req, ctx)
     ctx.set_code.assert_not_called()
@@ -182,7 +182,7 @@ async def test_rows_converted_to_position_event_data() -> None:
     servicer = _make_servicer(rows=rows)
     ctx = _make_context()
     req = gateway_pb2.GetPositionHistoryRequest(
-        strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
+        deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
     )
     resp = await servicer.GetPositionHistory(req, ctx)
 
@@ -205,7 +205,7 @@ async def test_backend_exception_is_fail_quiet() -> None:
     servicer = _make_servicer(raise_exc=RuntimeError("db gone"))
     ctx = _make_context()
     req = gateway_pb2.GetPositionHistoryRequest(
-        strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
+        deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
     )
     resp = await servicer.GetPositionHistory(req, ctx)
     ctx.set_code.assert_not_called()

@@ -415,7 +415,7 @@ def test_check_reports_config_validation_error(tmp_path: Path) -> None:
         "        return Intent.hold(reason='never reached')\n"
         "    def get_open_positions(self):\n"
         "        from almanak.framework.teardown import TeardownPositionSummary\n"
-        "        return TeardownPositionSummary.empty(self.strategy_id)\n"
+        "        return TeardownPositionSummary.empty(self.deployment_id)\n"
         "    def generate_teardown_intents(self, mode=None, market=None):\n"
         "        return []\n",
         encoding="utf-8",
@@ -469,7 +469,7 @@ def test_check_handles_missing_validate_config_hook(
             "        return Intent.hold(reason='never reached')\n"
             "    def get_open_positions(self):\n"
             "        from almanak.framework.teardown import TeardownPositionSummary\n"
-            "        return TeardownPositionSummary.empty(self.strategy_id or 'legacy')\n"
+            "        return TeardownPositionSummary.empty(self.deployment_id or 'legacy')\n"
             "    def generate_teardown_intents(self, mode=None, market=None):\n"
             "        return []\n",
             encoding="utf-8",

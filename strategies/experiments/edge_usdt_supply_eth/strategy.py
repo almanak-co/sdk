@@ -325,7 +325,7 @@ class EdgeUsdtSupplyEthStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "edge_usdt_supply_eth"),
+            deployment_id=getattr(self, "deployment_id", "edge_usdt_supply_eth"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

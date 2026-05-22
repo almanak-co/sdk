@@ -3,7 +3,7 @@
 Verifies that:
 - SavePortfolioMetrics delegates to the warm backend
 - GetPortfolioMetrics returns data in the correct proto format
-- Error handling works for missing strategy_id and backend failures
+- Error handling works for missing deployment_id and backend failures
 """
 
 from datetime import UTC, datetime
@@ -51,7 +51,7 @@ class TestSavePortfolioMetrics:
         state_service._state_manager = mock_sm
 
         request = gateway_pb2.SaveMetricsRequest(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             initial_value_usd="10000.50",
             initial_timestamp=1712000000,
             deposits_usd="500.00",
@@ -65,17 +65,17 @@ class TestSavePortfolioMetrics:
         mock_warm.save_portfolio_metrics.assert_called_once()
 
         saved_metrics = mock_warm.save_portfolio_metrics.call_args[0][0]
-        assert saved_metrics.strategy_id == "test-strategy"
+        assert saved_metrics.deployment_id == "test-strategy"
         assert saved_metrics.initial_value_usd == Decimal("10000.50")
         assert saved_metrics.deposits_usd == Decimal("500.00")
         assert saved_metrics.withdrawals_usd == Decimal("100.00")
         assert saved_metrics.gas_spent_usd == Decimal("25.00")
 
-    @pytest.mark.parametrize("strategy_id", ["", "   "])
+    @pytest.mark.parametrize("deployment_id", ["", "   "])
     @pytest.mark.asyncio
-    async def test_save_metrics_missing_strategy_id(self, state_service, mock_context, strategy_id):
-        """SavePortfolioMetrics rejects empty or whitespace-only strategy_id."""
-        request = gateway_pb2.SaveMetricsRequest(strategy_id=strategy_id)
+    async def test_save_metrics_missing_deployment_id(self, state_service, mock_context, deployment_id):
+        """SavePortfolioMetrics rejects empty or whitespace-only deployment_id."""
+        request = gateway_pb2.SaveMetricsRequest(deployment_id=deployment_id)
         response = await state_service.SavePortfolioMetrics(request, mock_context)
 
         assert response.success is False
@@ -89,7 +89,7 @@ class TestSavePortfolioMetrics:
         state_service._state_manager = mock_sm
 
         request = gateway_pb2.SaveMetricsRequest(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             initial_value_usd="10000",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
@@ -107,7 +107,7 @@ class TestSavePortfolioMetrics:
         state_service._state_manager = mock_sm
 
         request = gateway_pb2.SaveMetricsRequest(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             initial_value_usd="10000",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
@@ -126,7 +126,7 @@ class TestSavePortfolioMetrics:
         state_service._state_manager = mock_sm
 
         request = gateway_pb2.SaveMetricsRequest(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             initial_value_usd="not-a-number",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
@@ -145,7 +145,7 @@ class TestGetPortfolioMetrics:
         from almanak.framework.portfolio.models import PortfolioMetrics
 
         mock_metrics = PortfolioMetrics(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             timestamp=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
             total_value_usd=Decimal("12000"),
             initial_value_usd=Decimal("10000"),
@@ -160,11 +160,11 @@ class TestGetPortfolioMetrics:
         mock_sm.warm_backend = mock_warm
         state_service._state_manager = mock_sm
 
-        request = gateway_pb2.GetMetricsRequest(strategy_id="test-strategy")
+        request = gateway_pb2.GetMetricsRequest(deployment_id="test-strategy")
         response = await state_service.GetPortfolioMetrics(request, mock_context)
 
         assert response.found is True
-        assert response.strategy_id == "test-strategy"
+        assert response.deployment_id == "test-strategy"
         assert response.initial_value_usd == "10000"
         assert response.deposits_usd == "500"
         assert response.withdrawals_usd == "100"
@@ -180,16 +180,16 @@ class TestGetPortfolioMetrics:
         mock_sm.warm_backend = mock_warm
         state_service._state_manager = mock_sm
 
-        request = gateway_pb2.GetMetricsRequest(strategy_id="nonexistent")
+        request = gateway_pb2.GetMetricsRequest(deployment_id="nonexistent")
         response = await state_service.GetPortfolioMetrics(request, mock_context)
 
         assert response.found is False
 
-    @pytest.mark.parametrize("strategy_id", ["", "   "])
+    @pytest.mark.parametrize("deployment_id", ["", "   "])
     @pytest.mark.asyncio
-    async def test_get_metrics_missing_strategy_id(self, state_service, mock_context, strategy_id):
-        """GetPortfolioMetrics rejects empty or whitespace-only strategy_id."""
-        request = gateway_pb2.GetMetricsRequest(strategy_id=strategy_id)
+    async def test_get_metrics_missing_deployment_id(self, state_service, mock_context, deployment_id):
+        """GetPortfolioMetrics rejects empty or whitespace-only deployment_id."""
+        request = gateway_pb2.GetMetricsRequest(deployment_id=deployment_id)
         response = await state_service.GetPortfolioMetrics(request, mock_context)
 
         assert response.found is False
@@ -204,7 +204,7 @@ class TestGetPortfolioMetrics:
         mock_sm.warm_backend = mock_warm
         state_service._state_manager = mock_sm
 
-        request = gateway_pb2.GetMetricsRequest(strategy_id="test-strategy")
+        request = gateway_pb2.GetMetricsRequest(deployment_id="test-strategy")
         response = await state_service.GetPortfolioMetrics(request, mock_context)
 
         assert response.found is False
@@ -229,7 +229,7 @@ class TestGatewayStateManagerMetrics:
         gsm = GatewayStateManager(mock_client)
 
         metrics = PortfolioMetrics(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             timestamp=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
             total_value_usd=Decimal("12000"),
             initial_value_usd=Decimal("10000"),
@@ -250,7 +250,7 @@ class TestGatewayStateManagerMetrics:
         mock_client = MagicMock()
         mock_state_stub = MagicMock()
         mock_state_stub.GetPortfolioMetrics.return_value = gateway_pb2.PortfolioMetricsData(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             initial_value_usd="10000",
             initial_timestamp=1712000000,
             deposits_usd="500",
@@ -265,7 +265,7 @@ class TestGatewayStateManagerMetrics:
         result = await gsm.get_portfolio_metrics("test-strategy")
 
         assert result is not None
-        assert result.strategy_id == "test-strategy"
+        assert result.deployment_id == "test-strategy"
         assert result.initial_value_usd == Decimal("10000")
         assert result.deposits_usd == Decimal("500")
         mock_state_stub.GetPortfolioMetrics.assert_called_once()
@@ -294,7 +294,7 @@ class TestGatewayStateManagerMetrics:
         runner can halt the cycle and alert the operator.
 
         Exercises the transport-exception branch *and* asserts the typed
-        ``write_kind`` / ``strategy_id`` metadata on the raised exception.
+        ``write_kind`` / ``deployment_id`` metadata on the raised exception.
         """
         from almanak.framework.portfolio.models import PortfolioMetrics
         from almanak.framework.state.exceptions import AccountingPersistenceError
@@ -307,7 +307,7 @@ class TestGatewayStateManagerMetrics:
 
         gsm = GatewayStateManager(mock_client)
         metrics = PortfolioMetrics(
-            strategy_id="test",
+            deployment_id="test",
             timestamp=datetime.now(UTC),
             total_value_usd=Decimal("0"),
             initial_value_usd=Decimal("10000"),
@@ -321,7 +321,7 @@ class TestGatewayStateManagerMetrics:
         # the test to Python's ``raise X from Y`` implementation detail.
         assert "gRPC unavailable" in str(excinfo.value) or excinfo.value.cause is not None
         assert excinfo.value.write_kind == "metrics"
-        assert excinfo.value.strategy_id == "test"
+        assert excinfo.value.deployment_id == "test"
 
     @pytest.mark.asyncio
     async def test_save_metrics_response_failure(self):
@@ -343,7 +343,7 @@ class TestGatewayStateManagerMetrics:
 
         gsm = GatewayStateManager(mock_client)
         metrics = PortfolioMetrics(
-            strategy_id="test",
+            deployment_id="test",
             timestamp=datetime.now(UTC),
             total_value_usd=Decimal("0"),
             initial_value_usd=Decimal("10000"),
@@ -353,5 +353,5 @@ class TestGatewayStateManagerMetrics:
             await gsm.save_portfolio_metrics(metrics)
 
         assert excinfo.value.write_kind == "metrics"
-        assert excinfo.value.strategy_id == "test"
+        assert excinfo.value.deployment_id == "test"
         assert "backend rejected metrics" in str(excinfo.value)

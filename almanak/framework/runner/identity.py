@@ -1,78 +1,82 @@
-"""Strategy identity model for the accounting layer.
+"""Strategy identity model for the accounting layer — blueprint 29.
 
-Three-tier identity:
-    - ``strategy_name``: Human/code reference (e.g. "AaveYieldStrategy").
-      Immutable, lives in the code.
-    - ``deployment_id``: Stable primary key that survives restarts.
-      Deterministic hash of (wallet, chain, strategy_name), or user-supplied
-      via ``--id``.  All database tables key on this.
-    - ``run_id``: Per-process ephemeral UUID4.  Used for forensic event
-      correlation only.  Never stored as a primary key.
+There is **one canonical identifier**, ``deployment_id``, resolved exactly
+once at runner boot and immutable for the life of the process:
+
+- ``deployment_id``: stable primary key that survives restarts and
+  redeploys of the same deployment. Every deployment-scoped table keys on
+  it. In hosted mode it is the platform deployment id (injected as
+  ``ALMANAK_DEPLOYMENT_ID``); in local mode it is a pure function of the
+  execution wallet + chain.
+- ``run_id``: per-process ephemeral UUID4. Forensic event correlation
+  only. Never stored as a primary key.
+
+The strategy class name is **deliberately excluded** from ``deployment_id``
+and from its hash input (blueprint 29 §1): renaming a class must not fork a
+deployment's open positions or accounting history.
 """
 
 import hashlib
-import logging
 import uuid
 
-logger = logging.getLogger(__name__)
-
-# Module-level flag: emit the bare-name deprecation warning at most once per process.
-_BARE_NAME_WARNING_EMITTED = False
+from almanak.framework.deployment import FatalBootError, deployment_id, is_hosted
 
 
 def resolve_deployment_id(
     *,
-    strategy_name: str,
     wallet_address: str = "",
     chain: str = "",
-    cli_id: str | None = None,
 ) -> str:
-    """Resolve a stable deployment_id for this strategy instance.
+    """Resolve the canonical ``deployment_id`` for this process — once, at boot.
 
-    Precedence:
-        1. ``cli_id`` (user-supplied ``--id``) wins unconditionally.
-        2. If wallet + chain are available, deterministic
-           ``{name}:{hash(wallet+chain+name)[:12]}``.
-        3. Fallback: bare ``strategy_name`` with a deprecation warning.
-           This keeps backward compatibility for local ``--once`` dev runs
-           without a wallet, but will be removed in a future release.
+    Two modes, one identity (blueprint 29 §2):
+
+    * **Hosted** (``ALMANAK_IS_HOSTED`` truthy): ``deployment_id`` is the
+      platform deployment id, taken verbatim from ``ALMANAK_DEPLOYMENT_ID``.
+      A blank id raises :class:`FatalBootError` — a hosted pod with no id
+      cannot stamp deployment-scoped rows. The SDK never *computes* a hosted
+      identity; the hosted id must be the platform deployment identifier so
+      platform-side joins hold.
+    * **Local**: ``deployment_id`` is
+      ``deployment:{sha256(wallet:chain)[:12]}`` — a pure function of the
+      execution wallet and chain. It is stable across restarts and machines,
+      forks correctly when wallet or chain changes, and is rename-safe
+      (the class name is not an input). If wallet + chain cannot be
+      resolved, this raises :class:`FatalBootError` rather than fall back to
+      a non-canonical identity — there is no ``--id`` flag and no bare-name
+      fallback.
 
     Args:
-        strategy_name: The human-readable strategy name (e.g. class name).
-        wallet_address: Execution wallet address (EOA or Safe).
-        chain: Primary chain (e.g. "arbitrum").
-        cli_id: User-supplied ``--id`` override.
+        wallet_address: Execution wallet address (EOA or Safe). Local mode
+            only; ignored in hosted mode.
+        chain: Primary chain (e.g. ``"arbitrum"``), or a comma-joined sorted
+            multi-chain signature. Local mode only; ignored in hosted mode.
 
     Returns:
-        A stable deployment_id string.
+        The canonical ``deployment_id`` string.
+
+    Raises:
+        FatalBootError: hosted with a blank ``ALMANAK_DEPLOYMENT_ID``, or
+            local with no resolvable wallet + chain.
     """
-    global _BARE_NAME_WARNING_EMITTED  # noqa: PLW0603
+    if is_hosted():
+        # deployment_id() raises FatalBootError on a blank hosted id.
+        hosted_id = deployment_id()
+        assert hosted_id is not None  # is_hosted() guarantees a non-None return
+        return hosted_id
 
-    if cli_id:
-        # User override — use exactly as given.
-        # If it already has the name: prefix, keep it; otherwise prefix.
-        if ":" in cli_id:
-            return cli_id
-        return f"{strategy_name}:{cli_id}"
-
-    if wallet_address and chain:
-        # Deterministic hash from the deployment triple.
-        hash_input = f"{wallet_address.lower()}:{chain.lower()}:{strategy_name}"
-        short_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
-        return f"{strategy_name}:{short_hash}"
-
-    # Fallback: bare name (local dev, no wallet yet).
-    # Deprecated — will be removed in a future release.
-    if not _BARE_NAME_WARNING_EMITTED:
-        logger.warning(
-            "deployment_id falling back to bare strategy name '%s' because wallet_address "
-            "and chain are not available. This produces a non-canonical identity that cannot "
-            "be used for cross-session accounting. Supply --id or ensure wallet+chain are "
-            "configured. This fallback will be removed in a future release.",
-            strategy_name,
+    wallet = (wallet_address or "").strip().lower()
+    resolved_chain = (chain or "").strip().lower()
+    if not (wallet and resolved_chain):
+        raise FatalBootError(
+            "cannot resolve deployment_id: local mode requires a resolved "
+            f"execution wallet and chain (wallet={wallet_address!r}, "
+            f"chain={chain!r}). The runner refuses to start rather than "
+            "fall back to a non-canonical identity."
         )
-        _BARE_NAME_WARNING_EMITTED = True
-    return strategy_name
+    key = f"{wallet}:{resolved_chain}"
+    short_hash = hashlib.sha256(key.encode()).hexdigest()[:12]
+    return f"deployment:{short_hash}"
 
 
 def generate_run_id() -> str:

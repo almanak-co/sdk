@@ -32,7 +32,7 @@ def _isolated_teardown_state_db(monkeypatch, tmp_path):
     ``execute_teardown_via_manager`` constructs a ``TeardownStateAdapter``.
     Tests in this file mock the state manager so the file is never read.
     """
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
 
@@ -57,7 +57,7 @@ def _make_runner(**overrides) -> StrategyRunner:
 
 def _make_strategy(
     *,
-    strategy_id: str = "test_strat",
+    deployment_id: str = "test_strat",
     chain: str = "arbitrum",
     wallet_address: str = "0x1234",
     should_teardown: bool = False,
@@ -66,7 +66,7 @@ def _make_strategy(
 ) -> MagicMock:
     """Build a mock strategy with configurable teardown behaviour."""
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = chain
     strategy.wallet_address = wallet_address
     strategy.should_teardown.return_value = should_teardown
@@ -104,7 +104,7 @@ class TestCheckTeardownRequested:
     def test_returns_none_when_no_should_teardown(self):
         runner = _make_runner()
         strategy = MagicMock(spec=[])  # no should_teardown attr
-        strategy.strategy_id = "strat"
+        strategy.deployment_id = "strat"
         assert runner._check_teardown_requested(strategy) is None
 
     def test_returns_none_when_should_teardown_false(self):
@@ -201,7 +201,7 @@ class TestTeardownInRunIteration:
         # Mock _execute_teardown to verify it's called from run_iteration
         runner._execute_teardown = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
             )
         )
 
@@ -230,7 +230,7 @@ class TestTeardownInRunIteration:
         # Patch TeardownManager path - returns success for empty intents
         runner._execute_teardown = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
             )
         )
 
@@ -262,7 +262,7 @@ class TestTeardownInRunIteration:
             return_value=IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=None,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 error="Teardown failed: boom",
             )
         )
@@ -293,7 +293,7 @@ class TestTeardownInRunIteration:
             return_value=IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=None,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 error="Teardown failed: not done",
             )
         )
@@ -321,7 +321,7 @@ class TestTeardownInRunIteration:
 
         runner._execute_teardown = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
             )
         )
 
@@ -349,7 +349,7 @@ class TestTeardownInRunIteration:
 
         runner._execute_teardown = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
             )
         )
 
@@ -377,7 +377,7 @@ class TestTeardownInRunIteration:
         # TeardownManager handles backward compat internally
         runner._execute_teardown = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
             )
         )
 
@@ -409,7 +409,7 @@ class TestTeardownInRunIteration:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -574,7 +574,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=None,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -609,7 +609,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -675,7 +675,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -718,7 +718,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.TEARDOWN,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -748,7 +748,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent1,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -777,7 +777,7 @@ class TestTeardownViaManager:
             return_value=IterationResult(
                 status=IterationStatus.STRATEGY_ERROR,
                 error="tx reverted",
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -816,7 +816,7 @@ class TestInlineTeardownAmountResolution:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -849,7 +849,7 @@ class TestInlineTeardownAmountResolution:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -942,7 +942,7 @@ class TestInlineTeardownAmountResolution:
             return_value=IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
-                strategy_id="test_strat",
+                deployment_id="test_strat",
                 duration_ms=100,
             )
         )
@@ -1048,7 +1048,7 @@ def _make_teardown_manager_class_mock(
     from datetime import UTC, datetime as _dt
     state = TeardownState(
         teardown_id="td_test",
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.PENDING,
         total_intents=1,
@@ -1077,7 +1077,7 @@ def _make_successful_teardown_result():
 
     return TeardownResult(
         success=True,
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         mode="graceful",
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -1098,7 +1098,7 @@ def _make_failed_teardown_result(error_msg: str = "Slippage too high"):
 
     return TeardownResult(
         success=False,
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         mode="graceful",
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -1128,7 +1128,7 @@ def _make_strategy_for_manager(**overrides):
     strategy.uses_safe_wallet = False
     strategy.pause = AsyncMock()
     strategy.get_open_positions.return_value = TeardownPositionSummary(
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         timestamp=datetime.now(UTC),
         positions=[
             PositionInfo(

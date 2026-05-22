@@ -70,7 +70,7 @@ def _make_fake_trader(
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example/rpc",
-            strategy_id="t",
+            deployment_id="t",
             tick_interval_seconds=0.001,
             price_source="coingecko",
             fork_lifecycle=fork_lifecycle,
@@ -175,7 +175,7 @@ def _make_fake_trader(
 
 
 class _Strategy:
-    strategy_id = "helper_strategy"
+    deployment_id = "helper_strategy"
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ class TestResolveEffectiveDuration:
         cfg = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example/rpc",
-            strategy_id="t",
+            deployment_id="t",
             tick_interval_seconds=1,
             max_ticks=60,  # config.max_duration_seconds == 60
         )
@@ -250,7 +250,7 @@ class TestResolveEffectiveDuration:
         cfg = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example/rpc",
-            strategy_id="t",
+            deployment_id="t",
             tick_interval_seconds=10,
             max_ticks=5,  # 50 seconds
         )
@@ -260,7 +260,7 @@ class TestResolveEffectiveDuration:
         cfg = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example/rpc",
-            strategy_id="t",
+            deployment_id="t",
             tick_interval_seconds=1,
             max_ticks=None,  # None -> config.max_duration_seconds is None
         )
@@ -270,7 +270,7 @@ class TestResolveEffectiveDuration:
         cfg = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb.example/rpc",
-            strategy_id="t",
+            deployment_id="t",
             tick_interval_seconds=1,
             max_ticks=None,
         )
@@ -685,7 +685,7 @@ class TestAssembleBacktestResult:
 
         result = _engine_helpers.assemble_backtest_result(
             trader=trader,
-            strategy_id="s1",
+            deployment_id="s1",
             run_started_at=started,
             run_ended_at=ended,
             metrics=metrics,
@@ -701,7 +701,7 @@ class TestAssembleBacktestResult:
         )
 
         assert result.engine == BacktestEngine.PAPER
-        assert result.strategy_id == "s1"
+        assert result.deployment_id == "s1"
         assert result.initial_capital_usd == Decimal("10000")
         assert result.final_capital_usd == Decimal("10500")
         assert result.run_duration_seconds == 30.0
@@ -717,7 +717,7 @@ class TestAssembleBacktestResult:
         ended = started
         result = _engine_helpers.assemble_backtest_result(
             trader=trader,
-            strategy_id="s",
+            deployment_id="s",
             run_started_at=started,
             run_ended_at=ended,
             metrics=BacktestMetrics(),
@@ -738,7 +738,7 @@ class TestAssembleBacktestResult:
         started = datetime.now(UTC)
         result = _engine_helpers.assemble_backtest_result(
             trader=trader,
-            strategy_id="s",
+            deployment_id="s",
             run_started_at=started,
             run_ended_at=started,
             metrics=BacktestMetrics(),

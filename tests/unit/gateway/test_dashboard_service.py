@@ -23,7 +23,6 @@ from almanak.gateway.services.dashboard_service import (
     _resolve_trade_tape_row_event,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures / helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -150,7 +149,7 @@ async def test_get_trade_tape_coerces_jsonb_payload_json_to_str() -> None:
     sm.get_position_events_for_dashboard = AsyncMock(return_value=[])
     svc._state_manager = sm
 
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
     response = await svc.GetTradeTape(request, MagicMock(spec=grpc.aio.ServicerContext))
 
     # Row surfaces; all proto string fields are populated cleanly.
@@ -212,7 +211,7 @@ async def test_get_trade_tape_happy_path_joins_all_three_sources() -> None:
     )
     svc._state_manager = sm
 
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
     response = await svc.GetTradeTape(request, MagicMock(spec=grpc.aio.ServicerContext))
 
     assert len(response.rows) == 1
@@ -236,7 +235,7 @@ async def test_get_trade_tape_paginates_with_has_more_when_overfetched() -> None
     sm.get_position_events_for_dashboard = AsyncMock(return_value=[])
     svc._state_manager = sm
 
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=2)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=2)
     response = await svc.GetTradeTape(request, MagicMock(spec=grpc.aio.ServicerContext))
 
     assert len(response.rows) == 2
@@ -262,7 +261,7 @@ async def test_get_trade_tape_drops_entries_at_or_after_before_cursor() -> None:
     svc._state_manager = sm
 
     request = gateway_pb2.GetTradeTapeRequest(
-        strategy_id="test_strategy", limit=10, before_timestamp=int(cutoff.timestamp())
+        deployment_id="test_strategy", limit=10, before_timestamp=int(cutoff.timestamp())
     )
     response = await svc.GetTradeTape(request, MagicMock(spec=grpc.aio.ServicerContext))
 
@@ -287,7 +286,7 @@ async def test_get_trade_tape_swallows_per_source_backend_errors() -> None:
     sm.get_position_events_for_dashboard = AsyncMock(return_value=[])
     svc._state_manager = sm
 
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
     response = await svc.GetTradeTape(request, MagicMock(spec=grpc.aio.ServicerContext))
 
     # Ledger row still surfaces; accounting fields default to empty.
@@ -318,7 +317,7 @@ async def test_get_trade_tape_invalid_before_timestamp_returns_invalid_argument(
     context = MagicMock(spec=grpc.aio.ServicerContext)
     # Year > ~10 trillion seconds blows past the datetime range on every platform.
     request = gateway_pb2.GetTradeTapeRequest(
-        strategy_id="test_strategy", limit=10, before_timestamp=9_999_999_999_999
+        deployment_id="test_strategy", limit=10, before_timestamp=9_999_999_999_999
     )
     response = await svc.GetTradeTape(request, context)
 
@@ -342,7 +341,7 @@ async def test_get_trade_tape_missing_state_manager_returns_unavailable() -> Non
     svc._state_manager = None  # init failed / never wired
 
     context = MagicMock(spec=grpc.aio.ServicerContext)
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
     response = await svc.GetTradeTape(request, context)
 
     assert len(response.rows) == 0
@@ -370,7 +369,7 @@ async def test_get_trade_tape_ledger_failure_returns_unavailable() -> None:
     svc._state_manager = sm
 
     context = MagicMock(spec=grpc.aio.ServicerContext)
-    request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+    request = gateway_pb2.GetTradeTapeRequest(deployment_id="test_strategy", limit=10)
     response = await svc.GetTradeTape(request, context)
 
     assert len(response.rows) == 0

@@ -12,7 +12,7 @@ Each factory:
    "paper_fork", "http_backtest", "unit_test"} on the snapshot. The
    behavioral contract suite (PRD §5.3) verifies all surfaces produce the
    same class object.
-3. Never reads ``AGENT_ID`` directly — deployment mode is resolved upstream
+3. Never reads deployment-mode env vars directly — deployment mode is resolved upstream
    and passed in as ``runtime_context``.
 """
 

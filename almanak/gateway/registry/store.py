@@ -15,8 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from almanak.gateway.validation import resolve_agent_id as _resolve_agent_id
-
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +26,7 @@ class StrategyInstance:
     unique ID, display name, status, and heartbeat tracking.
     """
 
-    strategy_id: str  # PK -- always unique (e.g. "uniswap_lp:a1b2c3d4e5f6")
+    deployment_id: str  # canonical deployment_id; textual rename lands in VIB-4726
     strategy_name: str  # Display name (e.g. "uniswap_lp")
     template_name: str  # Class name (e.g. "UniswapLPStrategy")
     chain: str
@@ -56,7 +54,7 @@ class InstanceRegistry:
         registry.initialize()
 
         instance = StrategyInstance(
-            strategy_id="uniswap_lp:abc123",
+            deployment_id="uniswap_lp:abc123",
             strategy_name="uniswap_lp",
             ...
         )
@@ -97,9 +95,12 @@ class InstanceRegistry:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
         with sqlite3.connect(str(self._db_path)) as conn:
+            existing_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(strategy_instances)").fetchall()}
+            if "strategy_id" in existing_cols and "deployment_id" not in existing_cols:
+                conn.execute("ALTER TABLE strategy_instances RENAME COLUMN strategy_id TO deployment_id")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS strategy_instances (
-                    strategy_id TEXT PRIMARY KEY,
+                    deployment_id TEXT PRIMARY KEY,
                     strategy_name TEXT NOT NULL,
                     template_name TEXT NOT NULL DEFAULT '',
                     chain TEXT NOT NULL DEFAULT '',
@@ -141,7 +142,7 @@ class InstanceRegistry:
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
-                SELECT strategy_id, strategy_name, template_name, chain, protocol,
+                SELECT deployment_id, strategy_name, template_name, chain, protocol,
                        wallet_address, config_json, status, archived,
                        created_at, updated_at, last_heartbeat_at, version,
                        chains, chain_wallets
@@ -150,7 +151,7 @@ class InstanceRegistry:
 
             for row in cursor:
                 instance = StrategyInstance(
-                    strategy_id=row["strategy_id"],
+                    deployment_id=row["deployment_id"],
                     strategy_name=row["strategy_name"],
                     template_name=row["template_name"] or "",
                     chain=row["chain"] or "",
@@ -166,7 +167,7 @@ class InstanceRegistry:
                     last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"]),
                     version=row["version"] or "",
                 )
-                self._cache[instance.strategy_id] = instance
+                self._cache[instance.deployment_id] = instance
 
             if self._cache:
                 logger.info(f"Loaded {len(self._cache)} strategy instances from database")
@@ -185,11 +186,10 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
-        # In deployed mode, normalise the instance key to AGENT_ID
-        instance.strategy_id = _resolve_agent_id(instance.strategy_id)
-
+        # One identity (blueprint 29): instance.deployment_id is the canonical
+        # deployment_id resolved at runner boot — used directly as the key.
         with self._lock:
-            already_existed = instance.strategy_id in self._cache
+            already_existed = instance.deployment_id in self._cache
 
             # Auto-archive older instances of the same strategy_name to prevent
             # duplicate cards after gateway restarts (new instance ID suffix).
@@ -197,7 +197,7 @@ class InstanceRegistry:
                 archived_count = 0
                 for sid, existing in list(self._cache.items()):
                     if (
-                        sid != instance.strategy_id
+                        sid != instance.deployment_id
                         and existing.strategy_name == instance.strategy_name
                         and not existing.archived
                     ):
@@ -213,12 +213,12 @@ class InstanceRegistry:
                         instance.strategy_name,
                     )
 
-            self._cache[instance.strategy_id] = instance
+            self._cache[instance.deployment_id] = instance
             self._persist_instance(instance)
 
         logger.info(
             f"{'Re-registered' if already_existed else 'Registered'} "
-            f"strategy instance: {instance.strategy_id} ({instance.strategy_name})"
+            f"strategy instance: {instance.deployment_id} ({instance.strategy_name})"
         )
         return not already_existed
 
@@ -228,14 +228,14 @@ class InstanceRegistry:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strategy_instances
-                (strategy_id, strategy_name, template_name, chain, protocol,
+                (deployment_id, strategy_name, template_name, chain, protocol,
                  wallet_address, config_json, status, archived,
                  created_at, updated_at, last_heartbeat_at, version,
                  chains, chain_wallets)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    instance.strategy_id,
+                    instance.deployment_id,
                     instance.strategy_name,
                     instance.template_name,
                     instance.chain,
@@ -254,11 +254,11 @@ class InstanceRegistry:
             )
             conn.commit()
 
-    def update_status(self, strategy_id: str, status: str, reason: str = "") -> bool:
+    def update_status(self, deployment_id: str, status: str, reason: str = "") -> bool:
         """Update the status of a strategy instance.
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
             status: New status (RUNNING, INACTIVE, ERROR, PAUSED).
             reason: Optional reason for the status change.
 
@@ -268,10 +268,8 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
-        strategy_id = _resolve_agent_id(strategy_id)
-
         with self._lock:
-            instance = self._cache.get(strategy_id)
+            instance = self._cache.get(deployment_id)
             if instance is None:
                 return False
 
@@ -281,14 +279,14 @@ class InstanceRegistry:
             instance.last_heartbeat_at = now
             self._persist_instance(instance)
 
-        logger.info(f"Updated status for {strategy_id}: {status}" + (f" ({reason})" if reason else ""))
+        logger.info(f"Updated status for {deployment_id}: {status}" + (f" ({reason})" if reason else ""))
         return True
 
-    def heartbeat(self, strategy_id: str) -> bool:
+    def heartbeat(self, deployment_id: str) -> bool:
         """Update the heartbeat timestamp for a strategy instance.
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             True if instance was found and updated.
@@ -296,11 +294,9 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
-        strategy_id = _resolve_agent_id(strategy_id)
-
         recovered = False
         with self._lock:
-            instance = self._cache.get(strategy_id)
+            instance = self._cache.get(deployment_id)
             if instance is None:
                 return False
 
@@ -320,14 +316,14 @@ class InstanceRegistry:
                     """
                     UPDATE strategy_instances
                     SET last_heartbeat_at = ?, updated_at = ?, status = ?
-                    WHERE strategy_id = ?
+                    WHERE deployment_id = ?
                     """,
-                    (now.isoformat(), now.isoformat(), instance.status, strategy_id),
+                    (now.isoformat(), now.isoformat(), instance.status, deployment_id),
                 )
                 conn.commit()
 
         if recovered:
-            logger.info("Heartbeat received from STALE instance %s — recovered to RUNNING", strategy_id)
+            logger.info("Heartbeat received from STALE instance %s — recovered to RUNNING", deployment_id)
         return True
 
     def reconcile_stale_on_startup(self) -> int:
@@ -355,7 +351,7 @@ class InstanceRegistry:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     f"UPDATE strategy_instances SET status = 'STALE', updated_at = ?"
-                    f" WHERE strategy_id IN ({placeholders}) AND status = 'RUNNING'",
+                    f" WHERE deployment_id IN ({placeholders}) AND status = 'RUNNING'",
                     [now.isoformat(), *stale_ids],
                 )
                 conn.commit()
@@ -411,7 +407,7 @@ class InstanceRegistry:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     f"UPDATE strategy_instances SET status = 'STALE', updated_at = ?"
-                    f" WHERE strategy_id IN ({placeholders}) AND status = 'RUNNING'",
+                    f" WHERE deployment_id IN ({placeholders}) AND status = 'RUNNING'",
                     [now.isoformat(), *stale_ids],
                 )
                 conn.commit()
@@ -428,11 +424,11 @@ class InstanceRegistry:
         )
         return len(stale_ids)
 
-    def archive(self, strategy_id: str) -> bool:
+    def archive(self, deployment_id: str) -> bool:
         """Archive a strategy instance (hidden from dashboard, data retained).
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             True if instance was found and archived.
@@ -441,7 +437,7 @@ class InstanceRegistry:
             self.initialize()
 
         with self._lock:
-            instance = self._cache.get(strategy_id)
+            instance = self._cache.get(deployment_id)
             if instance is None:
                 return False
 
@@ -449,14 +445,14 @@ class InstanceRegistry:
             instance.updated_at = datetime.now(UTC)
             self._persist_instance(instance)
 
-        logger.info(f"Archived strategy instance: {strategy_id}")
+        logger.info(f"Archived strategy instance: {deployment_id}")
         return True
 
-    def unarchive(self, strategy_id: str) -> bool:
+    def unarchive(self, deployment_id: str) -> bool:
         """Unarchive a strategy instance.
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             True if instance was found and unarchived.
@@ -465,7 +461,7 @@ class InstanceRegistry:
             self.initialize()
 
         with self._lock:
-            instance = self._cache.get(strategy_id)
+            instance = self._cache.get(deployment_id)
             if instance is None:
                 return False
 
@@ -473,16 +469,16 @@ class InstanceRegistry:
             instance.updated_at = datetime.now(UTC)
             self._persist_instance(instance)
 
-        logger.info(f"Unarchived strategy instance: {strategy_id}")
+        logger.info(f"Unarchived strategy instance: {deployment_id}")
         return True
 
-    def purge(self, strategy_id: str) -> bool:
+    def purge(self, deployment_id: str) -> bool:
         """Delete a strategy instance from the registry.
 
         Note: For atomic purge of instance + events, use purge_with_events().
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             True if instance was found and deleted.
@@ -491,29 +487,29 @@ class InstanceRegistry:
             self.initialize()
 
         with self._lock:
-            if strategy_id not in self._cache:
+            if deployment_id not in self._cache:
                 return False
 
-            del self._cache[strategy_id]
+            del self._cache[deployment_id]
 
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
-                    "DELETE FROM strategy_instances WHERE strategy_id = ?",
-                    (strategy_id,),
+                    "DELETE FROM strategy_instances WHERE deployment_id = ?",
+                    (deployment_id,),
                 )
                 conn.commit()
 
-        logger.info(f"Purged strategy instance: {strategy_id}")
+        logger.info(f"Purged strategy instance: {deployment_id}")
         return True
 
-    def purge_with_events(self, strategy_id: str) -> bool:
+    def purge_with_events(self, deployment_id: str) -> bool:
         """Atomically delete a strategy instance and all its timeline events.
 
         Both tables must be in the same SQLite database for this to work
         in a single transaction.
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             True if instance was found and purged.
@@ -522,35 +518,35 @@ class InstanceRegistry:
             self.initialize()
 
         with self._lock:
-            if strategy_id not in self._cache:
+            if deployment_id not in self._cache:
                 return False
 
             # DB operations first -- only remove from cache after successful commit
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
-                    "DELETE FROM strategy_instances WHERE strategy_id = ?",
-                    (strategy_id,),
+                    "DELETE FROM strategy_instances WHERE deployment_id = ?",
+                    (deployment_id,),
                 )
                 try:
                     conn.execute(
-                        "DELETE FROM timeline_events WHERE strategy_id = ?",
-                        (strategy_id,),
+                        "DELETE FROM timeline_events WHERE deployment_id = ?",
+                        (deployment_id,),
                     )
                 except sqlite3.OperationalError as e:
                     if "no such table" not in str(e):
                         raise
                 conn.commit()
 
-            del self._cache[strategy_id]
+            del self._cache[deployment_id]
 
-        logger.info(f"Purged strategy instance and events: {strategy_id}")
+        logger.info(f"Purged strategy instance and events: {deployment_id}")
         return True
 
-    def get(self, strategy_id: str) -> StrategyInstance | None:
+    def get(self, deployment_id: str) -> StrategyInstance | None:
         """Get a strategy instance by ID.
 
         Args:
-            strategy_id: The strategy instance ID.
+            deployment_id: The strategy instance ID.
 
         Returns:
             StrategyInstance or None if not found.
@@ -558,10 +554,8 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
-        strategy_id = _resolve_agent_id(strategy_id)
-
         with self._lock:
-            return self._cache.get(strategy_id)
+            return self._cache.get(deployment_id)
 
     def list_all(self, include_archived: bool = False) -> list[StrategyInstance]:
         """List all strategy instances.

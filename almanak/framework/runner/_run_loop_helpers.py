@@ -51,7 +51,7 @@ logger = logging.getLogger("almanak.framework.runner.strategy_runner")
 def reconstruct_lending_basis_store(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
 ) -> int:
     """Replay durable accounting_events into the in-memory FIFO basis store.
 
@@ -88,7 +88,7 @@ def reconstruct_lending_basis_store(
 
     deployment_id = ""
     try:
-        deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+        deployment_id = strategy.deployment_id
         if not deployment_id:
             return 0
         events = runner.state_manager.get_accounting_events_sync(deployment_id)
@@ -179,7 +179,7 @@ async def hydrate_recent_open_events_cache(
         # (VIB-3866 truth correction §15a.3), so this is acceptable.
         return 0
 
-    deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+    deployment_id = strategy.deployment_id
     if not deployment_id:
         return 0
 
@@ -211,10 +211,11 @@ async def hydrate_recent_open_events_cache(
 # =============================================================================
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 async def initialize_run_loop(  # noqa: C901
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
     interval: int,
 ) -> StatefulActivityProviderProtocol | None:
     """Run the one-shot setup before the ``while`` loop begins.
@@ -233,10 +234,10 @@ async def initialize_run_loop(  # noqa: C901
         try:
             await runner.state_manager.initialize()
             state_manager_ready = True
-            logger.debug(f"State manager initialized for {strategy_id}")
+            logger.debug(f"State manager initialized for {deployment_id}")
         except Exception as e:
             if runner._is_live_mode():
-                raise RuntimeError(f"Failed to initialize state manager for {strategy_id}: {e}") from e
+                raise RuntimeError(f"Failed to initialize state manager for {deployment_id}: {e}") from e
             logger.error(f"Failed to initialize state manager: {e}")
 
     # Reconstruct FIFO basis store from durable accounting_events so REPAY and
@@ -246,7 +247,7 @@ async def initialize_run_loop(  # noqa: C901
     # Shared helper (VIB-3944) so the ``--once``/``test-lifecycle`` CLI paths,
     # which bypass run_loop entirely, can reuse the same rebuild step.
     if state_manager_ready:
-        reconstruct_lending_basis_store(runner, strategy, strategy_id)
+        reconstruct_lending_basis_store(runner, strategy, deployment_id)
 
     # VIB-4086 — hydrate the runner's ``_recent_open_events`` cache from
     # disk so a process-restart between OPEN and CLOSE preserves
@@ -266,14 +267,14 @@ async def initialize_run_loop(  # noqa: C901
     # contribute to ``initialize_run_loop``'s already-D-rated cyclomatic
     # complexity. See that helper's docstring for the contract.
     if state_manager_ready:
-        await _run_cutover_boot_guard(runner, strategy, strategy_id)
+        await _run_cutover_boot_guard(runner, strategy, deployment_id)
 
     # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:
         try:
             processor = getattr(runner, "_accounting_processor", None)
             if processor is not None:
-                deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+                deployment_id = strategy.deployment_id
                 processor._deployment_id = deployment_id
                 drained = await processor.drain_pending()
                 if drained:
@@ -300,7 +301,7 @@ async def initialize_run_loop(  # noqa: C901
     )
     if activity_provider is not None and runner.config.enable_state_persistence:
         try:
-            state = await runner.state_manager.load_state(strategy_id)
+            state = await runner.state_manager.load_state(deployment_id)
             if state is not None and "copy_trading_state" in state.state:
                 activity_provider.set_state(state.state["copy_trading_state"])
                 logger.info("Copy trading: cursor state restored from persistence")
@@ -324,14 +325,14 @@ async def initialize_run_loop(  # noqa: C901
     runner._register_with_gateway(strategy)
 
     # Write RUNNING state to LifecycleStore
-    runner._lifecycle_write_state(strategy_id, "RUNNING")
+    runner._lifecycle_write_state(deployment_id, "RUNNING")
 
     # Emit strategy started event
     start_event = TimelineEvent(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_STARTED,
-        description=f"Strategy {strategy_id} started with interval={interval}s",
-        strategy_id=strategy_id,
+        description=f"Strategy {deployment_id} started with interval={interval}s",
+        deployment_id=deployment_id,
         chain=getattr(runner.config, "chain", ""),
         details={
             "interval_seconds": interval,
@@ -339,7 +340,7 @@ async def initialize_run_loop(  # noqa: C901
         },
     )
     add_event(start_event)
-    logger.debug(f"Emitted STRATEGY_STARTED event for {strategy_id}")
+    logger.debug(f"Emitted STRATEGY_STARTED event for {deployment_id}")
 
     return activity_provider
 
@@ -383,7 +384,7 @@ def invoke_pre_iteration_callback(
 async def capture_snapshot_with_accounting(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
     result: IterationResult,
     iteration_start_monotonic: float | None = None,
 ) -> IterationResult:
@@ -465,7 +466,7 @@ async def capture_snapshot_with_accounting(
                 duration_ms = result.duration_ms
             logger.exception(
                 "Accounting persistence failed in live mode for %s (write_kind=%s)",
-                strategy_id,
+                deployment_id,
                 acc_err.write_kind,
             )
             await runner._alert_accounting_failure(strategy, acc_err)
@@ -488,7 +489,7 @@ async def capture_snapshot_with_accounting(
             return IterationResult(
                 status=IterationStatus.ACCOUNTING_FAILED,
                 error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=duration_ms,
                 intent=result.intent,
                 execution_result=result.execution_result,
@@ -497,7 +498,7 @@ async def capture_snapshot_with_accounting(
         logger.error(
             "Snapshot accounting persistence failed in non-live mode for %s "
             "(write_kind=%s, continuing; pre-prod drift): %s",
-            strategy_id,
+            deployment_id,
             acc_err.write_kind,
             acc_err,
         )
@@ -945,8 +946,7 @@ async def capture_teardown_snapshot_with_accounting(
     accounting_degraded = False
     degraded_reason: str | None = None
 
-    deployment_id = getattr(strategy, "deployment_id", "") or getattr(strategy, "strategy_id", "") or ""
-    strategy_id = getattr(strategy, "strategy_id", "") or ""
+    deployment_id = strategy.deployment_id
 
     def _append_deferred_safely(*, error: str, extra: dict[str, str]) -> None:
         """Wrap the deferred-log append so even *its* failure cannot raise.
@@ -963,7 +963,6 @@ async def capture_teardown_snapshot_with_accounting(
         try:
             _deferred_append_now(
                 kind="snapshot",
-                strategy_id=strategy_id,
                 deployment_id=deployment_id,
                 cycle_id=teardown_cycle_id,
                 error=error,
@@ -974,7 +973,7 @@ async def capture_teardown_snapshot_with_accounting(
                 "capture_teardown_snapshot_with_accounting[%s]: deferred-write log "
                 "append failed for %s; original error=%s; continuing teardown",
                 phase,
-                strategy_id,
+                deployment_id,
                 error,
             )
 
@@ -1016,7 +1015,7 @@ async def capture_teardown_snapshot_with_accounting(
                 "capture_teardown_snapshot_with_accounting[%s]: persistence failed for %s "
                 "(write_kind=%s) — recording deferred + continuing teardown: %s",
                 phase,
-                strategy_id,
+                deployment_id,
                 acc_err.write_kind,
                 acc_err,
             )
@@ -1030,7 +1029,7 @@ async def capture_teardown_snapshot_with_accounting(
             logger.error(
                 "capture_teardown_snapshot_with_accounting[%s]: snapshot capture failed for %s: %s",
                 phase,
-                strategy_id,
+                deployment_id,
                 exc,
                 exc_info=True,
             )
@@ -1064,7 +1063,7 @@ async def capture_teardown_snapshot_with_accounting(
 async def handle_iteration_failure(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
     result: IterationResult,
 ) -> None:
     """Post-iteration bookkeeping for the failure branch.
@@ -1109,12 +1108,12 @@ async def handle_iteration_failure(
 
     if runner._consecutive_errors >= runner.config.max_consecutive_errors:
         await runner._alert_consecutive_errors(strategy, result)
-        runner._lifecycle_write_state(strategy_id, "ERROR", error_message=str(result.error) if result.error else None)
+        runner._lifecycle_write_state(deployment_id, "ERROR", error_message=str(result.error) if result.error else None)
 
 
 def handle_iteration_success(
     runner: StrategyRunner,
-    strategy_id: str,
+    deployment_id: str,
     was_in_error_streak: bool,
 ) -> None:
     """Post-iteration bookkeeping for the success branch.
@@ -1133,16 +1132,16 @@ def handle_iteration_success(
     # state (e.g., teardown writes TERMINATED and requests shutdown) --
     # otherwise we would clobber that terminal state with RUNNING.
     if was_in_error_streak and not runner._shutdown_requested and runner._terminal_lifecycle_state is None:
-        runner._lifecycle_write_state(strategy_id, "RUNNING")
+        runner._lifecycle_write_state(deployment_id, "RUNNING")
         logger.info(
             "Strategy %s recovered after error streak (max_consecutive_errors=%d) - lifecycle state reset to RUNNING",
-            strategy_id,
+            deployment_id,
             runner.config.max_consecutive_errors,
         )
     elif was_in_error_streak:
         logger.debug(
             "Skipping lifecycle recovery write for %s: shutdown/terminal state active",
-            strategy_id,
+            deployment_id,
         )
     runner._consecutive_errors = 0
     runner._first_error_at = None
@@ -1157,7 +1156,7 @@ def handle_iteration_success(
 async def handle_lifecycle_command(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
     command: str | None,
 ) -> None:
     """Route a polled lifecycle command.
@@ -1176,8 +1175,8 @@ async def handle_lifecycle_command(
     positions" semantic.
     """
     if command == "STOP":
-        logger.info("Received STOP command for %s", strategy_id)
-        runner._lifecycle_handle_stop(strategy_id, strategy)
+        logger.info("Received STOP command for %s", deployment_id)
+        runner._lifecycle_handle_stop(deployment_id, strategy)
         return
 
     if command in ("PAUSE", "RESUME"):
@@ -1185,7 +1184,7 @@ async def handle_lifecycle_command(
             "Received retired lifecycle command %s for %s; ignoring (VIB-4281). "
             "If this came from an operator action, the platform should have rejected it at the API edge.",
             command,
-            strategy_id,
+            deployment_id,
         )
 
 
@@ -1197,7 +1196,7 @@ async def handle_lifecycle_command(
 async def finalize_run_loop(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
-    strategy_id: str,
+    deployment_id: str,
 ) -> None:
     """Run the teardown block after the ``while`` loop exits.
 
@@ -1209,20 +1208,20 @@ async def finalize_run_loop(
     """
     # Write final state to LifecycleStore (preserve ERROR if set by circuit breaker)
     runner._lifecycle_write_state(
-        strategy_id,
+        deployment_id,
         runner._terminal_lifecycle_state or "TERMINATED",
         error_message=runner._terminal_lifecycle_error_message,
     )
 
     # Deregister from gateway (mark as INACTIVE)
-    runner._deregister_from_gateway(strategy_id)
+    runner._deregister_from_gateway(deployment_id)
 
     # Emit strategy stopped event
     stop_event = TimelineEvent(
         timestamp=datetime.now(UTC),
         event_type=TimelineEventType.STRATEGY_STOPPED,
-        description=f"Strategy {strategy_id} stopped",
-        strategy_id=strategy_id,
+        description=f"Strategy {deployment_id} stopped",
+        deployment_id=deployment_id,
         chain=getattr(runner.config, "chain", ""),
         details={
             "shutdown_requested": runner._shutdown_requested,
@@ -1230,9 +1229,9 @@ async def finalize_run_loop(
         },
     )
     add_event(stop_event)
-    logger.debug(f"Emitted STRATEGY_STOPPED event for {strategy_id}")
+    logger.debug(f"Emitted STRATEGY_STOPPED event for {deployment_id}")
 
-    logger.info(f"Run loop ended for strategy {strategy_id}")
+    logger.info(f"Run loop ended for strategy {deployment_id}")
 
     # Flush any pending state saves before cleanup
     if hasattr(strategy, "flush_pending_saves"):
@@ -1276,7 +1275,7 @@ async def finalize_run_loop(
 async def _run_cutover_boot_guard(
     runner: StrategyRunner,
     strategy: Any,
-    strategy_id: str,
+    deployment_id: str,
 ) -> None:
     """Run the VIB-4198 / T12 registry-mode cutover boot guard.
 
@@ -1328,7 +1327,7 @@ async def _run_cutover_boot_guard(
         LPPositionTracker,
     )
 
-    deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+    deployment_id = strategy.deployment_id
     for cutover_spec in ACTIVE_CUTOVERS:
         await enforce_or_run_cutover(
             runner=runner,

@@ -18,14 +18,14 @@ from almanak.framework.dashboard import (
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
 ) -> None:
     """Render the Stochastic Reversion custom dashboard."""
     st.title("Stochastic Reversion Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config
@@ -37,7 +37,7 @@ def render_custom_dashboard(
     base_token = strategy_config.get("base_token", "ARB")
     quote_token = strategy_config.get("quote_token", "USDC")
 
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pair:** {base_token}/{quote_token}")
     st.markdown("**Chain:** Arbitrum | **Protocol:** Uniswap V3")
 
@@ -106,8 +106,8 @@ def render_custom_dashboard(
     st.subheader("Performance")
     _render_pnl(session_state)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_position(session_state: dict[str, Any], base_token: str, quote_token: str) -> None:

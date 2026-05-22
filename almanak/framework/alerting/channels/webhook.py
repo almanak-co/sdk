@@ -63,10 +63,11 @@ class WebhookChannel:
         self._last_send_time: float = 0.0
         self._min_interval: float = 1.0  # 1s minimum between sends
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def _format_payload(self, card: OperatorCard) -> dict[str, Any]:
         """Format an OperatorCard as a JSON-serializable webhook payload."""
         return {
-            "strategy_id": card.strategy_id,
+            "deployment_id": card.deployment_id,
             "event_type": card.event_type.value if hasattr(card.event_type, "value") else str(card.event_type),
             "severity": card.severity.value if hasattr(card.severity, "value") else str(card.severity),
             "reason": card.reason.value if hasattr(card.reason, "value") else str(card.reason),

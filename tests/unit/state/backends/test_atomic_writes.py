@@ -70,7 +70,7 @@ async def store(temp_db_path):
 # =============================================================================
 
 
-def _read_row_raw(db_path: str, strategy_id: str) -> dict | None:
+def _read_row_raw(db_path: str, deployment_id: str) -> dict | None:
     """Read the raw state row via a fresh sqlite3 connection.
 
     Bypasses SQLiteStore so we can observe exactly what is on disk, e.g.
@@ -80,9 +80,12 @@ def _read_row_raw(db_path: str, strategy_id: str) -> dict | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        # strategy_state keys on the canonical deployment_id column
+        # (blueprint 29 §3). The StateData.deployment_id Python field maps to it.
         row = conn.execute(
-            "SELECT strategy_id, version, state_data, checksum FROM strategy_state WHERE strategy_id = ?",
-            (strategy_id,),
+            "SELECT deployment_id, version, state_data, checksum "
+            "FROM strategy_state WHERE deployment_id = ?",
+            (deployment_id,),
         ).fetchone()
         return dict(row) if row else None
     finally:
@@ -109,7 +112,7 @@ class TestAtomicWriteHappyPath:
     async def test_save_then_reload_checksum_matches(self, store, temp_db_path):
         """After a successful save, the on-disk row is self-consistent."""
         state = StateData(
-            strategy_id="atomic-happy",
+            deployment_id="atomic-happy",
             version=1,
             state={"nonce": 7, "last_tx": "0xabc"},
         )
@@ -122,7 +125,7 @@ class TestAtomicWriteHappyPath:
 
     async def test_cas_update_keeps_checksum_consistent(self, store, temp_db_path):
         """CAS update bumps version and rewrites checksum atomically."""
-        state = StateData(strategy_id="atomic-cas", version=1, state={"n": 1})
+        state = StateData(deployment_id="atomic-cas", version=1, state={"n": 1})
         await store.save(state)
 
         state.state["n"] = 2
@@ -153,7 +156,7 @@ class TestCrashBeforeCommit:
     async def test_crash_before_commit_preserves_prior_version(self, store, temp_db_path):
         """A fresh read after crash returns the prior durable row."""
         # First, a good save to establish baseline state.
-        v1 = StateData(strategy_id="atomic-crash", version=1, state={"nonce": 1})
+        v1 = StateData(deployment_id="atomic-crash", version=1, state={"nonce": 1})
         await store.save(v1)
 
         # Now perform a raw UPDATE inside a transaction, simulate the
@@ -173,7 +176,7 @@ class TestCrashBeforeCommit:
                 SET version = version + 1,
                     state_data = ?,
                     checksum = ?
-                WHERE strategy_id = ?
+                WHERE deployment_id = ?
                 """,
                 (new_state_json, new_checksum, "atomic-crash"),
             )
@@ -212,7 +215,7 @@ class TestCrashBeforeCommit:
         # Baseline
         s0 = SQLiteStore(SQLiteConfig(db_path=temp_db_path, wal_mode=True))
         await s0.initialize()
-        await s0.save(StateData(strategy_id="rep", version=1, state={"n": 0}))
+        await s0.save(StateData(deployment_id="rep", version=1, state={"n": 0}))
         await s0.close()
 
         last_successful_state = {"n": 0}
@@ -229,7 +232,7 @@ class TestCrashBeforeCommit:
                 try:
                     await store.save(
                         StateData(
-                            strategy_id="rep",
+                            deployment_id="rep",
                             version=last_successful_version,
                             state=new_state,
                         ),
@@ -248,7 +251,7 @@ class TestCrashBeforeCommit:
                     cs = hashlib.sha256(sj.encode()).hexdigest()
                     conn.execute(
                         "UPDATE strategy_state SET version = version + 1, "
-                        "state_data = ?, checksum = ? WHERE strategy_id = ?",
+                        "state_data = ?, checksum = ? WHERE deployment_id = ?",
                         (sj, cs, "rep"),
                     )
                     conn.execute("ROLLBACK")
@@ -293,7 +296,7 @@ class TestChecksumInvariantOnDisk:
         try:
             # Drive several saves, each with CAS. Each reload must
             # self-verify.
-            state = StateData(strategy_id="inv", version=1, state={"n": 0})
+            state = StateData(deployment_id="inv", version=1, state={"n": 0})
             saved = await mgr.save_state(state)
             for i in range(1, 6):
                 saved.state = {"n": i}
@@ -322,7 +325,7 @@ class TestChecksumInvariantOnDisk:
         # re-validation uses the same source and must pass. If it ever
         # diverged (e.g., non-deterministic JSON ordering regression)
         # SQLiteBackendError would fire.
-        s = StateData(strategy_id="dd", version=1, state={"a": [1, 2, 3]})
+        s = StateData(deployment_id="dd", version=1, state={"a": [1, 2, 3]})
         await store.save(s)
         loaded = await store.get("dd")
         assert loaded is not None
@@ -344,12 +347,12 @@ class TestConcurrentWritersAreSerialized:
     async def test_concurrent_cas_one_wins(self, store):
         from almanak.framework.state.state_manager import StateConflictError
 
-        await store.save(StateData(strategy_id="conc", version=1, state={"n": 0}))
+        await store.save(StateData(deployment_id="conc", version=1, state={"n": 0}))
 
         async def writer(value: int) -> bool:
             try:
                 await store.save(
-                    StateData(strategy_id="conc", version=1, state={"n": value}),
+                    StateData(deployment_id="conc", version=1, state={"n": value}),
                     expected_version=1,
                 )
                 return True
@@ -366,7 +369,7 @@ class TestConcurrentWritersAreSerialized:
 # =============================================================================
 
 
-def _make_snapshot(strategy_id: str, iteration: int, total_usd: str = "1000"):
+def _make_snapshot(deployment_id: str, iteration: int, total_usd: str = "1000"):
     """Build a minimal PortfolioSnapshot for atomic-write tests."""
     from datetime import UTC, datetime
     from decimal import Decimal
@@ -379,7 +382,7 @@ def _make_snapshot(strategy_id: str, iteration: int, total_usd: str = "1000"):
 
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         total_value_usd=Decimal(total_usd),
         available_cash_usd=Decimal("500"),
         value_confidence=ValueConfidence.HIGH,
@@ -420,6 +423,7 @@ def _make_clob_order(order_id: str, status_value: str = "live", filled: str = "0
         intent_id="intent-1",
         submitted_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
+        deployment_id="deployment:test-clob",
     )
 
 
@@ -443,7 +447,7 @@ class TestPortfolioSnapshotAtomicWrites:
         try:
             row = conn.execute(
                 "SELECT total_value_usd, iteration_number, wallet_balances_json "
-                "FROM portfolio_snapshots WHERE strategy_id = ?",
+                "FROM portfolio_snapshots WHERE deployment_id = ?",
                 ("snap-happy",),
             ).fetchone()
         finally:
@@ -465,7 +469,7 @@ class TestPortfolioSnapshotAtomicWrites:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "INSERT INTO portfolio_snapshots ("
-                "strategy_id, timestamp, iteration_number, total_value_usd, "
+                "deployment_id, timestamp, iteration_number, total_value_usd, "
                 "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
                 "value_confidence, positions_json, token_prices_json, "
                 "wallet_balances_json, chain, created_at) "
@@ -503,7 +507,7 @@ class TestPortfolioSnapshotAtomicWrites:
             try:
                 rows = conn.execute(
                     "SELECT iteration_number, total_value_usd FROM portfolio_snapshots "
-                    "WHERE strategy_id = ? ORDER BY iteration_number",
+                    "WHERE deployment_id = ? ORDER BY iteration_number",
                     ("snap-crash",),
                 ).fetchall()
             finally:
@@ -514,14 +518,17 @@ class TestPortfolioSnapshotAtomicWrites:
             await recovered.close()
 
     async def test_phase4_identity_fields_preserved_on_conflict(self, store, temp_db_path):
-        """save_portfolio_snapshot must NOT clobber phase-4 identity fields.
+        """save_portfolio_snapshot must NOT clobber phase-4 metadata fields.
 
-        save_snapshot_and_metrics writes (deployment_id, cycle_id,
-        execution_mode) for the same (strategy_id, timestamp). A
-        subsequent save_portfolio_snapshot for the same key must
-        preserve those fields rather than reset them to '' default
-        (legacy INSERT OR REPLACE behavior — VIB-3181 follow-up,
+        save_snapshot_and_metrics writes (cycle_id, execution_mode) for the
+        same (deployment_id, timestamp). A subsequent save_portfolio_snapshot
+        for the same key must preserve those fields rather than reset them to
+        '' default (legacy INSERT OR REPLACE behavior — VIB-3181 follow-up,
         CodeRabbit review on PR #2006).
+
+        VIB-4722 collapsed the identity column to a single canonical
+        `deployment_id` (the conflict key); `cycle_id` / `execution_mode`
+        remain the preserve-on-conflict metadata columns.
         """
         # Seed a row carrying phase-4 metadata directly via SQL so the
         # test does not depend on save_snapshot_and_metrics internals.
@@ -533,15 +540,14 @@ class TestPortfolioSnapshotAtomicWrites:
         try:
             conn.execute(
                 "INSERT INTO portfolio_snapshots ("
-                "strategy_id, deployment_id, cycle_id, execution_mode, "
+                "deployment_id, cycle_id, execution_mode, "
                 "timestamp, iteration_number, total_value_usd, "
                 "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
                 "value_confidence, positions_json, token_prices_json, "
                 "wallet_balances_json, chain, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    "snap-phase4",
-                    "deploy-abc",  # deployment_id (must be preserved)
+                    "snap-phase4",  # deployment_id (the conflict key)
                     "cycle-42",  # cycle_id (must be preserved)
                     "live",  # execution_mode (must be preserved)
                     ts_iso,
@@ -563,20 +569,20 @@ class TestPortfolioSnapshotAtomicWrites:
             conn.close()
 
         # Now write via save_portfolio_snapshot with the SAME
-        # (strategy_id, timestamp) — UPSERT path triggered.
+        # (deployment_id, timestamp) — UPSERT path triggered.
         snap = _make_snapshot("snap-phase4", iteration=2, total_usd="2000")
         snap.timestamp = ts
         row_id = await store.save_portfolio_snapshot(snap)
         assert row_id > 0
 
-        # Read back and assert phase-4 fields survived.
+        # Read back and assert phase-4 metadata survived.
         conn = sqlite3.connect(temp_db_path)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
                 "SELECT deployment_id, cycle_id, execution_mode, "
                 "iteration_number, total_value_usd "
-                "FROM portfolio_snapshots WHERE strategy_id = ?",
+                "FROM portfolio_snapshots WHERE deployment_id = ?",
                 ("snap-phase4",),
             ).fetchone()
         finally:
@@ -585,8 +591,8 @@ class TestPortfolioSnapshotAtomicWrites:
         # New snapshot fields applied:
         assert row["iteration_number"] == 2
         assert row["total_value_usd"] == "2000"
-        # Phase-4 identity preserved (the regression guard):
-        assert row["deployment_id"] == "deploy-abc"
+        # Phase-4 metadata preserved (the regression guard):
+        assert row["deployment_id"] == "snap-phase4"
         assert row["cycle_id"] == "cycle-42"
         assert row["execution_mode"] == "live"
 
@@ -609,7 +615,7 @@ class TestPortfolioSnapshotAtomicWrites:
         conn = sqlite3.connect(temp_db_path)
         try:
             count = conn.execute(
-                "SELECT COUNT(*) FROM portfolio_snapshots WHERE strategy_id = ?",
+                "SELECT COUNT(*) FROM portfolio_snapshots WHERE deployment_id = ?",
                 ("snap-conc",),
             ).fetchone()[0]
         finally:
@@ -717,7 +723,7 @@ class TestClobOrderAtomicWrites:
         recovered = SQLiteStore(SQLiteConfig(db_path=temp_db_path, wal_mode=True))
         await recovered.initialize()
         try:
-            loaded = await recovered.get_clob_order("order-crash")
+            loaded = await recovered.get_clob_order("order-crash", deployment_id=baseline.deployment_id)
             assert loaded is not None
             assert loaded.status.value == "live"
             assert loaded.filled_size == Decimal("0")

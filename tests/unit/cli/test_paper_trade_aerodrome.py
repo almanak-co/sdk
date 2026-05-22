@@ -47,7 +47,7 @@ class TestPaperTraderConfigForBase:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://example.com/rpc",
-            strategy_id="demo_aerodrome_paper_trade",
+            deployment_id="demo_aerodrome_paper_trade",
             initial_eth=Decimal("10"),
             initial_tokens={"USDC": Decimal("10000"), "WETH": Decimal("1")},
             tick_interval_seconds=60,
@@ -55,7 +55,7 @@ class TestPaperTraderConfigForBase:
             anvil_port=8546,
         )
         assert config.chain == "base"
-        assert config.strategy_id == "demo_aerodrome_paper_trade"
+        assert config.deployment_id == "demo_aerodrome_paper_trade"
         assert config.initial_tokens["USDC"] == Decimal("10000")
         assert config.max_ticks == 5
         assert config.tick_interval_seconds == 60
@@ -65,7 +65,7 @@ class TestPaperTraderConfigForBase:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
         )
         assert config.chain_id == 8453  # Base mainnet chain ID
 
@@ -74,7 +74,7 @@ class TestPaperTraderConfigForBase:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
             tick_interval_seconds=60,
             max_ticks=10,
         )
@@ -85,7 +85,7 @@ class TestPaperTraderConfigForBase:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://example.com/rpc",
-            strategy_id="test",
+            deployment_id="test",
             max_ticks=None,
         )
         assert config.max_duration_seconds is None

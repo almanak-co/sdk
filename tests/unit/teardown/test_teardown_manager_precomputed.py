@@ -31,7 +31,7 @@ def _make_strategy_with_no_local_state() -> MagicMock:
     deliberately never expect to be called (simulating gateway-restart
     recovery where the strategy forgot its positions)."""
     strategy = MagicMock()
-    strategy.strategy_id = "exp12_jaine_wbtc_w0g"
+    strategy.deployment_id = "exp12_jaine_wbtc_w0g"
     strategy.name = "JAINE LP"
     strategy.chain = "zerog"
     strategy.uses_safe_wallet = False
@@ -57,7 +57,7 @@ def _make_positions() -> TeardownPositionSummary:
         details={"discovered_on_chain": True},
     )
     return TeardownPositionSummary(
-        strategy_id="exp12_jaine_wbtc_w0g",
+        deployment_id="exp12_jaine_wbtc_w0g",
         timestamp=dt.datetime.now(dt.UTC),
         positions=[info],
     )
@@ -135,13 +135,13 @@ async def test_without_precomputed_queries_strategy():
     """Default behaviour is preserved: when precomputed_* are omitted, the
     manager still calls get_open_positions and generate_teardown_intents."""
     strategy = MagicMock()
-    strategy.strategy_id = "normal_strat"
+    strategy.deployment_id = "normal_strat"
     strategy.name = "Normal"
     strategy.chain = "arbitrum"
     strategy.uses_safe_wallet = False
     strategy.pause = AsyncMock()
     positions = TeardownPositionSummary(
-        strategy_id="normal_strat",
+        deployment_id="normal_strat",
         timestamp=__import__("datetime").datetime.now(__import__("datetime").UTC),
         positions=[],
     )

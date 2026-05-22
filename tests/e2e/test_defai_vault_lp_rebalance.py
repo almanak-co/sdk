@@ -43,7 +43,7 @@ TEST_CONFIG = {
     "lp": {"amount_almanak": "100", "amount_usdc": "10", "range_width_pct": "0.50"},
     "deposit": {"amount_usdc_raw": "10000000", "min_deploy_threshold_usdc_raw": "5000000"},
     "rebalance": {"min_rebalance_interval_minutes": 30},
-    "strategy_id": "test-defai",
+    "deployment_id": "test-defai",
     "max_tool_rounds": 15,
 }
 
@@ -287,7 +287,7 @@ class TestPromptTemplateVars:
         prompt = build_system_prompt(TEST_CONFIG, mode="running", state=state)
 
         assert "0.50" in prompt  # range_width_pct
-        assert "test-defai" in prompt  # strategy_id
+        assert "test-defai" in prompt  # deployment_id
         assert "0xABC" in prompt  # vault_address
         assert "#123" in prompt  # position_id
 

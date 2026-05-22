@@ -13,7 +13,7 @@ from almanak.framework.runner.strategy_runner import RunIterationState
 
 
 class _DummyStrategy:
-    strategy_id = "test-strategy"
+    deployment_id = "test-strategy"
     chain = "arbitrum"
 
 
@@ -23,17 +23,17 @@ class TestRunIterationStateDefaults:
         start = datetime.now(UTC)
         state = RunIterationState(
             strategy=strategy,  # type: ignore[arg-type]
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             start_time=start,
         )
         assert state.strategy is strategy
-        assert state.strategy_id == "test-strategy"
+        assert state.deployment_id == "test-strategy"
         assert state.start_time is start
 
     def test_optional_fields_default_empty(self) -> None:
         state = RunIterationState(
             strategy=_DummyStrategy(),  # type: ignore[arg-type]
-            strategy_id="s",
+            deployment_id="s",
             start_time=datetime.now(UTC),
         )
         assert state.market is None
@@ -49,7 +49,7 @@ class TestRunIterationStateMutation:
         """Each step helper writes one or two fields; the driver reads them back."""
         state = RunIterationState(
             strategy=_DummyStrategy(),  # type: ignore[arg-type]
-            strategy_id="s",
+            deployment_id="s",
             start_time=datetime.now(UTC),
         )
 
@@ -76,12 +76,12 @@ class TestRunIterationStateMutation:
         """Regression guard: mutable default_factory collections must not be shared."""
         a = RunIterationState(
             strategy=_DummyStrategy(),  # type: ignore[arg-type]
-            strategy_id="a",
+            deployment_id="a",
             start_time=datetime.now(UTC),
         )
         b = RunIterationState(
             strategy=_DummyStrategy(),  # type: ignore[arg-type]
-            strategy_id="b",
+            deployment_id="b",
             start_time=datetime.now(UTC),
         )
         a.intents.append(HoldIntent(reason="only-a"))

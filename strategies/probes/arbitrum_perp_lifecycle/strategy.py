@@ -289,7 +289,7 @@ class ArbitrumPerpLifecycleProbeStrategy(IntentStrategy):
                 details={"market": self.perp_market, "is_long": self.perp_is_long},
             ))
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "probe_arbitrum_perp_lifecycle"),
+            deployment_id=getattr(self, "deployment_id", "probe_arbitrum_perp_lifecycle"),
             timestamp=datetime.now(UTC), positions=positions,
         )
 

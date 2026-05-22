@@ -454,7 +454,7 @@ class AccountingWriter:
             if is_live:
                 raise AccountingPersistenceError(
                     AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(event.identity, "strategy_id", ""),
+                    deployment_id=event.identity.deployment_id,
                     message=msg,
                 )
             logger.warning(msg)
@@ -474,7 +474,7 @@ class AccountingWriter:
             if is_live:
                 raise AccountingPersistenceError(
                     AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(event.identity, "strategy_id", ""),
+                    deployment_id=event.identity.deployment_id,
                     cause=exc,
                 ) from exc
             return False

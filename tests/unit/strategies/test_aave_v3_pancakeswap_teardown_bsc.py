@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "bsc"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aave-pancake-bsc"
+    strat._deployment_id = "test-aave-pancake-bsc"
     strat.STRATEGY_NAME = "aave_v3_pancakeswap_teardown_bsc"
 
     # Config values

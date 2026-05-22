@@ -32,12 +32,12 @@ def tmp_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return adapter
 
 
-def _seed_pending_approval(adapter: TeardownStateAdapter, strategy_id: str) -> str:
+def _seed_pending_approval(adapter: TeardownStateAdapter, deployment_id: str) -> str:
     """Seed a pending approval as if a runner callback had written one."""
     teardown_id = "td_approve_test"
     adapter.create_approval_request(
         teardown_id=teardown_id,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         level=EscalationLevel.LEVEL_3,
         request_json=json.dumps({"level": "LEVEL_3", "current_slippage": "0.05"}),
         expires_at=(datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
@@ -49,14 +49,14 @@ class TestApproveEscalationWritesToSqlite:
     @pytest.mark.asyncio
     async def test_approve_action_writes_sqlite_response(self, tmp_adapter: TeardownStateAdapter) -> None:
         """approve_escalation must land in the SQLite channel the runner polls."""
-        strategy_id = "runner_initiated_strat"
-        teardown_id = _seed_pending_approval(tmp_adapter, strategy_id)
+        deployment_id = "runner_initiated_strat"
+        teardown_id = _seed_pending_approval(tmp_adapter, deployment_id)
         # Runner-initiated: no in-memory dict entry exists.
-        teardown_api._teardown_state.remove_teardown(strategy_id)
+        teardown_api._teardown_state.remove_teardown(deployment_id)
 
         request = teardown_api.EscalationApprovalRequest(action="approve")
         response = await teardown_api.approve_escalation(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             request=request,
             api_key="test-key",
         )
@@ -73,12 +73,12 @@ class TestApproveEscalationWritesToSqlite:
     async def test_wait_and_escalate_action_writes_sqlite_response(
         self, tmp_adapter: TeardownStateAdapter
     ) -> None:
-        strategy_id = "runner_strat_wait"
-        teardown_id = _seed_pending_approval(tmp_adapter, strategy_id)
-        teardown_api._teardown_state.remove_teardown(strategy_id)
+        deployment_id = "runner_strat_wait"
+        teardown_id = _seed_pending_approval(tmp_adapter, deployment_id)
+        teardown_api._teardown_state.remove_teardown(deployment_id)
 
         response = await teardown_api.approve_escalation(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             request=teardown_api.EscalationApprovalRequest(action="wait_and_escalate"),
             api_key="test-key",
         )
@@ -90,12 +90,12 @@ class TestApproveEscalationWritesToSqlite:
 
     @pytest.mark.asyncio
     async def test_cancel_action_writes_sqlite_response(self, tmp_adapter: TeardownStateAdapter) -> None:
-        strategy_id = "runner_strat_cancel"
-        teardown_id = _seed_pending_approval(tmp_adapter, strategy_id)
-        teardown_api._teardown_state.remove_teardown(strategy_id)
+        deployment_id = "runner_strat_cancel"
+        teardown_id = _seed_pending_approval(tmp_adapter, deployment_id)
+        teardown_api._teardown_state.remove_teardown(deployment_id)
 
         response = await teardown_api.approve_escalation(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             request=teardown_api.EscalationApprovalRequest(action="cancel"),
             api_key="test-key",
         )
@@ -116,7 +116,7 @@ class TestApproveEscalationWritesToSqlite:
 
         with pytest.raises(HTTPException) as exc_info:
             await teardown_api.approve_escalation(
-                strategy_id="ghost_strategy",
+                deployment_id="ghost_strategy",
                 request=teardown_api.EscalationApprovalRequest(action="approve"),
                 api_key="test-key",
             )
@@ -131,8 +131,8 @@ class TestApproveEscalationWritesToSqlite:
         409 rather than silently dropping the operator's decision."""
         from fastapi import HTTPException
 
-        strategy_id = "race_strat"
-        teardown_api._teardown_state.remove_teardown(strategy_id)
+        deployment_id = "race_strat"
+        teardown_api._teardown_state.remove_teardown(deployment_id)
 
         # Pretend there was a pending approval at lookup time.
         monkeypatch.setattr(
@@ -141,7 +141,7 @@ class TestApproveEscalationWritesToSqlite:
             lambda sid: {
                 "teardown_id": "td_race",
                 "level": "LEVEL_3",
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "request_json": "{}",
                 "created_at": "",
                 "expires_at": "",
@@ -156,7 +156,7 @@ class TestApproveEscalationWritesToSqlite:
 
         with pytest.raises(HTTPException) as exc_info:
             await teardown_api.approve_escalation(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 request=teardown_api.EscalationApprovalRequest(action="approve"),
                 api_key="test-key",
             )

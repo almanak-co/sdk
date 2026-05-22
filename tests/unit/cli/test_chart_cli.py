@@ -54,7 +54,7 @@ def sample_backtest_result() -> BacktestResult:
 
     return BacktestResult(
         engine="pnl",
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 1, 3),
         metrics=metrics,
@@ -178,7 +178,7 @@ class TestSaveChartIntegration:
         metrics = BacktestMetrics()
         backtest_result = BacktestResult(
             engine="pnl",
-            strategy_id="drawdown_test",
+            deployment_id="drawdown_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -222,7 +222,7 @@ class TestSaveChartIntegration:
         metrics = BacktestMetrics()
         backtest_result = BacktestResult(
             engine="pnl",
-            strategy_id="empty_test",
+            deployment_id="empty_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,

@@ -724,24 +724,22 @@ def test_postgres_contract_includes_t11_tables_after_t19_vib_4205() -> None:
     inverted test catches — it would silently re-disable the fail-loud
     boot guard for these tables.
     """
-    from almanak.framework.state.schema_contract import (
-        ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
-        ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
-    )
-    assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT_SQLITE
-    assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT_SQLITE
+    from almanak.framework.state.schema_contract import ACCOUNTING_SCHEMA_CONTRACT
+
+    assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT
+    assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT
     # T19 (VIB-4205) landed — both tables MUST now appear in the hosted
     # Postgres contract. Re-introducing either to
     # ``_POSTGRES_DEFERRED_TABLES`` silently re-disables the fail-loud
     # boot guard for new column drift on these tables.
-    assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
+    assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT, (
         "position_registry missing from the Postgres contract — T19 "
         "(VIB-4205) landed the hosted writer, so the schema validator "
         "must now require this table. If you re-added it to "
         "_POSTGRES_DEFERRED_TABLES, also revert the writer and update "
         "this test."
     )
-    assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
+    assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT, (
         "migration_state missing from the Postgres contract — T19 "
         "(VIB-4205) landed the hosted cutover RPCs, so the schema "
         "validator must now require this table. If you re-added it to "

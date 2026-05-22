@@ -80,7 +80,7 @@ class _FakeTrade:
 def _make_result(trades: list[_FakeTrade] | None = None) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo",
+        deployment_id="demo",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
         metrics=BacktestMetrics(
@@ -225,7 +225,7 @@ class TestWriteJsonOutput:
 
         # Top-level keys from result.to_dict() must be preserved.
         assert "engine" in payload
-        assert "strategy_id" in payload
+        assert "deployment_id" in payload
         assert "metrics" in payload
         assert "equity_curve" in payload
 

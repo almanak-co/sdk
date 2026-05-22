@@ -39,7 +39,7 @@ class ChainExecutionStrategy(ABC):
             actions: Chain-specific actions to execute.
                      EVM: list of Action/ActionBundle dicts.
                      Solana: list of SolanaInstruction or SolanaTransaction.
-            context: Optional execution context (strategy_id, dry_run, etc.).
+            context: Optional execution context (deployment_id, dry_run, etc.).
 
         Returns:
             ExecutionOutcome with success status, tx_ids, and enrichment data.

@@ -668,19 +668,19 @@ def _make_mock_config(chain: str, wallet_address: str) -> Any:
 
     @dataclass
     class MockConfig:
-        strategy_id: str
+        deployment_id: str
         chain: str
         wallet_address: str
 
         def to_dict(self) -> dict[str, Any]:
             return {
-                "strategy_id": self.strategy_id,
+                "deployment_id": self.deployment_id,
                 "chain": self.chain,
                 "wallet_address": self.wallet_address,
             }
 
     return MockConfig(
-        strategy_id="trace-test",
+        deployment_id="trace-test",
         chain=chain,
         wallet_address=wallet_address,
     )
@@ -702,7 +702,7 @@ def _resolve_trace_config(
         return _make_mock_config(chain, wallet_address)
 
     config_defaults = {
-        "strategy_id": "trace-test",
+        "deployment_id": "trace-test",
         "chain": chain,
         "wallet_address": wallet_address,
         **scenario_config,

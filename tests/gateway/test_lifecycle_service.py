@@ -47,7 +47,7 @@ class TestLifecycleServiceWriteState:
     @pytest.mark.asyncio
     async def test_write_state_success(self, service, store, mock_context):
         request = gateway_pb2.WriteAgentStateRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             state="RUNNING",
         )
         response = await service.WriteState(request, mock_context)
@@ -60,7 +60,7 @@ class TestLifecycleServiceWriteState:
     @pytest.mark.asyncio
     async def test_write_state_with_error_message(self, service, store, mock_context):
         request = gateway_pb2.WriteAgentStateRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             state="ERROR",
             error_message="Connection timeout",
         )
@@ -74,7 +74,7 @@ class TestLifecycleServiceWriteState:
     @pytest.mark.asyncio
     async def test_write_state_forwards_running_almanak_version(self, service, store, mock_context):
         request = gateway_pb2.WriteAgentStateRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             state="RUNNING",
             running_almanak_version="2.15.1rc16",
         )
@@ -92,7 +92,7 @@ class TestLifecycleServiceWriteState:
         service = LifecycleServiceServicer(store=broken_store)
 
         request = gateway_pb2.WriteAgentStateRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             state="RUNNING",
         )
         response = await service.WriteState(request, mock_context)
@@ -105,16 +105,16 @@ class TestLifecycleServiceReadState:
     async def test_read_state_found(self, service, store, mock_context):
         store.write_state("agent-1", "RUNNING")
 
-        request = gateway_pb2.ReadAgentStateRequest(agent_id="agent-1")
+        request = gateway_pb2.ReadAgentStateRequest(deployment_id="agent-1")
         response = await service.ReadState(request, mock_context)
         assert response.found is True
-        assert response.agent_id == "agent-1"
+        assert response.deployment_id == "agent-1"
         assert response.state == "RUNNING"
         assert response.iteration_count == 0
 
     @pytest.mark.asyncio
     async def test_read_state_not_found(self, service, mock_context):
-        request = gateway_pb2.ReadAgentStateRequest(agent_id="nonexistent")
+        request = gateway_pb2.ReadAgentStateRequest(deployment_id="nonexistent")
         response = await service.ReadState(request, mock_context)
         assert response.found is False
 
@@ -124,7 +124,7 @@ class TestLifecycleServiceHeartbeat:
     async def test_heartbeat_success(self, service, store, mock_context):
         store.write_state("agent-1", "RUNNING")
 
-        request = gateway_pb2.HeartbeatRequest(agent_id="agent-1")
+        request = gateway_pb2.HeartbeatRequest(deployment_id="agent-1")
         response = await service.Heartbeat(request, mock_context)
         assert response.success is True
 
@@ -140,7 +140,7 @@ class TestLifecycleServiceHeartbeat:
         broken_store.heartbeat.side_effect = RuntimeError("DB locked")
         service = LifecycleServiceServicer(store=broken_store)
 
-        request = gateway_pb2.HeartbeatRequest(agent_id="agent-1")
+        request = gateway_pb2.HeartbeatRequest(deployment_id="agent-1")
         response = await service.Heartbeat(request, mock_context)
         assert response.success is False
         assert response.error
@@ -151,7 +151,7 @@ class TestLifecycleServiceReadCommand:
     async def test_read_command_found(self, service, store, mock_context):
         store.write_command("agent-1", "STOP", "operator@test.com")
 
-        request = gateway_pb2.ReadAgentCommandRequest(agent_id="agent-1")
+        request = gateway_pb2.ReadAgentCommandRequest(deployment_id="agent-1")
         response = await service.ReadCommand(request, mock_context)
         assert response.found is True
         assert response.command == "STOP"
@@ -160,7 +160,7 @@ class TestLifecycleServiceReadCommand:
 
     @pytest.mark.asyncio
     async def test_read_command_not_found(self, service, mock_context):
-        request = gateway_pb2.ReadAgentCommandRequest(agent_id="agent-1")
+        request = gateway_pb2.ReadAgentCommandRequest(deployment_id="agent-1")
         response = await service.ReadCommand(request, mock_context)
         assert response.found is False
 
@@ -183,7 +183,7 @@ class TestLifecycleServiceWriteCommand:
     @pytest.mark.asyncio
     async def test_write_command_success(self, service, store, mock_context):
         request = gateway_pb2.WriteAgentCommandRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             command="STOP",
             issued_by="dashboard-user",
         )
@@ -200,7 +200,7 @@ class TestLifecycleServiceWriteCommand:
     async def test_write_command_rejects_pause(self, service, mock_context):
         """VIB-4281: PAUSE is no longer in _VALID_COMMANDS."""
         request = gateway_pb2.WriteAgentCommandRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             command="PAUSE",
             issued_by="dashboard-user",
         )
@@ -212,7 +212,7 @@ class TestLifecycleServiceWriteCommand:
     async def test_write_command_rejects_resume(self, service, mock_context):
         """VIB-4281: RESUME is no longer in _VALID_COMMANDS."""
         request = gateway_pb2.WriteAgentCommandRequest(
-            agent_id="agent-1",
+            deployment_id="agent-1",
             command="RESUME",
             issued_by="dashboard-user",
         )
@@ -228,22 +228,22 @@ class TestLifecycleServiceInputValidation:
     """Tests that malformed inputs return INVALID_ARGUMENT."""
 
     @pytest.mark.asyncio
-    async def test_write_state_empty_agent_id(self, service, mock_context):
-        request = gateway_pb2.WriteAgentStateRequest(agent_id="", state="RUNNING")
+    async def test_write_state_empty_deployment_id(self, service, mock_context):
+        request = gateway_pb2.WriteAgentStateRequest(deployment_id="", state="RUNNING")
         response = await service.WriteState(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_write_state_whitespace_agent_id(self, service, mock_context):
-        request = gateway_pb2.WriteAgentStateRequest(agent_id="   ", state="RUNNING")
+    async def test_write_state_whitespace_deployment_id(self, service, mock_context):
+        request = gateway_pb2.WriteAgentStateRequest(deployment_id="   ", state="RUNNING")
         response = await service.WriteState(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
     async def test_write_state_invalid_state(self, service, mock_context):
-        request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-1", state="BOGUS")
+        request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-1", state="BOGUS")
         response = await service.WriteState(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -256,34 +256,34 @@ class TestLifecycleServiceInputValidation:
         may still hold the value but the gateway no longer accepts new writes.
         """
         for state in ("INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"):
-            request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-v", state=state)
+            request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-v", state=state)
             response = await service.WriteState(request, mock_context)
             assert response.success is True, f"State {state} should be accepted"
 
     @pytest.mark.asyncio
     async def test_write_state_rejects_paused(self, service, mock_context):
         """VIB-4281: PAUSED is no longer in _VALID_STATES."""
-        request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-1", state="PAUSED")
+        request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-1", state="PAUSED")
         response = await service.WriteState(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_read_state_empty_agent_id(self, service, mock_context):
-        request = gateway_pb2.ReadAgentStateRequest(agent_id="")
+    async def test_read_state_empty_deployment_id(self, service, mock_context):
+        request = gateway_pb2.ReadAgentStateRequest(deployment_id="")
         await service.ReadState(request, mock_context)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_heartbeat_empty_agent_id(self, service, mock_context):
-        request = gateway_pb2.HeartbeatRequest(agent_id="")
+    async def test_heartbeat_empty_deployment_id(self, service, mock_context):
+        request = gateway_pb2.HeartbeatRequest(deployment_id="")
         response = await service.Heartbeat(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_read_command_empty_agent_id(self, service, mock_context):
-        request = gateway_pb2.ReadAgentCommandRequest(agent_id="")
+    async def test_read_command_empty_deployment_id(self, service, mock_context):
+        request = gateway_pb2.ReadAgentCommandRequest(deployment_id="")
         await service.ReadCommand(request, mock_context)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
@@ -295,15 +295,15 @@ class TestLifecycleServiceInputValidation:
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
-    async def test_write_command_empty_agent_id(self, service, mock_context):
-        request = gateway_pb2.WriteAgentCommandRequest(agent_id="", command="STOP", issued_by="admin")
+    async def test_write_command_empty_deployment_id(self, service, mock_context):
+        request = gateway_pb2.WriteAgentCommandRequest(deployment_id="", command="STOP", issued_by="admin")
         response = await service.WriteCommand(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
     async def test_write_command_invalid_command(self, service, mock_context):
-        request = gateway_pb2.WriteAgentCommandRequest(agent_id="agent-1", command="EXPLODE", issued_by="admin")
+        request = gateway_pb2.WriteAgentCommandRequest(deployment_id="agent-1", command="EXPLODE", issued_by="admin")
         response = await service.WriteCommand(request, mock_context)
         assert response.success is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
@@ -321,7 +321,7 @@ class TestLifecycleServiceBackendFailures:
         broken_store.read_state.side_effect = RuntimeError("connection refused to 10.0.0.5:5432")
         service = LifecycleServiceServicer(store=broken_store)
 
-        request = gateway_pb2.ReadAgentStateRequest(agent_id="agent-1")
+        request = gateway_pb2.ReadAgentStateRequest(deployment_id="agent-1")
         response = await service.ReadState(request, mock_context)
         assert response.found is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
@@ -336,7 +336,7 @@ class TestLifecycleServiceBackendFailures:
         broken_store.read_pending_command.side_effect = RuntimeError("SSL handshake failed")
         service = LifecycleServiceServicer(store=broken_store)
 
-        request = gateway_pb2.ReadAgentCommandRequest(agent_id="agent-1")
+        request = gateway_pb2.ReadAgentCommandRequest(deployment_id="agent-1")
         response = await service.ReadCommand(request, mock_context)
         assert response.found is False
         mock_context.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
@@ -350,7 +350,7 @@ class TestLifecycleServiceBackendFailures:
         broken_store.write_state.side_effect = RuntimeError("password authentication failed for user 'admin'")
         service = LifecycleServiceServicer(store=broken_store)
 
-        request = gateway_pb2.WriteAgentStateRequest(agent_id="agent-1", state="RUNNING")
+        request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-1", state="RUNNING")
         response = await service.WriteState(request, mock_context)
         assert response.success is False
         assert response.error == "internal server error"
@@ -364,7 +364,7 @@ class TestLifecycleServiceBackendFailures:
         broken_store.heartbeat.side_effect = RuntimeError("disk full /var/lib/pg")
         service = LifecycleServiceServicer(store=broken_store)
 
-        request = gateway_pb2.HeartbeatRequest(agent_id="agent-1")
+        request = gateway_pb2.HeartbeatRequest(deployment_id="agent-1")
         response = await service.Heartbeat(request, mock_context)
         assert response.success is False
         assert response.error == "internal server error"

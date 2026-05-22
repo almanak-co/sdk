@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "polygon"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aave-v3-paper-trade-polygon"
+    strat._deployment_id = "test-aave-v3-paper-trade-polygon"
     strat.collateral_token = "USDC"
     strat.collateral_amount = Decimal("500")
     strat.borrow_token = "WETH"

@@ -27,7 +27,7 @@ from almanak.framework.dashboard.plots.base import get_default_config
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -43,7 +43,7 @@ def render_custom_dashboard(
     - Trade history
     """
     st.title("ALMANAK RSI Strategy Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values
@@ -56,7 +56,7 @@ def render_custom_dashboard(
     cooldown_hours = strategy_config.get("cooldown_hours", 1)
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Trading Pair:** {base_token}/{quote_token}")
     st.markdown(f"**Pool:** `{pool_address[:16]}...{pool_address[-8:]}`")
     st.markdown("**DEX:** Uniswap V3")
@@ -97,10 +97,10 @@ def render_custom_dashboard(
 
     # Trade History section
     st.subheader("Recent Trades")
-    _render_trade_history(api_client, strategy_id)
+    _render_trade_history(api_client, deployment_id)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_rsi_chart_with_signals(
@@ -553,13 +553,13 @@ def _render_current_position(
             st.warning(f"Cooldown Active ({cooldown_remaining:.0f} min remaining)")
 
 
-def _render_trade_history(api_client: Any, strategy_id: str) -> None:
+def _render_trade_history(api_client: Any, deployment_id: str) -> None:
     """Render recent trade history."""
     trades = []
 
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=20)
+            events = api_client.get_timeline(deployment_id, limit=20)
             trades = [e for e in events if e.get("event_type") in ["SWAP", "swap", "INTENT_EXECUTED"]]
         except Exception as exc:
             st.warning(f"Unable to load trade history: {exc}")

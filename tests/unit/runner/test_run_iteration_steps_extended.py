@@ -91,9 +91,9 @@ def _make_runner(
     )
 
 
-def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
+def _make_strategy(deployment_id: str = "test-strategy") -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -107,14 +107,14 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
 def _make_state(strategy: MagicMock) -> RunIterationState:
     return RunIterationState(
         strategy=strategy,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         start_time=datetime.now(UTC),
     )
 
 
 def _tripped_breaker() -> CircuitBreaker:
     breaker = CircuitBreaker(
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         config=CircuitBreakerConfig(
             max_consecutive_failures=2,
             max_cumulative_loss_usd=Decimal("1000"),
@@ -159,9 +159,9 @@ class TestStepPauseGateExtended:
         strategy = _make_strategy()
 
         with caplog.at_level("INFO", logger="almanak.framework.runner.strategy_runner"):
-            # First pause call adds to _logged_paused_strategy_ids and emits an INFO log.
+            # First pause call adds to _logged_paused_deployment_ids and emits an INFO log.
             await runner._step_pause_gate(_make_state(strategy))
-            assert strategy.strategy_id in runner._logged_paused_strategy_ids
+            assert strategy.deployment_id in runner._logged_paused_deployment_ids
 
             # Second call: already logged, still returns HOLD but must NOT re-log.
             result2 = await runner._step_pause_gate(_make_state(strategy))
@@ -169,17 +169,17 @@ class TestStepPauseGateExtended:
         assert result2 is not None
         assert result2.status == IterationStatus.HOLD
         # Still in the set (it gets cleared only when strategy resumes)
-        assert strategy.strategy_id in runner._logged_paused_strategy_ids
+        assert strategy.deployment_id in runner._logged_paused_deployment_ids
 
         # Duplicate-log regression guard: exactly one INFO record mentioning this
         # strategy across both _step_pause_gate calls. The helper emits
-        # "[PAUSED] <strategy_id> is paused by operator (<reason>)" only on the
-        # first call because of the _logged_paused_strategy_ids membership check.
+        # "[PAUSED] <deployment_id> is paused by operator (<reason>)" only on the
+        # first call because of the _logged_paused_deployment_ids membership check.
         paused_records = [
             r
             for r in caplog.records
             if r.levelname == "INFO"
-            and strategy.strategy_id in r.message
+            and strategy.deployment_id in r.message
             and "paused by operator" in r.message
         ]
         assert len(paused_records) == 1, (
@@ -195,11 +195,11 @@ class TestStepPauseGateExtended:
         runner = _make_runner(state_manager=state_manager)
         strategy = _make_strategy()
         # Pre-seed as if strategy was previously paused
-        runner._logged_paused_strategy_ids.add(strategy.strategy_id)
+        runner._logged_paused_deployment_ids.add(strategy.deployment_id)
 
         result = await runner._step_pause_gate(_make_state(strategy))
         assert result is None
-        assert strategy.strategy_id not in runner._logged_paused_strategy_ids
+        assert strategy.deployment_id not in runner._logged_paused_deployment_ids
 
     @pytest.mark.asyncio
     async def test_paused_records_success_metric(self) -> None:
@@ -507,10 +507,10 @@ class TestStepLogIntents:
 
         # Helper is side-effect-only and returns None
         assert result is None
-        # Single-intent path emits exactly one INFO line mentioning the strategy id.
+        # Single-intent path emits exactly one INFO line mentioning the deployment id.
         info_records = _strategy_runner_info_records(caplog)
         assert len(info_records) == 1
-        assert strategy.strategy_id in info_records[0].message
+        assert strategy.deployment_id in info_records[0].message
         assert "intent:" in info_records[0].message
         # state.intents must be untouched by a logging helper
         assert state.intents == [intent]
@@ -861,7 +861,7 @@ class TestRunSingleChainIntents:
         expected = IterationResult(
             status=IterationStatus.SUCCESS,
             intent=intent,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
         )
 
@@ -883,7 +883,7 @@ class TestRunSingleChainIntents:
         fail_result = IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
             intent=intent1,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=5,
             error="first failed",
         )
@@ -924,14 +924,14 @@ class TestRunSingleChainIntents:
         success1 = IterationResult(
             status=IterationStatus.SUCCESS,
             intent=intent1,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
             execution_result=SimpleNamespace(swap_amounts=None),
         )
         success2 = IterationResult(
             status=IterationStatus.SUCCESS,
             intent=intent2,
-            strategy_id=strategy.strategy_id,
+            deployment_id=strategy.deployment_id,
             duration_ms=1,
             execution_result=SimpleNamespace(swap_amounts=None),
         )

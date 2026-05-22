@@ -191,7 +191,7 @@ class TestUpdatePositionAttribution:
 class TestGetPositionEvents:
     def test_forwards_with_keyword_args(self, manager_with_mocked_warm) -> None:
         """CR round-4 caught this: my round-3 forwarded positionally as
-        (strategy_id, event_type, limit) which mis-bound event_type to
+        (deployment_id, event_type, limit) which mis-bound event_type to
         position_id. Must use keyword args so event_type lands in the
         right slot."""
         mgr, warm = manager_with_mocked_warm

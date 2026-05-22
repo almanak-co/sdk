@@ -17,7 +17,7 @@ shape (column names + per-position attribution fields, VIB-3658).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
@@ -28,7 +28,7 @@ from almanak.gateway.services.state_service import StateServiceServicer
 
 _LEDGER_ID = "ledger-abc-123"
 _DEPLOYMENT_ID = "deploy-xyz"
-_STRATEGY_ID = "my_strategy:abc123"
+_DEPLOYMENT_ID = "my_strategy:abc123"
 
 
 @pytest.fixture
@@ -81,7 +81,6 @@ class TestSaveOutboxEntry:
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id="",
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert not resp.success
@@ -92,18 +91,16 @@ class TestSaveOutboxEntry:
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
             deployment_id="",
-            strategy_id=_STRATEGY_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert not resp.success
         assert "deployment_id" in resp.error
 
     @pytest.mark.asyncio
-    async def test_rejects_invalid_strategy_id(self, state_service, mock_context):
+    async def test_rejects_invalid_deployment_id(self, state_service, mock_context):
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
-            deployment_id=_DEPLOYMENT_ID,
-            strategy_id="has spaces!",
+            deployment_id="has spaces!",
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert not resp.success
@@ -115,7 +112,6 @@ class TestSaveOutboxEntry:
             outbox_id="outbox-uuid",
             ledger_entry_id=_LEDGER_ID,
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
             intent_type="SWAP",
             wallet_address="0xdeadbeef",
             position_key="swap:arbitrum:0xdeadbeef",
@@ -137,7 +133,6 @@ class TestSaveOutboxEntry:
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert not resp.success
@@ -150,7 +145,6 @@ class TestSaveOutboxEntry:
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
         )
         resp = await state_service.SaveOutboxEntry(req, mock_context)
         assert not resp.success
@@ -176,7 +170,6 @@ class TestGetOutboxEntry:
             return_value={
                 "id": _LEDGER_ID,
                 "deployment_id": _DEPLOYMENT_ID,
-                "strategy_id": _STRATEGY_ID,
                 "cycle_id": "cycle-1",
                 "ledger_entry_id": _LEDGER_ID,
                 "intent_type": "SWAP",
@@ -226,7 +219,6 @@ class TestGetOutboxPending:
                 {
                     "id": _LEDGER_ID,
                     "deployment_id": _DEPLOYMENT_ID,
-                    "strategy_id": _STRATEGY_ID,
                     "cycle_id": "cycle-1",
                     "ledger_entry_id": _LEDGER_ID,
                     "intent_type": "LP_OPEN",
@@ -337,7 +329,6 @@ class TestGetLedgerEntry:
             return_value={
                 "id": _LEDGER_ID,
                 "cycle_id": "cycle-1",
-                "strategy_id": _STRATEGY_ID,
                 "deployment_id": _DEPLOYMENT_ID,
                 "execution_mode": "live",
                 "timestamp": ts_iso,  # SQLite warm backend returns ISO string
@@ -374,11 +365,11 @@ class TestGetLedgerEntry:
 # PostgreSQL path — accounting_outbox SQL contract (VIB-3658)
 # =============================================================================
 #
-# Pins the column-name translation between PG, SQLite, and the wire:
-#   - PG column ``agent_id`` ↔ SQLite column ``strategy_id`` ↔ wire field
-#     ``strategy_id``. The SDK previously referenced ``strategy_id`` in the PG
-#     SQL, which would have failed against the live schema (column is
-#     ``agent_id``). The bug never surfaced because no PG-path tests existed.
+# Pins the column contract between PG, SQLite, and the wire:
+#   - VIB-4721/4722: ``accounting_outbox`` has a single identity column,
+#     ``deployment_id`` (the legacy ``deployment_id`` column was DROPPED). The PG
+#     SQL writes/reads/filters ``deployment_id`` directly with no identity
+#     translation (blueprint 29 §4-5).
 #   - VIB-3658 adds cycle_id / wallet_address / position_key / market_id to
 #     the PG schema; SaveOutboxEntry must persist them and GetOutboxEntry /
 #     GetOutboxPending must read them back into the proto.
@@ -405,17 +396,15 @@ def state_service_pg(settings):
 
 def _outbox_pg_row(
     *,
-    agent_id: str = "agent-resolved",
     deployment_id: str = _DEPLOYMENT_ID,
     cycle_id: str = "cycle-1",
     wallet_address: str = "0xdeadbeef",
     position_key: str = "uniswap_v3:arbitrum:0xdeadbeef:eth-usdc",
     market_id: str = "eth-usdc",
 ):
-    """A dict shaped like an asyncpg.Record for the post-VIB-3658 schema."""
+    """A dict shaped like an asyncpg.Record for the post-VIB-4721 schema."""
     return {
         "ledger_entry_id": _LEDGER_ID,
-        "agent_id": agent_id,
         "deployment_id": deployment_id,
         "intent_type": "SWAP",
         "cycle_id": cycle_id,
@@ -432,15 +421,15 @@ def _outbox_pg_row(
 
 class TestPostgresOutboxRoundTrip:
     @pytest.mark.asyncio
-    async def test_save_outbox_pg_insert_uses_agent_id_and_position_columns(
+    async def test_save_outbox_pg_insert_uses_deployment_id_and_position_columns(
         self, state_service_pg, mock_context
     ):
-        """PG INSERT must reference ``agent_id`` (not ``strategy_id``) and
-        carry all four per-position columns added in VIB-3658."""
+        """PG INSERT must reference ``deployment_id`` (the single identity
+        column, VIB-4721/4722) and carry all four per-position columns
+        added in VIB-3658."""
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
             cycle_id="cycle-1",
             intent_type="SWAP",
             wallet_address="0xdeadbeef",
@@ -453,25 +442,22 @@ class TestPostgresOutboxRoundTrip:
         assert resp.success
         state_service_pg._snapshot_execute.assert_awaited_once()
         sql, *args = state_service_pg._snapshot_execute.call_args.args
-        # Column-name contract: agent_id, never strategy_id, in the column list.
+        # Column contract: deployment_id only, no legacy identity columns.
         column_section = sql.split("VALUES")[0]
-        assert "agent_id" in column_section
-        assert "strategy_id" not in column_section
+        assert "deployment_id" in column_section
+        assert "agent_id" not in column_section
         # Per-position columns must be in the INSERT.
         for col in ("cycle_id", "wallet_address", "position_key", "market_id"):
             assert col in column_section, f"missing column {col} in INSERT"
-        # Argument order matches (ledger_entry_id, agent_id, deployment_id,
+        # Argument order matches (ledger_entry_id, deployment_id,
         # intent_type, cycle_id, wallet_address, position_key, market_id).
         assert args[0] == _LEDGER_ID
-        # args[1] is the resolved agent_id — the strategy_id-shaped wire input
-        # is normalized through resolve_agent_id() before the INSERT runs.
-        assert args[1]
-        assert args[2] == _DEPLOYMENT_ID
-        assert args[3] == "SWAP"
-        assert args[4] == "cycle-1"
-        assert args[5] == "0xdeadbeef"
-        assert args[6] == "uniswap_v3:arbitrum:0xdeadbeef:eth-usdc"
-        assert args[7] == "eth-usdc"
+        assert args[1] == _DEPLOYMENT_ID
+        assert args[2] == "SWAP"
+        assert args[3] == "cycle-1"
+        assert args[4] == "0xdeadbeef"
+        assert args[5] == "uniswap_v3:arbitrum:0xdeadbeef:eth-usdc"
+        assert args[6] == "eth-usdc"
 
     @pytest.mark.asyncio
     async def test_save_outbox_pg_uses_empty_strings_when_fields_missing(
@@ -482,7 +468,6 @@ class TestPostgresOutboxRoundTrip:
         req = gateway_pb2.SaveOutboxEntryRequest(
             ledger_entry_id=_LEDGER_ID,
             deployment_id=_DEPLOYMENT_ID,
-            strategy_id=_STRATEGY_ID,
             intent_type="SWAP",
             # cycle_id / wallet_address / position_key / market_id all unset
         )
@@ -491,15 +476,17 @@ class TestPostgresOutboxRoundTrip:
 
         assert resp.success
         args = state_service_pg._snapshot_execute.call_args.args[1:]
-        # Last four positional args correspond to cycle/wallet/position/market.
-        assert args[4:8] == ("", "", "", "")
+        # Last four positional args correspond to cycle/wallet/position/market
+        # (VIB-4721/4722: no legacy identity column, so they shift down to 3:7).
+        assert args[3:7] == ("", "", "", "")
 
     @pytest.mark.asyncio
     async def test_get_outbox_pg_select_includes_position_columns(
         self, state_service_pg, mock_context
     ):
-        """GetOutboxEntry PG SELECT must request agent_id + 4 new columns,
-        and the proto round-trips all of them via _pg_outbox_row_to_proto."""
+        """GetOutboxEntry PG SELECT must request deployment_id + 4 new
+        columns, and the proto round-trips all of them via
+        _pg_outbox_row_to_proto."""
         state_service_pg._snapshot_fetchrow.return_value = _outbox_pg_row()
 
         resp = await state_service_pg.GetOutboxEntry(
@@ -511,8 +498,8 @@ class TestPostgresOutboxRoundTrip:
         # SELECT-list contract.
         sql = state_service_pg._snapshot_fetchrow.call_args.args[0]
         select_section = sql.split("FROM")[0]
-        assert "agent_id" in select_section
-        assert "strategy_id" not in select_section
+        assert "deployment_id" in select_section
+        assert "agent_id" not in select_section
         for col in ("cycle_id", "wallet_address", "position_key", "market_id"):
             assert col in select_section, f"missing column {col} in SELECT"
         # Round-trip: every per-position field survives PG → proto.
@@ -521,8 +508,8 @@ class TestPostgresOutboxRoundTrip:
         assert resp.entry.wallet_address == "0xdeadbeef"
         assert resp.entry.position_key == "uniswap_v3:arbitrum:0xdeadbeef:eth-usdc"
         assert resp.entry.market_id == "eth-usdc"
-        # PG agent_id maps to wire strategy_id field (column-name translation).
-        assert resp.entry.strategy_id == "agent-resolved"
+        # PG deployment_id backs both wire identity fields (one identity).
+        assert resp.entry.deployment_id == _DEPLOYMENT_ID
 
     @pytest.mark.asyncio
     async def test_get_outbox_pending_pg_select_includes_position_columns(
@@ -550,8 +537,8 @@ class TestPostgresOutboxRoundTrip:
         assert len(resp.entries) == 2
         sql = state_service_pg._snapshot_fetch.call_args.args[0]
         select_section = sql.split("FROM")[0]
-        assert "agent_id" in select_section
-        assert "strategy_id" not in select_section
+        assert "deployment_id" in select_section
+        assert "agent_id" not in select_section
         for col in ("cycle_id", "wallet_address", "position_key", "market_id"):
             assert col in select_section, f"missing column {col} in SELECT"
         assert resp.entries[0].cycle_id == "cycle-1"

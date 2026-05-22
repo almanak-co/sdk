@@ -437,7 +437,7 @@ class MultiLPDualRangeStrategy(IntentStrategy[MultiLPDualRangeConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_multi_lp_dual_range"),
+            deployment_id=getattr(self, "deployment_id", "demo_multi_lp_dual_range"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

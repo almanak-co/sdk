@@ -21,7 +21,7 @@ SUPPORTED_CHAINS = ["arbitrum", "base", "optimism", "ethereum"]
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -36,7 +36,7 @@ def render_custom_dashboard(
     - In-range time percentage
     """
     st.title("Uniswap V3 Asymmetric Bullish LP Dashboard")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
 
 
     # Extract config values with defaults
@@ -51,7 +51,7 @@ def render_custom_dashboard(
     fee_tier = pool_parts[2] if len(pool_parts) > 2 else "3000"
 
     # Strategy info header
-    st.markdown(f"**Strategy ID:** `{strategy_id}`")
+    st.markdown(f"**Deployment ID:** `{deployment_id}`")
     st.markdown(f"**Pool:** {token0}/{token1} ({int(fee_tier) / 10000:.2f}% fee tier)")
     st.markdown(f"**Chain:** {chain.upper()}")
 
@@ -77,16 +77,16 @@ def render_custom_dashboard(
 
     # In-Range Time Metrics
     st.subheader("In-Range Time Analysis")
-    _render_in_range_time(api_client, strategy_id)
+    _render_in_range_time(api_client, deployment_id)
 
     st.divider()
 
     # Rebalance History
     st.subheader("Rebalance History")
-    _render_rebalance_history(api_client, strategy_id)
+    _render_rebalance_history(api_client, deployment_id)
 
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 
 
 def _render_asymmetric_config(upside_pct: str, downside_pct: str) -> None:
@@ -292,12 +292,12 @@ def _render_range_bar(session_state: dict[str, Any], token0: str) -> None:
     )
 
 
-def _render_in_range_time(api_client: Any, strategy_id: str) -> None:
+def _render_in_range_time(api_client: Any, deployment_id: str) -> None:
     """Render in-range time percentage analysis."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=100)
+            events = api_client.get_timeline(deployment_id, limit=100)
         except Exception:
             pass
 
@@ -373,12 +373,12 @@ def _render_in_range_time(api_client: Any, strategy_id: str) -> None:
         st.info("No positions recorded yet")
 
 
-def _render_rebalance_history(api_client: Any, strategy_id: str) -> None:
+def _render_rebalance_history(api_client: Any, deployment_id: str) -> None:
     """Render rebalance history with price movement."""
     events = []
     if api_client:
         try:
-            events = api_client.get_timeline(strategy_id, limit=50)
+            events = api_client.get_timeline(deployment_id, limit=50)
         except Exception:
             pass
 

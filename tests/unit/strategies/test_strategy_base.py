@@ -30,26 +30,26 @@ class TestStrategyBaseDictConfig:
     @patch("almanak.framework.strategies.base.add_event")
     def test_init_with_plain_dict(self, _mock_event):
         """Plain dict config should not raise on instantiation."""
-        config = {"strategy_id": "test-1", "chain": "arbitrum", "max_slippage": 0.005}
+        config = {"deployment_id": "test-1", "chain": "arbitrum", "max_slippage": 0.005}
         strategy = _ConcreteStrategy(config)
 
         assert strategy.config is config
-        # getattr on a dict doesn't resolve keys, so strategy_id/chain default to "unknown"
-        assert strategy.strategy_id == "unknown"
+        # getattr on a dict doesn't resolve keys, so deployment_id/chain default to "unknown"
+        assert strategy.deployment_id == "unknown"
         assert strategy.chain == "unknown"
 
     @patch("almanak.framework.strategies.base.add_event")
     def test_init_with_empty_dict(self, _mock_event):
-        """Empty dict config should work (strategy_id/chain default to 'unknown')."""
+        """Empty dict config should work (deployment_id/chain default to 'unknown')."""
         strategy = _ConcreteStrategy({})
 
-        assert strategy.strategy_id == "unknown"
+        assert strategy.deployment_id == "unknown"
         assert strategy.chain == "unknown"
 
     @patch("almanak.framework.strategies.base.add_event")
     def test_dict_config_snapshot_saved(self, _mock_event):
         """Config snapshot should contain the dict contents."""
-        config = {"strategy_id": "snap-test", "trade_size_usd": 1000}
+        config = {"deployment_id": "snap-test", "trade_size_usd": 1000}
         strategy = _ConcreteStrategy(config)
 
         snapshots = strategy.get_config_history()
@@ -61,7 +61,7 @@ class TestStrategyBaseDictConfig:
     @patch("almanak.framework.strategies.base.add_event")
     def test_dict_config_is_shallow_copy(self, _mock_event):
         """Snapshot should be a copy, not a reference to the original dict."""
-        config = {"strategy_id": "copy-test", "value": 42}
+        config = {"deployment_id": "copy-test", "value": 42}
         strategy = _ConcreteStrategy(config)
 
         snapshots = strategy.get_config_history()
@@ -88,7 +88,7 @@ class TestStrategyBaseDictConfig:
         """An object with neither to_dict() nor dict behavior should get empty snapshot."""
 
         class BareConfig:
-            strategy_id = "bare"
+            deployment_id = "bare"
             chain = "ethereum"
 
         strategy = _ConcreteStrategy(BareConfig())
@@ -109,7 +109,7 @@ class TestDataclassConfigSnapshot:
 
         @dataclass
         class MyStratConfig:
-            strategy_id: str = "dc-test"
+            deployment_id: str = "dc-test"
             chain: str = "base"
             trade_size_usd: int = 500
             pool_address: str = "0xabc"
@@ -129,7 +129,7 @@ class TestDataclassConfigSnapshot:
 
         @dataclass
         class QuietConfig:
-            strategy_id: str = "quiet"
+            deployment_id: str = "quiet"
             chain: str = "arbitrum"
 
         with caplog.at_level(logging.WARNING, logger="almanak.framework.strategies.base"):
@@ -143,7 +143,7 @@ class TestDataclassConfigSnapshot:
 
         @dataclass
         class DecimalConfig:
-            strategy_id: str = "dec-test"
+            deployment_id: str = "dec-test"
             chain: str = "base"
             max_slippage: Decimal = Decimal("0.005")
             trade_size: Decimal = Decimal("1000.50")
@@ -177,7 +177,7 @@ class TestGetConfig:
         """get_config uses .get() for DictConfigWrapper-style objects."""
 
         class DictLike:
-            strategy_id = "test"
+            deployment_id = "test"
             chain = "arbitrum"
 
             def get(self, key: str, default: Any = None) -> Any:
@@ -195,7 +195,7 @@ class TestGetConfig:
         """get_config falls back to getattr for plain objects."""
 
         class AttrConfig:
-            strategy_id = "test"
+            deployment_id = "test"
             chain = "arbitrum"
             trade_size_usd = "750"
             rsi_period = 30

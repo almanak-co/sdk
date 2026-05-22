@@ -218,7 +218,7 @@ class TestBuildLedgerEntryExtractedData:
         result.gas_cost_usd = Decimal("1.50")
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-1",
             intent=intent,
             result=result,
@@ -254,7 +254,7 @@ class TestBuildLedgerEntryExtractedData:
         result.gas_cost_usd = Decimal("3.75")
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-2",
             intent=intent,
             result=result,
@@ -282,7 +282,7 @@ class TestBuildLedgerEntryExtractedData:
         intent.to_token = None
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-3",
             intent=intent,
             result=None,
@@ -353,7 +353,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"repay_amount": 2_000_001})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-repay",
             intent=intent,
             result=result,
@@ -374,7 +374,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"withdraw_amount": 500_000})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-withdraw",
             intent=intent,
             result=result,
@@ -398,7 +398,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"repay_amount": 2_000_001})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-repay-partial",
             intent=intent,
             result=result,
@@ -417,7 +417,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({})  # no repay_amount key
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-repay-fallback",
             intent=intent,
             result=result,
@@ -441,7 +441,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"repay_amount": 2_000_001})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-repay-noresolve",
             intent=intent,
             result=result,
@@ -461,7 +461,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"repay_amount": "not-an-int"})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-repay-badtype",
             intent=intent,
             result=result,
@@ -487,7 +487,7 @@ class TestRepayWithdrawAmountIn:
         result = self._make_result({"repay_amount": 1_999_500})
 
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test",
             cycle_id="cycle-deleverage",
             intent=intent,
             result=result,

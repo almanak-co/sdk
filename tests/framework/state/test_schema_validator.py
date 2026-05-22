@@ -21,7 +21,7 @@ import pytest
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.schema_contract import (
     ACCOUNTING_SCHEMA_CONTRACT,
-    ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
+    TEARDOWN_SCHEMA_CONTRACT_POSTGRES,
     SchemaContractViolation,
     format_violations,
 )
@@ -29,6 +29,8 @@ from almanak.framework.state.schema_validator import (
     validate_postgres_schema_or_raise,
     validate_sqlite_schema_or_raise,
 )
+
+HOSTED_SCHEMA_CONTRACT = {**ACCOUNTING_SCHEMA_CONTRACT, **TEARDOWN_SCHEMA_CONTRACT_POSTGRES}
 
 
 # ---------------------------------------------------------------------------
@@ -89,35 +91,19 @@ def test_t_3763_2_contract_columns_are_non_empty() -> None:
         assert all(isinstance(c, str) and c for c in cols), table
 
 
-def test_pg_contract_uses_agent_id_not_strategy_id() -> None:
-    """PG contract MUST NOT use ``strategy_id`` — hosted metrics-database
-    schema keys teardown / accounting tables on ``agent_id``. Any drift here
-    would silently brick the hosted-boot validator at runtime.
+def test_hosted_contract_keys_on_deployment_id_only() -> None:
+    """Hosted contract MUST key every table on ``deployment_id`` only.
 
-    Replaces the earlier ``test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id``
-    (PR #2162 / Codex). That test conflated the naming invariant with a
-    structural ``pg_tables <= sqlite_tables`` assumption that broke as soon
-    as VIB-4049 introduced Postgres-only teardown tables (where SDK forbids
-    SDK-side PG DDL — see CLAUDE.md "Database schema ownership" — so PG
-    needs boot-validation entries SQLite doesn't, an opposite-direction
-    asymmetry the old structural assertions weren't built for). Per-column
-    equality / table set-subset checks were also overspecified — the boot
-    validator (``schema_validator.py``) fails closed at runtime if real-life
-    Postgres is missing any column the SDK actually writes, so the meta-test
-    on the contract dict added noise without adding signal. This stripped-
-    down version keeps the only piece with genuine load: the rename
-    invariant.
-
-    (Note: T19 / VIB-4205 lifted the table-level deferrals for
-    ``position_registry`` and ``migration_state``, and the per-column
-    deferral for ``accounting_events.position_reference`` — both
-    ``_POSTGRES_DEFERRED_TABLES`` and ``_POSTGRES_DEFERRED_COLUMNS`` are
-    empty by design as of T19. PR2's ``TEARDOWN_SCHEMA_CONTRACT_POSTGRES``
-    adds three PG-only tables on top of that, hence the opposite-direction
-    asymmetry mentioned above.)
+    VIB-4721/4722 (blueprint 29 §3): every deployment-scoped table — hosted
+    Postgres and local SQLite — carries exactly one identity column,
+    ``deployment_id``. The legacy hosted identity
+    columns are gone. Any drift here would silently brick the hosted-boot
+    validator at runtime (it would demand a column the post-migration
+    schema no longer has).
     """
-    for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items():
-        assert "strategy_id" not in cols, f"{table}: PG contract still lists 'strategy_id' (should be 'agent_id')"
+    for table, cols in HOSTED_SCHEMA_CONTRACT.items():
+        assert "agent_id" not in cols, f"{table}: hosted contract still lists legacy 'agent_id'"
+        assert "deployment_id" in cols, f"{table}: hosted contract missing 'deployment_id'"
 
 
 # ---------------------------------------------------------------------------
@@ -126,37 +112,13 @@ def test_pg_contract_uses_agent_id_not_strategy_id() -> None:
 # the column on hosted Postgres too.
 # ---------------------------------------------------------------------------
 def test_vib_4205_position_reference_required_on_both_backends() -> None:
-    """T19 (VIB-4205): position_reference MUST be required on BOTH backends.
+    """position_reference MUST be required on BOTH backends.
 
-    T10 (VIB-4196) introduced the column local-only with a per-column
-    Postgres deferral. T19 lifts that deferral now that the hosted writer
-    paths ship (and the metrics-database migration in VIB-4191 lands the
-    column on production Postgres). Re-introducing the deferral would
-    silently re-disable the fail-loud boot guard.
+    VIB-4722 collapsed the split contract into one dict, so the SQLite and
+    Postgres contracts are identical at the accounting layer — there is no
+    per-column deferral mechanism left to re-disable the guard.
     """
-    from almanak.framework.state.schema_contract import (
-        _POSTGRES_DEFERRED_COLUMNS,
-        ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
-        ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
-    )
-
-    assert (
-        "position_reference"
-        in ACCOUNTING_SCHEMA_CONTRACT_SQLITE["accounting_events"]
-    ), "T10 column missing from SQLite contract"
-    assert (
-        "position_reference"
-        in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES["accounting_events"]
-    ), (
-        "T19 (VIB-4205) lifts the T10 Postgres deferral; "
-        "accounting_events.position_reference MUST appear in the Postgres "
-        "contract so VIB-4191 column drift is caught at boot."
-    )
-    deferred_for_ae = _POSTGRES_DEFERRED_COLUMNS.get("accounting_events", frozenset())
-    assert "position_reference" not in deferred_for_ae, (
-        f"T19 lifts the deferral; _POSTGRES_DEFERRED_COLUMNS['accounting_events'] "
-        f"must not carry 'position_reference'; got {deferred_for_ae}"
-    )
+    assert "position_reference" in ACCOUNTING_SCHEMA_CONTRACT["accounting_events"]
 
 
 def test_vib_4196_validator_refuses_when_position_reference_missing(tmp_path) -> None:
@@ -191,7 +153,6 @@ def test_vib_4196_validator_refuses_when_position_reference_missing(tmp_path) ->
                 CREATE TABLE accounting_events (
                     id TEXT PRIMARY KEY,
                     deployment_id TEXT NOT NULL,
-                    strategy_id TEXT NOT NULL,
                     cycle_id TEXT NOT NULL,
                     execution_mode TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
@@ -239,8 +200,7 @@ def test_t_3763_4_sqlite_missing_column_raises(tmp_path) -> None:
             """
             CREATE TABLE portfolio_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy_id TEXT NOT NULL,
-                deployment_id TEXT DEFAULT '',
+                deployment_id TEXT NOT NULL,
                 cycle_id TEXT DEFAULT '',
                 execution_mode TEXT DEFAULT '',
                 timestamp TEXT NOT NULL,
@@ -292,14 +252,14 @@ def test_t_3763_6_format_violations_is_sorted() -> None:
     """
     violations = {
         "transaction_ledger": {"chain", "id"},
-        "portfolio_snapshots": {"strategy_id", "id"},
+        "portfolio_snapshots": {"cycle_id", "id"},
     }
     rendered = format_violations("Test", violations)
     lines = rendered.split("\n")
     assert lines[0] == "Test schema is missing required accounting columns:"
     # portfolio_snapshots before transaction_ledger; columns sorted within.
-    assert lines[1] == "  - portfolio_snapshots.id"
-    assert lines[2] == "  - portfolio_snapshots.strategy_id"
+    assert lines[1] == "  - portfolio_snapshots.cycle_id"
+    assert lines[2] == "  - portfolio_snapshots.id"
     assert lines[3] == "  - transaction_ledger.chain"
     assert lines[4] == "  - transaction_ledger.id"
 
@@ -334,11 +294,11 @@ def _make_pg_mock(
 async def test_t_3763_7_postgres_clean_passes() -> None:
     """T-3763-7: PG with all required columns passes.
 
-    Uses ``ACCOUNTING_SCHEMA_CONTRACT_POSTGRES`` (``agent_id`` instead of
-    ``strategy_id``) — the deployed metrics-database shape, not the SDK
-    SQLite shape (per Codex review on PR #2162).
+    Uses the hosted schema contract — the deployed
+    metrics-database shape (one identity column, ``deployment_id``, per
+    blueprint 29 / VIB-4721) plus the Postgres-only teardown bridge tables.
     """
-    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
+    full_columns = {table: list(cols) for table, cols in HOSTED_SCHEMA_CONTRACT.items()}
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
         await validate_postgres_schema_or_raise("postgres://user:pass@host/db")
@@ -350,7 +310,7 @@ async def test_t_3763_7_postgres_clean_passes() -> None:
 @pytest.mark.asyncio
 async def test_t_3763_8_postgres_missing_column_raises() -> None:
     """T-3763-8: PG missing a single column raises with that column named."""
-    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
+    full_columns = {table: list(cols) for table, cols in HOSTED_SCHEMA_CONTRACT.items()}
     full_columns["transaction_ledger"].remove("post_state_json")
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
@@ -380,7 +340,7 @@ async def test_t_3763_9_postgres_validator_never_issues_ddl() -> None:
         # Return everything required so we don't raise. Use the PG-shaped
         # contract since this exercises the hosted validator.
         table = args[-1]
-        return [{"column_name": c} for c in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.get(table, set())]
+        return [{"column_name": c} for c in HOSTED_SCHEMA_CONTRACT.get(table, set())]
 
     fake_conn = MagicMock()
     fake_conn.fetch = _fetch
@@ -406,7 +366,7 @@ async def test_t_3763_9_postgres_validator_never_issues_ddl() -> None:
 @pytest.mark.asyncio
 async def test_t_3763_10_postgres_missing_table_reports_all_columns() -> None:
     """T-3763-10: a missing table is treated as 'every column missing'."""
-    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
+    full_columns = {table: list(cols) for table, cols in HOSTED_SCHEMA_CONTRACT.items()}
     full_columns["accounting_events"] = []  # table missing entirely
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
@@ -426,15 +386,16 @@ async def test_t_3763_10_postgres_missing_table_reports_all_columns() -> None:
 async def test_validate_state_schema_at_boot_routes_to_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Boot helper must call the PG validator in hosted mode (AGENT_ID set).
+    """Boot helper must call the PG validator in hosted mode (ALMANAK_IS_HOSTED).
 
-    Mode is now read from ``is_hosted()`` rather than ``settings.database_url``
-    directly (CodeRabbit major fix on PR #1977) so a reordered boot path or
+    Mode is read from ``is_hosted()`` (the single ``ALMANAK_IS_HOSTED`` signal)
+    rather than ``settings.database_url`` directly, so a reordered boot path or
     direct unit call cannot drift from ``validate_deployment_invariants``.
     """
     from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
 
-    monkeypatch.setenv("AGENT_ID", "agent-test-pg")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test-pg")
 
     pg_mock = AsyncMock()
     sq_mock = MagicMock()
@@ -467,7 +428,8 @@ async def test_validate_state_schema_at_boot_hosted_without_database_url_fails(
     """
     from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
 
-    monkeypatch.setenv("AGENT_ID", "agent-test-pg-empty")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-test-pg-empty")
 
     settings = MagicMock()
     settings.database_url = "   "
@@ -480,7 +442,8 @@ async def test_validate_state_schema_at_boot_routes_to_sqlite(monkeypatch: pytes
     """Boot helper must call SQLite migrations + validator in local mode."""
     from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
 
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     db_path = str(tmp_path / "boot.db")
     monkeypatch.setenv("ALMANAK_STATE_DB", db_path)
 

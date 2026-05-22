@@ -20,7 +20,7 @@ reasoned by an LLM at runtime instead of encoded in Python.
 
 - **Fully deployed on X-Layer.** Every on-chain action (approvals,
   mints, burns, swaps) hits the `xlayer` network through the Almanak
-  execution gateway. The strategy ID, chain, and pool are all locked to
+  execution gateway. The deployment ID, chain, and pool are all locked to
   X-Layer by policy — the agent is not allowed to touch any other chain.
 - **Real Uniswap V3 integration.** Opens a concentrated position on the
   native `WOKB/USDT/3000` pool using the production Uniswap V3 connector
@@ -208,7 +208,7 @@ tool manifest only contains the allowed tools above.
     "rebalance_threshold_pct": "0.05",
     "interval_seconds": 60,
     "max_tool_rounds": 12,
-    "strategy_id": "agent-xlayer-lp-rebalance",
+    "deployment_id": "agent-xlayer-lp-rebalance",
     "anvil_funding": {
         "OKB": 100, "WOKB": 10, "USDT": 10000, "USDC": 10000
     }
@@ -223,7 +223,7 @@ tool manifest only contains the allowed tools above.
 | `rebalance_threshold_pct` | How far outside the range the price must move before the agent rebalances. |
 | `interval_seconds` | Loop period in non-`--once` mode. |
 | `max_tool_rounds` | Safety cap on tool calls per iteration — prevents runaway LLM loops. |
-| `strategy_id` | Opaque id used for state persistence. |
+| `deployment_id` | Opaque id used for state persistence. |
 | `anvil_funding` | Initial wallet funding for local Anvil fork smoke tests. |
 
 ---
@@ -241,7 +241,7 @@ tool manifest only contains the allowed tools above.
 5. **Circuit breaker** — consecutive tool errors halt the agent loop.
 6. **Structured error envelopes** — the LLM never sees raw gRPC
    exceptions, only typed `ToolError` objects with `recoverable` flags.
-7. **Auditability** — every decision is tagged with `strategy_id` and
+7. **Auditability** — every decision is tagged with `deployment_id` and
    written to the `ObserveService` audit trail via
    `record_agent_decision`.
 

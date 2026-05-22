@@ -465,7 +465,7 @@ def run_strategy_via_cli(force_action: str = "open", pool: str = "WETH/USDC", st
     pool_parts[1] if len(pool_parts) > 1 else "USDC"
 
     config = {
-        "strategy_id": "demo_aerodrome_lp",
+        "deployment_id": "demo_aerodrome_lp",
         "strategy_name": "demo_aerodrome_lp",
         "pool": pool,
         "stable": stable,

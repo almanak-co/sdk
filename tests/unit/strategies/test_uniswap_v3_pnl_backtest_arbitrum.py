@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "arbitrum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-uniswap-v3-pnl-backtest-arbitrum"
+    strat._deployment_id = "test-uniswap-v3-pnl-backtest-arbitrum"
     strat.trade_size_usd = Decimal("50")
     strat.base_token = "WETH"
     strat.quote_token = "USDC"

@@ -304,7 +304,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Opening LP position on {self.pool}",
-                strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+                deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
                 details={
                     "amount0": str(amount0),
                     "amount1": str(amount1),
@@ -400,7 +400,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
                             timestamp=datetime.now(UTC),
                             event_type=TimelineEventType.REBALANCE_EXECUTED,
                             description=f"Rebalancing LP: price {side} range threshold",
-                            strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+                            deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
                             details={
                                 "position_in_range": str(position_in_range),
                                 "rebalance_count": self._rebalance_count,
@@ -431,7 +431,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Closing LP position: {reason}",
-                strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+                deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
                 details={"reason": reason, "position_id": self._position_id},
             )
         )
@@ -502,7 +502,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
                             timestamp=datetime.now(UTC),
                             event_type=TimelineEventType.LP_OPEN,
                             description=f"LP position opened on {self.pool} (ID: {position_id})",
-                            strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+                            deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
                             details={
                                 "position_id": str(position_id),
                                 "range_lower": str(self._range_lower),
@@ -526,7 +526,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.LP_CLOSE,
                         description=f"LP position closed on {self.pool}",
-                        strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+                        deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
                         details={"position_id": self._position_id},
                     )
                 )
@@ -674,7 +674,7 @@ class EdgeLpOpUsdcWethStrategy(IntentStrategy[EdgeLPConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "edge_lp_op_usdc_weth"),
+            deployment_id=getattr(self, "deployment_id", "edge_lp_op_usdc_weth"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

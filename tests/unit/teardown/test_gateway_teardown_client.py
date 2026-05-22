@@ -25,11 +25,11 @@ from almanak.gateway.proto import gateway_pb2
 class _FakeTeardownStub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object, float | None]] = []
-        self.request = TeardownRequest(strategy_id="agent-1", mode=TeardownMode.HARD)
+        self.request = TeardownRequest(deployment_id="agent-1", mode=TeardownMode.HARD)
         now = datetime.now(UTC)
         self.state = TeardownState(
             teardown_id="td-1",
-            strategy_id="agent-1",
+            deployment_id="agent-1",
             mode=TeardownMode.SOFT,
             status=TeardownStatus.EXECUTING,
             total_intents=2,
@@ -56,7 +56,7 @@ class _FakeTeardownStub:
     def MarkTeardownCompleted(self, request, timeout=None):
         self._record("MarkTeardownCompleted", request, timeout)
         completed = TeardownRequest(
-            strategy_id=request.strategy_id,
+            deployment_id=request.deployment_id,
             mode=TeardownMode.HARD,
             status=TeardownStatus.COMPLETED,
         )
@@ -98,7 +98,7 @@ def test_gateway_manager_serializes_request_and_reads_mode() -> None:
     stub = _FakeTeardownStub()
     manager = GatewayTeardownStateManager(_client(stub))  # type: ignore[arg-type]
 
-    manager.create_request(TeardownRequest(strategy_id="agent-1", mode=TeardownMode.SOFT))
+    manager.create_request(TeardownRequest(deployment_id="agent-1", mode=TeardownMode.SOFT))
     request = manager.get_active_request("agent-1")
     completed = manager.mark_completed("agent-1", result={"intents": 2})
     cancelled = manager.request_cancel("agent-1")

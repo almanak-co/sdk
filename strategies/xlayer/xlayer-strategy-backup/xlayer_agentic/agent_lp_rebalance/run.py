@@ -100,12 +100,12 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     """Scripted mock LLM that opens an LP position once and reports status."""
     pool = config["pool"]
     token0, token1, fee = pool.split("/")
-    strategy_id = config.get("strategy_id", "agent-xlayer-lp-rebalance")
+    deployment_id = config.get("deployment_id", "agent-xlayer-lp-rebalance")
 
     return MockLLMClient([
         # Round 1: load state + get prices + get balances (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
+            _mock_tool_call("load_agent_state", {"deployment_id": deployment_id}),
             _mock_tool_call("get_price", {"token": token0, "chain": config["chain"]}),
             _mock_tool_call("get_price", {"token": token1, "chain": config["chain"]}),
             _mock_tool_call("get_balance", {"token": token0, "chain": config["chain"]}),
@@ -128,7 +128,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
         # Round 3: persist state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "state": {
                     "position": "open",
                     "pool": pool,
@@ -137,7 +137,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
                 },
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
                 "decision_summary": (
                     f"Opened concentrated LP on {pool} centred on the current "
                     "pair price with a +/-5% range. No prior state."
@@ -179,7 +179,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-xlayer-lp-rebalance"),
+            deployment_id=config.get("deployment_id", "agent-xlayer-lp-rebalance"),
             default_chain=config.get("chain", "xlayer"),
         )
 
@@ -210,7 +210,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 12),
-                strategy_id=config.get("strategy_id", "agent-xlayer-lp-rebalance"),
+                deployment_id=config.get("deployment_id", "agent-xlayer-lp-rebalance"),
             )
             logger.info("Agent result: %s", result)
         finally:

@@ -327,7 +327,7 @@ class CompoundV3CrisisPolygonStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", None) or "demo_compound_v3_crisis_polygon",
+            deployment_id=getattr(self, "deployment_id", None) or "demo_compound_v3_crisis_polygon",
             timestamp=self._last_market_timestamp or datetime.now(UTC),
             positions=positions,
         )

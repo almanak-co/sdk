@@ -66,9 +66,9 @@ def _make_runner(
     )
 
 
-def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
+def _make_strategy(deployment_id: str = "test-strategy") -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -83,14 +83,14 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
 def _make_state(strategy: MagicMock) -> RunIterationState:
     return RunIterationState(
         strategy=strategy,
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
         start_time=datetime.now(UTC),
     )
 
 
 def _tripped_breaker() -> CircuitBreaker:
     breaker = CircuitBreaker(
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         config=CircuitBreakerConfig(
             max_consecutive_failures=3,
             max_cumulative_loss_usd=Decimal("1000"),
@@ -374,7 +374,7 @@ class TestStepCircuitBreakerPreExecute:
 
     def test_closed_breaker_returns_none(self) -> None:
         breaker = CircuitBreaker(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             config=CircuitBreakerConfig(max_consecutive_failures=3),
         )
         runner = _make_runner(circuit_breaker=breaker)

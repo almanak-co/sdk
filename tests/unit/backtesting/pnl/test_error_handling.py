@@ -404,7 +404,7 @@ class TestBacktestResultErrors:
         """errors field should default to empty list."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -416,7 +416,7 @@ class TestBacktestResultErrors:
         """add_error should append error to list."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -447,7 +447,7 @@ class TestBacktestResultErrors:
         """add_error should log fatal errors at ERROR level."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -476,7 +476,7 @@ class TestBacktestResultErrors:
         """add_error should log recoverable errors at WARNING level."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -504,7 +504,7 @@ class TestBacktestResultErrors:
         """to_dict should include errors field."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -520,7 +520,7 @@ class TestBacktestResultErrors:
         """from_dict should restore errors field."""
         original = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -543,7 +543,7 @@ class TestBacktestResultErrors:
         """summary should include error statistics when errors are present."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),
@@ -573,7 +573,7 @@ class TestBacktestResultErrors:
         """summary should not include error section when no errors."""
         result = BacktestResult(
             engine=BacktestEngine.PNL,
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 31),
             metrics=BacktestMetrics(),

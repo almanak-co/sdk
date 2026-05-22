@@ -64,7 +64,6 @@ def _identity(protocol: str = "aave", chain: str = "arbitrum") -> AccountingIden
     return AccountingIdentity(
         id="evt-001",
         deployment_id=DEPLOYMENT_ID,
-        strategy_id=DEPLOYMENT_ID,
         cycle_id="cycle-001",
         execution_mode="live",
         timestamp=datetime.now(UTC),
@@ -417,7 +416,6 @@ def test_deserialize_lending_from_raw():
         {
             "id": "evt-001",
             "deployment_id": DEPLOYMENT_ID,
-            "strategy_id": DEPLOYMENT_ID,
             "cycle_id": "c1",
             "execution_mode": "live",
             "timestamp": "2026-04-26T10:00:00",
@@ -447,7 +445,6 @@ def test_deserialize_unavailable_flagged():
         {
             "id": "evt-002",
             "deployment_id": DEPLOYMENT_ID,
-            "strategy_id": DEPLOYMENT_ID,
             "cycle_id": "c1",
             "execution_mode": "live",
             "timestamp": "2026-04-26T10:00:00",
@@ -473,7 +470,6 @@ def test_deserialize_ignores_malformed_payload():
         {
             "id": "evt-003",
             "deployment_id": DEPLOYMENT_ID,
-            "strategy_id": DEPLOYMENT_ID,
             "cycle_id": "c1",
             "execution_mode": "live",
             "timestamp": "2026-04-26T10:00:00",
@@ -626,7 +622,6 @@ def test_unavailable_events_not_in_typed_lists():
         {
             "id": "evt-unavail",
             "deployment_id": DEPLOYMENT_ID,
-            "strategy_id": DEPLOYMENT_ID,
             "cycle_id": "c1",
             "execution_mode": "live",
             "timestamp": "2026-04-26T10:00:00",

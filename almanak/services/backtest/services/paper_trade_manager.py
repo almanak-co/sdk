@@ -31,7 +31,7 @@ class SessionState:
 
     session_id: str
     status: PaperTradeSessionStatus
-    strategy_id: str
+    deployment_id: str
     chain: str
     progress: ProgressInfo = field(default_factory=ProgressInfo)  # type: ignore[arg-type]
     metrics: PaperTradeLiveMetrics = field(default_factory=PaperTradeLiveMetrics)
@@ -56,7 +56,7 @@ class PaperTradeManager:
         self._max_total = max_total
         self._state_base_dir = Path(state_base_dir) if state_base_dir else Path.home() / ".almanak" / "paper"
 
-    def create_session(self, strategy_id: str, chain: str) -> str:
+    def create_session(self, deployment_id: str, chain: str) -> str:
         """Create a new paper trading session and return its ID."""
         session_id = f"pt_{uuid.uuid4().hex[:12]}"
         with self._lock:
@@ -74,7 +74,7 @@ class PaperTradeManager:
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
                 status=PaperTradeSessionStatus.STARTING,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 chain=chain,
                 state_dir=state_dir,
             )

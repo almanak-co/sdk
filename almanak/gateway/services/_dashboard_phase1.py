@@ -636,7 +636,7 @@ class _PreviewTokenEntry:
     diff buckets the operator saw at preview time — replayed at apply time
     if the fingerprint matches."""
 
-    strategy_id: str
+    deployment_id: str
     fingerprint: StateFingerprint
     reconcile_response: Any  # gateway_pb2.ReconcileResponse
     expires_at_unix_seconds: int
@@ -660,7 +660,7 @@ class PreviewTokenStore:
     def issue(
         self,
         *,
-        strategy_id: str,
+        deployment_id: str,
         fingerprint: StateFingerprint,
         reconcile_response: Any,
         now_unix_seconds: int,
@@ -673,7 +673,7 @@ class PreviewTokenStore:
         ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl_seconds
         expires_at = now_unix_seconds + ttl
         self._tokens[token] = _PreviewTokenEntry(
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             fingerprint=fingerprint,
             reconcile_response=reconcile_response,
             expires_at_unix_seconds=expires_at,
@@ -684,7 +684,7 @@ class PreviewTokenStore:
         self,
         *,
         token: str,
-        strategy_id: str,
+        deployment_id: str,
         now_unix_seconds: int,
     ) -> tuple[str, _PreviewTokenEntry | None]:
         """Validate + atomically remove the token.
@@ -700,7 +700,7 @@ class PreviewTokenStore:
             return ("NOT_FOUND", None)
         if entry.expires_at_unix_seconds < now_unix_seconds:
             return ("EXPIRED", None)
-        if entry.strategy_id != strategy_id:
+        if entry.deployment_id != deployment_id:
             # Re-store to avoid silent token loss (defensive — should be impossible
             # with sound client usage but cheap to guard).
             self._tokens[token] = entry
@@ -724,7 +724,7 @@ class _ReportCacheEntry:
 class ReconciliationReportCache:
     """5-second TTL cache on GetReconciliationReport responses.
 
-    Keyed only by strategy_id — no semantic invalidation, pure time-based
+    Keyed only by deployment_id — no semantic invalidation, pure time-based
     expiry. Per v5 design ("simpler, harder to get wrong, bounded staleness").
     """
 
@@ -732,17 +732,17 @@ class ReconciliationReportCache:
         self._entries: dict[str, _ReportCacheEntry] = {}
         self._ttl_seconds = ttl_seconds
 
-    def get(self, strategy_id: str, *, now_unix_seconds: int) -> Any | None:
-        entry = self._entries.get(strategy_id)
+    def get(self, deployment_id: str, *, now_unix_seconds: int) -> Any | None:
+        entry = self._entries.get(deployment_id)
         if entry is None:
             return None
         if entry.expires_at_unix_seconds < now_unix_seconds:
-            self._entries.pop(strategy_id, None)
+            self._entries.pop(deployment_id, None)
             return None
         return entry.response
 
-    def put(self, strategy_id: str, response: Any, *, now_unix_seconds: int) -> None:
-        self._entries[strategy_id] = _ReportCacheEntry(
+    def put(self, deployment_id: str, response: Any, *, now_unix_seconds: int) -> None:
+        self._entries[deployment_id] = _ReportCacheEntry(
             response=response,
             expires_at_unix_seconds=now_unix_seconds + self._ttl_seconds,
         )

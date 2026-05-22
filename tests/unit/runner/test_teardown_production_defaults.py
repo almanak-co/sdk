@@ -34,7 +34,7 @@ def _isolated_teardown_state_db(monkeypatch, tmp_path):
     runner builds the TeardownStateAdapter. Tests mock the manager so the
     file is never read.
     """
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
     monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
 
@@ -51,7 +51,7 @@ def _runner() -> StrategyRunner:
 
 def _strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test_strat"
+    strategy.deployment_id = "test_strat"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234"
     strategy.should_teardown.return_value = True
@@ -91,7 +91,7 @@ class TestProductionDefaults:
         runner._execute_teardown_inline = AsyncMock()
         runner._request_teardown_failure_shutdown = MagicMock()
         runner._create_error_result = MagicMock(
-            return_value=IterationResult(status=IterationStatus.STRATEGY_ERROR, strategy_id="test_strat"),
+            return_value=IterationResult(status=IterationStatus.STRATEGY_ERROR, deployment_id="test_strat"),
         )
 
         state_manager = MagicMock()
@@ -131,7 +131,7 @@ class TestProductionDefaults:
         runner._execute_teardown_inline = AsyncMock()
         runner._request_teardown_failure_shutdown = MagicMock()
         runner._create_error_result = MagicMock(
-            return_value=IterationResult(status=IterationStatus.STRATEGY_ERROR, strategy_id="test_strat"),
+            return_value=IterationResult(status=IterationStatus.STRATEGY_ERROR, deployment_id="test_strat"),
         )
 
         state_manager = MagicMock()

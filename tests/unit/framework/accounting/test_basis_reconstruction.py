@@ -252,8 +252,7 @@ class TestAmountTokenPayloadRoundTrip:
 
         return AccountingIdentity(
             id="test-id",
-            deployment_id="dep",
-            strategy_id="strat",
+            deployment_id="strat",
             cycle_id="cycle",
             execution_mode="live",
             timestamp=datetime(2026, 4, 27, tzinfo=UTC),
@@ -342,7 +341,7 @@ class TestAmountTokenPayloadRoundTrip:
         from almanak.framework.accounting.models import AccountingIdentity, LendingAccountingEvent
 
         identity = AccountingIdentity(
-            id="old-id", deployment_id="d", strategy_id="s", cycle_id="c",
+            id="old-id", deployment_id="s", cycle_id="c",
             execution_mode="live", timestamp=datetime(2026, 1, 1, tzinfo=UTC),
             chain="arbitrum", protocol="aave_v3", wallet_address="0xw",
             tx_hash="0xt", ledger_entry_id="l",

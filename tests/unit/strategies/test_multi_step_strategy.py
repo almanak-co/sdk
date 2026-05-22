@@ -96,7 +96,7 @@ def _make_strategy_class(
             self._ms_previous_stable = "idle"
             self._ms_retry_count = 0
             self._ms_step_data = {}
-            self._strategy_id = "test-strategy-1"
+            self._deployment_id = "test-strategy-1"
             self._ready = ready
 
             # Track hook calls
@@ -124,7 +124,7 @@ def _make_strategy_class(
 
         def get_open_positions(self):
             from almanak.framework.teardown.models import TeardownPositionSummary
-            return TeardownPositionSummary.empty(self._strategy_id or "test")
+            return TeardownPositionSummary.empty(self._deployment_id or "test")
 
         def generate_teardown_intents(self, mode=None, market=None):
             return []

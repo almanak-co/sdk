@@ -67,7 +67,7 @@ async def resolve_compiler_or_fallback(
     """
     from .runner_models import IterationStatus
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
 
     # Call through runner method so instance-level mock patching in tests works.
     compiler = runner._build_teardown_compiler(strategy, teardown_market)
@@ -76,7 +76,7 @@ async def resolve_compiler_or_fallback(
 
     if not runner.config.allow_unsafe_teardown_fallback:
         error_msg = (
-            f"Cannot build TeardownManager compiler for {strategy_id}. "
+            f"Cannot build TeardownManager compiler for {deployment_id}. "
             f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False). "
             f"Fix compiler dependencies or enable fallback for local testing."
         )
@@ -84,13 +84,13 @@ async def resolve_compiler_or_fallback(
         if request:
             from .runner_teardown import _safe_mark
 
-            _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
+            _safe_mark(state_manager, "mark_failed", deployment_id, error=error_msg)
         runner._request_teardown_failure_shutdown(error_msg)
-        return None, runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
+        return None, runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
 
     logger.warning(
         f"Cannot build compiler for TeardownManager — falling back to inline teardown "
-        f"for {strategy_id} (unsafe fallback enabled)"
+        f"for {deployment_id} (unsafe fallback enabled)"
     )
     fallback_result = await runner._execute_teardown_inline(
         strategy, teardown_intents, teardown_market, start_time, request, state_manager
@@ -122,25 +122,27 @@ async def fetch_positions_or_fallback(
     """
     from .runner_models import IterationStatus
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
     try:
         positions = strategy.get_open_positions()
     except Exception as pos_err:
         if not runner.config.allow_unsafe_teardown_fallback:
             error_msg = (
-                f"Cannot fetch positions for safety validation for {strategy_id}: {pos_err}. "
+                f"Cannot fetch positions for safety validation for {deployment_id}: {pos_err}. "
                 f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False)."
             )
             logger.error(error_msg)
             if request:
                 from .runner_teardown import _safe_mark
 
-                _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
+                _safe_mark(state_manager, "mark_failed", deployment_id, error=error_msg)
             runner._request_teardown_failure_shutdown(error_msg)
-            return None, runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
+            return None, runner._create_error_result(
+                deployment_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time
+            )
         logger.warning(
             f"Cannot fetch positions for safety validation — "
-            f"falling back to inline teardown for {strategy_id} (unsafe fallback enabled): {pos_err}"
+            f"falling back to inline teardown for {deployment_id} (unsafe fallback enabled): {pos_err}"
         )
         fallback_result = await runner._execute_teardown_inline(
             strategy, teardown_intents, teardown_market, start_time, request, state_manager
@@ -213,7 +215,7 @@ def validate_safety_or_error(
     """
     from .runner_models import IterationStatus
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
     validation = teardown_mgr.safety_guard.validate_teardown_request(positions, teardown_mode)
     if validation.all_passed:
         return None
@@ -225,12 +227,12 @@ def validate_safety_or_error(
         _safe_mark(
             state_manager,
             "mark_failed",
-            strategy_id,
+            deployment_id,
             error=f"Safety validation failed: {validation.blocked_reason}",
         )
     runner._request_teardown_failure_shutdown(f"Teardown safety validation failed: {validation.blocked_reason}")
     return runner._create_error_result(
-        strategy_id,
+        deployment_id,
         IterationStatus.STRATEGY_ERROR,
         f"Teardown safety validation failed: {validation.blocked_reason}",
         start_time,
@@ -265,7 +267,7 @@ async def run_cancel_window_and_persist(
     from ..teardown.models import TeardownStatus
     from .runner_models import IterationResult, IterationStatus
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
 
     teardown_id = f"td_{uuid.uuid4().hex[:12]}"
     teardown_state = await teardown_mgr._persist_state(
@@ -286,7 +288,7 @@ async def run_cancel_window_and_persist(
         short_circuit = IterationResult(
             status=IterationStatus.TEARDOWN,
             intent=None,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=runner._calculate_duration_ms(start_time),
         )
         return None, short_circuit
@@ -359,7 +361,7 @@ async def execute_and_verify(
     from ..teardown.models import TeardownStatus
     from .runner_teardown import _make_approval_callback, _safe_mark
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
 
     # Build approval callback for slippage escalation (VIB-2927).
     # Only wire for manual mode — auto mode uses hard slippage limits.
@@ -409,7 +411,7 @@ async def execute_and_verify(
         except Exception as verify_err:
             logger.exception(
                 "Post-teardown verification raised for %s — treating as verify-fail",
-                strategy_id,
+                deployment_id,
             )
             positions_closed = False
             verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
@@ -417,7 +419,7 @@ async def execute_and_verify(
         if not positions_closed:
             if verify_error_msg is None:
                 verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
-            logger.warning(f"Post-teardown verification: {strategy_id} incomplete. Marking as failed.")
+            logger.warning(f"Post-teardown verification: {deployment_id} incomplete. Marking as failed.")
             teardown_result = replace(
                 teardown_result,
                 success=False,
@@ -442,7 +444,7 @@ async def execute_and_verify(
                         exc_info=True,
                     )
             if request:
-                _safe_mark(state_manager, "mark_failed", strategy_id, error=verify_error_msg)
+                _safe_mark(state_manager, "mark_failed", deployment_id, error=verify_error_msg)
 
     return teardown_result
 
@@ -492,10 +494,10 @@ async def handle_executor_exception(
     from .runner_models import IterationStatus
     from .runner_teardown import _safe_mark
 
-    strategy_id = strategy.strategy_id
-    logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {exc}")
+    deployment_id = strategy.deployment_id
+    logger.error(f"🛑 TeardownManager execution failed for {deployment_id}: {exc}")
     if request:
-        _safe_mark(state_manager, "mark_failed", strategy_id, error=str(exc))
+        _safe_mark(state_manager, "mark_failed", deployment_id, error=str(exc))
 
     # Best effort: reflect the failure in the adapter's row so postmortem
     # readers don't see an EXECUTING teardown_execution_state row paired
@@ -508,11 +510,11 @@ async def handle_executor_exception(
     except Exception:
         logger.warning(
             "Failed to persist FAILED teardown_execution_state for %s after exception",
-            strategy_id,
+            deployment_id,
             exc_info=True,
         )
     runner._request_teardown_failure_shutdown(str(exc))
-    return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(exc), start_time)
+    return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(exc), start_time)
 
 
 # =============================================================================
@@ -537,22 +539,22 @@ def map_teardown_result(
     from .runner_models import IterationResult, IterationStatus
     from .runner_teardown import _safe_mark
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
 
     if teardown_result.success:
         logger.info(
-            f"🛑 {strategy_id} teardown complete via TeardownManager "
+            f"🛑 {deployment_id} teardown complete via TeardownManager "
             f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
             f"{teardown_result.duration_seconds:.1f}s)"
         )
         runner.request_shutdown()
-        runner._lifecycle_write_state(strategy_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, "TERMINATED")
         if request:
             _safe_mark(
                 state_manager,
                 "mark_completed",
-                strategy_id,
+                deployment_id,
                 result={
                     "intents": teardown_result.intents_succeeded,
                     "mode": mode_str,
@@ -563,11 +565,11 @@ def map_teardown_result(
         return IterationResult(
             status=IterationStatus.TEARDOWN,
             intent=None,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=runner._calculate_duration_ms(start_time),
         )
 
-    logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
+    logger.warning(f"🛑 {deployment_id} teardown incomplete via TeardownManager: {teardown_result.error}")
     if request:
         # VIB-4542: pass intent-landing counts so postmortem readers see
         # "6 of 7 landed" instead of "0 / 0 with error_message='1 intents failed'".
@@ -579,7 +581,7 @@ def map_teardown_result(
         _safe_mark(
             state_manager,
             "mark_failed",
-            strategy_id,
+            deployment_id,
             error=teardown_result.error or "teardown failed",
             positions_closed=intents_succeeded,
             positions_failed=max(intents_total - intents_succeeded, 0),
@@ -588,6 +590,6 @@ def map_teardown_result(
     return IterationResult(
         status=IterationStatus.STRATEGY_ERROR,
         error=teardown_result.error,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         duration_ms=runner._calculate_duration_ms(start_time),
     )

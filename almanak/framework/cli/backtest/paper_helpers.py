@@ -350,7 +350,7 @@ def load_resume_state(strategy: str) -> tuple[BackgroundPaperTrader, PaperTrader
         config=PaperTraderConfig(
             chain="arbitrum",
             rpc_url="http://placeholder",
-            strategy_id=strategy,
+            deployment_id=strategy,
         ),
     )
     if not bg_trader.state_file.exists():
@@ -374,7 +374,7 @@ def reset_dead_or_abort(
         click.echo(f"Process {state.pid} is no longer running. Resetting status to stopped.")
         state.status = "stopped"
         state.save(bg_trader.state_file)
-        pid_file = PIDFile(path=bg_trader.pid_file_path, strategy_id=strategy)
+        pid_file = PIDFile(path=bg_trader.pid_file_path, deployment_id=strategy)
         pid_file.release()
         return
 
@@ -473,7 +473,7 @@ def build_resume_config(
     kwargs.update(
         chain=chain,
         rpc_url=rpc_url,
-        strategy_id=strategy,
+        deployment_id=strategy,
         tick_interval_seconds=tick_interval,
         max_ticks=new_max_ticks,
     )
@@ -494,14 +494,14 @@ def _format_pid_status(pid: Any, fallback_status: str) -> str:
 
 def render_session_row(session: dict[str, Any], verbose: bool) -> None:
     """Render one row of the multi-session listing."""
-    strategy_id = session.get("strategy_id", "unknown")
+    deployment_id = session.get("deployment_id", "unknown")
     status = session.get("status", "unknown")
     pid = session.get("pid", "N/A")
     start_time = session.get("start_time", "N/A")
 
     status_display = _format_pid_status(pid, status)
 
-    click.echo(f"\nStrategy: {strategy_id}")
+    click.echo(f"\nStrategy: {deployment_id}")
     click.echo(f"  Status: {status_display}")
     click.echo(f"  Started: {start_time}")
 
@@ -602,7 +602,7 @@ def render_single_session_status(strategy: str) -> None:
         config=PaperTraderConfig(
             chain="arbitrum",
             rpc_url="http://localhost:8545",
-            strategy_id=strategy,
+            deployment_id=strategy,
         ),
     )
     bg_status = bg_trader.get_status()

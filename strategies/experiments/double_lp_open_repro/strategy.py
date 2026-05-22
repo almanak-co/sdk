@@ -130,7 +130,7 @@ class DoubleLpOpenReproStrategy(IntentStrategy[DoubleLpOpenReproConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Emitting LP_OPEN #{self._opens_emitted} (no registry_handle)",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"open_seq": self._opens_emitted, "pool": self.pool},
             )
         )
@@ -190,7 +190,7 @@ class DoubleLpOpenReproStrategy(IntentStrategy[DoubleLpOpenReproConfig]):
             for pid in self._position_ids
         ]
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

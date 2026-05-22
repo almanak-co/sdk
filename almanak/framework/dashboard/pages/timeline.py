@@ -29,10 +29,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     Args:
         strategies: List of all strategy data objects
     """
-    # Get strategy ID from query params
-    strategy_id = st.query_params.get("strategy_id")
+    # Get deployment ID from query params
+    deployment_id = st.query_params.get("deployment_id")
 
-    if not strategy_id:
+    if not deployment_id:
         maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to view its timeline.")
         st.markdown("### Or select a strategy here:")
@@ -45,7 +45,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 key="timeline_strategy_selector",
             )
             if st.button("View Timeline", use_container_width=True):
-                st.query_params["strategy_id"] = strategies[selected_idx].id
+                st.query_params["deployment_id"] = strategies[selected_idx].id
                 st.rerun()
         else:
             st.warning("No strategies found. Make sure you have strategies running or check your state database.")
@@ -53,10 +53,10 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
                 st.query_params["page"] = "overview"
         return
 
-    strategy = next((s for s in strategies if s.id == strategy_id), None)
+    strategy = next((s for s in strategies if s.id == deployment_id), None)
 
     if not strategy:
-        st.error(f"Strategy {strategy_id} not found.")
+        st.error(f"Strategy {deployment_id} not found.")
         if st.button("Go to Overview"):
             st.query_params["page"] = "overview"
         return
@@ -65,7 +65,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     from almanak.framework.dashboard.data_source import GatewayConnectionError, get_strategy_details
 
     try:
-        detailed = get_strategy_details(strategy_id)
+        detailed = get_strategy_details(deployment_id)
         if detailed is not None:
             strategy = detailed
     except GatewayConnectionError:
@@ -407,7 +407,7 @@ def _coalesce_consecutive_events(
         while run_end + 1 < len(events):
             nxt = events[run_end + 1]
             nxt_type = nxt.event_type.value if hasattr(nxt.event_type, "value") else str(nxt.event_type)
-            if nxt_type != etype or nxt.strategy_id != event.strategy_id:
+            if nxt_type != etype or nxt.deployment_id != event.deployment_id:
                 break
             # Compare adjacent events — break the run if the gap between
             # consecutive events exceeds max_gap (not first-to-Nth).

@@ -41,7 +41,7 @@ from almanak.framework.accounting.processor import AccountingProcessor
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DEPLOYMENT_ID = "dep-pred-test"
-_STRATEGY_ID = "strat-pred-test"
+_DEPLOYMENT_ID = "strat-pred-test"
 _CYCLE_ID = "cycle-pred-1"
 _WALLET = "0xabcdef1234567890abcdef1234567890abcdef12"
 _CHAIN = "polygon"
@@ -66,7 +66,7 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -102,7 +102,7 @@ def _make_ledger_row(
     lid = ledger_entry_id or str(uuid.uuid4())
     return {
         "id": lid,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",
@@ -601,7 +601,7 @@ def _outbox_with_no_key(intent_type: str) -> dict[str, Any]:
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": "",  # missing wallet

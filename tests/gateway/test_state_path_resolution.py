@@ -14,7 +14,7 @@ The fixture pattern manipulates env vars (``ALMANAK_STRATEGY_FOLDER``,
 3. HARD-FAIL        — neither folder nor standalone; strict resolver
    raises ``LocalPathError`` instead of silently writing to utility DB.
 
-Hosted mode (``AGENT_ID`` set) is out of scope for these tests because
+Hosted mode is out of scope for these tests because
 the gateway uses Postgres there; the local-path branch never executes.
 """
 
@@ -45,7 +45,8 @@ def _clean_env(monkeypatch):
         "ALMANAK_STATE_DB",
         "ALMANAK_STRATEGY_FOLDER",
         "ALMANAK_GATEWAY_DB_PATH",
-        "AGENT_ID",
+        "ALMANAK_IS_HOSTED",
+        "ALMANAK_DEPLOYMENT_ID",
     ):
         monkeypatch.delenv(var, raising=False)
 

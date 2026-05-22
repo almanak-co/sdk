@@ -4,7 +4,7 @@ This module provides structured logging via structlog with:
 - JSON output for production (machine-readable)
 - ConsoleRenderer for local development (human-readable)
 - Standard fields: timestamp, level, logger, message
-- Context fields: strategy_id, chain, tx_hash, correlation_id
+- Context fields: deployment_id, chain, tx_hash, correlation_id
 
 Usage:
     # Configure logging at application startup
@@ -24,7 +24,7 @@ Usage:
 
     # Add persistent context for a correlation_id
     from almanak.framework.utils.logging import add_context
-    add_context(correlation_id="abc-123", strategy_id="momentum_v1")
+    add_context(correlation_id="abc-123", deployment_id="momentum_v1")
 
 Example:
     >>> configure_logging(level=LogLevel.INFO, format=LogFormat.JSON)
@@ -335,7 +335,7 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
 
     Example:
         logger = get_logger(__name__)
-        logger.info("processing_started", strategy_id="momentum_v1")
+        logger.info("processing_started", deployment_id="momentum_v1")
     """
     if not _logging_configured:
         # Configure with defaults if not yet configured
@@ -349,14 +349,14 @@ def add_context(**kwargs: Any) -> None:
 
     Context is stored in a context variable and automatically added
     to all log messages. Use this for values like correlation_id or
-    strategy_id that should appear in all logs.
+    deployment_id that should appear in all logs.
 
     Args:
         **kwargs: Key-value pairs to add to context
 
     Example:
-        add_context(correlation_id="abc-123", strategy_id="momentum_v1")
-        logger.info("processing")  # Will include correlation_id and strategy_id
+        add_context(correlation_id="abc-123", deployment_id="momentum_v1")
+        logger.info("processing")  # Will include correlation_id and deployment_id
     """
     structlog.contextvars.bind_contextvars(**kwargs)
 

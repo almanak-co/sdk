@@ -72,7 +72,6 @@ def _call_builder(
         intent=intent,
         result=result,
         deployment_id=deployment_id,
-        strategy_id="strat-1",
         cycle_id="cycle-001",
         execution_mode="paper",
         chain=chain,

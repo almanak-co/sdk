@@ -103,7 +103,7 @@ def create_mock_llm(config: dict) -> MockLLMClient:
     return MockLLMClient([
         # Round 1: load state + get price + get balances (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": config.get("strategy_id", "agent-lp")}),
+            _mock_tool_call("load_agent_state", {"deployment_id": config.get("deployment_id", "agent-lp")}),
             _mock_tool_call("get_price", {"token": token_a}),
             _mock_tool_call("get_balance", {"token": token_a}),
             _mock_tool_call("get_balance", {"token": token_b}),
@@ -124,11 +124,11 @@ def create_mock_llm(config: dict) -> MockLLMClient:
         # Round 3: save state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": config.get("strategy_id", "agent-lp"),
+                "deployment_id": config.get("deployment_id", "agent-lp"),
                 "state": {"position": "open", "range": [8.5, 10.0], "pool": pool},
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": config.get("strategy_id", "agent-lp"),
+                "deployment_id": config.get("deployment_id", "agent-lp"),
                 "decision_summary": "Opened LP position on WAVAX/USDC with range 8.5-10.0. No existing position; price is 9.23 within range.",
             }),
         ),
@@ -165,7 +165,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-lp"),
+            deployment_id=config.get("deployment_id", "agent-lp"),
             default_chain=config.get("chain", "avalanche"),
         )
 
@@ -195,7 +195,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 10),
-                strategy_id=config.get("strategy_id", "agent-lp"),
+                deployment_id=config.get("deployment_id", "agent-lp"),
             )
             logger.info("Agent result: %s", result)
         finally:

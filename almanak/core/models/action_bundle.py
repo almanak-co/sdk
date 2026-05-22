@@ -30,7 +30,7 @@ class ActionBundle(BaseModel):
     created_at: float = Field(default_factory=lambda: datetime.now(pytz.utc).timestamp())
     executed_at: float | None = None
     status: ExecutionStatus = ExecutionStatus.CREATED
-    strategy_id: str
+    deployment_id: str
     config: Any
     persistent_state: Any
 
@@ -154,7 +154,7 @@ class ActionBundle(BaseModel):
             f"  network={self.network.value},\n"
             f"  chain={self.chain.value},\n"
             f"  status={self.status.value}\n"
-            f"  strategy_id={self.strategy_id}\n"
+            f"  deployment_id={self.deployment_id}\n"
         )
         result += f"  Actions= {self.get_action_types()}\n"
         if self.transactions:
@@ -169,7 +169,7 @@ class ActionBundle(BaseModel):
             "network": self.network.value,
             "chain": self.chain.value,
             "status": self.status.value,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "actions": self.get_action_types(),
         }
         if self.transactions:

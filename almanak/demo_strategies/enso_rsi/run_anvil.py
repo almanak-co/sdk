@@ -351,7 +351,7 @@ def run_strategy_via_cli(force_action: str = "buy") -> int:
     import tempfile
 
     config = {
-        "strategy_id": "demo_enso_rsi",
+        "deployment_id": "demo_enso_rsi",
         "strategy_name": "demo_enso_rsi",
         "trade_size_usd": "100",
         "rsi_oversold": 30,

@@ -28,7 +28,7 @@ def strategy():
     strat = CompoundV3WETHMarketArbitrumStrategy.__new__(CompoundV3WETHMarketArbitrumStrategy)
     strat._chain = "arbitrum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-compound-weth-arb"
+    strat._deployment_id = "test-compound-weth-arb"
     strat.STRATEGY_NAME = "compound_v3_weth_market_arbitrum"
 
     # Config

@@ -232,7 +232,7 @@ def test_build_ledger_entry_raw_wei_amount_warns_but_returns_entry(
 
     with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.ledger"):
         entry = build_ledger_entry(
-            strategy_id="test",
+            deployment_id="test:abc123",
             cycle_id="cycle-1",
             intent=_FakeIntent(),
             result=_FakeResult(),

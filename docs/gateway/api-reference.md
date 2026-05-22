@@ -189,14 +189,14 @@ rpc LoadState(LoadStateRequest) returns (StateData)
 **Request:**
 ```protobuf
 message LoadStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
 }
 ```
 
 **Response:**
 ```protobuf
 message StateData {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 version = 2;
   bytes data = 3;              // JSON-serialized state
   int32 schema_version = 4;
@@ -218,7 +218,7 @@ rpc SaveState(SaveStateRequest) returns (SaveStateResponse)
 **Request:**
 ```protobuf
 message SaveStateRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   int64 expected_version = 2;  // For optimistic locking (0 = new state)
   bytes data = 3;              // JSON-serialized state
   int32 schema_version = 4;
@@ -296,7 +296,7 @@ rpc SaveLedgerEntry(SaveLedgerEntryRequest) returns (SaveLedgerEntryResponse)
 message SaveLedgerEntryRequest {
   string id = 1;                   // UUID primary key (idempotent ON CONFLICT target)
   string cycle_id = 2;
-  string strategy_id = 3;
+  string deployment_id = 3;
   string deployment_id = 4;
   string execution_mode = 5;       // "live" | "paper" | "dry_run"
   int64 timestamp = 6;             // Unix epoch seconds
@@ -583,7 +583,7 @@ message AlertRequest {
   string severity = 1;     // info, warning, error, critical
   string title = 2;
   string message = 3;
-  string strategy_id = 4;
+  string deployment_id = 4;
 }
 ```
 
@@ -606,7 +606,7 @@ rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEvent
 **Request:**
 ```protobuf
 message RecordTimelineEventRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string event_type = 2;       // "TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc.
   string description = 3;
   string tx_hash = 4;          // Optional: transaction hash
@@ -945,7 +945,7 @@ rpc GetStrategyDetails(GetStrategyDetailsRequest) returns (StrategyDetails)
 **Request:**
 ```protobuf
 message GetStrategyDetailsRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   bool include_timeline = 2;
   bool include_pnl_history = 3;
   int32 timeline_limit = 4;
@@ -987,7 +987,7 @@ rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse)
 **Request:**
 ```protobuf
 message ExecuteActionRequest {
-  string strategy_id = 1;
+  string deployment_id = 1;
   string action = 2;       // PAUSE, RESUME, BUMP_GAS, CANCEL_TX, EMERGENCY_UNWIND
   string reason = 3;
   map<string, string> params = 4;

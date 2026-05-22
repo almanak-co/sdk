@@ -37,7 +37,7 @@ from almanak.framework.accounting.models import AccountingConfidence, LendingEve
 
 _POSITION_KEY = "lending:arbitrum:aave_v3:0xabc:usdc"
 _DEPLOYMENT_ID = "dep-1"
-_STRATEGY_ID = "strat-1"
+_DEPLOYMENT_ID = "strat-1"
 _CYCLE_ID = "cycle-1"
 
 
@@ -50,7 +50,7 @@ def _make_outbox_row(
         "id": "outbox-001",
         "ledger_entry_id": "ledger-001",
         "deployment_id": _DEPLOYMENT_ID,
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": "0xabc",
@@ -71,7 +71,7 @@ def _make_ledger_row(
 ) -> dict:
     return {
         "id": "ledger-001",
-        "strategy_id": _STRATEGY_ID,
+        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",

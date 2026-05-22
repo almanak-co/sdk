@@ -1,5 +1,5 @@
 {
-    "strategy_id": "ethena_pt_leverage",
+    "deployment_id": "ethena_pt_leverage",
     "strategy_name": "ethena_pt_leverage",
     "description": "Leveraged fixed yield via Pendle PT-sUSDe and Morpho Blue flash loans",
     "morpho_market_id": "0xd174bb7b8dd6ef16b116753b56679932ee13382b94f81bf66a2b37962cb41f56",

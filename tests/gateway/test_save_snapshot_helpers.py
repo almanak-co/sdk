@@ -65,7 +65,6 @@ def _request(
     iteration_number: int = 1,
 ) -> gateway_pb2.SaveSnapshotRequest:
     return gateway_pb2.SaveSnapshotRequest(
-        strategy_id="Strat:abc",
         timestamp=timestamp,
         iteration_number=iteration_number,
         total_value_usd=total_value_usd,
@@ -157,13 +156,12 @@ class TestBuildSqliteSnapshot:
         req = _request(positions_json=b"")
         snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
         assert isinstance(snap, PortfolioSnapshot)
-        assert snap.strategy_id == "Strat:abc"
+        assert snap.deployment_id == "Strat:abc"
         assert snap.timestamp == ts
         assert snap.total_value_usd == Decimal("1000.00")
         assert snap.available_cash_usd == Decimal("500.00")
         assert snap.value_confidence == ValueConfidence.HIGH
         assert snap.positions == []
-        assert snap.deployment_id == ""
         assert snap.cycle_id == ""
         assert snap.execution_mode == ""
 
@@ -304,20 +302,27 @@ class TestSaveSnapshotPostgres:
         req = _request(deployment_id="Strat:abc", cycle_id="cycle-7", execution_mode="paper")
         await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
         args = pg_service._snapshot_fetchrow.await_args.args
-        # SQL is args[0], then 12 parameters; identity is the LAST 3.
-        assert tuple(args[-3:]) == ("Strat:abc", "cycle-7", "paper")
+        # VIB-4721/4722: portfolio_snapshots has a single identity column,
+        # deployment_id ($1, the validated wire id). cycle_id / execution_mode
+        # are the LAST 2 params.
+        assert args[1] == "Strat:abc"  # deployment_id column
+        assert tuple(args[-2:]) == ("cycle-7", "paper")
 
     @pytest.mark.asyncio
-    async def test_omitted_identity_collapses_to_empty_strings(self, pg_service: StateServiceServicer):
+    async def test_omitted_phase4_identity_collapses_to_empty_strings(self, pg_service: StateServiceServicer):
         # Wire-side proto3 default is ``""`` — helper passes that through
-        # unchanged; the SQL's CASE clause is what preserves prior values.
+        # unchanged for the optional Phase-4 cycle_id / execution_mode
+        # columns; the SQL's CASE clause is what preserves prior values.
+        # deployment_id is the required identity column ($1) — always the
+        # validated wire id, never blank.
         pg_service._snapshot_fetchrow = AsyncMock(return_value={"id": 1})
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
-        req = _request()  # all identity fields = ""
+        req = _request()  # cycle_id / execution_mode = ""
         await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
         args = pg_service._snapshot_fetchrow.await_args.args
-        assert tuple(args[-3:]) == ("", "", "")
+        assert args[1] == "Strat:abc"  # deployment_id always present
+        assert tuple(args[-2:]) == ("", "")
 
     @pytest.mark.asyncio
     async def test_default_value_confidence_passed_when_unset(self, pg_service: StateServiceServicer):
@@ -328,7 +333,7 @@ class TestSaveSnapshotPostgres:
         await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
         args = pg_service._snapshot_fetchrow.await_args.args
         # value_confidence is the 6th param after SQL → args[6]
-        # (agent_id, ts, iter, total, available, value_conf)
+        # (deployment_id, ts, iter, total, available, value_conf)
         assert args[6] == "HIGH"
 
     @pytest.mark.asyncio

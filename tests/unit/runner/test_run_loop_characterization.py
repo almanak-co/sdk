@@ -125,10 +125,10 @@ def _make_runner(
     return runner
 
 
-def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
+def _make_strategy(deployment_id: str = "test-strategy") -> MagicMock:
     """Mock strategy that avoids copy-trading / portfolio paths."""
     strategy = MagicMock()
-    strategy.strategy_id = strategy_id
+    strategy.deployment_id = deployment_id
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.config = {}
@@ -142,11 +142,11 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
 def _make_result(
     status: IterationStatus = IterationStatus.SUCCESS,
     error: str | None = None,
-    strategy_id: str = "test-strategy",
+    deployment_id: str = "test-strategy",
 ) -> IterationResult:
     return IterationResult(
         status=status,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         duration_ms=10.0,
         error=error,
     )
@@ -403,7 +403,7 @@ class TestIterationCallbackArgs:
         assert len(captured) == 1
         assert captured[0] is result_in
         assert captured[0].status == IterationStatus.HOLD
-        assert captured[0].strategy_id == "test-strategy"
+        assert captured[0].deployment_id == "test-strategy"
         assert captured[0].duration_ms == 10.0
 
     @pytest.mark.asyncio
@@ -942,7 +942,7 @@ def _setup_accounting_failure_runner(
     runner._capture_portfolio_snapshot = AsyncMock(
         side_effect=AccountingPersistenceError(
             write_kind,
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             cause=cause or RuntimeError("disk full"),
         )
     )
@@ -961,7 +961,7 @@ class TestAccountingFailedSnapshot:
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 duration_ms=1234.5,
             )
 
@@ -1018,7 +1018,7 @@ class TestAccountingFailedSnapshot:
         snapshot_phase_seconds = 0.05
         real_error = AccountingPersistenceError(
             AccountingWriteKind.SNAPSHOT,
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             cause=RuntimeError("disk full"),
         )
 
@@ -1031,7 +1031,7 @@ class TestAccountingFailedSnapshot:
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 # Stale/uninformative duration on the pre-snapshot
                 # result -- we should NOT be using this as the
                 # rebuilt duration any more (post-#1782).
@@ -1087,7 +1087,7 @@ class TestAccountingFailedSnapshot:
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 duration_ms=100.0,
                 intent=sentinel_intent,
                 execution_result=sentinel_execution_result,
@@ -1141,7 +1141,7 @@ class TestAccountingFailedSnapshot:
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 duration_ms=0.0,
             )
 
@@ -1202,7 +1202,7 @@ class TestAccountingFailedSnapshot:
         def record_summary(result, chain=None):
             summary_calls.append(result)
 
-        async def record_state(strategy_id, result, strategy=None):
+        async def record_state(deployment_id, result, strategy=None):
             state_calls.append(result)
 
         runner._emit_iteration_summary = MagicMock(side_effect=record_summary)
@@ -1211,7 +1211,7 @@ class TestAccountingFailedSnapshot:
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
-                strategy_id="test-strategy",
+                deployment_id="test-strategy",
                 duration_ms=42.0,
             )
 
@@ -1413,7 +1413,7 @@ class TestConsecutiveErrorsSingleIncrement:
         runner._total_iterations = 0
 
         result = runner._create_error_result(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             status=IterationStatus.STRATEGY_ERROR,
             error="boom",
             start_time=datetime.now(UTC),

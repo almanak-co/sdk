@@ -19,50 +19,43 @@ def cli_runner() -> CliRunner:
     return CliRunner()
 
 
-def test_build_strategy_id_candidates_includes_all_sources_in_order() -> None:
-    """Candidate generation should include configured/runtime/name/class sources."""
+def test_build_deployment_id_candidates_includes_all_sources_in_order() -> None:
+    """Candidate generation should include only explicit deployment IDs."""
 
     class DummyStrategy:
         STRATEGY_NAME = "meta-strategy"
 
     strategy = DummyStrategy()
-    strategy.strategy_id = "runtime:session"
+    strategy.deployment_id = "runtime:session"
     strategy.name = "runtime-name"
 
-    candidates = teardown_cli_module._build_strategy_id_candidates(
+    candidates = teardown_cli_module._build_deployment_id_candidates(
         strategy,
-        DummyStrategy,
-        {"strategy_id": "configured:run"},
+        {"deployment_id": "configured:run"},
     )
 
     assert candidates == [
         "configured:run",
-        "configured",
         "runtime:session",
-        "runtime",
-        "runtime-name",
-        "meta-strategy",
-        "DummyStrategy",
     ]
 
 
-def test_build_strategy_id_candidates_deduplicates_while_preserving_order() -> None:
+def test_build_deployment_id_candidates_deduplicates_while_preserving_order() -> None:
     """Duplicate IDs from different sources should appear once in first-seen order."""
 
     class DemoStrategy:
         STRATEGY_NAME = "demo_aerodrome_lp"
 
     strategy = DemoStrategy()
-    strategy.strategy_id = "demo_aerodrome_lp"
+    strategy.deployment_id = "demo_aerodrome_lp"
     strategy.name = "demo_aerodrome_lp"
 
-    candidates = teardown_cli_module._build_strategy_id_candidates(
+    candidates = teardown_cli_module._build_deployment_id_candidates(
         strategy,
-        DemoStrategy,
-        {"strategy_id": "demo_aerodrome_lp"},
+        {"deployment_id": "demo_aerodrome_lp"},
     )
 
-    assert candidates == ["demo_aerodrome_lp", "DemoStrategy"]
+    assert candidates == ["demo_aerodrome_lp"]
 
 
 def test_execute_teardown_restores_state_before_position_detection(
@@ -96,12 +89,12 @@ def test_execute_teardown_restores_state_before_position_detection(
             self.wallet_address = wallet_address
             self._has_position = False
             self.events: list[str] = []
-            self.state_manager_strategy_ids: list[str] = []
+            self.state_manager_deployment_ids: list[str] = []
             type(self).last_instance = self
 
-        def set_state_manager(self, _state_manager, strategy_id: str) -> None:
-            self.events.append(f"set_state_manager:{strategy_id}")
-            self.state_manager_strategy_ids.append(strategy_id)
+        def set_state_manager(self, _state_manager, deployment_id: str) -> None:
+            self.events.append(f"set_state_manager:{deployment_id}")
+            self.state_manager_deployment_ids.append(deployment_id)
 
         def load_state(self) -> bool:
             self.events.append("load_state")
@@ -141,7 +134,7 @@ def test_execute_teardown_restores_state_before_position_detection(
             {
                 "chain": "base",
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "demo_aerodrome_lp",
+                "deployment_id": "demo_aerodrome_lp",
             }
         )
     )
@@ -175,7 +168,7 @@ def test_execute_teardown_restores_state_before_position_detection(
 
     instance = FakeStrategy.last_instance
     assert instance is not None
-    assert instance.state_manager_strategy_ids == ["demo_aerodrome_lp"]
+    assert instance.state_manager_deployment_ids == ["demo_aerodrome_lp"]
     assert instance.events.index("set_state_manager:demo_aerodrome_lp") < instance.events.index("load_state")
     assert instance.events.index("load_state") < instance.events.index("get_open_positions")
 

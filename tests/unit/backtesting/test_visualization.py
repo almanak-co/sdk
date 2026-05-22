@@ -49,7 +49,7 @@ def sample_backtest_result() -> BacktestResult:
 
     return BacktestResult(
         engine="pnl",
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 1, 5),
         metrics=metrics,
@@ -67,7 +67,7 @@ def empty_backtest_result() -> BacktestResult:
 
     return BacktestResult(
         engine="pnl",
-        strategy_id="empty_strategy",
+        deployment_id="empty_strategy",
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 1, 5),
         metrics=metrics,
@@ -194,12 +194,12 @@ class TestPlotEquityCurve:
                 assert result.success is False
                 assert "matplotlib" in result.error
 
-    def test_plot_equity_curve_strategy_id_sanitized(
+    def test_plot_equity_curve_deployment_id_sanitized(
         self, sample_backtest_result: BacktestResult, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that strategy IDs with slashes are sanitized."""
+        """Test that deployment IDs with slashes are sanitized."""
         monkeypatch.chdir(tmp_path)
-        sample_backtest_result.strategy_id = "path/to/strategy"
+        sample_backtest_result.deployment_id = "path/to/strategy"
 
         result = plot_equity_curve(sample_backtest_result)
 
@@ -485,7 +485,7 @@ class TestDrawdownHighlighting:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="drawdown_test_strategy",
+            deployment_id="drawdown_test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -836,7 +836,7 @@ class TestPlotEquityCurveWithTrades:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="trade_test_strategy",
+            deployment_id="trade_test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -945,7 +945,7 @@ class TestPlotEquityCurveInteractive:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="interactive_test",
+            deployment_id="interactive_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -1030,7 +1030,7 @@ class TestPlotEquityCurveInteractive:
         metrics = BacktestMetrics()
         empty_result = BacktestResult(
             engine="pnl",
-            strategy_id="empty",
+            deployment_id="empty",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -1076,7 +1076,7 @@ class TestSaveChart:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="save_chart_test",
+            deployment_id="save_chart_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 3),
             metrics=metrics,
@@ -1261,7 +1261,7 @@ class TestPlotPnlHistogram:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="histogram_test",
+            deployment_id="histogram_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -1368,7 +1368,7 @@ class TestPlotDurationScatter:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="duration_test",
+            deployment_id="duration_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -1473,7 +1473,7 @@ class TestPlotIntentPie:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="intent_test",
+            deployment_id="intent_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -1546,7 +1546,7 @@ class TestPlotIntentPie:
 
         result_obj = BacktestResult(
             engine="pnl",
-            strategy_id="hold_test",
+            deployment_id="hold_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 1),
             metrics=BacktestMetrics(),
@@ -1589,7 +1589,7 @@ class TestDistributionChartsCustomConfig:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="config_test",
+            deployment_id="config_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=BacktestMetrics(),
@@ -1876,7 +1876,7 @@ class TestPnlHistogramWithStats:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 10),
             metrics=metrics,
@@ -1951,7 +1951,7 @@ class TestPnlHistogramInteractive:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 10),
             metrics=metrics,
@@ -2030,7 +2030,7 @@ class TestPnlHistogramInteractive:
         metrics = BacktestMetrics()
         result_no_trades = BacktestResult(
             engine="pnl",
-            strategy_id="empty_strategy",
+            deployment_id="empty_strategy",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -2125,7 +2125,7 @@ class TestAttributionCharts:
 
         return BacktestResult(
             engine="pnl",
-            strategy_id="attribution_test",
+            deployment_id="attribution_test",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
@@ -2228,7 +2228,7 @@ class TestAttributionCharts:
         metrics = BacktestMetrics()  # No attribution fields populated
         result = BacktestResult(
             engine="pnl",
-            strategy_id="empty",
+            deployment_id="empty",
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 5),
             metrics=metrics,

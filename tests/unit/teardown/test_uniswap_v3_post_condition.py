@@ -622,7 +622,7 @@ def _restore_uniswap_v3_hook():
 
 def _make_lp_position_summary(position_id: str = "5460223") -> TeardownPositionSummary:
     return TeardownPositionSummary(
-        strategy_id="accounting_quant_lp",
+        deployment_id="accounting_quant_lp",
         timestamp=datetime.now(UTC),
         positions=[
             PositionInfo(
@@ -700,7 +700,7 @@ def test_verify_closure_correctly_flags_residual_position(
     strategy = MagicMock()
     strategy.wallet_address = WALLET
     strategy.get_open_positions.return_value = TeardownPositionSummary(
-        strategy_id="x", timestamp=datetime.now(UTC), positions=[]
+        deployment_id="x", timestamp=datetime.now(UTC), positions=[]
     )
 
     pre_exec = _make_lp_position_summary()
@@ -735,7 +735,7 @@ def test_verify_closure_aggregates_multi_protocol_failures(
     mgr.compiler = SimpleNamespace(_gateway_client=fake_gateway)
 
     pre_exec = TeardownPositionSummary(
-        strategy_id="multi",
+        deployment_id="multi",
         timestamp=datetime.now(UTC),
         positions=[
             PositionInfo(
@@ -760,7 +760,7 @@ def test_verify_closure_aggregates_multi_protocol_failures(
     strategy = MagicMock()
     strategy.wallet_address = WALLET
     strategy.get_open_positions.return_value = TeardownPositionSummary(
-        strategy_id="multi", timestamp=datetime.now(UTC), positions=[]
+        deployment_id="multi", timestamp=datetime.now(UTC), positions=[]
     )
 
     result = asyncio.run(
@@ -821,11 +821,11 @@ def test_verify_closure_uses_orchestrator_client_for_v3_post_condition(
     strategy = MagicMock()
     strategy.wallet_address = WALLET
     strategy.get_open_positions.return_value = TeardownPositionSummary(
-        strategy_id="optimism-lp", timestamp=datetime.now(UTC), positions=[]
+        deployment_id="optimism-lp", timestamp=datetime.now(UTC), positions=[]
     )
 
     pre_exec = TeardownPositionSummary(
-        strategy_id="optimism-lp",
+        deployment_id="optimism-lp",
         timestamp=datetime.now(UTC),
         positions=[
             PositionInfo(

@@ -409,11 +409,12 @@ class GatewayExecutionOrchestrator:
             logger.error(f"Gateway compile intent failed: {e}")
             raise
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def execute(
         self,
         action_bundle: Any,
         context: Any | None = None,
-        strategy_id: str = "",
+        deployment_id: str = "",
         intent_id: str = "",
         dry_run: bool = False,
         simulation_enabled: bool = True,
@@ -424,9 +425,9 @@ class GatewayExecutionOrchestrator:
         Args:
             action_bundle: Action bundle to execute (object or dict)
             context: Optional ExecutionContext for interface compatibility with
-                ExecutionOrchestrator. If provided, extracts strategy_id, intent_id,
+                ExecutionOrchestrator. If provided, extracts deployment_id, intent_id,
                 dry_run, simulation_enabled, and wallet_address from it.
-            strategy_id: Strategy identifier for tracking
+            deployment_id: Deployment identifier for tracking
             intent_id: Intent identifier for tracking
             dry_run: If True, simulate only without submitting
             simulation_enabled: If True, run simulation before execution
@@ -440,7 +441,7 @@ class GatewayExecutionOrchestrator:
         """
         # Extract values from context if provided (interface compatibility)
         if context is not None:
-            strategy_id = getattr(context, "strategy_id", "") or strategy_id
+            deployment_id = getattr(context, "deployment_id", "") or deployment_id
             intent_id = getattr(context, "intent_id", "") or intent_id
             dry_run = getattr(context, "dry_run", dry_run)
             simulation_enabled = getattr(context, "simulation_enabled", simulation_enabled)
@@ -472,7 +473,7 @@ class GatewayExecutionOrchestrator:
                 action_bundle=bundle_bytes,
                 dry_run=dry_run,
                 simulation_enabled=simulation_enabled,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 intent_id=intent_id,
                 chain=self._chain,
                 wallet_address=wallet,

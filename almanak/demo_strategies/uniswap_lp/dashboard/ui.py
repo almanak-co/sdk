@@ -63,7 +63,7 @@ def _token_address(strategy_config: dict[str, Any], symbol: str) -> str | None:
 
 
 def render_custom_dashboard(
-    strategy_id: str,
+    deployment_id: str,
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
@@ -93,4 +93,4 @@ def render_custom_dashboard(
 
     # Pass api_client through so the LP template renders the gateway-backed
     # Positions registry + Position Lifecycle sections (PR #2373 / Problem A2).
-    render_lp_dashboard(strategy_id, strategy_config, session_state, config, api_client=api_client)
+    render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)

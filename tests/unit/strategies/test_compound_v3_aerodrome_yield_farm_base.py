@@ -29,7 +29,7 @@ def _create_strategy(config_overrides: dict | None = None):
     )
 
     config = {
-        "strategy_id": "test-compound-aero-yield",
+        "deployment_id": "test-compound-aero-yield",
         "strategy_name": "test-compound-aero-yield",
         "chain": "base",
         "collateral_token": "WETH",
@@ -47,7 +47,7 @@ def _create_strategy(config_overrides: dict | None = None):
     with patch.object(CompoundV3AerodromeYieldFarmBaseStrategy, "__init__", lambda self, *a, **kw: None):
         strategy = CompoundV3AerodromeYieldFarmBaseStrategy.__new__(CompoundV3AerodromeYieldFarmBaseStrategy)
 
-    strategy._strategy_id = config["strategy_id"]
+    strategy._deployment_id = config["deployment_id"]
     strategy._chain = config["chain"]
     strategy.collateral_token = config["collateral_token"]
     strategy.collateral_amount = Decimal(config["collateral_amount"])

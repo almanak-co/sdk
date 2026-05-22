@@ -314,12 +314,12 @@ class TestPaperStartBranches:
         assert "mock strategy" in combined.lower()
 
 
-def _make_state(strategy_id="test_strat", status="stopped", tick_count=10, pid=None):
+def _make_state(deployment_id="test_strat", status="stopped", tick_count=10, pid=None):
     """Helper to create a PaperTraderState for testing."""
     from almanak.framework.backtesting.paper.background import PaperTraderState
 
     return PaperTraderState(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         session_start=datetime(2026, 3, 26, tzinfo=UTC),
         last_save=datetime(2026, 3, 26, 1, 0, tzinfo=UTC),
         tick_count=tick_count,
@@ -383,7 +383,7 @@ class TestPaperResume:
         mock_save.assert_called_once()
         call_kwargs = mock_save.call_args[1]
         assert call_kwargs["pid"] == 12345
-        assert call_kwargs["strategy_id"] == "test_strat"
+        assert call_kwargs["deployment_id"] == "test_strat"
 
     def test_resume_dead_process_resets_status(self, tmp_path):
         """Dead process detected -> status reset to stopped and PID cleaned up."""

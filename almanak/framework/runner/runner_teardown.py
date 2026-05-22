@@ -202,12 +202,12 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
         await asyncio.to_thread(
             state_adapter.create_approval_request,
             teardown_id=request.teardown_id,
-            strategy_id=request.strategy_id,
+            deployment_id=request.deployment_id,
             level=request.current_level,
             request_json=json.dumps(
                 {
                     "teardown_id": request.teardown_id,
-                    "strategy_id": request.strategy_id,
+                    "deployment_id": request.deployment_id,
                     "current_level": request.current_level.value
                     if hasattr(request.current_level, "value")
                     else str(request.current_level),
@@ -327,7 +327,7 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
     return on_approval_needed
 
 
-def _safe_mark(state_manager: Any, method_name: str, strategy_id: str, **kwargs: Any) -> None:
+def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwargs: Any) -> None:
     """Call a ``mark_*`` state-manager method, swallowing any persistence error.
 
     ``mark_completed`` / ``mark_failed`` / ``mark_cancelled`` touch SQLite and
@@ -341,12 +341,12 @@ def _safe_mark(state_manager: Any, method_name: str, strategy_id: str, **kwargs:
     if method is None:
         return
     try:
-        method(strategy_id, **kwargs)
+        method(deployment_id, **kwargs)
     except Exception:
         logger.warning(
             "Failed to call %s for strategy %s (non-fatal)",
             method_name,
-            strategy_id,
+            deployment_id,
             exc_info=True,
         )
 
@@ -391,12 +391,12 @@ async def execute_teardown(  # noqa: C901
     from ..teardown import get_teardown_state_manager_for_runtime
     from .runner_models import IterationResult, IterationStatus
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
     # Both modes have a real cross-process teardown channel: SQLite locally,
     # gateway-backed in hosted mode. Any error here is a genuine
     # misconfiguration and should propagate.
     manager: Any = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
-    request: Any = manager.get_active_request(strategy_id)
+    request: Any = manager.get_active_request(deployment_id)
 
     # Step T1: Create market snapshot (SAME as normal decide() path)
     teardown_market = None
@@ -420,42 +420,42 @@ async def execute_teardown(  # noqa: C901
             if "unexpected keyword argument" not in str(exc):
                 raise
             # Backward compat: old-style signature def generate_teardown_intents(self, mode)
-            logger.debug(f"Strategy {strategy_id} uses old teardown signature (no market param), falling back")
+            logger.debug(f"Strategy {deployment_id} uses old teardown signature (no market param), falling back")
             teardown_intents = strategy.generate_teardown_intents(teardown_mode)
     except Exception as e:
-        logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
+        logger.error(f"Failed to generate teardown intents for {deployment_id}: {e}")
         if request:
-            _safe_mark(manager, "mark_failed", strategy_id, error=str(e))
+            _safe_mark(manager, "mark_failed", deployment_id, error=str(e))
         runner._request_teardown_failure_shutdown(str(e))
-        return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
+        return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
     if not teardown_intents:
-        logger.info(f"🛑 {strategy_id} teardown complete (no positions to close)")
+        logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
         if request:
-            _safe_mark(manager, "mark_completed", strategy_id, result={"reason": "no_positions"})
+            _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "no_positions"})
         runner.request_shutdown()
         # Match the adjacent all-balances-zero + TeardownManager-success paths —
         # the lifecycle supervisor must see TERMINATED so it doesn't treat a
         # teardown-with-no-positions as still running.
-        runner._lifecycle_write_state(strategy_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, "TERMINATED")
         runner._record_success()
         return IterationResult(
             status=IterationStatus.TEARDOWN,
             intent=None,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=runner._calculate_duration_ms(start_time),
         )
 
-    logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
+    logger.info(f"🛑 {deployment_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
     # VIB-4049: switch lifecycle state to TEARING_DOWN now that unwind work is
     # actually starting. Platform maps this to live_agent_status.TEARDOWN_IN_PROGRESS
     # so the dashboard / reconciler can distinguish "stopping cleanly" (SLA
     # 5min) from "actively unwinding positions" (SLA 45min). The terminal
     # TERMINATED / ERROR writes downstream are unchanged — they take over once
     # the unwind completes (or fails).
-    runner._lifecycle_write_state(strategy_id, "TEARING_DOWN")
+    runner._lifecycle_write_state(deployment_id, "TEARING_DOWN")
     if request:
-        _safe_mark(manager, "mark_started", strategy_id, total_positions=len(teardown_intents))
+        _safe_mark(manager, "mark_started", deployment_id, total_positions=len(teardown_intents))
 
     # Step T2.5: Pre-fetch prices for tokens in teardown intents
     if teardown_market is not None and hasattr(teardown_market, "price"):
@@ -470,16 +470,16 @@ async def execute_teardown(  # noqa: C901
 
     # Step T2.7: If all intents were resolved away, teardown is complete
     if not teardown_intents:
-        logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
+        logger.info(f"🛑 {deployment_id} teardown complete (all positions already closed)")
         if request:
-            _safe_mark(manager, "mark_completed", strategy_id, result={"reason": "all_balances_zero"})
+            _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "all_balances_zero"})
         runner.request_shutdown()
-        runner._lifecycle_write_state(strategy_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, "TERMINATED")
         runner._record_success()
         return IterationResult(
             status=IterationStatus.TEARDOWN,
             intent=None,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             duration_ms=runner._calculate_duration_ms(start_time),
         )
 
@@ -494,13 +494,13 @@ async def execute_teardown(  # noqa: C901
         )
         if result.success:
             result.status = IterationStatus.TEARDOWN
-            logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
+            logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
             if request:
-                _safe_mark(manager, "mark_completed", strategy_id, result={"intents": len(teardown_intents)})
+                _safe_mark(manager, "mark_completed", deployment_id, result={"intents": len(teardown_intents)})
         else:
             if request:
-                _safe_mark(manager, "mark_failed", strategy_id, error=result.error or "execution failed")
+                _safe_mark(manager, "mark_failed", deployment_id, error=result.error or "execution failed")
             runner._request_teardown_failure_shutdown(result.error or "multi-chain teardown execution failed")
         return result
     else:
@@ -558,7 +558,7 @@ async def execute_teardown_via_manager(
     from ..teardown import TeardownMode
     from . import _teardown_helpers as _h
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
 
     # Derive auto mode from teardown request source (VIB-2923). See
@@ -577,7 +577,7 @@ async def execute_teardown_via_manager(
     teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(runner, compiler, state_manager)
 
     logger.info(
-        f"🛑 Routing {strategy_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
+        f"🛑 Routing {deployment_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
     )
 
     # Outer try preserves the original exception contract: any failure in
@@ -655,7 +655,7 @@ async def execute_teardown_via_manager(
             if pre_bracket_outcome.accounting_degraded:
                 logger.error(
                     "Pre-teardown snapshot accounting degraded for %s — %s",
-                    strategy_id,
+                    deployment_id,
                     pre_bracket_outcome.degraded_reason or "unknown",
                 )
 
@@ -690,7 +690,7 @@ async def execute_teardown_via_manager(
             if post_bracket_outcome.accounting_degraded:
                 logger.error(
                     "Post-teardown snapshot accounting degraded for %s — %s",
-                    strategy_id,
+                    deployment_id,
                     post_bracket_outcome.degraded_reason or "unknown",
                 )
 
@@ -784,7 +784,7 @@ async def execute_teardown_inline(
     )
     from ..teardown.runner_helpers import build_runner_helpers
 
-    strategy_id = strategy.strategy_id
+    deployment_id = strategy.deployment_id
 
     # VIB-3773: dual cycle-id swap so ledger/outbox/snapshot rows carry the
     # teardown's cycle id, not the iteration that triggered the inline path.
@@ -819,7 +819,7 @@ async def execute_teardown_inline(
                 accounting_degraded_count += 1
                 logger.error(
                     "🛑 Pre-teardown (inline) snapshot accounting degraded for %s — %s",
-                    strategy_id,
+                    deployment_id,
                     pre_outcome.degraded_reason or "unknown",
                 )
 
@@ -851,7 +851,7 @@ async def execute_teardown_inline(
                 accounting_degraded_count += 1
                 logger.error(
                     "🛑 Post-teardown (inline) snapshot accounting degraded for %s — %s",
-                    strategy_id,
+                    deployment_id,
                     post_outcome.degraded_reason or "unknown",
                 )
         if accounting_degraded_count and getattr(result, "error", None) is None:
@@ -899,8 +899,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
     from ..state.exceptions import AccountingPersistenceError
     from .runner_models import IterationResult, IterationStatus
 
-    strategy_id = strategy.strategy_id
-    deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+    deployment_id = strategy.deployment_id
 
     inline_degraded_count = 0
     all_success = True
@@ -939,7 +938,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
                         status=IterationStatus.COMPILATION_FAILED,
                         intent=intent,
                         error=f"Cannot resolve amount='all' for {balance_token}: {e}",
-                        strategy_id=strategy_id,
+                        deployment_id=deployment_id,
                         duration_ms=runner._calculate_duration_ms(start_time),
                     )
                     break
@@ -1003,7 +1002,6 @@ async def _execute_teardown_inline_body(  # noqa: C901
             try:
                 deferred_append(
                     kind=str(acc_err.write_kind) if acc_err.write_kind else "ledger",
-                    strategy_id=strategy_id,
                     deployment_id=deployment_id,
                     cycle_id=teardown_cycle_id,
                     intent_type=getattr(intent_to_execute.intent_type, "value", str(intent_to_execute.intent_type)),
@@ -1022,7 +1020,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
             result = IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent_to_execute,
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 duration_ms=runner._calculate_duration_ms(start_time),
             )
         last_result = result
@@ -1034,30 +1032,30 @@ async def _execute_teardown_inline_body(  # noqa: C901
     if last_result:
         if all_success:
             last_result.status = IterationStatus.TEARDOWN
-            logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
+            logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
-            runner._lifecycle_write_state(strategy_id, "TERMINATED")
+            runner._lifecycle_write_state(deployment_id, "TERMINATED")
             runner._record_success()
             if request:
-                _safe_mark(state_manager, "mark_completed", strategy_id, result={"intents": len(teardown_intents)})
+                _safe_mark(state_manager, "mark_completed", deployment_id, result={"intents": len(teardown_intents)})
         else:
-            logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
+            logger.warning(f"🛑 {deployment_id} teardown incomplete - manual intervention may be required")
             if request:
-                _safe_mark(state_manager, "mark_failed", strategy_id, error=last_result.error or "execution failed")
+                _safe_mark(state_manager, "mark_failed", deployment_id, error=last_result.error or "execution failed")
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
         return last_result, inline_degraded_count
 
     # Edge case: no intents executed (all positions already closed)
-    logger.info(f"🛑 {strategy_id} teardown: all positions already closed, shutting down")
+    logger.info(f"🛑 {deployment_id} teardown: all positions already closed, shutting down")
     runner.request_shutdown()
-    runner._lifecycle_write_state(strategy_id, "TERMINATED")
+    runner._lifecycle_write_state(deployment_id, "TERMINATED")
     runner._record_success()
     if request:
-        _safe_mark(state_manager, "mark_completed", strategy_id, result={"reason": "all_positions_already_closed"})
+        _safe_mark(state_manager, "mark_completed", deployment_id, result={"reason": "all_positions_already_closed"})
     final_result = IterationResult(
         status=IterationStatus.TEARDOWN,
         intent=None,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         duration_ms=runner._calculate_duration_ms(start_time),
     )
     return final_result, inline_degraded_count

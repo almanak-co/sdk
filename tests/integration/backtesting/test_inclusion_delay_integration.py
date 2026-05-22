@@ -121,21 +121,21 @@ class DeterministicStrategy:
     def __init__(
         self,
         intents: list[Any | None],
-        strategy_id: str = "deterministic_strategy",
+        deployment_id: str = "deterministic_strategy",
     ):
         """Initialize with pre-defined intent sequence.
 
         Args:
             intents: List of intents to return in order (None = hold)
-            strategy_id: Identifier for the strategy
+            deployment_id: Identifier for the strategy
         """
         self._intents = intents
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self._call_count = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any | None:
         """Return next intent from sequence."""

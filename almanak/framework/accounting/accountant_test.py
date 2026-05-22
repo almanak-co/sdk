@@ -144,7 +144,7 @@ class AccountantReport:
 
     primitive: Primitive
     network: str
-    strategy_id: str
+    deployment_id: str
     schema_version: int = SCHEMA_VERSION
     formula_version: int = FORMULA_VERSION
     matching_policy_version: int = MATCHING_POLICY_VERSION
@@ -191,7 +191,7 @@ class AccountantReport:
         return {
             "primitive": self.primitive,
             "network": self.network,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "schema_version": self.schema_version,
             "formula_version": self.formula_version,
             "matching_policy_version": self.matching_policy_version,
@@ -227,7 +227,7 @@ class AccountantReport:
         lines.append("## Run metadata")
         lines.append(f"- Primitive: **{self.primitive}**")
         lines.append(f"- Network: {self.network}")
-        lines.append(f"- Strategy: `{self.strategy_id}`")
+        lines.append(f"- Strategy: `{self.deployment_id}`")
         lines.append(
             f"- schema_version / formula_version / matching_policy_version: "
             f"{self.schema_version} / {self.formula_version} / {self.matching_policy_version}"
@@ -2615,7 +2615,7 @@ def evaluate_cells(
     """Evaluate the cell matrix against pre-fetched rows.
 
     Decoupled from sqlite I/O so callers like the filtered reporting API
-    (VIB-3870) can pass pre-filtered rows (by strategy_id, cycle_ids, time
+    (VIB-3870) can pass pre-filtered rows (by deployment_id, cycle_ids, time
     window, …) without rewriting the cell predicates.
 
     Sorts the input lists in-place by timestamp / iteration_number — cells
@@ -2627,10 +2627,10 @@ def evaluate_cells(
     pos_events.sort(key=lambda r: r.get("timestamp") or "")
     acct_events.sort(key=lambda r: r.get("timestamp") or "")
 
-    strategy_id = ""
+    deployment_id = ""
     network = ""
     if metrics:
-        strategy_id = metrics[0].get("strategy_id") or ""
+        deployment_id = metrics[0].get("deployment_id") or ""
     if ledger:
         network = ledger[0].get("chain") or ""
 
@@ -2738,7 +2738,7 @@ def evaluate_cells(
     return AccountantReport(
         primitive=primitive,
         network=network,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         cells=cells,
         on_chain_footprint=footprint,
         g6_decomposition=decomp,

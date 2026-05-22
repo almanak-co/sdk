@@ -51,7 +51,7 @@ def _make_executor() -> ToolExecutor:
         gateway_client=gateway,
         policy=AgentPolicy(),
         wallet_address="0x0000000000000000000000000000000000000001",
-        strategy_id="test-strategy",
+        deployment_id="test-deployment",
         default_chain="arbitrum",
         tracer=DecisionTracer(),
     )

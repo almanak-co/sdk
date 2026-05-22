@@ -6,14 +6,14 @@ commands rely on:
 
 - `validate_strategy_is_registered`: error strings, exit type.
 - `parse_token_list`: whitespace + case handling.
-- `ensure_strategy_id`: `_strategy_id`-before-`strategy_id` precedence and
+- `ensure_deployment_id`: `_deployment_id`-before-`deployment_id` precedence and
   no-op when the id is already populated.
 - `resolve_strategy_class_or_mock`: allow-mock fallback warning vs strict
   abort path.
 
 Phase 5B.4 extends coverage across these helpers to >= 85% with focus on
 error paths, `build_pnl_config` kwarg propagation edge cases, and
-`ensure_strategy_id` precedence corner cases.
+`ensure_deployment_id` precedence corner cases.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pytest
 
 from almanak.framework.cli.backtest.run_helpers import (
     build_pnl_config,
-    ensure_strategy_id,
+    ensure_deployment_id,
     parse_token_list,
     resolve_strategy_class_or_mock,
     validate_strategy_is_registered,
@@ -122,59 +122,59 @@ class TestValidateStrategyIsRegistered:
 
 
 # =============================================================================
-# ensure_strategy_id
+# ensure_deployment_id
 # =============================================================================
 
 
 class _StrategyWithPrivateId:
-    """Simulates an IntentStrategy that backs strategy_id with _strategy_id."""
+    """Simulates an IntentStrategy that backs deployment_id with _deployment_id."""
 
     def __init__(self, initial: str = "") -> None:
-        self._strategy_id = initial
+        self._deployment_id = initial
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
 
 class _PlainStrategy:
     """Simulates a minimal strategy with only a public attribute."""
 
-    strategy_id: str = ""
+    deployment_id: str = ""
 
 
 class TestEnsureStrategyId:
-    def test_noop_when_strategy_id_already_set(self) -> None:
+    def test_noop_when_deployment_id_already_set(self) -> None:
         strat = _StrategyWithPrivateId(initial="existing-id")
-        ensure_strategy_id(strat, fallback="should-not-apply")
-        assert strat.strategy_id == "existing-id"
+        ensure_deployment_id(strat, fallback="should-not-apply")
+        assert strat.deployment_id == "existing-id"
 
     def test_sets_private_attribute_when_present(self) -> None:
         strat = _StrategyWithPrivateId(initial="")
-        ensure_strategy_id(strat, fallback="fallback-id")
-        assert strat._strategy_id == "fallback-id"
-        assert strat.strategy_id == "fallback-id"
+        ensure_deployment_id(strat, fallback="fallback-id")
+        assert strat._deployment_id == "fallback-id"
+        assert strat.deployment_id == "fallback-id"
 
     def test_sets_public_attribute_when_no_private(self) -> None:
         strat = _PlainStrategy()
-        ensure_strategy_id(strat, fallback="plain-id")
-        assert strat.strategy_id == "plain-id"
+        ensure_deployment_id(strat, fallback="plain-id")
+        assert strat.deployment_id == "plain-id"
 
     def test_noop_on_plain_strategy_with_existing_id(self) -> None:
         strat = _PlainStrategy()
-        strat.strategy_id = "already-set"
-        ensure_strategy_id(strat, fallback="ignored")
-        assert strat.strategy_id == "already-set"
+        strat.deployment_id = "already-set"
+        ensure_deployment_id(strat, fallback="ignored")
+        assert strat.deployment_id == "already-set"
 
     def test_missing_attribute_falls_back_to_public_assignment(self) -> None:
-        """Instances without strategy_id at all still receive the fallback."""
+        """Instances without deployment_id at all still receive the fallback."""
 
         class _Bare:
             pass
 
         strat = _Bare()
-        ensure_strategy_id(strat, fallback="bare-id")
-        assert strat.strategy_id == "bare-id"  # type: ignore[attr-defined]
+        ensure_deployment_id(strat, fallback="bare-id")
+        assert strat.deployment_id == "bare-id"  # type: ignore[attr-defined]
 
 
 # =============================================================================
@@ -185,7 +185,7 @@ class TestEnsureStrategyId:
 class TestResolveStrategyClassOrMock:
     def test_returns_class_when_registered(self) -> None:
         class Dummy:
-            strategy_id = "dummy"
+            deployment_id = "dummy"
 
         with patch(
             "almanak.framework.cli.backtest.run_helpers.get_strategy",
@@ -203,7 +203,7 @@ class TestResolveStrategyClassOrMock:
 
         # Mock class must be instantiable and satisfy the contract used in sweep.
         instance = result({"foo": "bar"})
-        assert instance.strategy_id == "mock-sweep"
+        assert instance.deployment_id == "mock-sweep"
         # decide() returns None for the mock
         assert instance.decide(market=None) is None  # type: ignore[arg-type]
 
@@ -241,69 +241,69 @@ class TestResolveStrategyClassOrMock:
 
 
 class TestEnsureStrategyIdPrecedence:
-    """Extended edge cases for `_strategy_id` vs `strategy_id` precedence."""
+    """Extended edge cases for `_deployment_id` vs `deployment_id` precedence."""
 
     def test_both_private_and_public_prefers_private(self) -> None:
-        """When both attrs exist, assignment goes to `_strategy_id`."""
+        """When both attrs exist, assignment goes to `_deployment_id`."""
 
         class _Both:
             def __init__(self) -> None:
-                self._strategy_id: str = ""
-                self.strategy_id: str = ""
+                self._deployment_id: str = ""
+                self.deployment_id: str = ""
 
         strat = _Both()
-        ensure_strategy_id(strat, fallback="priv-id")
-        assert strat._strategy_id == "priv-id"
-        # `strategy_id` is untouched when private channel exists
-        assert strat.strategy_id == ""
+        ensure_deployment_id(strat, fallback="priv-id")
+        assert strat._deployment_id == "priv-id"
+        # `deployment_id` is untouched when private channel exists
+        assert strat.deployment_id == ""
 
     def test_truthy_existing_id_beats_private_channel(self) -> None:
-        """Non-empty public `strategy_id` is respected even when `_strategy_id` exists."""
+        """Non-empty public `deployment_id` is respected even when `_deployment_id` exists."""
 
         class _BothExisting:
             def __init__(self) -> None:
-                self._strategy_id: str = ""
-                self.strategy_id: str = "already-set"
+                self._deployment_id: str = ""
+                self.deployment_id: str = "already-set"
 
         strat = _BothExisting()
-        ensure_strategy_id(strat, fallback="ignored")
-        assert strat.strategy_id == "already-set"
-        assert strat._strategy_id == ""  # no write happened
+        ensure_deployment_id(strat, fallback="ignored")
+        assert strat.deployment_id == "already-set"
+        assert strat._deployment_id == ""  # no write happened
 
     def test_noop_when_private_channel_already_populated(self) -> None:
-        """IntentStrategy-style: `strategy_id` reads `_strategy_id`; when latter set, no-op."""
+        """IntentStrategy-style: `deployment_id` reads `_deployment_id`; when latter set, no-op."""
 
         class _Backed:
             def __init__(self, initial: str) -> None:
-                self._strategy_id = initial
+                self._deployment_id = initial
 
             @property
-            def strategy_id(self) -> str:
-                return self._strategy_id
+            def deployment_id(self) -> str:
+                return self._deployment_id
 
         strat = _Backed(initial="pre-seeded")
-        ensure_strategy_id(strat, fallback="ignored")
-        assert strat._strategy_id == "pre-seeded"
+        ensure_deployment_id(strat, fallback="ignored")
+        assert strat._deployment_id == "pre-seeded"
 
     def test_falsy_empty_string_triggers_fallback(self) -> None:
         """Empty string is falsy — triggers the fallback path."""
 
         class _EmptyPlain:
-            strategy_id: str = ""
+            deployment_id: str = ""
 
         strat = _EmptyPlain()
-        ensure_strategy_id(strat, fallback="from-fallback")
-        assert strat.strategy_id == "from-fallback"
+        ensure_deployment_id(strat, fallback="from-fallback")
+        assert strat.deployment_id == "from-fallback"
 
     def test_none_existing_id_triggers_fallback(self) -> None:
         """None is falsy — triggers the fallback path via public attr."""
 
         class _NoneId:
-            strategy_id: str | None = None
+            deployment_id: str | None = None
 
         strat = _NoneId()
-        ensure_strategy_id(strat, fallback="from-none")
-        assert strat.strategy_id == "from-none"
+        ensure_deployment_id(strat, fallback="from-none")
+        assert strat.deployment_id == "from-none"
 
 
 class TestBuildPnlConfigKwargs:
@@ -503,14 +503,14 @@ class TestResolveStrategyClassOrMockExtended:
         assert inst.decide(market=None) is None  # type: ignore[arg-type]
 
     def test_mock_class_attribute_accessible(self) -> None:
-        """Class-level strategy_id is accessible before instantiation."""
+        """Class-level deployment_id is accessible before instantiation."""
         with patch(
             "almanak.framework.cli.backtest.run_helpers.get_strategy",
             side_effect=ValueError(),
         ):
             mock_cls: Any = resolve_strategy_class_or_mock("x", allow_mock=True)
 
-        assert mock_cls.strategy_id == "mock-sweep"
+        assert mock_cls.deployment_id == "mock-sweep"
 
     def test_get_strategy_succeeds_ignores_allow_mock_false(self) -> None:
         """When get_strategy succeeds, allow_mock is irrelevant."""

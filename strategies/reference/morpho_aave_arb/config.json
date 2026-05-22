@@ -1,5 +1,5 @@
 {
-    "strategy_id": "morpho_aave_yield_rotation",
+    "deployment_id": "morpho_aave_yield_rotation",
     "strategy_name": "morpho_aave_yield_rotation",
     "description": "Cross-protocol yield rotation - moves wstETH to highest-yielding protocol",
     "token": "wstETH",

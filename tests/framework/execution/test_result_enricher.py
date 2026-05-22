@@ -125,7 +125,7 @@ def create_execution_result(
 def create_context() -> ExecutionContext:
     """Create a mock ExecutionContext."""
     return ExecutionContext(
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         chain="arbitrum",
         wallet_address="0x1234567890abcdef",
     )
@@ -892,7 +892,7 @@ class TestResultEnricherWithUniswapV3:
 
         intent = AgniSwapIntent()
         context = ExecutionContext(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             chain="mantle",
             wallet_address=wallet,
             protocol="agni_finance",
@@ -949,7 +949,7 @@ class TestResultEnricherWithUniswapV3:
 
         intent = NoProtocolIntent()
         context = ExecutionContext(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             chain="mantle",
             wallet_address=wallet,
             protocol="agni_finance",  # Set by runner from compiler.default_protocol
@@ -1020,7 +1020,7 @@ class TestResultEnricherWithUniswapV3:
         enricher = ResultEnricher()
         intent = MockSwapIntent(protocol="agni_finance")
         context = ExecutionContext(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             chain="mantle",
             wallet_address=wallet,
             protocol="agni_finance",

@@ -246,7 +246,7 @@ class AerodromePaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Opened {self.pool} LP position",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_open", "pool": self.pool},
                 )
             )
@@ -260,7 +260,7 @@ class AerodromePaperTradeStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Closed {self.pool} LP position",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_close", "pool": self.pool},
                 )
             )
@@ -312,7 +312,7 @@ class AerodromePaperTradeStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

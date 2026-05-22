@@ -420,6 +420,7 @@ def calculate_distribution_stats(pnl_values: list[float]) -> DistributionStats |
     )
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def plot_equity_curve(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
@@ -442,9 +443,9 @@ def plot_equity_curve(  # noqa: C901
     Args:
         result: BacktestResult containing equity curve data
         output_path: Path to save the PNG file. If None, saves to
-            current directory as 'equity_curve_{strategy_id}.png'
+            current directory as 'equity_curve_{deployment_id}.png'
         config: Optional chart styling configuration. Uses defaults if None.
-        title: Optional custom title. If None, auto-generates from strategy_id.
+        title: Optional custom title. If None, auto-generates from deployment_id.
         benchmark_curve: Optional benchmark equity curve (e.g., ETH hold) for comparison.
             Should have the same timestamps as the strategy equity curve.
         benchmark_label: Label for the benchmark in the legend (default "Benchmark")
@@ -503,7 +504,7 @@ def plot_equity_curve(  # noqa: C901
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"equity_curve_{safe_id}.png")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -649,7 +650,7 @@ def plot_equity_curve(  # noqa: C901
                     )
 
         # Set title
-        chart_title = title or f"Equity Curve - {result.strategy_id}"
+        chart_title = title or f"Equity Curve - {result.deployment_id}"
         ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
 
         # Set labels
@@ -699,6 +700,7 @@ def plot_equity_curve(  # noqa: C901
         )
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def plot_equity_curve_interactive(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
@@ -718,8 +720,8 @@ def plot_equity_curve_interactive(  # noqa: C901
     Args:
         result: BacktestResult containing equity curve data
         output_path: Path to save the HTML file. If None, saves to
-            current directory as 'equity_curve_{strategy_id}.html'
-        title: Optional custom title. If None, auto-generates from strategy_id.
+            current directory as 'equity_curve_{deployment_id}.html'
+        title: Optional custom title. If None, auto-generates from deployment_id.
         benchmark_curve: Optional benchmark equity curve for comparison.
         benchmark_label: Label for the benchmark in the legend (default "Benchmark")
         show_drawdown: If True, highlight drawdown periods with shading (default False)
@@ -763,7 +765,7 @@ def plot_equity_curve_interactive(  # noqa: C901
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"equity_curve_{safe_id}.html")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -902,7 +904,7 @@ def plot_equity_curve_interactive(  # noqa: C901
                     )
 
         # Set layout
-        chart_title = title or f"Equity Curve - {result.strategy_id}"
+        chart_title = title or f"Equity Curve - {result.deployment_id}"
         fig.update_layout(
             title={
                 "text": chart_title,
@@ -982,9 +984,9 @@ def plot_pnl_histogram(
     Args:
         result: BacktestResult containing trades data
         output_path: Path to save the PNG file. If None, saves to
-            current directory as 'pnl_histogram_{strategy_id}.png'
+            current directory as 'pnl_histogram_{deployment_id}.png'
         config: Optional chart styling configuration. Uses defaults if None.
-        title: Optional custom title. If None, auto-generates from strategy_id.
+        title: Optional custom title. If None, auto-generates from deployment_id.
         bins: Number of histogram bins (default 20)
         show_stats: If True, display distribution statistics (skewness, kurtosis,
             mean, std dev) on the chart (default False)
@@ -1023,7 +1025,7 @@ def plot_pnl_histogram(
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"pnl_histogram_{safe_id}.png")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -1113,7 +1115,7 @@ def plot_pnl_histogram(
                 )
 
         # Set title
-        chart_title = title or f"Trade PnL Distribution - {result.strategy_id}"
+        chart_title = title or f"Trade PnL Distribution - {result.deployment_id}"
         ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
 
         # Set labels
@@ -1155,6 +1157,7 @@ def plot_pnl_histogram(
         )
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def plot_pnl_histogram_interactive(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
@@ -1171,8 +1174,8 @@ def plot_pnl_histogram_interactive(  # noqa: C901
     Args:
         result: BacktestResult containing trades data
         output_path: Path to save the HTML file. If None, saves to
-            current directory as 'pnl_histogram_{strategy_id}.html'
-        title: Optional custom title. If None, auto-generates from strategy_id.
+            current directory as 'pnl_histogram_{deployment_id}.html'
+        title: Optional custom title. If None, auto-generates from deployment_id.
         bins: Number of histogram bins (default 20)
         show_stats: If True, display distribution statistics on the chart (default True)
 
@@ -1208,7 +1211,7 @@ def plot_pnl_histogram_interactive(  # noqa: C901
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"pnl_histogram_{safe_id}.html")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -1335,7 +1338,7 @@ def plot_pnl_histogram_interactive(  # noqa: C901
             )
 
         # Set layout
-        chart_title = title or f"Trade PnL Distribution - {result.strategy_id}"
+        chart_title = title or f"Trade PnL Distribution - {result.deployment_id}"
         fig.update_layout(
             title={
                 "text": chart_title,
@@ -1411,9 +1414,9 @@ def plot_duration_scatter(
     Args:
         result: BacktestResult containing trades data
         output_path: Path to save the PNG file. If None, saves to
-            current directory as 'duration_scatter_{strategy_id}.png'
+            current directory as 'duration_scatter_{deployment_id}.png'
         config: Optional chart styling configuration. Uses defaults if None.
-        title: Optional custom title. If None, auto-generates from strategy_id.
+        title: Optional custom title. If None, auto-generates from deployment_id.
 
     Returns:
         ChartResult with file path and success status
@@ -1448,7 +1451,7 @@ def plot_duration_scatter(
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"duration_scatter_{safe_id}.png")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -1522,7 +1525,7 @@ def plot_duration_scatter(
         ax.axhline(y=0, color="#757575", linestyle="--", linewidth=1.5, label="Break-even")
 
         # Set title
-        chart_title = title or f"Trade Duration vs PnL - {result.strategy_id}"
+        chart_title = title or f"Trade Duration vs PnL - {result.deployment_id}"
         ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
 
         # Set labels
@@ -1577,9 +1580,9 @@ def plot_intent_pie(
     Args:
         result: BacktestResult containing trades data
         output_path: Path to save the PNG file. If None, saves to
-            current directory as 'intent_pie_{strategy_id}.png'
+            current directory as 'intent_pie_{deployment_id}.png'
         config: Optional chart styling configuration. Uses defaults if None.
-        title: Optional custom title. If None, auto-generates from strategy_id.
+        title: Optional custom title. If None, auto-generates from deployment_id.
 
     Returns:
         ChartResult with file path and success status
@@ -1614,7 +1617,7 @@ def plot_intent_pie(
 
     # Determine output path
     if output_path is None:
-        safe_id = result.strategy_id.replace("/", "_").replace("\\", "_")
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
         output_path = Path(f"intent_pie_{safe_id}.png")
     elif isinstance(output_path, str):
         output_path = Path(output_path)
@@ -1692,7 +1695,7 @@ def plot_intent_pie(
             autotext.set_fontweight("bold")
 
         # Set title
-        chart_title = title or f"Trades by Intent Type - {result.strategy_id}"
+        chart_title = title or f"Trades by Intent Type - {result.deployment_id}"
         ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
 
         # Equal aspect ratio ensures circular pie

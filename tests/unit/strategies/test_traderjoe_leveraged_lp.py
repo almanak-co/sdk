@@ -25,7 +25,7 @@ def _create_strategy(config_overrides: dict | None = None):
     from almanak.demo_strategies.traderjoe_leveraged_lp.strategy import TraderJoeLeveragedLPStrategy
 
     config = {
-        "strategy_id": "test-leveraged-lp",
+        "deployment_id": "test-leveraged-lp",
         "strategy_name": "test-leveraged-lp",
         "chain": "avalanche",
         "collateral_token": "WAVAX",
@@ -44,7 +44,7 @@ def _create_strategy(config_overrides: dict | None = None):
         strategy = TraderJoeLeveragedLPStrategy.__new__(TraderJoeLeveragedLPStrategy)
 
     # Manually initialize what __init__ would do (use private attrs for properties)
-    strategy._strategy_id = config["strategy_id"]
+    strategy._deployment_id = config["deployment_id"]
     strategy._chain = config["chain"]
     strategy.collateral_token = config["collateral_token"]
     strategy.collateral_amount = Decimal(config["collateral_amount"])

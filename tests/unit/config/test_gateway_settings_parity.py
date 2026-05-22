@@ -45,9 +45,7 @@ def test_parity_empty_env(gateway_env_scrub: pytest.MonkeyPatch) -> None:
         ("ALMANAK_GATEWAY_CHAINS", "arbitrum,base"),
     ],
 )
-def test_parity_prefixed_env(
-    gateway_env_scrub: pytest.MonkeyPatch, env_var: str, value: str
-) -> None:
+def test_parity_prefixed_env(gateway_env_scrub: pytest.MonkeyPatch, env_var: str, value: str) -> None:
     """Prefixed env vars resolve identically through both classes."""
     gateway_env_scrub.setenv(env_var, value)
     settings = GatewaySettings()
@@ -115,7 +113,7 @@ def test_gateway_config_from_env_applies_fallbacks(
     assert full.private_key == private_key
 
 
-def test_load_config_returns_local_when_agent_id_unset(
+def test_load_config_returns_local_when_hosted_flag_unset(
     gateway_env_scrub: pytest.MonkeyPatch,
 ) -> None:
     """``load_config()`` picks ``LocalConfig`` in the local-mode (default)."""
@@ -124,11 +122,12 @@ def test_load_config_returns_local_when_agent_id_unset(
     assert not isinstance(config, HostedConfig)
 
 
-def test_load_config_returns_hosted_when_agent_id_set(
+def test_load_config_returns_hosted_when_hosted_flag_set(
     gateway_env_scrub: pytest.MonkeyPatch,
 ) -> None:
-    """``load_config()`` picks ``HostedConfig`` when ``AGENT_ID`` is set."""
-    gateway_env_scrub.setenv("AGENT_ID", "test-agent")
+    """``load_config()`` picks ``HostedConfig`` in hosted mode."""
+    gateway_env_scrub.setenv("ALMANAK_IS_HOSTED", "true")
+    gateway_env_scrub.setenv("ALMANAK_DEPLOYMENT_ID", "test-agent")
     config = load_config()
     assert isinstance(config, HostedConfig)
     # Mirror the inverse test — guard against a future subclass relationship

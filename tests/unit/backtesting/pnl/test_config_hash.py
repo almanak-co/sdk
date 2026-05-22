@@ -246,7 +246,7 @@ def test_backtest_result_includes_config_hash() -> None:
     """BacktestResult should include config_hash field."""
     result = BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         metrics=BacktestMetrics(),
@@ -261,7 +261,7 @@ def test_backtest_result_config_hash_serialization() -> None:
     expected_hash = "a1b2c3d4e5f6" * 8 + "a1b2c3d4e5f67890"  # 64 chars
     result = BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         metrics=BacktestMetrics(),
@@ -281,7 +281,7 @@ def test_backtest_result_config_hash_none_by_default() -> None:
     """BacktestResult config_hash should be None by default."""
     result = BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         metrics=BacktestMetrics(),
@@ -294,7 +294,7 @@ def test_backtest_result_config_hash_none_serialization() -> None:
     """BacktestResult with None config_hash should serialize/deserialize correctly."""
     result = BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="test_strategy",
+        deployment_id="test_strategy",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         metrics=BacktestMetrics(),

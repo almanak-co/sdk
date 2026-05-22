@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface
 
 # Load .env file if it exists
 -include .env
@@ -68,6 +68,15 @@ check-connector-registry:
 #      (~150 triples as of 2026-05-12).
 check-intent-coverage:
 	uv run python scripts/ci/check_intent_coverage.py --verbose
+
+# Deployment-scoped table conformance gate (VIB-4722 / blueprint 29 §3).
+# Asserts every table in schema/deployment_scoped_tables.yaml carries the
+# single canonical `deployment_id` identity column in the SDK SQLite schema.
+check-deployment-scoped-tables:
+	uv run python scripts/ci/check_deployment_scoped_tables.py --verbose
+
+check-deployment-id-proto-surface:
+	uv run python scripts/ci/check_deployment_id_proto_surface.py
 
 # Run security checks (bandit for Python security issues)
 security:
@@ -319,7 +328,8 @@ proto:
 
 # Check that generated proto files are up-to-date (CI)
 proto-check:
-	uv run pytest tests/gateway/test_proto_compatibility.py -v
+	uv run pytest tests/gateway/test_proto_compatibility.py -v --import-mode=importlib
+	uv run python scripts/ci/check_deployment_id_proto_surface.py
 
 # Start gateway server (required for strategy execution)
 gateway:

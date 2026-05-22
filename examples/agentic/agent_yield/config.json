@@ -6,5 +6,5 @@
     "supply_tokens": ["USDC", "WAVAX"],
     "interval_seconds": 120,
     "max_tool_rounds": 10,
-    "strategy_id": "agent-yield-aave-avax"
+    "deployment_id": "agent-yield-aave-avax"
 }

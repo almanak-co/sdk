@@ -71,7 +71,6 @@ class TestBuildPendlePtRedeemAccountingEvent:
             intent=intent,
             result=result,
             deployment_id=self._DEPLOY_ID,
-            strategy_id="strat-1",
             cycle_id="cycle-001",
             execution_mode="paper",
             chain="arbitrum",
@@ -153,7 +152,7 @@ class TestBuildPendlePtRedeemAccountingEvent:
         result = _make_redeem_result(sy_received_raw=1_000_000_000_000_000_000)
         ev = build_pendle_pt_redeem_accounting_event(
             intent=intent, result=result,
-            deployment_id="d", strategy_id="s", cycle_id="c",
+            deployment_id="s", cycle_id="c",
             execution_mode="paper", chain="arbitrum", wallet_address="0xw",
             basis_store=bs,
         )

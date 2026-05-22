@@ -14,7 +14,6 @@ Focuses on gaps left by `test_run_helpers_gateway.py`:
         * fresh mainnet handles missing teardown_requests table gracefully
         * fresh prints "No existing state" when nothing to clear
         * sqlite3.Error during clear raises ClickException (fail fast)
-        * Backfill "0 migrated rows" does not set migrated=True
 """
 
 from __future__ import annotations
@@ -415,11 +414,13 @@ class TestSetupGatewayManagedErrors:
 
 
 def _make_state_db_with_teardown(path: Path) -> None:
+    # strategy_state keys on the canonical deployment_id column (blueprint 29);
+    # teardown_requests still keys on the legacy deployment_id column (VIB-4726).
     with sqlite3.connect(str(path)) as conn:
         conn.execute(
             """
             CREATE TABLE strategy_state (
-                strategy_id TEXT PRIMARY KEY,
+                deployment_id TEXT PRIMARY KEY,
                 version INTEGER,
                 state_data TEXT
             )
@@ -429,7 +430,7 @@ def _make_state_db_with_teardown(path: Path) -> None:
             """
             CREATE TABLE teardown_requests (
                 id INTEGER PRIMARY KEY,
-                strategy_id TEXT
+                deployment_id TEXT
             )
             """
         )
@@ -449,10 +450,10 @@ class TestResolveIdentityFreshExtended:
                 "INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}")
             )
             conn.execute(
-                "INSERT INTO teardown_requests (strategy_id) VALUES (?)", ("strat-1:hash",)
+                "INSERT INTO teardown_requests (deployment_id) VALUES (?)", ("strat-1:hash",)
             )
             conn.execute(
-                "INSERT INTO teardown_requests (strategy_id) VALUES (?)", ("other-strat",)
+                "INSERT INTO teardown_requests (deployment_id) VALUES (?)", ("other-strat",)
             )
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
 
@@ -465,11 +466,10 @@ class TestResolveIdentityFreshExtended:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
         with sqlite3.connect(str(db_path)) as conn:
-            remaining = conn.execute("SELECT strategy_id FROM teardown_requests").fetchall()
+            remaining = conn.execute("SELECT deployment_id FROM teardown_requests").fetchall()
         assert [r[0] for r in remaining] == ["other-strat"]
         text = out.getvalue().decode()
         assert "cleared all state for strategy" in text.lower()
@@ -487,10 +487,10 @@ class TestResolveIdentityFreshExtended:
                 "INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}")
             )
             conn.execute(
-                "INSERT INTO teardown_requests (strategy_id) VALUES (?)", ("strat-1:hash",)
+                "INSERT INTO teardown_requests (deployment_id) VALUES (?)", ("strat-1:hash",)
             )
             conn.execute(
-                "INSERT INTO teardown_requests (strategy_id) VALUES (?)", ("other-strat",)
+                "INSERT INTO teardown_requests (deployment_id) VALUES (?)", ("other-strat",)
             )
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
 
@@ -503,11 +503,10 @@ class TestResolveIdentityFreshExtended:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="anvil",
             )
         with sqlite3.connect(str(db_path)) as conn:
-            remaining = conn.execute("SELECT strategy_id FROM teardown_requests").fetchall()
+            remaining = conn.execute("SELECT deployment_id FROM teardown_requests").fetchall()
         assert remaining == []
 
     def test_fresh_with_missing_teardown_table_does_not_crash(
@@ -520,7 +519,7 @@ class TestResolveIdentityFreshExtended:
         # Only strategy_state table — teardown_requests is absent.
         with sqlite3.connect(str(db_path)) as conn:
             conn.execute(
-                "CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
+                "CREATE TABLE strategy_state (deployment_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
             )
             conn.execute(
                 "INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}")
@@ -537,11 +536,10 @@ class TestResolveIdentityFreshExtended:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
         with sqlite3.connect(str(db_path)) as conn:
-            rows = conn.execute("SELECT strategy_id FROM strategy_state").fetchall()
+            rows = conn.execute("SELECT deployment_id FROM strategy_state").fetchall()
         assert rows == []
 
     def test_fresh_empty_db_prints_no_existing_state_message(
@@ -553,7 +551,7 @@ class TestResolveIdentityFreshExtended:
         db_path = tmp_path / "almanak_state.db"
         with sqlite3.connect(str(db_path)) as conn:
             conn.execute(
-                "CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
+                "CREATE TABLE strategy_state (deployment_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
             )
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
 
@@ -566,7 +564,6 @@ class TestResolveIdentityFreshExtended:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
         assert "No existing state for strategy" in out.getvalue().decode()
@@ -591,46 +588,11 @@ class TestResolveIdentityFreshExtended:
                 multi_chain=False,
                 strategy_chains=[],
                 config_display_name="strat-1",
-                cli_id_override=None,
                 gateway_network="mainnet",
             )
 
-    def test_backfill_with_zero_rows_migrated_does_not_flag_migrated(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Backfill returning 0 means nothing migrated (info.migrated stays False)."""
-        monkeypatch.chdir(tmp_path)
-        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
-
-        class _ZeroStore:
-            def __init__(self, config: Any) -> None:
-                self.config = config
-
-            async def backfill_deployment_id(self, _old: str, _new: str) -> int:
-                return 0
-
-            async def close(self) -> None:
-                return None
-
-        from almanak.framework.state.backends import sqlite as sqlite_backend
-
-        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _ZeroStore)
-        monkeypatch.setattr(sqlite_backend, "SQLiteConfig", lambda db_path: {"db_path": db_path})
-
-        db_path = tmp_path / "almanak_state.db"
-        db_path.write_text("")
-        monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
-
-        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
-        cli = CliRunner()
-        with cli.isolation():
-            info = run_helpers._resolve_identity(
-                strategy_config=strategy_config,
-                fresh=False,
-                multi_chain=False,
-                strategy_chains=[],
-                config_display_name="strat-1",
-                cli_id_override=None,
-                gateway_network="mainnet",
-            )
-        assert info.migrated is False
+    # NOTE: the bare-name → deployment_id backfill path was removed in
+    # VIB-4722 — the new local deployment_id (deployment:{sha256(...)}) is
+    # stable across restarts and machines, so there is nothing to migrate
+    # (blueprint 29 §2.2). The former "0 rows migrated" test is therefore
+    # obsolete and intentionally not carried forward.

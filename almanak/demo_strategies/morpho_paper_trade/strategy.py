@@ -203,7 +203,7 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.collateral_amount} {self.collateral_token} to Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
             elif intent_type == "BORROW":
@@ -215,7 +215,7 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token} from Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
             elif intent_type == "REPAY":
@@ -226,7 +226,7 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Repaid {self.borrow_token} to Morpho Blue",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "repay"},
                     )
                 )
@@ -315,7 +315,7 @@ class MorphoPaperTradeStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

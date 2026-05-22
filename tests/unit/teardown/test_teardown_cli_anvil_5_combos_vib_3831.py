@@ -76,7 +76,7 @@ class _SwapOnlyStrategy:
         self.config = config
         self.chain = chain
         self.wallet_address = wallet_address
-        self.strategy_id = "vib_3831_probe"
+        self.deployment_id = "vib_3831_probe"
 
     def get_open_positions(self):
         from types import SimpleNamespace
@@ -102,7 +102,7 @@ def _write_strategy_files(tmp_path, chain: str) -> tuple[str, str]:
             {
                 "chain": chain,
                 "wallet_address": "0x0000000000000000000000000000000000000001",
-                "strategy_id": "vib_3831_probe",
+                "deployment_id": "vib_3831_probe",
                 "anvil_funding": {"WETH": 1, "USDC": 1000, "ETH": 1},
             }
         )

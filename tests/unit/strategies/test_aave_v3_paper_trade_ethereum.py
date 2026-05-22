@@ -24,7 +24,7 @@ def strategy():
     strat.config = {}
     strat._chain = "ethereum"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-aave-paper-ethereum"
+    strat._deployment_id = "test-aave-paper-ethereum"
     strat.STRATEGY_NAME = "aave_v3_paper_trade_ethereum"
 
     # Config

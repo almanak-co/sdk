@@ -472,7 +472,7 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_OPENED,
                     description=f"Aerodrome Slipstream CL position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "tick_spacing": self.tick_spacing,
@@ -577,7 +577,7 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         total_value = sum(p.value_usd for p in positions)
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             total_value_usd=total_value,
             positions=positions,

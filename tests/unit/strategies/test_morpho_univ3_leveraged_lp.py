@@ -35,7 +35,7 @@ def strategy():
     ):
         s = MorphoUniV3LeveragedLPStrategy.__new__(MorphoUniV3LeveragedLPStrategy)
         # Set attributes that __init__ would set
-        s._strategy_id = "test_morpho_univ3_lp"
+        s._deployment_id = "test_morpho_univ3_lp"
         s.name = "demo_morpho_univ3_leveraged_lp"
         s._chain = "ethereum"
         s._config = {

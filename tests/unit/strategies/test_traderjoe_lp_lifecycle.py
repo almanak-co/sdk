@@ -25,7 +25,7 @@ def strategy():
     strat.config = LPLifecycleConfig()
     strat._chain = "avalanche"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-traderjoe-lp-lifecycle"
+    strat._deployment_id = "test-traderjoe-lp-lifecycle"
     strat.pool = "WAVAX/USDC/20"
     strat.token_x = "WAVAX"
     strat.token_y = "USDC"

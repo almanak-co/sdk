@@ -13,7 +13,7 @@ sentinel config object and patches ``serve`` to a no-op coroutine,
 then asserts identity between ``serve``'s argument and the sentinel's
 ``.gateway``. Patching the source of truth (rather than resolving the
 real env twice and comparing) keeps the test deterministic — ambient
-``AGENT_ID`` / ``ALMANAK_GATEWAY_*`` vars in the test runner cannot
+``ALMANAK_IS_HOSTED`` / ``ALMANAK_GATEWAY_*`` vars in the test runner cannot
 flip modes or perturb the comparison.
 """
 

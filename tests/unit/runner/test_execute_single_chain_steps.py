@@ -80,7 +80,7 @@ def _make_runner(
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-strategy"
+    strategy.deployment_id = "test-strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.generate_teardown_intents.side_effect = NotImplementedError
@@ -94,7 +94,7 @@ def _make_state(strategy: MagicMock, *, intent=None) -> SingleChainExecutionStat
         strategy=strategy,
         intent=intent,
         start_time=datetime.now(UTC),
-        strategy_id=strategy.strategy_id,
+        deployment_id=strategy.deployment_id,
     )
 
 

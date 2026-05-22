@@ -13,7 +13,7 @@ The compositor contract this file verifies:
        - `next_before_timestamp` is the timestamp of the last returned item.
   4. The page never exceeds the requested limit, and the server cap (200)
      applies even when the request asks for more.
-  5. Validation rejects bad strategy_ids before any backend hit.
+  5. Validation rejects bad deployment_ids before any backend hit.
   6. Default kind / unknown payloads degrade gracefully on the client side.
 
 Failure of any of these would mean the dashboard either drifts from the
@@ -43,7 +43,7 @@ class _LedgerRow:
 
     id: str
     cycle_id: str
-    strategy_id: str
+    deployment_id: str
     timestamp: datetime
     intent_type: str = "SWAP"
     token_in: str = "USDC"
@@ -83,10 +83,10 @@ def mock_context():
     return MagicMock(spec=grpc.aio.ServicerContext)
 
 
-def _add_timeline(strategy_id: str, ts: datetime, **kwargs) -> TimelineEvent:
+def _add_timeline(deployment_id: str, ts: datetime, **kwargs) -> TimelineEvent:
     event = TimelineEvent(
         event_id=str(uuid4()),
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         timestamp=ts,
         event_type=kwargs.pop("event_type", "STATE_CHANGE"),
         description=kwargs.pop("description", "test"),
@@ -110,12 +110,12 @@ class TestMergeAndOrder:
         _add_timeline(sid, now - timedelta(minutes=3), description="oldest UX")
 
         ledger = [
-            _LedgerRow(id="lg-1", cycle_id="cyc-1", strategy_id=sid, timestamp=now - timedelta(minutes=2)),
+            _LedgerRow(id="lg-1", cycle_id="cyc-1", deployment_id=sid, timestamp=now - timedelta(minutes=2)),
         ]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
 
@@ -134,7 +134,7 @@ class TestMergeAndOrder:
         now = datetime.now(UTC)
 
         # The ledger row IS the truth.
-        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", strategy_id=sid, timestamp=now)]
+        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", deployment_id=sid, timestamp=now)]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         # Timeline duplicate references that ledger row → must be suppressed.
@@ -154,7 +154,7 @@ class TestMergeAndOrder:
         )
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
 
@@ -175,7 +175,7 @@ class TestMergeAndOrder:
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=[])
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         assert len(response.items) == 1
@@ -196,7 +196,7 @@ class TestPagination:
 
         response = await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=10,
                 before_timestamp=int(cursor_dt.timestamp()),
             ),
@@ -215,7 +215,7 @@ class TestPagination:
             _add_timeline(sid, now - timedelta(seconds=i), description=f"e{i}")
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=3),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=3),
             mock_context,
         )
 
@@ -232,7 +232,7 @@ class TestPagination:
         _add_timeline(sid, now)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
 
@@ -249,7 +249,7 @@ class TestPagination:
             _add_timeline(sid, now - timedelta(seconds=i), description=f"e{i}")
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=9999),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=9999),
             mock_context,
         )
         assert len(response.items) <= 200
@@ -280,7 +280,7 @@ class TestPushdownAndCursor:
 
         await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=10,
                 before_timestamp=int(cursor_dt.timestamp()),
             ),
@@ -313,7 +313,7 @@ class TestPushdownAndCursor:
 
         await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=10,
                 before_timestamp=int(cursor_dt.timestamp()),
             ),
@@ -347,7 +347,7 @@ class TestPushdownAndCursor:
 
         response = await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=5,
                 before_timestamp=int(cursor_dt.timestamp()),
             ),
@@ -374,7 +374,7 @@ class TestPushdownAndCursor:
 
         # Page 1
         page1 = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=2),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=2),
             mock_context,
         )
         assert len(page1.items) == 2
@@ -385,7 +385,7 @@ class TestPushdownAndCursor:
         # Page 2 with the tie-breaker cursor — must return the third item.
         page2 = await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=2,
                 before_timestamp=page1.next_before_timestamp,
                 before_id=page1.next_before_id,
@@ -407,7 +407,7 @@ class TestPushdownAndCursor:
             _add_timeline(sid, now - timedelta(seconds=i), description=f"e{i}")
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=2),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=2),
             mock_context,
         )
         assert response.has_more is True
@@ -423,7 +423,7 @@ class TestPushdownAndCursor:
         _add_timeline(sid, now)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         assert response.has_more is False
@@ -441,7 +441,7 @@ class TestPushdownAndCursor:
         cursor_dt = now - timedelta(minutes=5)
 
         all_entries = [
-            _LedgerRow(id=f"lg-{i}", cycle_id=f"cyc-{i}", strategy_id=sid, timestamp=now - timedelta(minutes=i))
+            _LedgerRow(id=f"lg-{i}", cycle_id=f"cyc-{i}", deployment_id=sid, timestamp=now - timedelta(minutes=i))
             for i in range(10)
         ]
 
@@ -458,7 +458,7 @@ class TestPushdownAndCursor:
 
         response = await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=10,
                 before_timestamp=int(cursor_dt.timestamp()),
             ),
@@ -474,9 +474,9 @@ class TestPushdownAndCursor:
 
 class TestValidation:
     @pytest.mark.asyncio
-    async def test_invalid_strategy_id_rejected(self, dashboard_service, mock_context):
+    async def test_invalid_deployment_id_rejected(self, dashboard_service, mock_context):
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id="", limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id="", limit=10),
             mock_context,
         )
         # Empty response, INVALID_ARGUMENT set on context
@@ -487,7 +487,7 @@ class TestValidation:
     async def test_before_id_without_before_timestamp_rejected(self, dashboard_service, mock_context):
         """CR review: composite cursor must be validated as a pair."""
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id="s", limit=10, before_id="0:T:abc"),
+            gateway_pb2.GetActivityFeedRequest(deployment_id="s", limit=10, before_id="0:T:abc"),
             mock_context,
         )
         assert len(response.items) == 0
@@ -508,7 +508,7 @@ class TestValidation:
             mock_context.reset_mock()
             response = await dashboard_service.GetActivityFeed(
                 gateway_pb2.GetActivityFeedRequest(
-                    strategy_id="s", limit=10, before_timestamp=1700000000, before_id=bad
+                    deployment_id="s", limit=10, before_timestamp=1700000000, before_id=bad
                 ),
                 mock_context,
             )
@@ -519,9 +519,9 @@ class TestValidation:
     async def test_well_formed_before_id_accepted(self, dashboard_service, mock_context):
         """A valid composite cursor must NOT trip the validator."""
         sid = "test_strategy"
-        response = await dashboard_service.GetActivityFeed(
+        await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id=sid,
+                deployment_id=sid,
                 limit=10,
                 before_timestamp=1700000000,
                 before_id="1:L:lg-7",
@@ -545,7 +545,7 @@ class TestValidation:
         # Max int64; well past datetime year 9999 (≈ 253402300799).
         overflow_ts = 9223372036854775807
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id="s", limit=10, before_timestamp=overflow_ts),
+            gateway_pb2.GetActivityFeedRequest(deployment_id="s", limit=10, before_timestamp=overflow_ts),
             mock_context,
         )
         assert len(response.items) == 0
@@ -556,7 +556,7 @@ class TestValidation:
         """The same overflow must be rejected when a tie-breaker is present."""
         response = await dashboard_service.GetActivityFeed(
             gateway_pb2.GetActivityFeedRequest(
-                strategy_id="s",
+                deployment_id="s",
                 limit=10,
                 before_timestamp=9223372036854775807,
                 before_id="0:T:evt-7",
@@ -582,7 +582,7 @@ class TestFieldPropagation:
             related_ledger_entry_id="",
         )
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         item = response.items[0]
@@ -598,7 +598,7 @@ class TestFieldPropagation:
             _LedgerRow(
                 id="lg-1",
                 cycle_id="cyc-1",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=now,
                 intent_type="SWAP",
                 token_in="USDC",
@@ -612,7 +612,7 @@ class TestFieldPropagation:
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         item = response.items[0]
@@ -659,12 +659,12 @@ class TestIncrementalDedup:
                 related_ledger_entry_id="lg-tail" if i == 0 else "",
             )
         ledger = [
-            _LedgerRow(id="lg-tail", cycle_id="cyc-tail", strategy_id=sid, timestamp=now - timedelta(minutes=6)),
+            _LedgerRow(id="lg-tail", cycle_id="cyc-tail", deployment_id=sid, timestamp=now - timedelta(minutes=6)),
         ]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=2),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=2),
             mock_context,
         )
 
@@ -692,7 +692,7 @@ class TestIncrementalDedup:
         # Anchor at a fixed timestamp so the test is stable across re-runs.
         anchor = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
         # Ledger row at t=0.
-        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", strategy_id=sid, timestamp=anchor)]
+        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", deployment_id=sid, timestamp=anchor)]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
         # Timeline event at t+1s, referencing the ledger. Sort DESC: timeline first.
         _add_timeline(
@@ -705,7 +705,7 @@ class TestIncrementalDedup:
         _add_timeline(sid, anchor + timedelta(seconds=2), description="standalone")
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         kinds = [i.kind for i in response.items]
@@ -717,7 +717,7 @@ class TestIncrementalDedup:
         # truth), even though the timeline sorted FIRST in DESC order.
         assert "dup_after_ledger_write" not in descriptions, (
             "Timeline event whose ref'd ledger appears later on the page "
-            "must be dropped (PRD §6.1 ledger-wins). Got: %s" % descriptions
+            f"must be dropped (PRD §6.1 ledger-wins). Got: {descriptions}"
         )
         assert "standalone" in descriptions
         assert "lg-7" in ledger_ids
@@ -731,13 +731,13 @@ class TestIncrementalDedup:
         now = datetime.now(UTC)
 
         # Both at `now`: ledger sorts before timeline at ties (priority "1" > "0").
-        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", strategy_id=sid, timestamp=now)]
+        ledger = [_LedgerRow(id="lg-7", cycle_id="cyc-7", deployment_id=sid, timestamp=now)]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
         _add_timeline(sid, now, description="dup", related_ledger_entry_id="lg-7")
         _add_timeline(sid, now - timedelta(seconds=10), description="other")
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         kinds = [i.kind for i in response.items]
@@ -766,7 +766,7 @@ class TestIncrementalDedup:
         """
         sid = "test_strategy"
         anchor = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
-        ledger = [_LedgerRow(id="lg-multi", cycle_id="cyc-1", strategy_id=sid, timestamp=anchor)]
+        ledger = [_LedgerRow(id="lg-multi", cycle_id="cyc-1", deployment_id=sid, timestamp=anchor)]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
         # Three UX rows, all referencing lg-multi, all sort BEFORE lg-multi
         # in DESC (newer ts).
@@ -790,7 +790,7 @@ class TestIncrementalDedup:
         )
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         kinds = [i.kind for i in response.items]
@@ -842,7 +842,7 @@ class TestBackfillLoop:
             _LedgerRow(
                 id="lg-top",
                 cycle_id="cyc-top",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=now,
             )
         ]
@@ -867,7 +867,7 @@ class TestBackfillLoop:
             )
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=5),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=5),
             mock_context,
         )
 
@@ -901,20 +901,20 @@ class TestBackfillLoop:
             _LedgerRow(
                 id="lg-1",
                 cycle_id="cyc-1",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=now - timedelta(seconds=1),
             ),
             _LedgerRow(
                 id="lg-2",
                 cycle_id="cyc-2",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=now - timedelta(seconds=2),
             ),
         ]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         assert len(response.items) == 3
@@ -953,7 +953,7 @@ class TestBackfillLoop:
             _LedgerRow(
                 id="lg-target",
                 cycle_id="c",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=anchor,
             ),
         ]
@@ -986,7 +986,7 @@ class TestBackfillLoop:
         monkeypatch.setattr(store, "get_events", _spy_get_events)
 
         await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=3),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=3),
             mock_context,
         )
 
@@ -1000,7 +1000,7 @@ class TestBackfillLoop:
         # be strictly older. None after a real cursor would mean a regression
         # (we'd re-read the same window), so it's never permitted past the
         # first call.
-        for prior, current in zip(timeline_cursors_seen, timeline_cursors_seen[1:]):
+        for prior, current in zip(timeline_cursors_seen, timeline_cursors_seen[1:], strict=False):
             assert current is not None, (
                 f"Cursor regressed to ``None`` after advancement. cursors_seen={timeline_cursors_seen}"
             )
@@ -1027,7 +1027,7 @@ class TestBackfillLoop:
             _LedgerRow(
                 id=f"lg-{i}",
                 cycle_id="c",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=now,
             )
             for i in range(31)
@@ -1035,14 +1035,14 @@ class TestBackfillLoop:
 
         call_count = [0]
 
-        async def _spy(_strategy_id, *, since=None, intent_type=None, limit=None, before=None):
+        async def _spy(_deployment_id, *, since=None, intent_type=None, limit=None, before=None):
             call_count[0] += 1
             return ledger_rows[:limit] if limit else ledger_rows
 
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(side_effect=_spy)
 
-        response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+        await dashboard_service.GetActivityFeed(
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
 
@@ -1081,7 +1081,7 @@ class TestBackfillLoop:
             _LedgerRow(
                 id="lg-0",
                 cycle_id="c",
-                strategy_id=sid,
+                deployment_id=sid,
                 timestamp=anchor,
             )
         ]
@@ -1101,7 +1101,7 @@ class TestBackfillLoop:
             return [
                 TimelineEvent(
                     event_id=f"dup-{base_offset + i}",
-                    strategy_id=sid,
+                    deployment_id=sid,
                     timestamp=anchor - timedelta(seconds=base_offset + i + 1),
                     event_type="STATE_CHANGE",
                     description=f"dup{base_offset + i}",
@@ -1113,7 +1113,7 @@ class TestBackfillLoop:
         monkeypatch.setattr(dashboard_service, "_load_timeline_for_feed", _fake_load_timeline)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
 
@@ -1145,7 +1145,7 @@ class TestBackfillLoop:
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=[])
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         assert len(response.items) == 1
@@ -1168,11 +1168,11 @@ class TestPayloadOneofInvariant:
         sid = "test_strategy"
         now = datetime.now(UTC)
         _add_timeline(sid, now, description="ux event")
-        ledger = [_LedgerRow(id="lg-1", cycle_id="cyc-1", strategy_id=sid, timestamp=now - timedelta(seconds=1))]
+        ledger = [_LedgerRow(id="lg-1", cycle_id="cyc-1", deployment_id=sid, timestamp=now - timedelta(seconds=1))]
         dashboard_service._state_manager.get_ledger_entries = AsyncMock(return_value=ledger)
 
         response = await dashboard_service.GetActivityFeed(
-            gateway_pb2.GetActivityFeedRequest(strategy_id=sid, limit=10),
+            gateway_pb2.GetActivityFeedRequest(deployment_id=sid, limit=10),
             mock_context,
         )
         for item in response.items:
@@ -1214,7 +1214,6 @@ class TestClientConversion:
                 gateway_pb2.ActivityFeedItem(
                     kind=gateway_pb2.ActivityFeedItem.Kind.TIMELINE_EVENT,
                     timestamp=ts,
-                    strategy_id="s",
                     cycle_id="cyc-1",
                     timeline_event=gateway_pb2.TimelineEventInfo(
                         timestamp=ts,
@@ -1226,12 +1225,11 @@ class TestClientConversion:
                 gateway_pb2.ActivityFeedItem(
                     kind=gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY,
                     timestamp=ts - 1,
-                    strategy_id="s",
                     cycle_id="cyc-2",
                     ledger_entry=gateway_pb2.LedgerEntryInfo(
                         id="lg-1",
                         cycle_id="cyc-2",
-                        strategy_id="s",
+                        deployment_id="s",
                         timestamp=ts - 1,
                         intent_type="SWAP",
                         amount_in="1",

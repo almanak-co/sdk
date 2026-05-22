@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 def call_operator_action(
-    strategy_id: str, action: AvailableAction, params: dict[str, Any] | None = None
+    deployment_id: str, action: AvailableAction, params: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Call an operator action API endpoint.
 
     Args:
-        strategy_id: The strategy ID
+        deployment_id: The deployment ID
         action: The action to execute
         params: Optional action-specific parameters
 
@@ -45,7 +45,7 @@ def call_operator_action(
     if not endpoint:
         return {"success": False, "error": f"Unknown action: {action}"}
 
-    url = f"{API_BASE_URL}/api/strategies/{strategy_id}/{endpoint}"
+    url = f"{API_BASE_URL}/api/strategies/{deployment_id}/{endpoint}"
     headers = {"Content-Type": "application/json", "X-API-Key": "demo-key"}
 
     try:
@@ -59,7 +59,7 @@ def call_operator_action(
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:
-            return {"success": False, "error": f"Strategy {strategy_id} not found"}
+            return {"success": False, "error": f"Strategy {deployment_id} not found"}
         elif response.status_code == 400:
             error_detail = response.json().get("detail", "Bad request")
             return {"success": False, "error": error_detail}
@@ -182,7 +182,7 @@ def render_operator_card(card: OperatorCard, strategy_name: str) -> None:  # noq
     st.markdown("### Available Actions")
 
     # Use session state for confirmation dialogs
-    confirm_key = f"confirm_action_{card.strategy_id}"
+    confirm_key = f"confirm_action_{card.deployment_id}"
     if confirm_key not in st.session_state:
         st.session_state[confirm_key] = None
 
@@ -198,7 +198,7 @@ def render_operator_card(card: OperatorCard, strategy_name: str) -> None:  # noq
 
             if st.button(
                 action_label,
-                key=f"action_{card.strategy_id}_{action.value}",
+                key=f"action_{card.deployment_id}_{action.value}",
                 use_container_width=True,
                 type="primary" if is_recommended else "secondary",
             ):
@@ -217,25 +217,25 @@ def render_operator_card(card: OperatorCard, strategy_name: str) -> None:  # noq
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Confirm", key=f"confirm_yes_{card.strategy_id}", use_container_width=True, type="primary"):
+            if st.button("Confirm", key=f"confirm_yes_{card.deployment_id}", use_container_width=True, type="primary"):
                 # Build params from suggested action
                 params = suggested.params if suggested else {}
 
                 # Call real API
                 with st.spinner(f"Executing {action_label}..."):
-                    result = call_operator_action(card.strategy_id, action, params)
+                    result = call_operator_action(card.deployment_id, action, params)
 
                 # Store result and clear confirmation
                 st.session_state[confirm_key] = None
                 if result.get("success"):
-                    st.session_state[f"action_result_{card.strategy_id}"] = {
+                    st.session_state[f"action_result_{card.deployment_id}"] = {
                         "success": True,
                         "action": action,
                         "message": result.get("message", f"{action_label} executed successfully"),
                     }
                 else:
                     error_msg = result.get("error", "Action failed")
-                    st.session_state[f"action_result_{card.strategy_id}"] = {
+                    st.session_state[f"action_result_{card.deployment_id}"] = {
                         "success": False,
                         "action": action,
                         "message": error_msg,
@@ -244,12 +244,12 @@ def render_operator_card(card: OperatorCard, strategy_name: str) -> None:  # noq
                 st.rerun()
 
         with col2:
-            if st.button("Cancel", key=f"confirm_no_{card.strategy_id}", use_container_width=True):
+            if st.button("Cancel", key=f"confirm_no_{card.deployment_id}", use_container_width=True):
                 st.session_state[confirm_key] = None
                 st.rerun()
 
     # Show action result feedback
-    result_key = f"action_result_{card.strategy_id}"
+    result_key = f"action_result_{card.deployment_id}"
     if result_key in st.session_state and st.session_state[result_key]:
         result = st.session_state[result_key]
         if result["success"]:

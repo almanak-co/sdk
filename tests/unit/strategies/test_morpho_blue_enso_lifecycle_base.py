@@ -32,7 +32,7 @@ def strategy():
         return_value=None,
     ):
         s = MorphoBlueEnsoLifecycleBaseStrategy.__new__(MorphoBlueEnsoLifecycleBaseStrategy)
-        s._strategy_id = "test_morpho_blue_enso_lifecycle_base"
+        s._deployment_id = "test_morpho_blue_enso_lifecycle_base"
         s.name = "morpho_blue_enso_lifecycle_base"
         s._chain = "base"
         s._config = {

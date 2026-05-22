@@ -41,7 +41,7 @@ def _make_strategy(decide_side_effect=None):
     from almanak.framework.intents.vocabulary import HoldIntent
 
     strategy = MagicMock()
-    strategy.strategy_id = "test_strategy"
+    strategy.deployment_id = "test_strategy"
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
@@ -321,7 +321,7 @@ class TestAlertWithStuckDetector:
 
         snapshot = detector.detect_stuck.call_args[0][0]
         assert snapshot.chain == "arbitrum"
-        assert snapshot.strategy_id == "test_strategy"
+        assert snapshot.deployment_id == "test_strategy"
 
     @pytest.mark.asyncio
     @patch(_TEARDOWN_PATCH, return_value=None)
@@ -362,7 +362,7 @@ class TestAlertWithStuckDetector:
 
         # Breaker with low threshold so it trips after 2 failures
         breaker = CircuitBreaker(
-            strategy_id="test_strategy",
+            deployment_id="test_strategy",
             config=CircuitBreakerConfig(
                 max_consecutive_failures=2,
                 max_cumulative_loss_usd=Decimal("1000"),
@@ -434,7 +434,7 @@ class TestExecutionErrorWithGenerator:
         mock_result.phase = None
 
         strategy = MagicMock()
-        strategy.strategy_id = "test_strategy"
+        strategy.deployment_id = "test_strategy"
 
         await runner._handle_execution_error(strategy, mock_result)
 
@@ -458,7 +458,7 @@ class TestExecutionErrorWithGenerator:
         mock_result.phase = None
 
         strategy = MagicMock()
-        strategy.strategy_id = "test_strategy"
+        strategy.deployment_id = "test_strategy"
 
         await runner._handle_execution_error(strategy, mock_result)
 

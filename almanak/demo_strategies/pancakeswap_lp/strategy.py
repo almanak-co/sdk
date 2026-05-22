@@ -174,7 +174,7 @@ class PancakeSwapLPStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_pancakeswap_lp"),
+            deployment_id=getattr(self, "deployment_id", "demo_pancakeswap_lp"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

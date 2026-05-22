@@ -99,7 +99,7 @@ def derive_isolated_wallet(master_private_key: str, strategy_name: str) -> tuple
 
     Args:
         master_private_key: Hex-encoded master private key (with or without 0x prefix)
-        strategy_name: Strategy identifier used as derivation salt
+        strategy_name: Deployment identifier used as derivation salt
 
     Returns:
         Tuple of (derived_private_key_hex, derived_wallet_address)

@@ -28,7 +28,7 @@ from almanak.framework.teardown.config import TeardownConfig
 def _make_strategy(intents=None):
     """Create a mock strategy."""
     strategy = MagicMock()
-    strategy.strategy_id = "test_strat"
+    strategy.deployment_id = "test_strat"
     strategy.name = "Test Strategy"
     strategy.chain = "arbitrum"
     strategy.uses_safe_wallet = False
@@ -156,7 +156,7 @@ async def test_resume_applies_prices_when_regenerating():
     state_manager = MagicMock()
     state = TeardownState(
         teardown_id="td_123",
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=1,
@@ -176,7 +176,7 @@ async def test_resume_applies_prices_when_regenerating():
     manager = TeardownManager(state_manager=state_manager, config=config)
 
     await manager.resume(
-        strategy_id="test_strat",
+        deployment_id="test_strat",
         strategy=strategy,
         market=market,
     )

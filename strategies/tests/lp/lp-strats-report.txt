@@ -11,7 +11,7 @@ across TraderJoe V2, Aerodrome, and Uniswap V3 protocols. All strategies include
 
 ## Strategy Summary Table
 
-| # | Strategy ID              | Protocol      | Chain     | Pool         | Range/Bins        | Value  | Dashboard | Status |
+| # | Deployment ID              | Protocol      | Chain     | Pool         | Range/Bins        | Value  | Dashboard | Status |
 |---|--------------------------|---------------|-----------|--------------|-------------------|--------|-----------|--------|
 | 1 | test_tj_tight_scalper    | TraderJoe V2  | Avalanche | WAVAX/USDC/20| 5% / 11 bins      | ~$6    | TJ Tight Scalper | PASS |
 | 2 | test_tj_wide_accumulator | TraderJoe V2  | Avalanche | JOE/WAVAX/20 | 15% / 21 bins     | ~$10.5 | TJ Wide Accumulator | PASS |
@@ -248,11 +248,11 @@ dashboards = discover_custom_dashboards(Path('strategies/tests/lp'))
 
 ### Implementation Patterns Used
 
-1. **TeardownPositionSummary** - Requires `strategy_id` and `timestamp` fields
+1. **TeardownPositionSummary** - Requires `deployment_id` and `timestamp` fields
 2. **PositionInfo** - Requires `position_id` and `chain` fields
 3. **Intent Factory Methods** - Use `Intent.lp_open()` and `Intent.lp_close()`
 4. **Config Decimal Fields** - Use `field(default_factory=lambda: Decimal("value"))`
-5. **Dashboard Functions** - Implement `render_custom_dashboard(strategy_id, config, api_client, session_state)`
+5. **Dashboard Functions** - Implement `render_custom_dashboard(deployment_id, config, api_client, session_state)`
 
 ### Code Quality
 

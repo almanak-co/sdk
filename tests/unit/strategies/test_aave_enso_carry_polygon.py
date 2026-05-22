@@ -41,7 +41,7 @@ def _make_strategy(**config_overrides) -> AaveEnsoCarryPolygonStrategy:
         strategy = AaveEnsoCarryPolygonStrategy.__new__(AaveEnsoCarryPolygonStrategy)
 
     # Set required base class attributes
-    strategy._strategy_id = "test-aave-enso-carry-polygon"
+    strategy._deployment_id = "test-aave-enso-carry-polygon"
     strategy._chain = "polygon"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
     strategy._config = default_config

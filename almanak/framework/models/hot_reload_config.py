@@ -28,7 +28,7 @@ from typing import Any
 # =============================================================================
 # The following fields are considered "cold" and require a strategy restart:
 #
-# - strategy_id: Immutable identity of the strategy
+# - deployment_id: Immutable identity of the strategy
 # - chain: Network the strategy operates on (e.g., "arbitrum", "ethereum")
 # - pool_address: The LP pool or protocol contract address
 # - wallet_address: The wallet executing transactions
@@ -90,7 +90,7 @@ class HotReloadableConfig:
 
     The distinction between hot-reloadable and cold parameters:
     - Hot-reloadable: Can change at runtime, affect trading behavior
-    - Cold parameters: Require restart, define strategy identity (see comments above)
+    - Cold parameters: Require restart, define deployment identity (see comments above)
     """
 
     # Trading parameters (hot-reloadable)

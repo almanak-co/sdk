@@ -1,4 +1,4 @@
-"""Schema contract for accounting tables — VIB-3763, plan §D.
+"""Schema contract for accounting tables — VIB-3763, blueprint 29.
 
 The SDK writes accounting rows whose columns are produced from in-code
 dataclasses. The deployed backend (SQLite locally, Postgres hosted) must
@@ -23,6 +23,14 @@ silent first-iteration failure.
 
 Per blueprint 27 §accounting and CLAUDE.md "metrics_db schema is owned
 outside this repo".
+
+> **One identity (blueprint 29 §3).** Every deployment-scoped table — local
+> SQLite *and* hosted Postgres — carries exactly one identity column,
+> ``deployment_id``. There is no separate legacy identity column
+> identity column and no runtime translation. The contract below is a
+> **single dict** used for both backends — the gateway's SQLite vs.
+> Postgres branch exists only for SQL dialect, never for the identity
+> column name.
 """
 
 from __future__ import annotations
@@ -37,23 +45,14 @@ from __future__ import annotations
 # build can be deployed before its companion metrics-database migration
 # without bricking startup.
 #
-# Identity column convention (CodeRabbit + Codex on PR #2162):
-#   - Local SQLite tables key on ``strategy_id`` (the SDK's wire-side
-#     name; this is what every writer in ``backends/sqlite.py`` writes).
-#   - Hosted Postgres tables key on ``agent_id`` (the deployed
-#     metrics-database name; the gateway maps wire-side ``strategy_id``
-#     → ``agent_id`` via ``resolve_agent_id`` before each PG INSERT /
-#     SELECT — see ``state_service.py:610`` and the read sites in
-#     ``state_manager.py:721/752/782``).
-# We therefore expose two contract dicts and two name maps so the
-# validator can introspect the right column names per backend. The
-# legacy ``ACCOUNTING_SCHEMA_CONTRACT`` alias points at the SQLite
-# variant for backwards compatibility with existing imports.
-ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
+# Identity column convention (blueprint 29 §3): every deployment-scoped
+# table keys on the single ``deployment_id`` column on BOTH backends. The
+# legacy split between local and hosted identity names is gone —
+# there is one column, one name, one contract.
+ACCOUNTING_SCHEMA_CONTRACT: dict[str, frozenset[str]] = {
     "portfolio_snapshots": frozenset(
         {
             "id",
-            "strategy_id",
             "deployment_id",
             "cycle_id",
             "execution_mode",
@@ -73,7 +72,7 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
     ),
     "portfolio_metrics": frozenset(
         {
-            "strategy_id",
+            "deployment_id",
             "initial_value_usd",
             "initial_timestamp",
             "deposits_usd",
@@ -82,7 +81,6 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
             "total_value_usd",
             "positions_json",
             "cycle_id",
-            "deployment_id",
             "execution_mode",
             "is_complete",
             "updated_at",
@@ -92,7 +90,6 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
         {
             "id",
             "cycle_id",
-            "strategy_id",
             "deployment_id",
             "execution_mode",
             "timestamp",
@@ -120,7 +117,6 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
         {
             "id",
             "deployment_id",
-            "strategy_id",
             "cycle_id",
             "execution_mode",
             "timestamp",
@@ -135,9 +131,8 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
             "payload_json",
             "schema_version",
             # VIB-4196 / T10: forward-compat JSON pointer between
-            # accounting_events and the position_registry (T11). Required
-            # on BOTH backends as of T19 (VIB-4205) — the metrics-database
-            # migration (VIB-4191) lands the column on hosted Postgres.
+            # accounting_events and the position_registry. Required on
+            # BOTH backends as of T19 (VIB-4205).
             "position_reference",
         }
     ),
@@ -145,7 +140,6 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
         {
             "id",
             "deployment_id",
-            "strategy_id",
             "cycle_id",
             "ledger_entry_id",
             "intent_type",
@@ -161,16 +155,7 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
     ),
     # VIB-4197 / T11 — atomic ledger+registry+handle commit primitive.
     # The 16-column shape ratified by PRD §Registry Data Shape and the
-    # blueprint 28 §3 reference. Adding the contract entry was deferred
-    # from T05 (schema-only PR) per blueprint 28 §5.1; T11 adds it
-    # atomically with the writer code so the LOCAL SQLite boot guard refuses
-    # to start when the column shape is missing (VIB-3763 pattern).
-    #
-    # NOT in the hosted Postgres contract until T19 (VIB-4205) lands the
-    # Postgres writer + corresponding ``metrics-database`` migration —
-    # auto-flow from ``_SQLITE`` to ``_POSTGRES`` is suppressed via
-    # ``_POSTGRES_DEFERRED_TABLES`` below. Including it earlier would block
-    # hosted gateway boot for a table the hosted runtime can't use.
+    # blueprint 28 §3 reference.
     "position_registry": frozenset(
         {
             "deployment_id",
@@ -192,12 +177,7 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
         }
     ),
     # VIB-4197 / T11 — per-(deployment_id, primitive, cutover_key) cutover
-    # progress tracking. Schema lives in SCHEMA_SQL; per the cutover spec
-    # §2.1 the SDK adds the contract entry with the writer (here) but the
-    # boot-time guard / BackfillReader runner-side wiring lands in a
-    # follow-up ticket. Hosted Postgres ships via metrics-database per
-    # AGENTS.md "Database schema ownership"; the SDK does NOT apply
-    # Postgres DDL.
+    # progress tracking.
     "migration_state": frozenset(
         {
             "deployment_id",
@@ -229,16 +209,22 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
 # contract would crash a fresh local boot with ``SchemaContractViolation``
 # every time before any teardown work has occurred.
 #
-# We therefore keep them out of ``ACCOUNTING_SCHEMA_CONTRACT_SQLITE`` and
-# only require them at hosted Postgres boot — where the migration is the
+# We therefore keep them out of ``ACCOUNTING_SCHEMA_CONTRACT`` and only
+# require them at hosted Postgres boot — where the migration is the
 # operative gate, and where lazy table creation is forbidden by
 # ``CLAUDE.md`` "Database schema ownership". Hosted boot fails closed if
 # metrics-database#32 hasn't been applied; local boot doesn't care because
 # the teardown subsystem self-bootstraps.
+#
+# The ``teardown_*`` tables key on the canonical ``deployment_id`` (blueprint
+# 29 §3). VIB-4721's metrics-database migration RENAMED the legacy hosted id
+# column on these three tables to ``deployment_id``; the contract requires the
+# post-migration name so the hosted boot-time schema validator matches the
+# deployed schema.
 TEARDOWN_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
     "teardown_requests": frozenset(
         {
-            "agent_id",
+            "deployment_id",
             "mode",
             "asset_policy",
             "target_token",
@@ -263,7 +249,7 @@ TEARDOWN_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
     "teardown_execution_state": frozenset(
         {
             "teardown_id",
-            "agent_id",
+            "deployment_id",
             "mode",
             "status",
             "total_intents",
@@ -282,7 +268,7 @@ TEARDOWN_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
         {
             "teardown_id",
             "level",
-            "agent_id",
+            "deployment_id",
             "request_json",
             "response_json",
             "created_at",
@@ -291,74 +277,6 @@ TEARDOWN_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
         }
     ),
 }
-
-
-# Postgres variant: same table set, ``strategy_id`` → ``agent_id`` per
-# the deployed metrics-database schema. The transformation is
-# table-by-table because some accounting tables (``accounting_events``,
-# ``accounting_outbox``) historically carry both ``deployment_id`` AND
-# the strategy/agent key.
-def _swap_strategy_for_agent(cols: frozenset[str]) -> frozenset[str]:
-    return frozenset({"agent_id" if c == "strategy_id" else c for c in cols})
-
-
-# Tables introduced by VIB-4197 / T11 (``position_registry``) and the cutover
-# infrastructure (``migration_state``). T19 (VIB-4205) shipped the Postgres
-# writer paths in ``almanak/gateway/services/state_service.py``; the deployed
-# metrics-database schema is owned outside this repo (VIB-4191). Once VIB-4191
-# lands on production metrics-database, hosted gateway boot will validate-only
-# both tables here — adding either name to this set would re-disable that
-# fail-loud guard for new column drift.
-#
-# Empty by design as of T19. Future additions belong here ONLY when a new
-# table lands on SQLite ahead of a still-pending metrics-database migration
-# (the same forward-compat pattern this set has always served).
-_POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset()
-
-# Per-table column-level Postgres deferrals. Mirrors
-# ``_POSTGRES_DEFERRED_TABLES`` for additions that introduce a new column
-# on an EXISTING table — the SDK can land the column on local SQLite and
-# require it via the SQLite contract while the corresponding metrics-database
-# migration is still in flight. The Postgres contract construction below
-# subtracts these per-table columns from the SQLite contract before swapping
-# ``strategy_id`` → ``agent_id``.
-#
-# Empty by design as of T19 (VIB-4205): ``accounting_events.position_reference``
-# (VIB-4196 / T10) is now required on hosted Postgres too. Re-adding an entry
-# here would silently re-disable the fail-loud boot guard for that column.
-_POSTGRES_DEFERRED_COLUMNS: dict[str, frozenset[str]] = {}
-
-
-def _postgres_columns_for(table: str, sqlite_cols: frozenset[str]) -> frozenset[str]:
-    """Derive the Postgres column set for ``table`` from its SQLite columns.
-
-    Applies (1) per-table column deferrals from ``_POSTGRES_DEFERRED_COLUMNS``
-    so columns the metrics-database migration has not landed yet are NOT
-    required at hosted boot, and (2) the ``strategy_id`` → ``agent_id`` rename.
-    """
-    deferred = _POSTGRES_DEFERRED_COLUMNS.get(table, frozenset())
-    return _swap_strategy_for_agent(sqlite_cols - deferred)
-
-
-ACCOUNTING_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
-    **{
-        table: _postgres_columns_for(table, cols)
-        for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
-        if table not in _POSTGRES_DEFERRED_TABLES
-    },
-    # Teardown tables are Postgres-only in the contract. Local SQLite creates
-    # them lazily via ``SQLiteTeardownStateManager._init_db`` so they have no
-    # entry in the SQLite contract; hosted Postgres requires the
-    # metrics-database#32 migration to have landed before the gateway boots.
-    **TEARDOWN_SCHEMA_CONTRACT_POSTGRES,
-}
-
-
-# Backwards-compatibility alias. Existing call sites that import
-# ``ACCOUNTING_SCHEMA_CONTRACT`` get the SQLite-shaped contract — the
-# pre-split behaviour. The Postgres validator now imports the explicit
-# ``_POSTGRES`` variant.
-ACCOUNTING_SCHEMA_CONTRACT = ACCOUNTING_SCHEMA_CONTRACT_SQLITE
 
 
 class SchemaContractViolation(RuntimeError):

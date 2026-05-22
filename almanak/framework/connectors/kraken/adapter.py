@@ -167,7 +167,7 @@ class ExecutionContext:
 
     chain: str = "ethereum"
     wallet_address: str = ""
-    strategy_id: str = ""
+    deployment_id: str = ""
 
     # Token decimals lookup
     token_decimals: dict[str, int] = field(default_factory=dict)

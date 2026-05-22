@@ -42,7 +42,7 @@ class ForensicEvent:
     timestamp: datetime
     phase: StrategyPhase
     event_type: str
-    strategy_id: str
+    deployment_id: str
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_json_line(self) -> str:
@@ -67,7 +67,7 @@ class ForensicEvent:
         cycle_id: str,
         phase: StrategyPhase,
         event_type: str,
-        strategy_id: str,
+        deployment_id: str,
         **payload: Any,
     ) -> ForensicEvent:
         """Create a forensic event with current timestamp."""
@@ -76,6 +76,6 @@ class ForensicEvent:
             timestamp=datetime.now(UTC),
             phase=phase,
             event_type=event_type,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             payload=payload,
         )

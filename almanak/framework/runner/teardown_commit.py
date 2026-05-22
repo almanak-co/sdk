@@ -143,7 +143,7 @@ async def commit_teardown_intent(
         explicitly (not implicit ``self``) so the function is easy to plumb
         as a callable into the teardown lane and to fake in tests.
     strategy:
-        The strategy being torn down — used for ``strategy_id``,
+        The strategy being torn down — used for ``deployment_id``,
         ``deployment_id``, ``chain``, ``wallet_address``.
     intent:
         The teardown intent that just executed on-chain.
@@ -163,10 +163,9 @@ async def commit_teardown_intent(
         duration of the helper so the underlying writers stamp the same
         value on their rows.
     """
-    deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
     intent_type = _intent_type_str(intent)
     tx_hash = _first_tx_hash(execution_result)
-    strategy_id = getattr(strategy, "strategy_id", "") or ""
+    deployment_id = strategy.deployment_id
 
     degraded_records: list[DeferredWrite] = []
     degraded_reasons: list[str] = []
@@ -175,7 +174,6 @@ async def commit_teardown_intent(
         """Append a deferred-log record and remember the reason."""
         rec = DeferredWrite.now(
             kind=kind,
-            strategy_id=strategy_id,
             deployment_id=deployment_id,
             cycle_id=teardown_cycle_id,
             intent_type=intent_type,
@@ -215,7 +213,7 @@ async def commit_teardown_intent(
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(
                 "commit_teardown_intent: enrichment failed for %s/%s: %s",
-                strategy_id,
+                deployment_id,
                 intent_type or "unknown-intent",
                 exc,
                 exc_info=True,
@@ -306,7 +304,7 @@ async def commit_teardown_intent(
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.debug(
                     "commit_teardown_intent: lending post-state capture failed for %s: %s",
-                    strategy_id,
+                    deployment_id,
                     exc,
                 )
 
@@ -325,7 +323,7 @@ async def commit_teardown_intent(
         except Exception as exc:  # noqa: BLE001 — never propagate state-building
             logger.debug(
                 "commit_teardown_intent: pre/post state build failed for %s: %s",
-                strategy_id,
+                deployment_id,
                 exc,
             )
 
@@ -342,7 +340,7 @@ async def commit_teardown_intent(
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(
                 "commit_teardown_intent: ledger write failed for %s/%s tx=%s: %s",
-                strategy_id,
+                deployment_id,
                 intent_type or "unknown-intent",
                 tx_hash or "-",
                 exc,
@@ -357,7 +355,7 @@ async def commit_teardown_intent(
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(
                     "commit_teardown_intent: outbox+fire failed for %s ledger=%s: %s",
-                    strategy_id,
+                    deployment_id,
                     ledger_entry_id,
                     exc,
                     exc_info=True,
@@ -375,7 +373,7 @@ async def commit_teardown_intent(
             # row. Without this, the teardown sidecar JSONL line was missing
             # the price_oracle entirely.
             AccountingSidecarWriter().append(
-                strategy_id=strategy_id,
+                deployment_id=deployment_id,
                 intent=intent,
                 result=enriched_result,
                 chain=chain,
@@ -384,7 +382,7 @@ async def commit_teardown_intent(
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(
                 "commit_teardown_intent: sidecar append failed for %s: %s",
-                strategy_id,
+                deployment_id,
                 exc,
                 exc_info=True,
             )

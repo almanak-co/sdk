@@ -388,7 +388,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "probe_arbitrum_full_cycle"),
+            deployment_id=getattr(self, "deployment_id", "probe_arbitrum_full_cycle"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

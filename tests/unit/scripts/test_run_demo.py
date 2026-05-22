@@ -1,9 +1,9 @@
 """Unit tests for ``scripts/run_demo.py`` env preparation.
 
 Pins the env-isolation contract: ambient developer-shell state that would
-break the smoke run (``AGENT_ID``, ``ALMANAK_GATEWAY_AUTH_TOKEN``,
-``ALMANAK_CHAIN``, ``ALMANAK_CHAINS``) MUST NOT leak into the subprocess
-spawned by the demo runner.
+break the smoke run (``ALMANAK_DEPLOYMENT_ID``, ``ALMANAK_IS_HOSTED``,
+``ALMANAK_GATEWAY_AUTH_TOKEN``, ``ALMANAK_CHAIN``, ``ALMANAK_CHAINS``) MUST
+NOT leak into the subprocess spawned by the demo runner.
 
 Regression history:
 
@@ -75,13 +75,15 @@ def test_prepare_subprocess_env_dotenv_reload_simulation() -> None:
 
 
 def test_prepare_subprocess_env_strips_gateway_conflict_vars() -> None:
-    """AGENT_ID / ALMANAK_GATEWAY_AUTH_TOKEN must not propagate (insecure-mode conflict)."""
+    """Hosted/gateway identity vars must not propagate into the smoke subprocess."""
     parent = {
-        "AGENT_ID": "agent-12345",
+        "ALMANAK_DEPLOYMENT_ID": "hosted-deployment",
+        "ALMANAK_IS_HOSTED": "true",
         "ALMANAK_GATEWAY_AUTH_TOKEN": "secret-token",
     }
     env = run_demo._prepare_subprocess_env("ethereum", parent)
-    assert "AGENT_ID" not in env
+    assert "ALMANAK_DEPLOYMENT_ID" not in env
+    assert "ALMANAK_IS_HOSTED" not in env
     assert "ALMANAK_GATEWAY_AUTH_TOKEN" not in env
 
 
@@ -128,7 +130,7 @@ def test_prepare_subprocess_env_does_not_mutate_parent() -> None:
     """The parent dict supplied by the caller must not be mutated."""
     parent = {
         "ALMANAK_CHAIN": "arbitrum",
-        "AGENT_ID": "agent-9",
+        "ALMANAK_IS_HOSTED": "true",
     }
     snapshot = dict(parent)
     run_demo._prepare_subprocess_env("ethereum", parent)

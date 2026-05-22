@@ -39,7 +39,7 @@ def _make_runner() -> StrategyRunner:
 
 def _make_strategy() -> MagicMock:
     strategy = MagicMock()
-    strategy.strategy_id = "test-bridge-dest-fields"
+    strategy.deployment_id = "test-bridge-dest-fields"
     strategy.chain = "base"
     strategy.wallet_address = "0x" + "a1" * 20
     strategy.on_intent_executed = MagicMock()

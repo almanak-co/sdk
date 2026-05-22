@@ -80,7 +80,7 @@ class _MockForkManager:
 
 
 class _MockStrategy:
-    strategy_id = "loop_strategy"
+    deployment_id = "loop_strategy"
 
     async def decide(self, snapshot: Any) -> None:
         return None
@@ -90,7 +90,7 @@ def _make_config(**overrides: Any) -> PaperTraderConfig:
     kwargs: dict[str, Any] = {
         "chain": "arbitrum",
         "rpc_url": "https://arb.example/rpc",
-        "strategy_id": "loop_strategy",
+        "deployment_id": "loop_strategy",
         "tick_interval_seconds": 0.001,
         "price_source": "coingecko",
     }
@@ -215,7 +215,7 @@ class TestRunLoopHappyPath:
         summary = await trader.run_loop(_MockStrategy(), max_ticks=5)
 
         assert isinstance(summary, PaperTradingSummary)
-        assert summary.strategy_id == "loop_strategy"
+        assert summary.deployment_id == "loop_strategy"
         assert summary.chain == "arbitrum"
         # Two ticks executed; no successful trades / errors.
         assert spy["tick_calls"] == 2

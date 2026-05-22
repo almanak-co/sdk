@@ -1,5 +1,5 @@
 {
-    "strategy_id": "test_bollinger_reversion",
+    "deployment_id": "test_bollinger_reversion",
     "strategy_name": "test_bollinger_reversion",
     "description": "Bollinger Bands mean reversion strategy for testing - buys at lower band, sells at upper band",
     "trade_size_usd": 5,

@@ -53,6 +53,7 @@ except ImportError:
     create_mock_api_client = None  # type: ignore[assignment]
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def render_custom_dashboard_page(
     dashboard_name: str,
     custom_dashboards: list,
@@ -94,7 +95,7 @@ def render_custom_dashboard_page(
 
     # Find matching strategy config
     strategy_config = {}
-    strategy_id = dashboard_info.strategy_name
+    deployment_id = dashboard_info.strategy_name
     for s in strategies:
         if s.id == dashboard_name or dashboard_name in s.id:
             strategy_config = {
@@ -102,7 +103,7 @@ def render_custom_dashboard_page(
                 "status": s.status.value,
                 "total_value": float(s.total_value_usd),
             }
-            strategy_id = s.id
+            deployment_id = s.id
             break
 
     # Create API client
@@ -114,7 +115,7 @@ def render_custom_dashboard_page(
     if render_custom_dashboard_safe is not None:
         render_custom_dashboard_safe(
             dashboard_info=dashboard_info,
-            strategy_id=strategy_id,
+            deployment_id=deployment_id,
             strategy_config=strategy_config,
             api_client=api_client,
             session_state=dict(st.session_state),
@@ -123,6 +124,7 @@ def render_custom_dashboard_page(
         st.warning("Custom dashboard rendering not available")
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def main() -> None:  # noqa: C901
     """Main dashboard application."""
     st.set_page_config(
@@ -222,9 +224,9 @@ def main() -> None:  # noqa: C901
         with st.expander("Debug Info"):
             st.write(f"Strategies found: {len(strategies)}")
             if strategies:
-                st.write("Strategy IDs:", [s.id for s in strategies])
+                st.write("Deployment IDs:", [s.id for s in strategies])
             st.write("Current page:", st.query_params.get("page", "overview"))
-            st.write("Strategy ID param:", st.query_params.get("strategy_id"))
+            st.write("Deployment ID param:", st.query_params.get("deployment_id"))
 
     # Get current page from query params
     current_page = st.query_params.get("page", "overview")
@@ -287,12 +289,12 @@ def main() -> None:  # noqa: C901
         st.markdown("### Select Strategy")
         if strategies:
             strategy_options = ["None"] + [f"{s.name} ({s.id[:8]}...)" for s in strategies]
-            current_strategy_id = st.query_params.get("strategy_id")
+            current_deployment_id = st.query_params.get("deployment_id")
             current_index = 0
-            if current_strategy_id:
+            if current_deployment_id:
                 # Find the index of the current strategy
                 for idx, s in enumerate(strategies, start=1):
-                    if s.id == current_strategy_id:
+                    if s.id == current_deployment_id:
                         current_index = idx
                         break
 
@@ -308,11 +310,11 @@ def main() -> None:  # noqa: C901
             # Update query params if strategy selection changed
             if selected_strategy_display > 0:
                 selected_strategy = strategies[selected_strategy_display - 1]
-                if selected_strategy.id != current_strategy_id:
-                    st.query_params["strategy_id"] = selected_strategy.id
+                if selected_strategy.id != current_deployment_id:
+                    st.query_params["deployment_id"] = selected_strategy.id
                     # Picking a strategy from the sidebar means "show me this
                     # one" — route to detail unless the operator is on a
-                    # page that already accepts a strategy_id (timeline,
+                    # page that already accepts a deployment_id (timeline,
                     # config, teardown, custom_dashboard). Previously this
                     # only fired when ``page == "overview"``, which missed
                     # the no-page-set case (default overview render with no
@@ -322,10 +324,10 @@ def main() -> None:  # noqa: C901
                     if st.query_params.get("page") not in strategy_aware_pages:
                         st.query_params["page"] = "detail"
                     st.rerun()
-            elif current_strategy_id and selected_strategy_display == 0:
+            elif current_deployment_id and selected_strategy_display == 0:
                 # Strategy was deselected
-                if "strategy_id" in st.query_params:
-                    del st.query_params["strategy_id"]
+                if "deployment_id" in st.query_params:
+                    del st.query_params["deployment_id"]
                 st.rerun()
         else:
             st.caption("No strategies available")

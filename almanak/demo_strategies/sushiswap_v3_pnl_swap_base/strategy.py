@@ -197,7 +197,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
                         timestamp=ts,
                         event_type=TimelineEventType.TRADE,
                         description=f"BUY {self.base_token} (trade #{self._total_buys})",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "buy", "total_buys": self._total_buys},
                     )
                 )
@@ -212,7 +212,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
                         timestamp=ts,
                         event_type=TimelineEventType.TRADE,
                         description=f"SELL {self.base_token} (trade #{self._total_sells})",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "sell", "total_sells": self._total_sells},
                     )
                 )
@@ -296,7 +296,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=self._current_timestamp or datetime.now(UTC),
             positions=positions,
         )

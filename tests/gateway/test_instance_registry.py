@@ -16,8 +16,6 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from almanak.gateway.registry.store import (
     InstanceRegistry,
     StrategyInstance,
@@ -27,7 +25,7 @@ from almanak.gateway.registry.store import (
 
 
 def _make_instance(
-    strategy_id: str = "test_strat:abc123",
+    deployment_id: str = "test_strat:abc123",
     strategy_name: str = "test_strat",
     status: str = "RUNNING",
     archived: bool = False,
@@ -36,7 +34,7 @@ def _make_instance(
     """Create a test instance with defaults."""
     now = datetime.now(UTC)
     return StrategyInstance(
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         strategy_name=strategy_name,
         template_name="TestStrategy",
         chain=chain,
@@ -60,7 +58,7 @@ class TestStrategyInstance:
     def test_create_instance(self):
         """Test creating a strategy instance."""
         inst = _make_instance()
-        assert inst.strategy_id == "test_strat:abc123"
+        assert inst.deployment_id == "test_strat:abc123"
         assert inst.strategy_name == "test_strat"
         assert inst.template_name == "TestStrategy"
         assert inst.chain == "arbitrum"
@@ -92,7 +90,7 @@ class TestInstanceRegistryBasics:
 
             retrieved = registry.get("test_strat:abc123")
             assert retrieved is not None
-            assert retrieved.strategy_id == "test_strat:abc123"
+            assert retrieved.deployment_id == "test_strat:abc123"
             assert retrieved.strategy_name == "test_strat"
             assert retrieved.status == "RUNNING"
 
@@ -128,7 +126,7 @@ class TestInstanceRegistryBasics:
 
             instances = registry.list_all()
             assert len(instances) == 2
-            ids = {i.strategy_id for i in instances}
+            ids = {i.deployment_id for i in instances}
             assert "strat1:aaa111" in ids
             assert "strat2:bbb222" in ids
 
@@ -146,7 +144,7 @@ class TestInstanceRegistryBasics:
             # Only the latest should be non-archived
             non_archived = registry.list_all(include_archived=False)
             assert len(non_archived) == 1
-            assert non_archived[0].strategy_id == "my_strat:bbb222"
+            assert non_archived[0].deployment_id == "my_strat:bbb222"
 
             # The old one should be archived
             old = registry.get("my_strat:aaa111")
@@ -253,7 +251,7 @@ class TestInstanceRegistryArchive:
             # Default excludes archived
             instances = registry.list_all()
             assert len(instances) == 1
-            assert instances[0].strategy_id == "strat2:bbb222"
+            assert instances[0].deployment_id == "strat2:bbb222"
 
             # Include archived
             all_instances = registry.list_all(include_archived=True)
@@ -311,7 +309,7 @@ class TestInstanceRegistryPurge:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS timeline_events (
                         event_id TEXT PRIMARY KEY,
-                        strategy_id TEXT NOT NULL,
+                        deployment_id TEXT NOT NULL,
                         timestamp TEXT NOT NULL,
                         event_type TEXT NOT NULL,
                         description TEXT,
@@ -323,7 +321,7 @@ class TestInstanceRegistryPurge:
                 """)
                 # Insert a test event
                 conn.execute(
-                    "INSERT INTO timeline_events (event_id, strategy_id, timestamp, event_type, description) "
+                    "INSERT INTO timeline_events (event_id, deployment_id, timestamp, event_type, description) "
                     "VALUES (?, ?, ?, ?, ?)",
                     ("evt1", "test_strat:abc123", datetime.now(UTC).isoformat(), "TRADE", "Test event"),
                 )
@@ -332,14 +330,14 @@ class TestInstanceRegistryPurge:
             registry.register(_make_instance())
             assert registry.purge_with_events("test_strat:abc123") is True
 
-            # Verify both tables are empty for this strategy_id
+            # Verify both tables are empty for this deployment_id
             with sqlite3.connect(str(db_path)) as conn:
                 inst_count = conn.execute(
-                    "SELECT COUNT(*) FROM strategy_instances WHERE strategy_id = ?",
+                    "SELECT COUNT(*) FROM strategy_instances WHERE deployment_id = ?",
                     ("test_strat:abc123",),
                 ).fetchone()[0]
                 evt_count = conn.execute(
-                    "SELECT COUNT(*) FROM timeline_events WHERE strategy_id = ?",
+                    "SELECT COUNT(*) FROM timeline_events WHERE deployment_id = ?",
                     ("test_strat:abc123",),
                 ).fetchone()[0]
 
@@ -453,7 +451,7 @@ class TestInstanceRegistryThreadSafety:
             def send_heartbeats(thread_id: int):
                 try:
                     for i in range(5):
-                        for j in range(20):
+                        for _j in range(20):
                             registry.heartbeat(f"strat:{i:06d}")
                 except Exception as e:
                     errors.append(e)
@@ -688,72 +686,68 @@ class TestInstanceRegistrySingleton:
         reset_instance_registry()
 
 
-class TestAgentIdResolution:
-    """Tests for AGENT_ID normalization in deployed mode.
+class TestRegistryIdentityPassThrough:
+    """The registry keys on the instance's deployment_id verbatim.
 
-    When AGENT_ID env var is set, the registry should use it as the key
-    for all operations, ensuring write/read consistency with the dashboard.
+    Per blueprint 29 (VIB-4722) the registry no longer translates identity
+    via ``resolve_deployment_id``: ``instance.deployment_id`` is already the
+    canonical ``deployment_id`` resolved at runner boot, and every
+    register / get / heartbeat / update keys on that exact value.
     """
 
-    def test_register_uses_agent_id(self, tmp_path, monkeypatch):
-        """Register stores instance under AGENT_ID when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    def test_register_stores_under_instance_id(self, tmp_path):
+        """Register stores the instance under its own deployment_id verbatim."""
         registry = InstanceRegistry(db_path=tmp_path / "test.db")
         registry.initialize()
 
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        instance = _make_instance(deployment_id="platform-agent-1234")
         registry.register(instance)
 
-        # Stored under AGENT_ID, not the original strategy_id
-        assert registry.get("platform-uuid-1234") is not None
-        assert registry.get("platform-uuid-1234").strategy_name == "test_strat"
+        assert registry.get("platform-agent-1234") is not None
+        assert registry.get("platform-agent-1234").strategy_name == "test_strat"
 
-    def test_get_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Get resolves AGENT_ID so lookups match registered data."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    def test_get_keys_on_exact_id(self, tmp_path):
+        """Get keys on the exact id — no translation."""
         registry = InstanceRegistry(db_path=tmp_path / "test.db")
         registry.initialize()
 
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        instance = _make_instance(deployment_id="deployment:abc123def456")
         registry.register(instance)
 
-        # Querying with SDK strategy_id also resolves to AGENT_ID
-        result = registry.get("uniswap_rsi:abc123")
+        result = registry.get("deployment:abc123def456")
         assert result is not None
-        assert result.strategy_id == "platform-uuid-1234"
+        assert result.deployment_id == "deployment:abc123def456"
+        # A different id genuinely misses — no silent translation.
+        assert registry.get("some-other-id") is None
 
-    def test_heartbeat_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Heartbeat finds the instance via resolved AGENT_ID."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    def test_heartbeat_keys_on_exact_id(self, tmp_path):
+        """Heartbeat finds the instance by its exact deployment_id."""
         registry = InstanceRegistry(db_path=tmp_path / "test.db")
         registry.initialize()
 
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        instance = _make_instance(deployment_id="platform-agent-1234")
         registry.register(instance)
 
-        # Heartbeat with SDK strategy_id resolves to AGENT_ID
-        assert registry.heartbeat("uniswap_rsi:abc123") is True
+        assert registry.heartbeat("platform-agent-1234") is True
 
-    def test_update_status_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Status update finds the instance via resolved AGENT_ID."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+    def test_update_status_keys_on_exact_id(self, tmp_path):
+        """Status update finds the instance by its exact deployment_id."""
         registry = InstanceRegistry(db_path=tmp_path / "test.db")
         registry.initialize()
 
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        instance = _make_instance(deployment_id="platform-agent-1234")
         registry.register(instance)
 
-        assert registry.update_status("uniswap_rsi:abc123", "PAUSED") is True
-        assert registry.get("platform-uuid-1234").status == "PAUSED"
+        assert registry.update_status("platform-agent-1234", "PAUSED") is True
+        assert registry.get("platform-agent-1234").status == "PAUSED"
 
-    def test_no_env_var_passes_through(self, tmp_path, monkeypatch):
-        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
+    def test_local_id_passes_through(self, tmp_path):
+        """A local deployment:hash id is keyed verbatim."""
         registry = InstanceRegistry(db_path=tmp_path / "test.db")
         registry.initialize()
 
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        instance = _make_instance(deployment_id="deployment:abc123def456")
         registry.register(instance)
 
-        assert registry.get("uniswap_rsi:abc123") is not None
-        assert registry.get("platform-uuid-1234") is None
+        assert registry.get("deployment:abc123def456") is not None
+        assert registry.get("platform-agent-1234") is None

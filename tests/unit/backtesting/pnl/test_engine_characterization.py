@@ -174,13 +174,13 @@ class _FakeSwapIntent:
 class HoldStrategy:
     """Strategy that always holds (returns None)."""
 
-    def __init__(self, strategy_id: str = "hold_strategy") -> None:
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "hold_strategy") -> None:
+        self._deployment_id = deployment_id
         self.decide_calls = 0
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any:
         self.decide_calls += 1
@@ -195,12 +195,12 @@ class RaisingStrategy:
     this as a genuine decide() failure.
     """
 
-    def __init__(self, strategy_id: str = "raising_strategy") -> None:
-        self._strategy_id = strategy_id
+    def __init__(self, deployment_id: str = "raising_strategy") -> None:
+        self._deployment_id = deployment_id
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any:
         raise RuntimeError("unexpected decide failure")
@@ -267,7 +267,7 @@ class TestRunBacktestHappyPath:
 
         assert result.error is None
         assert result.engine == BacktestEngine.PNL
-        assert result.strategy_id == "hold_strategy"
+        assert result.deployment_id == "hold_strategy"
         assert result.start_time == config.start_time
         assert result.end_time == config.end_time
         assert result.initial_capital_usd == Decimal("10000")
@@ -457,7 +457,7 @@ class TestRunBacktestErrorHandling:
         assert result.institutional_compliance is False
         assert any("Backtest failed" in v for v in result.compliance_violations)
         # Partial result still sets identity fields.
-        assert result.strategy_id == "hold_strategy"
+        assert result.deployment_id == "hold_strategy"
         assert result.start_time == config.start_time
         assert result.run_started_at is not None
         assert result.run_ended_at is not None

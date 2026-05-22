@@ -10,7 +10,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import grpc
@@ -61,11 +61,12 @@ async def test_get_accounting_events_missing_deployment_id() -> None:
     servicer = _make_servicer(warm_rows=[])
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id="", position_key="")
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id="", position_key="")
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
-    ctx.set_details.assert_called_once_with("deployment_id is required")
+    assert "deployment_id" in ctx.set_details.call_args.args[0]
+    assert "required" in ctx.set_details.call_args.args[0]
     assert len(resp.events) == 0
 
 
@@ -74,7 +75,7 @@ async def test_get_accounting_events_backend_missing_method() -> None:
     servicer = _make_servicer(warm_rows=None)  # warm has no get_accounting_events_sync
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID)
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     ctx.set_code.assert_not_called()
@@ -86,7 +87,7 @@ async def test_get_accounting_events_empty_result() -> None:
     servicer = _make_servicer(warm_rows=[])
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID)
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     ctx.set_code.assert_not_called()
@@ -100,7 +101,6 @@ async def test_get_accounting_events_rows_converted() -> None:
         {
             "id": "a1b2c3d4-0000-0000-0000-000000000001",
             "deployment_id": _DEPLOYMENT_ID,
-            "strategy_id": "strat-1",
             "cycle_id": "cycle-1",
             "execution_mode": "paper",
             "timestamp": now_iso,
@@ -119,7 +119,7 @@ async def test_get_accounting_events_rows_converted() -> None:
     servicer = _make_servicer(warm_rows=rows)
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID)
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     ctx.set_code.assert_not_called()
@@ -127,7 +127,6 @@ async def test_get_accounting_events_rows_converted() -> None:
     row = resp.events[0]
     assert row.id == "a1b2c3d4-0000-0000-0000-000000000001"
     assert row.deployment_id == _DEPLOYMENT_ID
-    assert row.strategy_id == "strat-1"
     assert row.event_type == "LP_OPEN"
     assert row.position_key == _POSITION_KEY
     # timestamp is serialised as int64 epoch seconds in main's proto
@@ -141,7 +140,7 @@ async def test_get_accounting_events_position_key_filter_passed_through() -> Non
     servicer = _make_servicer(warm_rows=[])
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID, position_key=_POSITION_KEY)
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID, position_key=_POSITION_KEY)
     await servicer.GetAccountingEvents(req, ctx)
 
     warm = servicer._state_manager.warm_backend  # type: ignore[union-attr]
@@ -155,7 +154,7 @@ async def test_get_accounting_events_backend_exception() -> None:
     servicer = _make_servicer(raise_exc=RuntimeError("db is gone"))
     ctx = _make_context()
 
-    req = gateway_pb2.GetAccountingEventsRequest(strategy_id=_DEPLOYMENT_ID, deployment_id=_DEPLOYMENT_ID)
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     # Main's service is fail-quiet on SQLite exceptions — logs warning and returns empty.
@@ -189,7 +188,6 @@ def _make_gsm(events: list[dict] | None = None, raise_exc: Exception | None = No
                 gateway_pb2.AccountingEvent(
                     id=row.get("id", ""),
                     deployment_id=row.get("deployment_id", ""),
-                    strategy_id=row.get("strategy_id", ""),
                     cycle_id=row.get("cycle_id", ""),
                     execution_mode=row.get("execution_mode", ""),
                     timestamp=epoch,
@@ -224,7 +222,6 @@ def test_gsm_get_accounting_events_sync_returns_dicts() -> None:
         {
             "id": "row-id-1",
             "deployment_id": "dep-1",
-            "strategy_id": "strat-1",
             "cycle_id": "cycle-1",
             "execution_mode": "paper",
             "timestamp": "2026-01-01T00:00:00+00:00",

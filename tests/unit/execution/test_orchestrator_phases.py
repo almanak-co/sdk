@@ -66,7 +66,7 @@ def _make_state(
         metadata=metadata or {},
     )
     context = ExecutionContext(
-        strategy_id="test",
+        deployment_id="test",
         intent_id="test-intent",
         chain="arbitrum",
         wallet_address=orchestrator.signer.address,

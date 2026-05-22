@@ -30,7 +30,7 @@ def test_config_update_connection_error_points_to_almanak_gateway() -> None:
         side_effect=requests.exceptions.ConnectionError("connection refused"),
     ):
         result = call_config_update_api(
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             updates={"max_slippage": Decimal("0.01")},
         )
 

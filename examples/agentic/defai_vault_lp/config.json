@@ -32,7 +32,7 @@
         "cooldown_seconds": 30,
         "max_trades_per_hour": 10
     },
-    "strategy_id": "defai-vault-lp",
+    "deployment_id": "defai-vault-lp",
     "max_tool_rounds": 15,
     "interval_seconds": 120
 }

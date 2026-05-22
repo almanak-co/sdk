@@ -147,7 +147,7 @@ def _make_outbox_row(*, position_key: str = "", market_id: str = "") -> dict[str
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": "dep-vib4471",
-        "strategy_id": "strat-vib4471",
+        "deployment_id": "strat-vib4471",
         "cycle_id": "cycle-1",
         "intent_type": "LP_OPEN",
         "wallet_address": "0xwallet",

@@ -92,8 +92,7 @@ def _identity(*, event_type_str: str = "SUPPLY") -> AccountingIdentity:
     """Build a minimal AccountingIdentity for synthetic events."""
     return AccountingIdentity(
         id=str(uuid.uuid4()),
-        deployment_id="dep-vib-4166",
-        strategy_id="strat-vib-4166",
+        deployment_id="strat-vib-4166",
         cycle_id="cycle-1",
         execution_mode="paper",
         timestamp=_NOW,

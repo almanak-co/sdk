@@ -361,7 +361,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description="No position found - opening new SushiSwap V3 LP position",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={"action": "opening_new_position", "pool": self.pool},
             )
         )
@@ -524,7 +524,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"SushiSwap V3 LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "fee_tier": self.fee_tier,
@@ -621,7 +621,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         total_value = sum(p.value_usd for p in positions)
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             total_value_usd=total_value,
             positions=positions,

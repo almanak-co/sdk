@@ -52,7 +52,7 @@ def _track_call(label: str, calls: list[tuple[str, Any]]):
     """Side-effect that records ``(label, first-positional-arg)`` per invocation.
 
     Capturing the first positional arg lets the tests assert the section
-    helpers receive the right ``strategy_id`` — catches refactors that
+    helpers receive the right ``deployment_id`` — catches refactors that
     misroute the arg (e.g. passing ``strategy_config`` by mistake).
     """
 

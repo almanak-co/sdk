@@ -137,7 +137,7 @@ class ReplayResult:
             "REPLAY RESULTS",
             "=" * 70,
             f"Bundle ID: {self.bundle.bundle_id}",
-            f"Strategy: {self.bundle.strategy_id}",
+            f"Strategy: {self.bundle.deployment_id}",
             f"Chain: {self.bundle.chain}",
             f"Block: {self.bundle.block_number}",
             f"Failure Time: {self.bundle.failure_timestamp.isoformat()}",
@@ -473,7 +473,7 @@ class ReplayEngine:
         click.echo("ALMANAK REPLAY")
         click.echo("=" * 70)
         click.echo(f"Bundle ID: {ctx.bundle.bundle_id}")
-        click.echo(f"Strategy: {ctx.bundle.strategy_id}")
+        click.echo(f"Strategy: {ctx.bundle.deployment_id}")
         click.echo(f"Chain: {ctx.bundle.chain}")
         click.echo(f"Block: {ctx.bundle.block_number}")
         click.echo(f"Failure Time: {ctx.bundle.failure_timestamp}")
@@ -904,6 +904,7 @@ def replay(
         sys.exit(1)
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def list_available_bundles() -> None:
     """List all available bundles in storage."""
     click.echo("Searching for bundles...")
@@ -920,8 +921,8 @@ def list_available_bundles() -> None:
                 with open(bundle_path) as f:
                     data = json.load(f)
                 bundle_id = data.get("bundle_id", bundle_path.stem)
-                strategy_id = data.get("strategy_id", "unknown")
-                found_bundles.append((bundle_path, bundle_id, strategy_id))
+                deployment_id = data.get("deployment_id", "unknown")
+                found_bundles.append((bundle_path, bundle_id, deployment_id))
             except (json.JSONDecodeError, KeyError):
                 continue
 
@@ -939,13 +940,14 @@ def list_available_bundles() -> None:
     click.echo(f"Found {len(found_bundles)} bundle(s):")
     click.echo()
 
-    for bundle_path, bundle_id, strategy_id in found_bundles:
+    for bundle_path, bundle_id, deployment_id in found_bundles:
         click.echo(f"  ID: {bundle_id}")
-        click.echo(f"  Strategy: {strategy_id}")
+        click.echo(f"  Strategy: {deployment_id}")
         click.echo(f"  Path: {bundle_path}")
         click.echo()
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def print_bundle_info(bundle: ReproductionBundle) -> None:
     """Print bundle information for dry run.
 
@@ -957,7 +959,7 @@ def print_bundle_info(bundle: ReproductionBundle) -> None:
     click.echo("BUNDLE INFORMATION (dry run)")
     click.echo("=" * 70)
     click.echo(f"Bundle ID: {bundle.bundle_id}")
-    click.echo(f"Strategy ID: {bundle.strategy_id}")
+    click.echo(f"Deployment ID: {bundle.deployment_id}")
     click.echo(f"Chain: {bundle.chain}")
     click.echo(f"Block Number: {bundle.block_number}")
     click.echo(f"Failure Time: {bundle.failure_timestamp}")

@@ -327,7 +327,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.STATE_CHANGE,
                         description=f"Volatility regime changed: {self._current_volatility_regime} -> {volatility_regime}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "trigger": "regime_change",
                             "old_regime": self._current_volatility_regime,
@@ -349,7 +349,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.STATE_CHANGE,
                         description="Price exited position range",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={
                             "trigger": "out_of_range",
                             "current_price": str(current_price),
@@ -389,7 +389,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=f"Opening LP with {volatility_regime} volatility range",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "opening_new_position",
                     "volatility_regime": volatility_regime,
@@ -449,7 +449,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_OPEN,
                     description=f"Uniswap V3 LP position opened on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "volatility_regime": self._current_volatility_regime,
@@ -467,7 +467,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.LP_CLOSE,
                     description=f"Uniswap V3 LP position closed on {self.pool}",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={
                         "pool": self.pool,
                         "volatility_regime": self._current_volatility_regime,
@@ -538,7 +538,7 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

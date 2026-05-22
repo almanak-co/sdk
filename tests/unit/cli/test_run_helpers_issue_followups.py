@@ -128,7 +128,7 @@ class TestIssue1683MultiChainCopyTradingFailsFast:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
-                strategy_id="mc-ct",
+                deployment_id="mc-ct",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,
@@ -269,7 +269,7 @@ class TestIssue1682VaultDryRunPreservesCleanup:
                 execution_orchestrator=MagicMock(),
                 state_manager=MagicMock(load_state=AsyncMock(return_value=None)),
                 strategy_instance=MagicMock(),
-                strategy_id="dryrun-vault",
+                deployment_id="dryrun-vault",
             )
 
     def test_build_components_attaches_partial_components_on_early_exit(
@@ -300,7 +300,7 @@ class TestIssue1682VaultDryRunPreservesCleanup:
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=True,
-                strategy_id="dryrun",
+                deployment_id="dryrun",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
                 copy_shadow=False,

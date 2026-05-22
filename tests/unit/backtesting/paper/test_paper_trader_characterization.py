@@ -87,7 +87,7 @@ class _MockForkManager:
 
 
 class _MockStrategy:
-    strategy_id = "char_strategy"
+    deployment_id = "char_strategy"
 
     async def decide(self, snapshot: Any) -> None:
         return None
@@ -98,7 +98,7 @@ def _make_config(**overrides: Any) -> PaperTraderConfig:
     kwargs: dict[str, Any] = {
         "chain": "arbitrum",
         "rpc_url": "https://arb.example/rpc",
-        "strategy_id": "char_strategy",
+        "deployment_id": "char_strategy",
         "tick_interval_seconds": 0.001,  # keep sleeps near-instant
         "price_source": "coingecko",
         "strict_price_mode": False,
@@ -549,7 +549,7 @@ class TestEventEmission:
         assert PaperTradeEventType.SESSION_STARTED in kinds
         assert PaperTradeEventType.SESSION_ENDED in kinds
         end_payload = [e for e in events if e[0] == PaperTradeEventType.SESSION_ENDED][0][1]
-        assert end_payload["strategy_id"] == "char_strategy"
+        assert end_payload["deployment_id"] == "char_strategy"
         assert end_payload["tick_count"] == 0
         assert end_payload["trade_count"] == 0
         assert end_payload["error"] is None
@@ -595,7 +595,7 @@ class TestResultAssembly:
         result = await trader.run(_MockStrategy(), duration_seconds=0.0, max_ticks=0)
 
         assert result.engine == BacktestEngine.PAPER
-        assert result.strategy_id == "char_strategy"
+        assert result.deployment_id == "char_strategy"
         assert result.chain == "arbitrum"
         assert result.initial_capital_usd == Decimal("10000")
         assert result.run_started_at is not None

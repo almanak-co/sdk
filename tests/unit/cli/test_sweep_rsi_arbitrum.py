@@ -71,7 +71,7 @@ def _make_backtest_result(
     """Create a BacktestResult with configurable metrics."""
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo_uniswap_rsi",
+        deployment_id="demo_uniswap_rsi",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 3, 1, tzinfo=UTC),
         trades=[],
@@ -188,7 +188,7 @@ class TestRSISweepExecution:
         captured_configs: list[dict] = []
 
         class TrackingStrategy:
-            strategy_id = "demo_uniswap_rsi"
+            deployment_id = "demo_uniswap_rsi"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -224,7 +224,7 @@ class TestRSISweepExecution:
         """Verify sweep result contains correct metrics."""
 
         class SimpleStrategy:
-            strategy_id = "rsi_test"
+            deployment_id = "rsi_test"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

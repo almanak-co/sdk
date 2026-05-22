@@ -67,7 +67,7 @@ def _make_lending_backtest_result(
     """
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo_aave_pnl_lending",
+        deployment_id="demo_aave_pnl_lending",
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 2, 1, tzinfo=UTC),
         trades=[],
@@ -166,7 +166,7 @@ class TestAavePnLLendingStrategyLifecycle:
         instance = object.__new__(strategy_cls)
         instance._config = mock_config
         instance._chain = "arbitrum"
-        instance._strategy_id = "demo_aave_pnl_lending"
+        instance._deployment_id = "demo_aave_pnl_lending"
         instance.STRATEGY_NAME = "demo_aave_pnl_lending"
 
         # Manually call init logic
@@ -382,7 +382,7 @@ class TestPnLBacktestLendingExecution:
         captured_configs: list[dict] = []
 
         class TrackingLendingStrategy:
-            strategy_id = "demo_aave_pnl_lending"
+            deployment_id = "demo_aave_pnl_lending"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -424,7 +424,7 @@ class TestPnLBacktestLendingExecution:
         """Verify metrics extraction works for lending backtest."""
 
         class SimpleLendingStrategy:
-            strategy_id = "demo_aave_pnl_lending"
+            deployment_id = "demo_aave_pnl_lending"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -459,7 +459,7 @@ class TestPnLBacktestLendingExecution:
         """Verify sweep handles lending-specific parameter (LTV target)."""
 
         class LTVStrategy:
-            strategy_id = "demo_aave_pnl_lending"
+            deployment_id = "demo_aave_pnl_lending"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

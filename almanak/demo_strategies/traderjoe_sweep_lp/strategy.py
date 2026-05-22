@@ -314,7 +314,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Opened {self.pool} TraderJoe LP (cycle {self._lp_cycles})",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_open", "pool": self.pool, "cycle": self._lp_cycles},
                 )
             )
@@ -329,7 +329,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Closed {self.pool} TraderJoe LP, cooldown {self.reentry_cooldown}t",
-                    strategy_id=self.strategy_id,
+                    deployment_id=self.deployment_id,
                     details={"action": "lp_close", "pool": self.pool, "cooldown": self.reentry_cooldown},
                 )
             )
@@ -415,7 +415,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
                 )
             )
         return TeardownPositionSummary(
-            strategy_id=self.strategy_id,
+            deployment_id=self.deployment_id,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

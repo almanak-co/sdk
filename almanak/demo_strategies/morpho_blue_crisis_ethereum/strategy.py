@@ -380,7 +380,7 @@ class MorphoBlueCrisisEthereumStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", None) or "demo_morpho_blue_crisis_ethereum",
+            deployment_id=getattr(self, "deployment_id", None) or "demo_morpho_blue_crisis_ethereum",
             timestamp=self._last_market_timestamp or datetime.now(UTC),
             positions=positions,
         )

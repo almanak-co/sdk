@@ -29,7 +29,7 @@ class TestExportTrades:
         mock_client.get_trades.return_value = [
             TradeRecord(
                 id="t1",
-                strategy_id="s1",
+                deployment_id="s1",
                 timestamp=datetime(2026, 4, 5, tzinfo=UTC),
                 intent_type="SWAP",
                 token_in="USDC",
@@ -50,7 +50,7 @@ class TestExportTrades:
 
     def test_json_format(self, mock_client):
         mock_client.get_trades.return_value = [
-            TradeRecord(id="t1", strategy_id="s1", intent_type="SWAP"),
+            TradeRecord(id="t1", deployment_id="s1", intent_type="SWAP"),
         ]
 
         result = export_trades(mock_client, "s1", fmt="json")

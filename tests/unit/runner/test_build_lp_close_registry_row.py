@@ -49,11 +49,10 @@ _build_lp_close_registry_row = StrategyRunner._build_lp_close_registry_row
 
 
 def _make_strategy(
-    *, deployment_id: str = "dep:1", strategy_id: str = "strat-1", chain: str = "arbitrum"
+    *, deployment_id: str = "dep:1", chain: str = "arbitrum"
 ) -> SimpleNamespace:
     return SimpleNamespace(
         deployment_id=deployment_id,
-        strategy_id=strategy_id,
         chain=chain,
     )
 
@@ -92,7 +91,7 @@ def _make_runner(
         handle: str | None,
     ) -> SimpleNamespace:
         return SimpleNamespace(
-            strategy_id=getattr(strategy, "deployment_id", "") or strategy.strategy_id,
+            deployment_id=getattr(strategy, "deployment_id", "") or strategy.deployment_id,
             chain=getattr(strategy, "chain", "") or runner.config.chain,
             primitive=primitive,
             physical_identity_hash=physical_identity_hash,
@@ -391,11 +390,11 @@ class TestBuildLpCloseRegistryRow:
         assert registry_row.handle is None
 
     @pytest.mark.asyncio
-    async def test_strategy_no_deployment_id_falls_back_to_strategy_id(self) -> None:
-        """Strategy with empty deployment_id → uses strategy_id (per
+    async def test_strategy_no_deployment_id_falls_back_to_deployment_id(self) -> None:
+        """Strategy with empty deployment_id → uses deployment_id (per
         ``_build_registry_row`` resolution). Pinned at the orchestrator
         boundary so a future refactor doesn't drop the fallback."""
-        strategy = _make_strategy(deployment_id="", strategy_id="strat-fallback")
+        strategy = _make_strategy(deployment_id="strat-fallback")
         runner = _make_runner(open_payload_for_close=None)
         result = await _build_lp_close_registry_row(
             runner,
@@ -411,7 +410,7 @@ class TestBuildLpCloseRegistryRow:
         )
         assert result is not None
         registry_row, _, _ = result
-        assert registry_row.strategy_id == "strat-fallback"
+        assert registry_row.deployment_id == "strat-fallback"
 
     @pytest.mark.asyncio
     async def test_lookup_called_with_correct_args(self) -> None:

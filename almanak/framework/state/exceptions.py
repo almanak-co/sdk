@@ -41,14 +41,15 @@ class AccountingPersistenceError(Exception):
         write_kind: Which accounting surface failed. Stored as the string
             value; accepts both :class:`AccountingWriteKind` members and raw
             strings so call sites can migrate incrementally.
-        strategy_id: Strategy whose write failed (may be empty when unknown).
+        deployment_id: Deployment whose write failed (may be empty when unknown).
         cause: Original exception, if any.
     """
 
     def __init__(
         self,
         write_kind: AccountingWriteKind | str,
-        strategy_id: str = "",
+        *,
+        deployment_id: str = "",
         message: str | None = None,
         cause: BaseException | None = None,
     ) -> None:
@@ -60,9 +61,9 @@ class AccountingPersistenceError(Exception):
         else:
             normalized = AccountingWriteKind(write_kind)  # raises ValueError on typo
         self.write_kind: str = normalized.value
-        self.strategy_id = strategy_id
+        self.deployment_id = deployment_id
         self.cause = cause
-        detail = f" strategy={strategy_id}" if strategy_id else ""
+        detail = f" deployment={self.deployment_id}" if self.deployment_id else ""
         suffix = f": {cause}" if cause is not None else ""
         super().__init__(message or f"Accounting write failed ({self.write_kind}){detail}{suffix}")
 

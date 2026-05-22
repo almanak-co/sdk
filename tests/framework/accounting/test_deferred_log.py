@@ -27,7 +27,6 @@ from almanak.framework.accounting.deferred_log import (
     append_now,
 )
 
-
 # ---------------------------------------------------------------------------
 # Local-mode helpers
 # ---------------------------------------------------------------------------
@@ -37,10 +36,11 @@ from almanak.framework.accounting.deferred_log import (
 def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Pin the local DB resolver to ``tmp_path`` for the test.
 
-    Sets ``ALMANAK_STATE_DB`` and unsets ``AGENT_ID`` so :func:`local_db_path`
-    returns a sibling under ``tmp_path``.
+    Sets ``ALMANAK_STATE_DB`` and unsets the hosted-mode env so
+    :func:`local_db_path` returns a sibling under ``tmp_path``.
     """
-    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ALMANAK_DEPLOYMENT_ID", raising=False)
     monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "state.db"))
     return tmp_path
 
@@ -53,12 +53,11 @@ def local_db_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 def test_deferred_write_now_stamps_iso_utc():
     rec = DeferredWrite.now(
         kind="ledger",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-abc",
     )
     assert rec.kind == "ledger"
-    assert rec.strategy_id == "s1"
+    assert rec.deployment_id == "d1"
     assert rec.cycle_id == "teardown-abc"
     # ISO-8601 with timezone (parses cleanly).
     from datetime import datetime
@@ -70,7 +69,6 @@ def test_deferred_write_now_stamps_iso_utc():
 def test_to_json_line_round_trips():
     rec = DeferredWrite.now(
         kind="outbox",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-xyz",
         intent_type="LP_CLOSE",
@@ -91,7 +89,6 @@ def test_to_json_line_round_trips():
 def test_error_field_is_truncated():
     rec = DeferredWrite.now(
         kind="ledger",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-zzz",
         error="x" * 5000,
@@ -103,7 +100,6 @@ def test_error_field_is_truncated():
 def test_extra_redacts_obviously_secret_keys():
     rec = DeferredWrite.now(
         kind="ledger",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-1",
         extra={
@@ -127,7 +123,6 @@ def test_extra_redacts_obviously_secret_keys():
 def test_append_local_writes_jsonl(local_db_dir: Path):
     ok = append_now(
         kind="ledger",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-1",
         intent_type="LP_CLOSE",
@@ -149,7 +144,6 @@ def test_append_local_appends_not_overwrites(local_db_dir: Path):
     for i in range(5):
         append_now(
             kind="outbox",
-            strategy_id="s1",
             deployment_id="d1",
             cycle_id="teardown-1",
             intent_type="SWAP",
@@ -175,7 +169,8 @@ def _worker_append(state_db_path: str, kind_prefix: str, count: int) -> None:
     won't carry monkeypatched env reliably; we set the env var explicitly.
     """
     os.environ["ALMANAK_STATE_DB"] = state_db_path
-    os.environ.pop("AGENT_ID", None)
+    os.environ.pop("ALMANAK_IS_HOSTED", None)
+    os.environ.pop("ALMANAK_DEPLOYMENT_ID", None)
 
     # Reload modules to pick up the env (defensive).
     from importlib import reload
@@ -190,7 +185,6 @@ def _worker_append(state_db_path: str, kind_prefix: str, count: int) -> None:
     for i in range(count):
         dl.append_now(
             kind=f"{kind_prefix}-{i}",
-            strategy_id=f"strategy-{kind_prefix}",
             deployment_id="dep",
             cycle_id="teardown-concurrent",
             intent_type="SWAP",
@@ -210,10 +204,7 @@ def test_concurrent_appends_produce_no_torn_lines(local_db_dir: Path):
     per_worker = 50
 
     ctx = mp.get_context("spawn")
-    procs = [
-        ctx.Process(target=_worker_append, args=(state_db, f"w{i}", per_worker))
-        for i in range(n_workers)
-    ]
+    procs = [ctx.Process(target=_worker_append, args=(state_db, f"w{i}", per_worker)) for i in range(n_workers)]
     for p in procs:
         p.start()
     for p in procs:
@@ -244,10 +235,11 @@ def test_append_hosted_emits_structured_log_no_file(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ):
-    """In hosted mode (AGENT_ID set), no JSONL file is created — instead a
-    WARNING log line is emitted with ``event=accounting_deferred``.
+    """In hosted mode (ALMANAK_IS_HOSTED set), no JSONL file is created —
+    instead a WARNING log line is emitted with ``event=accounting_deferred``.
     """
-    monkeypatch.setenv("AGENT_ID", "agent-xyz")
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-xyz")
     monkeypatch.setenv("ALMANAK_GATEWAY_DATABASE_URL", "postgresql://fake")
     monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "tok")
     monkeypatch.delenv("ALMANAK_GATEWAY_ALLOW_INSECURE", raising=False)
@@ -257,7 +249,6 @@ def test_append_hosted_emits_structured_log_no_file(
 
     ok = append_now(
         kind="ledger",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-hosted",
         intent_type="REPAY",
@@ -274,7 +265,7 @@ def test_append_hosted_emits_structured_log_no_file(
     rec = matched[0]
     assert getattr(rec, "event", None) == "accounting_deferred"
     assert getattr(rec, "deferred_kind", None) == "ledger"
-    assert getattr(rec, "strategy_id", None) == "s1"
+    assert getattr(rec, "deployment_id", None) == "d1"
     assert getattr(rec, "cycle_id", None) == "teardown-hosted"
 
 
@@ -283,16 +274,13 @@ def test_append_hosted_emits_structured_log_no_file(
 # ---------------------------------------------------------------------------
 
 
-def test_append_never_raises_on_serialise_failure(
-    monkeypatch: pytest.MonkeyPatch, local_db_dir: Path
-):
+def test_append_never_raises_on_serialise_failure(monkeypatch: pytest.MonkeyPatch, local_db_dir: Path):
     """A pathological ``DeferredWrite`` whose to_json_line raises must not
     propagate the exception out of :func:`append`.
     """
 
     class BadRecord:
         kind = "ledger"
-        strategy_id = "s1"
         deployment_id = "d1"
         cycle_id = "teardown-bad"
         intent_type = None
@@ -324,7 +312,6 @@ def test_append_falls_back_to_hosted_when_local_unwritable(
 
     ok = append_now(
         kind="snapshot",
-        strategy_id="s1",
         deployment_id="d1",
         cycle_id="teardown-fallback",
         error="forced",

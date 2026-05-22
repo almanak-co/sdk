@@ -1,7 +1,7 @@
 
 AccountingQuant-TA audit — DB: <TMPDIR>/ta.db
 
-strategy_id=AccountingQuantTAStrategy:newer
+deployment_id=AccountingQuantTAStrategy:newer
 2026-05-10T00:01:00 SWAP 200.0 USDC -> 0.08 WETH gas=— tx=0xta-new-1
   bundle=0xta-new-1
 2026-05-10T00:02:00 SWAP 0.08 WETH -> 200.5 USDC gas=$0.00000000 tx=0xta-new-2

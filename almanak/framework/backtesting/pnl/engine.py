@@ -361,7 +361,7 @@ class BacktestableStrategy(Protocol):
     """Protocol defining the interface for strategies that can be backtested.
 
     Strategies must implement:
-    - strategy_id: Unique identifier for the strategy
+    - deployment_id: Unique identifier for the strategy
     - decide(market): Method that returns an intent based on market data
 
     The decide method can return:
@@ -371,7 +371,7 @@ class BacktestableStrategy(Protocol):
     """
 
     @property
-    def strategy_id(self) -> str:
+    def deployment_id(self) -> str:
         """Return the unique identifier for this strategy."""
         ...
 
@@ -883,14 +883,14 @@ class PnLBacktester:
 
         if adapter:
             self._adapter = adapter
-            adapter_info = f"'{adapter.adapter_name}' for strategy '{strategy.strategy_id}'"
+            adapter_info = f"'{adapter.adapter_name}' for strategy '{strategy.deployment_id}'"
             if self.data_config is not None:
                 logger.info(f"Loaded adapter {adapter_info} with BacktestDataConfig")
             else:
                 logger.info(f"Loaded adapter {adapter_info}")
         else:
             self._adapter = None
-            logger.debug(f"No adapter loaded for strategy '{strategy.strategy_id}', using generic backtesting")
+            logger.debug(f"No adapter loaded for strategy '{strategy.deployment_id}', using generic backtesting")
 
     def _init_mev_simulator(self, config: PnLBacktestConfig) -> None:
         """Initialize MEV simulator based on config.
@@ -1366,7 +1366,7 @@ class PnLBacktester:
         )
 
         bt_logger.info(
-            f"Starting backtest for {strategy.strategy_id} "
+            f"Starting backtest for {strategy.deployment_id} "
             f"from {config.start_time} to {config.end_time} "
             f"with ${config.initial_capital_usd:,.2f} capital"
         )

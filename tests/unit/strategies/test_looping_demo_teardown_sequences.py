@@ -374,9 +374,9 @@ def test_morpho_looping_teardown_hard_mode_uses_emergency_slippage() -> None:
 
 def _build_strategy_for_bookkeeping() -> MorphoLoopingStrategy:
     strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    # `strategy_id` is a read-only property backed by `_strategy_id`; set the
+    # `deployment_id` is a read-only property backed by `_deployment_id`; set the
     # underlying field for tests that bypass __init__ via __new__.
-    strategy._strategy_id = "test-morpho-looping"
+    strategy._deployment_id = "test-morpho-looping"
     strategy._chain = "ethereum"
     strategy.market_id = "0xmarket"
     strategy.collateral_token = "wstETH"

@@ -80,15 +80,14 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
     # (measured non-zero). The first / final pair drives Q5; the mid row
     # tests the measured-zero negative control.
     cur.executemany(
-        "INSERT INTO portfolio_snapshots (strategy_id, deployment_id, cycle_id, "
+        "INSERT INTO portfolio_snapshots (deployment_id, cycle_id, "
         "execution_mode, timestamp, iteration_number, total_value_usd, "
         "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
         "value_confidence, positions_json, token_prices_json, "
         "wallet_balances_json, chain, created_at) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "cyc-1",
                 "live",
@@ -107,7 +106,6 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
             ),
             (
                 "AccountingQuantLPStrategy:lp-test",
-                "AccountingQuantLPStrategy:lp-test",
                 "cyc-2",
                 "live",
                 "2026-05-10T00:00:30",
@@ -124,7 +122,6 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
                 "2026-05-10T00:00:30",
             ),
             (
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "cyc-3",
                 "live",
@@ -147,16 +144,15 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
     # transaction_ledger: SWAP + LP_OPEN + LP_CLOSE. Mix of None / "0" /
     # measured / garbage gas_usd to pin Empty ≠ Zero rendering.
     cur.executemany(
-        "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, deployment_id, "
+        "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
         "execution_mode, timestamp, intent_type, token_in, amount_in, token_out, "
         "amount_out, effective_price, slippage_bps, gas_used, gas_usd, tx_hash, "
         "chain, protocol, success, error) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "tx-1",
                 "cyc-1",
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "live",
                 "2026-05-10T00:00:10",
@@ -179,7 +175,6 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
                 "tx-2",
                 "cyc-1",
                 "AccountingQuantLPStrategy:lp-test",
-                "AccountingQuantLPStrategy:lp-test",
                 "live",
                 "2026-05-10T00:00:20",
                 "LP_OPEN",
@@ -200,7 +195,6 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
             (
                 "tx-3",
                 "cyc-3",
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "live",
                 "2026-05-10T00:01:00",
@@ -282,9 +276,9 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
 
     # portfolio_metrics: one row with mixed None / "0" / measured fields.
     cur.execute(
-        "INSERT INTO portfolio_metrics (strategy_id, initial_value_usd, "
+        "INSERT INTO portfolio_metrics (deployment_id, initial_value_usd, "
         "initial_timestamp, deposits_usd, withdrawals_usd, gas_spent_usd, "
-        "total_value_usd, positions_json, deployment_id, execution_mode, "
+        "total_value_usd, positions_json, cycle_id, execution_mode, "
         "is_complete, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "AccountingQuantLPStrategy:lp-test",
@@ -295,7 +289,7 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
             "0.50",
             "100.5000",
             "[]",
-            "AccountingQuantLPStrategy:lp-test",
+            "cyc-3",
             "live",
             1,
             "2026-05-10T00:01:00",
@@ -304,13 +298,12 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
 
     # accounting_events: one Layer-5 row.
     cur.execute(
-        "INSERT INTO accounting_events (id, deployment_id, strategy_id, cycle_id, "
+        "INSERT INTO accounting_events (id, deployment_id, cycle_id, "
         "execution_mode, timestamp, chain, protocol, wallet_address, event_type, "
         "position_key, ledger_entry_id, tx_hash, confidence, payload_json, "
-        "schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ae-1",
-            "AccountingQuantLPStrategy:lp-test",
             "AccountingQuantLPStrategy:lp-test",
             "cyc-1",
             "live",
@@ -330,13 +323,12 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
 
     # accounting_outbox: one processed row + one pending row.
     cur.executemany(
-        "INSERT INTO accounting_outbox (id, deployment_id, strategy_id, cycle_id, "
+        "INSERT INTO accounting_outbox (id, deployment_id, cycle_id, "
         "ledger_entry_id, intent_type, status, attempts, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "ob-1",
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "cyc-1",
                 "tx-2",
@@ -348,7 +340,6 @@ def _build_lp_fixture(tmp_path: Path) -> Path:
             ),
             (
                 "ob-2",
-                "AccountingQuantLPStrategy:lp-test",
                 "AccountingQuantLPStrategy:lp-test",
                 "cyc-3",
                 "tx-3",
@@ -373,15 +364,14 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
     cur = conn.cursor()
 
     cur.executemany(
-        "INSERT INTO portfolio_snapshots (strategy_id, deployment_id, cycle_id, "
+        "INSERT INTO portfolio_snapshots (deployment_id, cycle_id, "
         "execution_mode, timestamp, iteration_number, total_value_usd, "
         "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
         "value_confidence, positions_json, token_prices_json, "
         "wallet_balances_json, chain, created_at) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
-                "AccountingQuantLoopingStrategy:loop-test",
                 "AccountingQuantLoopingStrategy:loop-test",
                 "cyc-1",
                 "live",
@@ -399,7 +389,6 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
                 "2026-05-10T00:00:00",
             ),
             (
-                "AccountingQuantLoopingStrategy:loop-test",
                 "AccountingQuantLoopingStrategy:loop-test",
                 "cyc-2",
                 "live",
@@ -420,16 +409,15 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
     )
 
     cur.executemany(
-        "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, deployment_id, "
+        "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
         "execution_mode, timestamp, intent_type, token_in, amount_in, token_out, "
         "amount_out, effective_price, slippage_bps, gas_used, gas_usd, tx_hash, "
         "chain, protocol, success, error) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "tx-1",
                 "cyc-1",
-                "AccountingQuantLoopingStrategy:loop-test",
                 "AccountingQuantLoopingStrategy:loop-test",
                 "live",
                 "2026-05-10T00:00:10",
@@ -452,7 +440,6 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
                 "tx-2",
                 "cyc-1",
                 "AccountingQuantLoopingStrategy:loop-test",
-                "AccountingQuantLoopingStrategy:loop-test",
                 "live",
                 "2026-05-10T00:00:20",
                 "BORROW",
@@ -473,7 +460,6 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
             (
                 "tx-3",
                 "cyc-2",
-                "AccountingQuantLoopingStrategy:loop-test",
                 "AccountingQuantLoopingStrategy:loop-test",
                 "live",
                 "2026-05-10T00:00:30",
@@ -520,9 +506,9 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO portfolio_metrics (strategy_id, initial_value_usd, "
+        "INSERT INTO portfolio_metrics (deployment_id, initial_value_usd, "
         "initial_timestamp, deposits_usd, withdrawals_usd, gas_spent_usd, "
-        "total_value_usd, positions_json, deployment_id, execution_mode, "
+        "total_value_usd, positions_json, cycle_id, execution_mode, "
         "is_complete, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "AccountingQuantLoopingStrategy:loop-test",
@@ -533,7 +519,7 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
             None,
             "1000.0000",
             "[]",
-            "AccountingQuantLoopingStrategy:loop-test",
+            "cyc-2",
             "live",
             0,
             "2026-05-10T00:01:00",
@@ -541,13 +527,12 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO accounting_events (id, deployment_id, strategy_id, cycle_id, "
+        "INSERT INTO accounting_events (id, deployment_id, cycle_id, "
         "execution_mode, timestamp, chain, protocol, wallet_address, event_type, "
         "position_key, confidence, payload_json, schema_version) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ae-1",
-            "AccountingQuantLoopingStrategy:loop-test",
             "AccountingQuantLoopingStrategy:loop-test",
             "cyc-1",
             "live",
@@ -564,12 +549,11 @@ def _build_looping_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO accounting_outbox (id, deployment_id, strategy_id, cycle_id, "
+        "INSERT INTO accounting_outbox (id, deployment_id, cycle_id, "
         "ledger_entry_id, intent_type, status, attempts, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ob-1",
-            "AccountingQuantLoopingStrategy:loop-test",
             "AccountingQuantLoopingStrategy:loop-test",
             "cyc-1",
             "tx-1",
@@ -598,14 +582,13 @@ def _build_perp_fixture(tmp_path: Path) -> Path:
     # value rendered for lp/looping/ta would have been ``"100"`` if they read
     # this row — proving perp's quirk doesn't accidentally read ``balance``.
     cur.execute(
-        "INSERT INTO portfolio_snapshots (strategy_id, deployment_id, cycle_id, "
+        "INSERT INTO portfolio_snapshots (deployment_id, cycle_id, "
         "execution_mode, timestamp, iteration_number, total_value_usd, "
         "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
         "value_confidence, positions_json, token_prices_json, "
         "wallet_balances_json, chain, created_at) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            "AccountingQuantPerpStrategy:perp-test",
             "AccountingQuantPerpStrategy:perp-test",
             "cyc-1",
             "live",
@@ -625,15 +608,14 @@ def _build_perp_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, deployment_id, "
+        "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
         "execution_mode, timestamp, intent_type, token_in, amount_in, token_out, "
         "amount_out, effective_price, slippage_bps, gas_used, gas_usd, tx_hash, "
         "chain, protocol, success, error) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "tx-1",
             "cyc-1",
-            "AccountingQuantPerpStrategy:perp-test",
             "AccountingQuantPerpStrategy:perp-test",
             "live",
             "2026-05-10T00:00:10",
@@ -655,9 +637,9 @@ def _build_perp_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO portfolio_metrics (strategy_id, initial_value_usd, "
+        "INSERT INTO portfolio_metrics (deployment_id, initial_value_usd, "
         "initial_timestamp, deposits_usd, withdrawals_usd, gas_spent_usd, "
-        "total_value_usd, positions_json, deployment_id, execution_mode, "
+        "total_value_usd, positions_json, cycle_id, execution_mode, "
         "is_complete, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "AccountingQuantPerpStrategy:perp-test",
@@ -668,7 +650,7 @@ def _build_perp_fixture(tmp_path: Path) -> Path:
             "0.80",
             "5000.0000",
             "[]",
-            "AccountingQuantPerpStrategy:perp-test",
+            "cyc-1",
             "live",
             0,
             "2026-05-10T00:00:10",
@@ -676,12 +658,11 @@ def _build_perp_fixture(tmp_path: Path) -> Path:
     )
 
     cur.execute(
-        "INSERT INTO accounting_outbox (id, deployment_id, strategy_id, cycle_id, "
+        "INSERT INTO accounting_outbox (id, deployment_id, cycle_id, "
         "ledger_entry_id, intent_type, status, attempts, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ob-1",
-            "AccountingQuantPerpStrategy:perp-test",
             "AccountingQuantPerpStrategy:perp-test",
             "cyc-1",
             "tx-1",
@@ -704,14 +685,14 @@ def _build_ta_fixture(tmp_path: Path) -> Path:
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
 
-    # TA filters by strategy_id. Two distinct ids exercise the
-    # ``_latest_strategy_id`` auto-discover path (max-timestamp wins) AND the
-    # explicit ``--strategy-id`` filter (D2.3). Auto-discover picks id "newer"
+    # TA filters by deployment_id. Two distinct ids exercise the
+    # ``_latest_deployment_id`` auto-discover path (max-timestamp wins) AND the
+    # explicit ``--deployment-id`` filter (D2.3). Auto-discover picks id "newer"
     # because its rows have the latest timestamps.
     #
-    # The "newer" strategy_id has three rows exercising all three Empty≠Zero
+    # The "newer" deployment_id has three rows exercising all three Empty≠Zero
     # states for gas_usd (None / "0" / measured), so D3.4's auto-discover-path
-    # paired control finds all three substrings without needing --strategy-id.
+    # paired control finds all three substrings without needing --deployment-id.
     rows = [
         (
             "tx-A1",
@@ -772,12 +753,12 @@ def _build_ta_fixture(tmp_path: Path) -> Path:
     ]
     for r in rows:
         cur.execute(
-            "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, "
-            "deployment_id, execution_mode, timestamp, intent_type, token_in, "
+            "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
+            "execution_mode, timestamp, intent_type, token_in, "
             "amount_in, token_out, amount_out, gas_usd, gas_used, tx_hash, "
             "extracted_data_json, success, error) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (r[0], r[1], r[2], r[2], "live", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], "{}", 1, None),
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (r[0], r[1], r[2], "live", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], "{}", 1, None),
         )
 
     conn.commit()
@@ -861,30 +842,30 @@ def test_d1_2_cli_shim_byte_equality(primitive: str, tmp_path: Path) -> None:
     )
 
 
-# ─── D1.3 — TA ``--strategy-id`` filter ──────────────────────────────────
+# ─── D1.3 — TA ``--deployment-id`` filter ──────────────────────────────────
 
 
-def test_d1_3_ta_strategy_id_filter(tmp_path: Path) -> None:
-    """Each `--strategy-id` selects exactly its own ledger rows by tx_hash."""
+def test_d1_3_ta_deployment_id_filter(tmp_path: Path) -> None:
+    """Each `--deployment-id` selects exactly its own ledger rows by tx_hash."""
     db_path = _build_ta_fixture(tmp_path)
-    rc_a, captured_a = _run_prose_main("ta", [str(db_path), "--strategy-id", "AccountingQuantTAStrategy:older"])
-    rc_b, captured_b = _run_prose_main("ta", [str(db_path), "--strategy-id", "AccountingQuantTAStrategy:newer"])
+    rc_a, captured_a = _run_prose_main("ta", [str(db_path), "--deployment-id", "AccountingQuantTAStrategy:older"])
+    rc_b, captured_b = _run_prose_main("ta", [str(db_path), "--deployment-id", "AccountingQuantTAStrategy:newer"])
     assert rc_a == 0 and rc_b == 0
     older_only = "0xta-old"
     newer_hashes = ("0xta-new-1", "0xta-new-2", "0xta-new-3")
-    assert older_only in captured_a, "older strategy_id must select its own row"
-    assert all(h not in captured_a for h in newer_hashes), "older strategy_id must NOT leak rows from newer"
+    assert older_only in captured_a, "older deployment_id must select its own row"
+    assert all(h not in captured_a for h in newer_hashes), "older deployment_id must NOT leak rows from newer"
     assert all(h in captured_b for h in newer_hashes)
     assert older_only not in captured_b
 
 
 def test_d2_3_ta_auto_discover_picks_latest_strategy(tmp_path: Path) -> None:
-    """`_latest_strategy_id` orders by MAX(timestamp) DESC; "newer" wins."""
+    """`_latest_deployment_id` orders by MAX(timestamp) DESC; "newer" wins."""
     db_path = _build_ta_fixture(tmp_path)
-    rc, captured = _run_prose_main("ta", [str(db_path)])  # no --strategy-id
+    rc, captured = _run_prose_main("ta", [str(db_path)])  # no --deployment-id
     assert rc == 0
-    assert "newer" in captured, "auto-discover must select 'newer' strategy_id"
-    assert "0xta-old" not in captured, "auto-discover must NOT print rows from the older strategy_id"
+    assert "newer" in captured, "auto-discover must select 'newer' deployment_id"
+    assert "0xta-old" not in captured, "auto-discover must NOT print rows from the older deployment_id"
 
 
 # ─── D1.4 — AST static checks ─────────────────────────────────────────────
@@ -1006,13 +987,12 @@ def test_d3_3_garbage_decimal_renders_emdash(tmp_path: Path) -> None:
     _bootstrap_live_schema(str(db_path))
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, "
-        "deployment_id, execution_mode, timestamp, intent_type, gas_usd, "
-        "gas_used, success) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
+        "execution_mode, timestamp, intent_type, gas_usd, "
+        "gas_used, success) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "tx-garbage",
             "cyc-x",
-            "AccountingQuantLPStrategy:garbage",
             "AccountingQuantLPStrategy:garbage",
             "live",
             "2026-05-10T00:00:00",

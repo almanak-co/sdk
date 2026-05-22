@@ -5,7 +5,7 @@ Covers:
 - TypeError on bad db_path type
 - TeardownState round-trip (save/get/delete)
 - Compound-PK approval requests (teardown_id, level) — levels don't clobber
-- strategy_id-based lookup for API callers
+- deployment_id-based lookup for API callers
 - Schema migration from pre-release single-PK layout
 - Concurrent process simulation (runner poll + API writer on the same file)
 """
@@ -40,11 +40,11 @@ def adapter(tmp_db_path: Path) -> TeardownStateAdapter:
     return TeardownStateAdapter(db_path=tmp_db_path)
 
 
-def _make_teardown_state(strategy_id: str = "strat_1", teardown_id: str = "td_1") -> TeardownState:
+def _make_teardown_state(deployment_id: str = "strat_1", teardown_id: str = "td_1") -> TeardownState:
     now = datetime.now(UTC)
     return TeardownState(
         teardown_id=teardown_id,
-        strategy_id=strategy_id,
+        deployment_id=deployment_id,
         mode=TeardownMode.SOFT,
         status=TeardownStatus.EXECUTING,
         total_intents=3,
@@ -98,7 +98,7 @@ class TestPathResolution:
         """
         from almanak.framework.local_paths import LocalPathError
 
-        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
         monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
         monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
@@ -137,11 +137,11 @@ class TestTeardownStateRoundTrip:
         state = _make_teardown_state()
 
         await adapter.save_teardown_state(state)
-        loaded = await adapter.get_teardown_state(state.strategy_id)
+        loaded = await adapter.get_teardown_state(state.deployment_id)
 
         assert loaded is not None
         assert loaded.teardown_id == state.teardown_id
-        assert loaded.strategy_id == state.strategy_id
+        assert loaded.deployment_id == state.deployment_id
         assert loaded.status == TeardownStatus.EXECUTING
         assert loaded.total_intents == 3
         assert loaded.completed_intents == 1
@@ -157,7 +157,7 @@ class TestTeardownStateRoundTrip:
 
         updated = TeardownState(
             teardown_id=state.teardown_id,
-            strategy_id=state.strategy_id,
+            deployment_id=state.deployment_id,
             mode=state.mode,
             status=TeardownStatus.COMPLETED,
             total_intents=3,
@@ -173,7 +173,7 @@ class TestTeardownStateRoundTrip:
         )
         await adapter.save_teardown_state(updated)
 
-        loaded = await adapter.get_teardown_state(state.strategy_id)
+        loaded = await adapter.get_teardown_state(state.deployment_id)
 
         assert loaded is not None
         assert loaded.status == TeardownStatus.COMPLETED
@@ -186,7 +186,7 @@ class TestTeardownStateRoundTrip:
 
         await adapter.delete_teardown_state(state.teardown_id)
 
-        assert await adapter.get_teardown_state(state.strategy_id) is None
+        assert await adapter.get_teardown_state(state.deployment_id) is None
 
     @pytest.mark.asyncio
     async def test_corrupted_intent_results_json_falls_back_to_empty(
@@ -207,7 +207,7 @@ class TestTeardownStateRoundTrip:
             )
             conn.commit()
 
-        loaded = await adapter.get_teardown_state(state.strategy_id)
+        loaded = await adapter.get_teardown_state(state.deployment_id)
 
         assert loaded is not None
         assert loaded.intent_results == []
@@ -228,7 +228,7 @@ class TestTeardownStateRoundTrip:
             )
             conn.commit()
 
-        loaded = await adapter.get_teardown_state(state.strategy_id)
+        loaded = await adapter.get_teardown_state(state.deployment_id)
 
         assert loaded is not None
         assert loaded.intent_results == []
@@ -245,14 +245,14 @@ class TestApprovalCompoundKey:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json=json.dumps({"slippage": "0.05"}),
             expires_at=expires,
         )
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_4,
             request_json=json.dumps({"slippage": "0.08"}),
             expires_at=expires,
@@ -274,14 +274,14 @@ class TestApprovalCompoundKey:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
         )
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_4,
             request_json="{}",
             expires_at=expires,
@@ -309,7 +309,7 @@ class TestApprovalCompoundKey:
 
 
 # -----------------------------------------------------------------------------
-# strategy_id-based API convenience methods
+# deployment_id-based API convenience methods
 # -----------------------------------------------------------------------------
 
 
@@ -321,14 +321,14 @@ class TestByStrategyHelpers:
         now = datetime.now(UTC)
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=(now + timedelta(minutes=30)).isoformat(),
         )
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_4,
             request_json="{}",
             expires_at=(now + timedelta(minutes=30)).isoformat(),
@@ -344,14 +344,14 @@ class TestByStrategyHelpers:
         expires = (now + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
         )
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_4,
             request_json="{}",
             expires_at=expires,
@@ -371,7 +371,7 @@ class TestByStrategyHelpers:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
@@ -390,14 +390,14 @@ class TestByStrategyHelpers:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
         )
 
         ok = adapter.write_approval_response_by_strategy(
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             response_json=json.dumps({"approved": True, "action": "approve"}),
         )
 
@@ -411,7 +411,7 @@ class TestByStrategyHelpers:
     ) -> None:
         assert (
             adapter.write_approval_response_by_strategy(
-                strategy_id="never_existed",
+                deployment_id="never_existed",
                 response_json="{}",
             )
             is False
@@ -436,7 +436,7 @@ class TestCrossProcessCoordination:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         runner_adapter.create_approval_request(
             teardown_id="td_1",
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
@@ -444,7 +444,7 @@ class TestCrossProcessCoordination:
 
         # API writes the operator's decision.
         ok = api_adapter.write_approval_response_by_strategy(
-            strategy_id="strat_1",
+            deployment_id="strat_1",
             response_json=json.dumps({"approved": True, "action": "approve"}),
         )
 
@@ -473,7 +473,7 @@ class TestSchemaMigration:
                 """
                 CREATE TABLE teardown_approvals (
                     teardown_id TEXT PRIMARY KEY,
-                    strategy_id TEXT NOT NULL,
+                    deployment_id TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     response_json TEXT,
                     created_at TEXT NOT NULL,
@@ -484,7 +484,7 @@ class TestSchemaMigration:
             )
             conn.execute(
                 """INSERT INTO teardown_approvals
-                   (teardown_id, strategy_id, request_json, created_at, expires_at)
+                   (teardown_id, deployment_id, request_json, created_at, expires_at)
                    VALUES ('td_legacy', 'strat_legacy', '{}', ?, ?)""",
                 (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()),
             )
@@ -507,7 +507,7 @@ class TestSchemaMigration:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         adapter.create_approval_request(
             teardown_id="td_new",
-            strategy_id="strat_new",
+            deployment_id="strat_new",
             level=EscalationLevel.LEVEL_3,
             request_json="{}",
             expires_at=expires,
@@ -546,10 +546,10 @@ class TestAsyncOffThread:
         assert ticks == 5
 
         loaded, _ = await asyncio.gather(
-            adapter.get_teardown_state(state.strategy_id),
+            adapter.get_teardown_state(state.deployment_id),
             heartbeat(),
         )
         assert loaded is not None
 
         await adapter.delete_teardown_state(state.teardown_id)
-        assert await adapter.get_teardown_state(state.strategy_id) is None
+        assert await adapter.get_teardown_state(state.deployment_id) is None

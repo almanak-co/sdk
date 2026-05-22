@@ -73,18 +73,18 @@ class MockStrategy:
 
     def __init__(
         self,
-        strategy_id: str = "test_pending_intent_strategy",
+        deployment_id: str = "test_pending_intent_strategy",
         intents_to_return: list[Any] | None = None,
     ):
-        self._strategy_id = strategy_id
+        self._deployment_id = deployment_id
         self.decide_call_count = 0
         # If intents_to_return is provided, we cycle through them
         # Otherwise, return a swap intent on every call
         self._intents_to_return = intents_to_return
 
     @property
-    def strategy_id(self) -> str:
-        return self._strategy_id
+    def deployment_id(self) -> str:
+        return self._deployment_id
 
     def decide(self, market: Any) -> Any:
         """Return a swap intent on each call."""

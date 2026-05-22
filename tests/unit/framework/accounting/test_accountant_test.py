@@ -55,8 +55,7 @@ def _make_db_with_minimal_lp_run() -> Path:
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
-            deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, effective_price TEXT, slippage_bps INTEGER,
             gas_used INTEGER, gas_usd TEXT, tx_hash TEXT, chain TEXT,
@@ -80,15 +79,14 @@ def _make_db_with_minimal_lp_run() -> Path:
             attribution_version INTEGER
         );
         CREATE TABLE accounting_events (
-            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT,
-            strategy_id TEXT, execution_mode TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
             chain TEXT, protocol TEXT, wallet_address TEXT,
             event_type TEXT, position_key TEXT, ledger_entry_id TEXT,
             tx_hash TEXT, confidence TEXT, payload_json TEXT,
             schema_version INTEGER DEFAULT 1
         );
         CREATE TABLE portfolio_snapshots (
-            id INTEGER PRIMARY KEY, strategy_id TEXT, deployment_id TEXT,
+            id INTEGER PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, execution_mode TEXT, timestamp TEXT,
             iteration_number INTEGER, total_value_usd TEXT,
             available_cash_usd TEXT, deployed_capital_usd TEXT,
@@ -97,10 +95,10 @@ def _make_db_with_minimal_lp_run() -> Path:
             wallet_balances_json TEXT, chain TEXT, created_at TEXT
         );
         CREATE TABLE portfolio_metrics (
-            strategy_id TEXT PRIMARY KEY, initial_value_usd TEXT,
+            deployment_id TEXT PRIMARY KEY, initial_value_usd TEXT,
             initial_timestamp TEXT, deposits_usd TEXT, withdrawals_usd TEXT,
             gas_spent_usd TEXT, total_value_usd TEXT, positions_json TEXT,
-            cycle_id TEXT, deployment_id TEXT, execution_mode TEXT,
+            cycle_id TEXT, execution_mode TEXT,
             is_complete INTEGER, updated_at TEXT
         );
         """
@@ -108,12 +106,12 @@ def _make_db_with_minimal_lp_run() -> Path:
     # 1 LP_OPEN ledger row, with all four audit columns populated
     cur.execute(
         """
-        INSERT INTO transaction_ledger (id, cycle_id, strategy_id, deployment_id,
+        INSERT INTO transaction_ledger (id, cycle_id, deployment_id,
             execution_mode, timestamp, intent_type, token_in, amount_in,
             token_out, amount_out, gas_used, gas_usd, tx_hash, chain, protocol,
             success, extracted_data_json, price_inputs_json, pre_state_json,
             post_state_json, schema_version, formula_version, matching_policy_version)
-        VALUES ('led-1', 'cyc-1', 'lp-test', 'lp-test', 'live', '2026-05-01T00:00:00Z',
+        VALUES ('led-1', 'cyc-1', 'lp-test', 'live', '2026-05-01T00:00:00Z',
             'LP_OPEN', 'WETH', '0.001', 'USDC', '3.0', 500000, '0.05',
             '0xdeadbeef', 'arbitrum', 'uniswap_v3', 1,
             '{"lp_open_data": {"tick_lower": 100, "tick_upper": 200, "liquidity": "1234567"}}',
@@ -135,10 +133,10 @@ def _make_db_with_minimal_lp_run() -> Path:
     # accounting_event with HIGH confidence + valid payload
     cur.execute(
         """
-        INSERT INTO accounting_events (id, cycle_id, deployment_id, strategy_id,
+        INSERT INTO accounting_events (id, cycle_id, deployment_id,
             timestamp, chain, protocol, event_type, position_key,
             ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
-        VALUES ('ae-1', 'cyc-1', 'lp-test', 'lp-test', '2026-05-01T00:00:00Z',
+        VALUES ('ae-1', 'cyc-1', 'lp-test', '2026-05-01T00:00:00Z',
             'arbitrum', 'uniswap_v3', 'LP_OPEN', 'pos-1', 'led-1', '0xdeadbeef',
             'HIGH',
             '{"event_type": "LP_OPEN", "protocol": "uniswap_v3", "position_key": "pos-1", "pool_address": "weth-usdc-500", "token0": "WETH", "token1": "USDC", "amount0": "0.001", "amount1": "3.0", "amount0_usd": "3.0", "amount1_usd": "3.0", "cost_basis_usd": "6.0", "tick_lower": 100, "tick_upper": 200, "liquidity": 1234567, "confidence": "HIGH", "matching_policy_version": 1}',
@@ -149,21 +147,21 @@ def _make_db_with_minimal_lp_run() -> Path:
     for i, val in enumerate(["10.0", "10.5", "11.0"]):
         cur.execute(
             """
-            INSERT INTO portfolio_snapshots (strategy_id, deployment_id,
+            INSERT INTO portfolio_snapshots (deployment_id,
                 cycle_id, execution_mode, timestamp, iteration_number,
                 total_value_usd, available_cash_usd, deployed_capital_usd,
                 value_confidence, chain)
-            VALUES ('lp-test', 'lp-test', 'cyc-1', 'live', ?, ?, ?, '0', ?, 'HIGH', 'arbitrum')
+            VALUES ('lp-test', 'cyc-1', 'live', ?, ?, ?, '0', ?, 'HIGH', 'arbitrum')
             """,
             (f"2026-05-01T00:0{i}:00Z", i, val, val),
         )
     cur.execute(
         """
-        INSERT INTO portfolio_metrics (strategy_id, initial_value_usd,
-            initial_timestamp, total_value_usd, cycle_id, deployment_id,
+        INSERT INTO portfolio_metrics (deployment_id, initial_value_usd,
+            initial_timestamp, total_value_usd, cycle_id,
             execution_mode, is_complete)
         VALUES ('lp-test', '10.0', '2026-05-01T00:00:00Z', '11.0', 'cyc-1',
-            'lp-test', 'live', 0)
+            'live', 0)
         """
     )
     conn.commit()
@@ -214,7 +212,7 @@ def test_accountant_test_lp_red_when_columns_empty():
         cur.executescript(
             """
             CREATE TABLE transaction_ledger (
-                id TEXT, cycle_id TEXT, strategy_id TEXT, deployment_id TEXT,
+                id TEXT, cycle_id TEXT, deployment_id TEXT,
                 execution_mode TEXT, timestamp TEXT, intent_type TEXT,
                 gas_used INTEGER, gas_usd TEXT, tx_hash TEXT, chain TEXT,
                 protocol TEXT, success INTEGER, extracted_data_json TEXT,
@@ -224,7 +222,7 @@ def test_accountant_test_lp_red_when_columns_empty():
             CREATE TABLE position_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, position_id TEXT);
             CREATE TABLE accounting_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, payload_json TEXT, confidence TEXT);
             CREATE TABLE portfolio_snapshots (id INTEGER, total_value_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT);
-            CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+            CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
             """
         )
         cur.execute(
@@ -284,7 +282,7 @@ def _make_db_with_only_snapshots(snapshot_values: list[str]) -> Path:
         CREATE TABLE position_events (id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (id TEXT, event_type TEXT, payload_json TEXT, confidence TEXT);
         CREATE TABLE portfolio_snapshots (id INTEGER PRIMARY KEY, total_value_usd TEXT, available_cash_usd TEXT, deployed_capital_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT, chain TEXT);
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     for i, val in enumerate(snapshot_values):
@@ -367,7 +365,7 @@ def test_g15_fails_when_snapshots_have_positions_but_track_c_rows_missing():
                 deployed_capital_usd TEXT, value_confidence TEXT, iteration_number INTEGER,
                 timestamp TEXT, chain TEXT, positions_json TEXT
             );
-            CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+            CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
             CREATE TABLE position_state_snapshots (
                 id INTEGER PRIMARY KEY, snapshot_id INTEGER, position_type TEXT,
                 position_id TEXT, captured_at TEXT
@@ -420,7 +418,7 @@ def test_g15_passes_when_track_c_covers_every_snapshot_with_positions():
                 deployed_capital_usd TEXT, value_confidence TEXT, iteration_number INTEGER,
                 timestamp TEXT, chain TEXT, positions_json TEXT
             );
-            CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+            CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
             CREATE TABLE position_state_snapshots (
                 id INTEGER PRIMARY KEY, snapshot_id INTEGER, position_type TEXT,
                 position_id TEXT, captured_at TEXT, in_range INTEGER, liquidity TEXT
@@ -475,7 +473,7 @@ def _make_db_with_perp_close(realized_pnl_usd: str) -> Path:
         CREATE TABLE position_events (id TEXT, cycle_id TEXT, event_type TEXT, position_id TEXT, tx_hash TEXT, ledger_entry_id TEXT, leverage TEXT, entry_price TEXT, mark_price TEXT, unrealized_pnl TEXT);
         CREATE TABLE accounting_events (id TEXT, cycle_id TEXT, event_type TEXT, payload_json TEXT, confidence TEXT, position_key TEXT, tx_hash TEXT, ledger_entry_id TEXT);
         CREATE TABLE portfolio_snapshots (id INTEGER PRIMARY KEY, total_value_usd TEXT, available_cash_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT, chain TEXT);
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     # Two snapshots so G6 has endpoints
@@ -550,8 +548,7 @@ def _make_db_with_swap_payload(payload_json: str) -> Path:
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
-            deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, protocol TEXT, success INTEGER,
@@ -562,7 +559,7 @@ def _make_db_with_swap_payload(payload_json: str) -> Path:
         );
         CREATE TABLE position_events (id TEXT, cycle_id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (
-            id TEXT, cycle_id TEXT, deployment_id TEXT, strategy_id TEXT,
+            id TEXT, cycle_id TEXT, deployment_id TEXT,
             timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
             position_key TEXT, ledger_entry_id TEXT, tx_hash TEXT,
             confidence TEXT, payload_json TEXT
@@ -572,23 +569,23 @@ def _make_db_with_swap_payload(payload_json: str) -> Path:
             available_cash_usd TEXT, value_confidence TEXT,
             iteration_number INTEGER, timestamp TEXT, chain TEXT
         );
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     cur.execute(
-        "INSERT INTO transaction_ledger (id, cycle_id, strategy_id, deployment_id, "
+        "INSERT INTO transaction_ledger (id, cycle_id, deployment_id, "
         "timestamp, intent_type, token_in, amount_in, token_out, amount_out, "
         "gas_used, gas_usd, tx_hash, chain, protocol, success, "
         "price_inputs_json, schema_version, formula_version, matching_policy_version) "
-        "VALUES ('led-1', 'cyc-1', 's', 's', '2026-05-01T00:00:00Z', 'SWAP', 'WETH', "
+        "VALUES ('led-1', 'cyc-1', 's', '2026-05-01T00:00:00Z', 'SWAP', 'WETH', "
         "'0.001', 'USDC', '3.0', 100000, '0.05', '0xabc', 'arbitrum', 'uniswap_v3', 1, "
         "'{\"WETH\": {\"price_usd\": \"3000\", \"oracle_source\": \"chainlink\"}}', 1, 1, 1)"
     )
     cur.execute(
-        "INSERT INTO accounting_events (id, cycle_id, deployment_id, strategy_id, "
+        "INSERT INTO accounting_events (id, cycle_id, deployment_id, "
         "timestamp, chain, protocol, event_type, position_key, ledger_entry_id, "
         "tx_hash, confidence, payload_json) "
-        "VALUES ('ae-1', 'cyc-1', 's', 's', '2026-05-01T00:00:00Z', 'arbitrum', "
+        "VALUES ('ae-1', 'cyc-1', 's', '2026-05-01T00:00:00Z', 'arbitrum', "
         "'uniswap_v3', 'SWAP', 'pos-1', 'led-1', '0xabc', 'HIGH', ?)",
         (payload_json,),
     )
@@ -719,7 +716,7 @@ def test_g1_strict_usd_fails_when_swap_has_no_paired_acct_event():
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, success INTEGER, price_inputs_json TEXT,
@@ -729,7 +726,7 @@ def test_g1_strict_usd_fails_when_swap_has_no_paired_acct_event():
         CREATE TABLE accounting_events (id TEXT, event_type TEXT, ledger_entry_id TEXT,
             payload_json TEXT, confidence TEXT);
         CREATE TABLE portfolio_snapshots (id INTEGER, total_value_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT);
-        CREATE TABLE portfolio_metrics (strategy_id TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT);
         """
     )
     cur.execute(
@@ -763,7 +760,7 @@ def _make_db_with_cycle_rows(rows: list[tuple[str, str, int]]) -> Path:
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, timestamp TEXT,
             intent_type TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, success INTEGER, price_inputs_json TEXT,
             schema_version INTEGER, formula_version INTEGER, matching_policy_version INTEGER
@@ -771,7 +768,7 @@ def _make_db_with_cycle_rows(rows: list[tuple[str, str, int]]) -> Path:
         CREATE TABLE position_events (id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (id TEXT, event_type TEXT, payload_json TEXT, confidence TEXT);
         CREATE TABLE portfolio_snapshots (id INTEGER, total_value_usd TEXT, value_confidence TEXT, iteration_number INTEGER, timestamp TEXT);
-        CREATE TABLE portfolio_metrics (strategy_id TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT);
         """
     )
     for i, (it, txh, succ) in enumerate(rows):
@@ -874,8 +871,7 @@ def _make_db_with_n_swaps(
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
-            deployment_id TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, gas_used INTEGER, gas_usd TEXT, tx_hash TEXT,
             chain TEXT, success INTEGER, price_inputs_json TEXT,
@@ -883,7 +879,7 @@ def _make_db_with_n_swaps(
         );
         CREATE TABLE position_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (
-            id TEXT, cycle_id TEXT, deployment_id TEXT, strategy_id TEXT,
+            id TEXT, cycle_id TEXT, deployment_id TEXT,
             timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
             position_key TEXT, ledger_entry_id TEXT, tx_hash TEXT,
             confidence TEXT, payload_json TEXT
@@ -893,20 +889,20 @@ def _make_db_with_n_swaps(
             available_cash_usd TEXT, value_confidence TEXT,
             iteration_number INTEGER, timestamp TEXT, chain TEXT
         );
-        CREATE TABLE portfolio_metrics (strategy_id TEXT, deployment_id TEXT, initial_value_usd TEXT);
+        CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
     )
     for i, pj in enumerate(payloads):
         cur.execute(
             "INSERT INTO transaction_ledger VALUES "
-            "(?, 'cyc-1', 's', 's', ?, 'SWAP', 'WETH', '0.001', 'USDC', '3.0', "
+            "(?, 'cyc-1', 's', ?, 'SWAP', 'WETH', '0.001', 'USDC', '3.0', "
             "100000, '0', ?, 'arbitrum', 1, "
             "'{\"WETH\": {\"price_usd\": \"3000\", \"oracle_source\": \"chainlink\"}}', 1, 1, 1)",
             (f"led-{i}", f"2026-05-01T00:0{i}:00Z", f"0x{i:x}"),
         )
         cur.execute(
             "INSERT INTO accounting_events VALUES "
-            "(?, 'cyc-1', 's', 's', ?, 'arbitrum', 'uniswap_v3', 'SWAP', 'pos-1', "
+            "(?, 'cyc-1', 's', ?, 'arbitrum', 'uniswap_v3', 'SWAP', 'pos-1', "
             "?, ?, 'HIGH', ?)",
             (f"ae-{i}", f"2026-05-01T00:0{i}:00Z", f"led-{i}", f"0x{i:x}", pj),
         )

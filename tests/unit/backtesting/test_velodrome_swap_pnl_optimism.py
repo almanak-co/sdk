@@ -37,7 +37,7 @@ def _create_strategy(config_overrides: dict | None = None):
     if config_overrides:
         config.update(config_overrides)
 
-    strategy._strategy_id = "test-velodrome-pnl-optimism"
+    strategy._deployment_id = "test-velodrome-pnl-optimism"
     strategy._chain = "optimism"
     strategy._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strategy.swap_amount = Decimal(str(config["swap_amount"]))

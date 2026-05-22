@@ -22,19 +22,19 @@ specific content (VIB-3969)::
         render_trade_tape_section,  # bottom — TX-level audit
     )
 
-    def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
         # 1. Title / strategy info
         st.title(...)
 
         # 2. Eyeball — am I making or losing money?
-        render_pnl_section(strategy_id)
+        render_pnl_section(deployment_id)
 
         # 3. Strategy-specific content (LP plots / HF gauge / RSI chart / ...)
         # ... author's custom UI here ...
 
         # 4. Audit — paper trade, transactions, full breakdown
-        render_cost_stack_section(strategy_id)
-        render_trade_tape_section(strategy_id)
+        render_cost_stack_section(deployment_id)
+        render_trade_tape_section(deployment_id)
 
 Each helper is intentionally thin (divider + heading + delegate) so the
 contract is trivially stable across releases. Each calls exactly one
@@ -64,7 +64,7 @@ from almanak.framework.dashboard.pages.trade_tape import render_trade_tape
 logger = logging.getLogger(__name__)
 
 
-def render_pnl_section(strategy_id: str) -> None:
+def render_pnl_section(deployment_id: str) -> None:
     """Render the 5-second-eyeball PnL section (VIB-3969).
 
     Money Trail row: Deployed / NAV / Lifetime PnL / Net APR. The
@@ -76,13 +76,13 @@ def render_pnl_section(strategy_id: str) -> None:
     Conventionally placed immediately below the strategy title.
 
     Args:
-        strategy_id: The strategy id (passed straight through from
+        deployment_id: The deployment id (passed straight through from
             ``render_custom_dashboard``'s first positional argument).
     """
     st.divider()
     st.markdown("### PnL")
     try:
-        pnl = get_pnl_summary(strategy_id)
+        pnl = get_pnl_summary(deployment_id)
     except GatewayConnectionError:
         st.info("PnL temporarily unavailable — the gateway is disconnected.")
         return
@@ -92,7 +92,7 @@ def render_pnl_section(strategy_id: str) -> None:
     render_money_trail(pnl)
 
 
-def render_cost_stack_section(strategy_id: str, *, heading: str = "### Cost Stack") -> None:
+def render_cost_stack_section(deployment_id: str, *, heading: str = "### Cost Stack") -> None:
     """Render the life-to-date Cost Stack section (VIB-3969).
 
     Gas / Fees / Slippage / Earn — generic across primitives (every
@@ -104,7 +104,7 @@ def render_cost_stack_section(strategy_id: str, *, heading: str = "### Cost Stac
     above the trade tape.
 
     Args:
-        strategy_id: The strategy id.
+        deployment_id: The deployment id.
         heading: Override the section heading. Pass an empty string to
             suppress the heading entirely (useful when composing inside
             a larger Audit panel that already has its own heading).
@@ -113,7 +113,7 @@ def render_cost_stack_section(strategy_id: str, *, heading: str = "### Cost Stac
     if heading:
         st.markdown(heading)
     try:
-        cost = get_cost_stack(strategy_id)
+        cost = get_cost_stack(deployment_id)
     except GatewayConnectionError:
         st.info("Cost data temporarily unavailable — the gateway is disconnected.")
         return
@@ -123,7 +123,7 @@ def render_cost_stack_section(strategy_id: str, *, heading: str = "### Cost Stac
     render_cost_stack(cost)
 
 
-def render_trade_tape_section(strategy_id: str, *, limit: int = 50) -> None:
+def render_trade_tape_section(deployment_id: str, *, limit: int = 50) -> None:
     """Render the standard trade-tape section.
 
     Conventionally placed at the bottom of every
@@ -135,17 +135,17 @@ def render_trade_tape_section(strategy_id: str, *, limit: int = 50) -> None:
     does.
 
     Args:
-        strategy_id: The strategy id (passed straight through from
+        deployment_id: The deployment id (passed straight through from
             ``render_custom_dashboard``'s first positional argument).
         limit: Most recent intents to fetch. Defaults to 50.
     """
     st.divider()
     st.markdown("### Trade Tape")
-    render_trade_tape(strategy_id, limit=limit)
+    render_trade_tape(deployment_id, limit=limit)
 
 
 def render_position_lifecycle_section(
-    strategy_id: str,
+    deployment_id: str,
     api_client: Any,
     *,
     position_types: list[str] | None = None,
@@ -169,10 +169,10 @@ def render_position_lifecycle_section(
     matches the single-leg / multi-leg behaviour of the detail page.
 
     Args:
-        strategy_id: The strategy id (passed straight through from
+        deployment_id: The deployment id (passed straight through from
             ``render_custom_dashboard``'s first positional argument).
         api_client: Custom-dashboard ``DashboardAPIClient`` (already
-            scoped to ``strategy_id``). The section calls
+            scoped to ``deployment_id``). The section calls
             ``api_client.get_position_events(position_types=...)`` on it.
         position_types: Optional list filter (e.g. ``["LP"]``). ``None``
             (default) returns all position types known to the gateway.
@@ -229,7 +229,7 @@ def render_position_lifecycle_section(
     events = sorted(events, key=lambda e: e.get("timestamp") or "", reverse=True)
     events = events[:limit]
 
-    handles, show_alias = _resolve_handles_with_visible_failure(strategy_id, get_dashboard_service_client)
+    handles, show_alias = _resolve_handles_with_visible_failure(deployment_id, get_dashboard_service_client)
 
     _render_lifecycle_metrics(events)
 
@@ -242,7 +242,7 @@ def render_position_lifecycle_section(
         st.download_button(
             label="Export Position Events (CSV)",
             data=csv_bytes,
-            file_name=f"position_events_{strategy_id}.csv",
+            file_name=f"position_events_{deployment_id}.csv",
             mime="text/csv",
         )
 
@@ -373,7 +373,7 @@ def _render_attribution_subtable(
 
 
 def _resolve_handles_with_visible_failure(
-    strategy_id: str,
+    deployment_id: str,
     client_factory: Any,
 ) -> tuple[dict[str, str], bool]:
     """Resolve registry handles and emit a visible caption on RPC failure.
@@ -388,7 +388,7 @@ def _resolve_handles_with_visible_failure(
     Returns ``(handles, show_alias)`` so the caller can immediately use both
     without re-checking the success sentinel.
     """
-    result = _fetch_registry_handles_via_gateway(strategy_id, client_factory)
+    result = _fetch_registry_handles_via_gateway(deployment_id, client_factory)
     if result is None:
         st.caption("⚠ Position aliases unavailable — registry lookup failed (events shown without leg labels).")
         return {}, False
@@ -408,7 +408,7 @@ def _filter_open_only_events(events: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _fetch_registry_handles_via_gateway(
-    strategy_id: str,
+    deployment_id: str,
     client_factory: Any,
 ) -> dict[str, str] | None:
     """Build the ``{position-key → handle}`` map by reading the registry RPC.
@@ -454,16 +454,16 @@ def _fetch_registry_handles_via_gateway(
         # caller emits the visible caption rather than crashing inside
         # the AttributeError catch-all below.
         if client is None:
-            logger.warning("Registry handle lookup: client_factory returned None for %s", strategy_id)
+            logger.warning("Registry handle lookup: client_factory returned None for %s", deployment_id)
             return None
         if not client.is_connected:
             client.connect()
-        result = client.get_positions(strategy_id)
+        result = client.get_positions(deployment_id)
     except Exception as exc:  # noqa: BLE001
         # Log at WARNING with traceback so transient gateway failures vs
         # payload-shape regressions are post-incident diagnosable. The
         # caller surfaces a visible caption to the operator regardless.
-        logger.warning("Registry handle lookup failed for %s: %s", strategy_id, exc, exc_info=True)
+        logger.warning("Registry handle lookup failed for %s: %s", deployment_id, exc, exc_info=True)
         return None
 
     # Defensive: ``get_positions`` is typed to return ``GetPositionsResult``

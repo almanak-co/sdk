@@ -225,7 +225,7 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self._supplied_amount} {self.collateral_token} to Aave V3",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
                 logger.info("SUPPLY succeeded: %s %s to Aave V3", self._supplied_amount, self.collateral_token)
@@ -239,7 +239,7 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token} from Aave V3",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                     )
                 )
                 logger.info("BORROW succeeded: %s %s from Aave V3", self._borrowed_amount, self.borrow_token)
@@ -256,7 +256,7 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Swapped {self._borrowed_amount} {self.borrow_token} -> {self.swap_to_token}",
-                        strategy_id=self.strategy_id,
+                        deployment_id=self.deployment_id,
                         details={"action": "swap", "protocol": self.swap_protocol},
                     )
                 )
@@ -357,7 +357,7 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=self.STRATEGY_NAME,
+            deployment_id=self.STRATEGY_NAME,
             timestamp=datetime.now(UTC),
             positions=positions,
         )

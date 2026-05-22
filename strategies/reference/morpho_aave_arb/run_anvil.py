@@ -170,7 +170,7 @@ def fund_eth(amount: Decimal) -> bool:
 def run_strategy(force_protocol: str) -> int:
     """Run the strategy via CLI."""
     config = {
-        "strategy_id": "morpho_aave_arb_test",
+        "deployment_id": "morpho_aave_arb_test",
         "strategy_name": "demo_morpho_aave_arb",
         "token": "wstETH",
         "morpho_market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",

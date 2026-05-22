@@ -33,7 +33,7 @@ def _make_strategy(**config_overrides) -> AaveV3LendingSonicStrategy:
         strategy = AaveV3LendingSonicStrategy.__new__(AaveV3LendingSonicStrategy)
 
     # Set required base class attributes
-    strategy._strategy_id = "test-aave-v3-sonic"
+    strategy._deployment_id = "test-aave-v3-sonic"
     strategy._chain = "sonic"
     strategy._wallet_address = "0x1234567890123456789012345678901234567890"
     strategy._config = default_config

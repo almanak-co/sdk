@@ -7,7 +7,7 @@ dashboard image and by `almanak dashboard` locally. Both call your
 ## Anatomy of a dashboard
 
 If a built-in template renderer fits your strategy, call it. The renderer
-owns the **title**, the **strategy header** (Strategy ID / pool / chain
+owns the **title**, the **strategy header** (Deployment ID / pool / chain
 markdown), and the three **audit sections** (PnL, cost stack, trade tape).
 Do not wrap it with your own `st.title(...)` or audit-section helpers — that
 double-renders the title and the audit panels.
@@ -15,9 +15,9 @@ double-renders the title and the audit panels.
 ```python
 from almanak.framework.dashboard.templates import get_bollinger_config, render_ta_dashboard
 
-def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
+def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
     config = get_bollinger_config(period=20, std_dev=1.0)
-    render_ta_dashboard(strategy_id, strategy_config, session_state, config)
+    render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 ```
 
 Need to add summary cards or extra metrics? Call the renderer first and
@@ -44,12 +44,12 @@ from almanak.framework.dashboard import (
     render_pnl_section, render_cost_stack_section, render_trade_tape_section,
 )
 
-def render_custom_dashboard(strategy_id, strategy_config, api_client, session_state):
+def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
     st.title("My Custom Strategy")
-    render_pnl_section(strategy_id)
+    render_pnl_section(deployment_id)
     # your indicator / position / performance UI
-    render_cost_stack_section(strategy_id)
-    render_trade_tape_section(strategy_id)
+    render_cost_stack_section(deployment_id)
+    render_trade_tape_section(deployment_id)
 ```
 
 ## Audit primitives

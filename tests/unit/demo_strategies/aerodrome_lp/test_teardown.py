@@ -12,7 +12,7 @@ def create_strategy() -> AerodromeLPStrategy:
     with patch.object(AerodromeLPStrategy, "__init__", lambda _self, *_args, **_kwargs: None):
         strategy = AerodromeLPStrategy.__new__(AerodromeLPStrategy)
 
-    strategy._strategy_id = "test-aerodrome-lp"
+    strategy._deployment_id = "test-aerodrome-lp"
     strategy._chain = "base"
     strategy.pool = "WETH/USDC"
     strategy.stable = False
@@ -32,7 +32,7 @@ def test_get_open_positions_returns_valid_summary_without_position() -> None:
 
     summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-aerodrome-lp"
+    assert summary.deployment_id == "test-aerodrome-lp"
     assert len(summary.positions) == 0
     assert summary.total_value_usd == Decimal("0")
 
@@ -45,7 +45,7 @@ def test_get_open_positions_returns_valid_summary_with_position() -> None:
 
     summary = strategy.get_open_positions()
 
-    assert summary.strategy_id == "test-aerodrome-lp"
+    assert summary.deployment_id == "test-aerodrome-lp"
     assert len(summary.positions) == 1
     assert summary.positions[0].protocol == "aerodrome"
     assert summary.total_value_usd > Decimal("0")

@@ -92,7 +92,7 @@ from almanak.framework.backtesting.paper import RollingForkManager, PaperPortfol
 config = PaperTraderConfig(
     chain="arbitrum",
     rpc_url="https://arb1.arbitrum.io/rpc",
-    strategy_id="my_strategy",
+    deployment_id="my_strategy",
     tick_interval_seconds=60,
 )
 

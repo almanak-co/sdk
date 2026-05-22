@@ -356,7 +356,7 @@ class EdgeEthFundingLongStrategy(IntentStrategy):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "edge_eth_funding_long"),
+            deployment_id=getattr(self, "deployment_id", "edge_eth_funding_long"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

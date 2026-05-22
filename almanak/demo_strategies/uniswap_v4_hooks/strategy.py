@@ -204,7 +204,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description="Opening new V4 hooked LP position",
-                strategy_id=self.strategy_id,
+                deployment_id=self.deployment_id,
                 details={
                     "action": "opening_v4_hooked_position",
                     "hook": self.hook_address,
@@ -382,7 +382,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             )
 
         return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_uniswap_v4_hooks"),
+            deployment_id=getattr(self, "deployment_id", "demo_uniswap_v4_hooks"),
             timestamp=datetime.now(UTC),
             positions=positions,
         )

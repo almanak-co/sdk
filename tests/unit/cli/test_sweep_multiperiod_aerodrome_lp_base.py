@@ -51,7 +51,7 @@ def _make_backtest_result(
 ) -> BacktestResult:
     return BacktestResult(
         engine=BacktestEngine.PNL,
-        strategy_id="demo_aerodrome_sweep_lp",
+        deployment_id="demo_aerodrome_sweep_lp",
         start_time=datetime(2024, 10, 1, tzinfo=UTC),
         end_time=datetime(2024, 12, 1, tzinfo=UTC),
         trades=[],

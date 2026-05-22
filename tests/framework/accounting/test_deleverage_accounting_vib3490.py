@@ -71,8 +71,7 @@ def _call_build(intent, tx_hash: str = "0xdeadc0de12345678"):
     return build_lending_accounting_event(
         intent=intent,
         result=result,
-        deployment_id="dep-1",
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         cycle_id="cycle-001",
         execution_mode="paper",
         chain="arbitrum",
@@ -219,8 +218,7 @@ class TestDeleverageProtocolValidation:
             event = build_lending_accounting_event(
                 intent=intent,
                 result=result,
-                deployment_id="dep-1",
-                strategy_id="strat-1",
+                deployment_id="strat-1",
                 cycle_id="cycle-001",
                 execution_mode="live",
                 chain="arbitrum",
@@ -257,7 +255,7 @@ class TestDeleverageWarningLogged:
         runner = StrategyRunner.__new__(StrategyRunner)
 
         strategy = MagicMock()
-        strategy.strategy_id = "test-strat"
+        strategy.deployment_id = "test-strat"
 
         intent = DeleverageIntent(
             protocol="aave_v3",

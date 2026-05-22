@@ -56,7 +56,7 @@ class _EnumLike:
 
 @dataclass
 class _FakeContext:
-    strategy_id: str = "strat-1"
+    deployment_id: str = "strat-1"
     chain: str = "arbitrum"
     wallet_address: str = "0xWALLET"
     correlation_id: str = "corr-123"
@@ -130,7 +130,7 @@ class TestBuildContextWiring:
             transaction_results=[],
             started_at=STARTED_AT,
         )
-        assert report.strategy_id == "strat-1"
+        assert report.deployment_id == "strat-1"
         assert report.chain == "arbitrum"
         assert report.wallet_address == "0xWALLET"
         assert report.correlation_id == "corr-123"
@@ -146,7 +146,7 @@ class TestBuildContextWiring:
             transaction_results=[],
             started_at=STARTED_AT,
         )
-        assert report.strategy_id == "unknown"
+        assert report.deployment_id == "unknown"
         assert report.chain == "unknown"
         assert report.wallet_address == "unknown"
         assert report.correlation_id == ""
@@ -597,7 +597,7 @@ MINIMAL_GOLDEN = (
     "======================================================================\n"
     "\n"
     "--- EXECUTION CONTEXT ---\n"
-    "Strategy ID: strat-1\n"
+    "Deployment ID: strat-1\n"
     "Chain: arbitrum\n"
     "Wallet: 0xWALLET\n"
     "Correlation ID: corr-123\n"
@@ -613,7 +613,7 @@ MINIMAL_GOLDEN = (
 
 def _build_minimal_report() -> VerboseRevertReport:
     return VerboseRevertReport(
-        strategy_id="strat-1",
+        deployment_id="strat-1",
         chain="arbitrum",
         wallet_address="0xWALLET",
         correlation_id="corr-123",
@@ -854,7 +854,7 @@ class TestBuildAndFormatIntegration:
             )
         ]
         d = report.to_dict()
-        assert d["strategy_id"] == "strat-1"
+        assert d["deployment_id"] == "strat-1"
         assert d["intent"]["intent_type"] == "SWAP"
         assert d["actions"][0]["action_type"] == "SWAP"
         assert d["transactions"][0]["tx_hash"] == "h"

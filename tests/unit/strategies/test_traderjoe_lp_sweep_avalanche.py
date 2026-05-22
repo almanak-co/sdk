@@ -45,7 +45,7 @@ def strategy(sweep_config):
     strat.config = config
     strat._chain = "avalanche"
     strat._wallet_address = "0x" + "0" * 40
-    strat._strategy_id = "test-traderjoe-sweep"
+    strat._deployment_id = "test-traderjoe-sweep"
 
     # Mirror __init__ logic
     strat.token_x = "WAVAX"

@@ -109,24 +109,24 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             return gateway_pb2.CreateTeardownRequestResponse(success=False, error="internal server error")
 
     async def GetTeardownRequest(self, request, context):
-        if not self._validate_non_empty(request.strategy_id, "strategy_id", context):
-            return gateway_pb2.GetTeardownRequestResponse(found=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(request.deployment_id, "deployment_id", context):
+            return gateway_pb2.GetTeardownRequestResponse(found=False, error="deployment_id must be non-empty")
         try:
-            result = await asyncio.to_thread(self._get_manager().get_request, request.strategy_id)
+            result = await asyncio.to_thread(self._get_manager().get_request, request.deployment_id)
             return self._request_response(result)
         except Exception:
-            logger.exception("GetTeardownRequest failed for %s", request.strategy_id)
+            logger.exception("GetTeardownRequest failed for %s", request.deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.GetTeardownRequestResponse(found=False, error="internal server error")
 
     async def GetActiveTeardownRequest(self, request, context):
-        if not self._validate_non_empty(request.strategy_id, "strategy_id", context):
-            return gateway_pb2.GetTeardownRequestResponse(found=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(request.deployment_id, "deployment_id", context):
+            return gateway_pb2.GetTeardownRequestResponse(found=False, error="deployment_id must be non-empty")
         try:
-            result = await asyncio.to_thread(self._get_manager().get_active_request, request.strategy_id)
+            result = await asyncio.to_thread(self._get_manager().get_active_request, request.deployment_id)
             return self._request_response(result)
         except Exception:
-            logger.exception("GetActiveTeardownRequest failed for %s", request.strategy_id)
+            logger.exception("GetActiveTeardownRequest failed for %s", request.deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.GetTeardownRequestResponse(found=False, error="internal server error")
 
@@ -175,22 +175,22 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
     async def AcknowledgeTeardownRequest(self, request, context):
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
-            lambda manager, strategy_id: manager.acknowledge_request(strategy_id),
+            request.deployment_id,
+            lambda manager, deployment_id: manager.acknowledge_request(deployment_id),
         )
 
     async def MarkTeardownStarted(self, request, context):
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
-            lambda manager, strategy_id: manager.mark_started(strategy_id, total_positions=request.total_positions),
+            request.deployment_id,
+            lambda manager, deployment_id: manager.mark_started(deployment_id, total_positions=request.total_positions),
         )
 
     async def UpdateTeardownProgress(self, request, context):
-        def _update(manager: TeardownStateManagerProtocol, strategy_id: str) -> Any | None:
+        def _update(manager: TeardownStateManagerProtocol, deployment_id: str) -> Any | None:
             phase = TeardownPhase(request.current_phase) if request.current_phase else None
             return manager.update_progress(
-                strategy_id,
+                deployment_id,
                 positions_closed=request.positions_closed,
                 positions_failed=request.positions_failed,
                 current_phase=phase,
@@ -198,21 +198,21 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
 
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
+            request.deployment_id,
             _update,
             invalid_error="current_phase is invalid",
         )
 
     async def MarkTeardownCompleted(self, request, context):
-        def _complete(manager: TeardownStateManagerProtocol, strategy_id: str) -> Any | None:
+        def _complete(manager: TeardownStateManagerProtocol, deployment_id: str) -> Any | None:
             result = json.loads(request.result_json) if request.result_json else None
             if result is not None and not isinstance(result, dict):
                 raise ValueError("result_json must be a JSON object")
-            return manager.mark_completed(strategy_id, result=result)
+            return manager.mark_completed(deployment_id, result=result)
 
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
+            request.deployment_id,
             _complete,
             invalid_error="result_json is invalid",
         )
@@ -225,7 +225,7 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
         # VIB-4542 (audit PR #2343): use proto3 ``optional`` field presence to
         # distinguish "caller supplied a count" from "caller omitted the field"
         # — the prior ``-1`` sentinel was unsafe because proto3 scalar defaults
-        # are 0 (not -1), so a legacy client sending only strategy_id +
+        # are 0 (not -1), so a legacy client sending only deployment_id +
         # error_message would have arrived as positions_closed=0 (overwrite)
         # instead of "preserve". HasField returns False for absent optional
         # scalars on both unset and not-yet-set messages.
@@ -233,9 +233,9 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
         failed = request.positions_failed if request.HasField("positions_failed") else None
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
-            lambda manager, strategy_id: manager.mark_failed(
-                strategy_id,
+            request.deployment_id,
+            lambda manager, deployment_id: manager.mark_failed(
+                deployment_id,
                 error=request.error_message,
                 positions_closed=closed,
                 positions_failed=failed,
@@ -245,59 +245,59 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
     async def RequestTeardownCancel(self, request, context):
         return await self._bool_mutation(
             context,
-            request.strategy_id,
-            lambda manager, strategy_id: manager.request_cancel(strategy_id),
+            request.deployment_id,
+            lambda manager, deployment_id: manager.request_cancel(deployment_id),
         )
 
     async def MarkTeardownCancelled(self, request, context):
         return await self._strategy_mutation(
             context,
-            request.strategy_id,
-            lambda manager, strategy_id: manager.mark_cancelled(strategy_id),
+            request.deployment_id,
+            lambda manager, deployment_id: manager.mark_cancelled(deployment_id),
         )
 
     async def DeleteTeardownRequest(self, request, context):
         return await self._bool_mutation(
-            context, request.strategy_id, lambda manager, strategy_id: manager.delete_request(strategy_id)
+            context, request.deployment_id, lambda manager, deployment_id: manager.delete_request(deployment_id)
         )
 
     async def _strategy_mutation(
         self,
         context,
-        strategy_id: str,
+        deployment_id: str,
         fn: Callable[[TeardownStateManagerProtocol, str], Any | None],
         invalid_error: str = "teardown request input is invalid",
     ):
-        if not self._validate_non_empty(strategy_id, "strategy_id", context):
-            return gateway_pb2.TeardownRequestMutationResponse(success=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(deployment_id, "deployment_id", context):
+            return gateway_pb2.TeardownRequestMutationResponse(success=False, error="deployment_id must be non-empty")
         try:
-            result = await asyncio.to_thread(fn, self._get_manager(), strategy_id)
+            result = await asyncio.to_thread(fn, self._get_manager(), deployment_id)
             return self._mutation_response(result)
         except _INPUT_ERROR_TYPES as exc:
-            logger.debug("Teardown request mutation rejected malformed input for %s: %s", strategy_id, exc)
+            logger.debug("Teardown request mutation rejected malformed input for %s: %s", deployment_id, exc)
             return self._invalid_argument(
                 context,
                 invalid_error,
                 gateway_pb2.TeardownRequestMutationResponse(success=False, error=invalid_error),
             )
         except Exception:
-            logger.exception("Teardown request mutation failed for %s", strategy_id)
+            logger.exception("Teardown request mutation failed for %s", deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.TeardownRequestMutationResponse(success=False, error="internal server error")
 
     async def _bool_mutation(
         self,
         context,
-        strategy_id: str,
+        deployment_id: str,
         fn: Callable[[TeardownStateManagerProtocol, str], bool],
     ):
-        if not self._validate_non_empty(strategy_id, "strategy_id", context):
-            return gateway_pb2.BoolMutationResponse(success=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(deployment_id, "deployment_id", context):
+            return gateway_pb2.BoolMutationResponse(success=False, error="deployment_id must be non-empty")
         try:
-            result = await asyncio.to_thread(fn, self._get_manager(), strategy_id)
+            result = await asyncio.to_thread(fn, self._get_manager(), deployment_id)
             return gateway_pb2.BoolMutationResponse(success=True, value=bool(result))
         except Exception:
-            logger.exception("Teardown bool mutation failed for %s", strategy_id)
+            logger.exception("Teardown bool mutation failed for %s", deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.BoolMutationResponse(success=False, error="internal server error")
 
@@ -323,15 +323,15 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             return gateway_pb2.SaveTeardownStateResponse(success=False, error="internal server error")
 
     async def LoadTeardownState(self, request, context):
-        if not self._validate_non_empty(request.strategy_id, "strategy_id", context):
-            return gateway_pb2.LoadTeardownStateResponse(found=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(request.deployment_id, "deployment_id", context):
+            return gateway_pb2.LoadTeardownStateResponse(found=False, error="deployment_id must be non-empty")
         try:
-            state = await self._get_adapter().get_teardown_state(request.strategy_id)
+            state = await self._get_adapter().get_teardown_state(request.deployment_id)
             if state is None:
                 return gateway_pb2.LoadTeardownStateResponse(found=False)
             return gateway_pb2.LoadTeardownStateResponse(found=True, state_json=teardown_state_to_json(state))
         except Exception:
-            logger.exception("LoadTeardownState failed for %s", request.strategy_id)
+            logger.exception("LoadTeardownState failed for %s", request.deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.LoadTeardownStateResponse(found=False, error="internal server error")
 
@@ -347,7 +347,9 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             return gateway_pb2.DeleteTeardownStateResponse(success=False, error="internal server error")
 
     async def CreateApprovalRequest(self, request, context):
-        if not all((request.teardown_id, request.strategy_id, request.level, request.request_json, request.expires_at)):
+        if not all(
+            (request.teardown_id, request.deployment_id, request.level, request.request_json, request.expires_at)
+        ):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("approval request fields must be non-empty")
             return gateway_pb2.CreateApprovalRequestResponse(
@@ -357,7 +359,7 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             await asyncio.to_thread(
                 self._get_adapter().create_approval_request,
                 request.teardown_id,
-                request.strategy_id,
+                request.deployment_id,
                 request.level,
                 request.request_json,
                 request.expires_at,
@@ -407,10 +409,10 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
             return gateway_pb2.BoolMutationResponse(success=False, error="internal server error")
 
     async def GetLatestPendingApproval(self, request, context):
-        if not self._validate_non_empty(request.strategy_id, "strategy_id", context):
-            return gateway_pb2.GetLatestPendingApprovalResponse(found=False, error="strategy_id must be non-empty")
+        if not self._validate_non_empty(request.deployment_id, "deployment_id", context):
+            return gateway_pb2.GetLatestPendingApprovalResponse(found=False, error="deployment_id must be non-empty")
         try:
-            approval = await asyncio.to_thread(self._get_adapter().get_latest_pending_approval, request.strategy_id)
+            approval = await asyncio.to_thread(self._get_adapter().get_latest_pending_approval, request.deployment_id)
             if approval is None:
                 return gateway_pb2.GetLatestPendingApprovalResponse(found=False)
             return gateway_pb2.GetLatestPendingApprovalResponse(
@@ -418,25 +420,25 @@ class TeardownServiceServicer(gateway_pb2_grpc.TeardownServiceServicer):
                 approval_json=json.dumps(approval, sort_keys=True),
             )
         except Exception:
-            logger.exception("GetLatestPendingApproval failed for %s", request.strategy_id)
+            logger.exception("GetLatestPendingApproval failed for %s", request.deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.GetLatestPendingApprovalResponse(found=False, error="internal server error")
 
     async def WriteApprovalResponseByStrategy(self, request, context):
-        if not all((request.strategy_id, request.response_json)):
+        if not all((request.deployment_id, request.response_json)):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("strategy_id and response_json must be non-empty")
+            context.set_details("deployment_id and response_json must be non-empty")
             return gateway_pb2.BoolMutationResponse(
-                success=False, error="strategy_id and response_json must be non-empty"
+                success=False, error="deployment_id and response_json must be non-empty"
             )
         try:
             value = await asyncio.to_thread(
                 self._get_adapter().write_approval_response_by_strategy,
-                request.strategy_id,
+                request.deployment_id,
                 request.response_json,
             )
             return gateway_pb2.BoolMutationResponse(success=True, value=bool(value))
         except Exception:
-            logger.exception("WriteApprovalResponseByStrategy failed for %s", request.strategy_id)
+            logger.exception("WriteApprovalResponseByStrategy failed for %s", request.deployment_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             return gateway_pb2.BoolMutationResponse(success=False, error="internal server error")

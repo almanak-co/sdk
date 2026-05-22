@@ -92,20 +92,20 @@ class PIDFile:
 
     Attributes:
         path: Path to the PID file
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         pid: Process ID (set when acquired)
     """
 
     path: Path
-    strategy_id: str
+    deployment_id: str
     pid: int | None = None
 
     @classmethod
-    def get_default_path(cls, strategy_id: str, state_dir: Path | None = None) -> Path:
+    def get_default_path(cls, deployment_id: str, state_dir: Path | None = None) -> Path:
         """Get the default PID file path for a strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             state_dir: Optional state directory (defaults to ~/.almanak/paper/)
 
         Returns:
@@ -113,7 +113,7 @@ class PIDFile:
         """
         if state_dir is None:
             state_dir = Path.home() / ".almanak" / "paper"
-        return state_dir / f"{strategy_id}.pid"
+        return state_dir / f"{deployment_id}.pid"
 
     def acquire(self) -> bool:
         """Acquire the PID file lock.
@@ -137,10 +137,10 @@ class PIDFile:
                 existing_pid = int(self.path.read_text().strip())
                 # Check if process is still running
                 if self._is_process_running(existing_pid):
-                    logger.warning(f"Paper Trader for {self.strategy_id} already running (PID: {existing_pid})")
+                    logger.warning(f"Paper Trader for {self.deployment_id} already running (PID: {existing_pid})")
                     return False
                 # Process not running, remove stale PID file
-                logger.info(f"Removing stale PID file for {self.strategy_id}")
+                logger.info(f"Removing stale PID file for {self.deployment_id}")
                 self.path.unlink()
             except (ValueError, OSError) as e:
                 logger.warning(f"Error reading PID file: {e}, removing it")
@@ -248,22 +248,22 @@ class TradeHistoryWriter:
 
     Attributes:
         path: Path to the trade history JSONL file
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         _trade_count: Number of trades written
         _error_count: Number of errors written
     """
 
     path: Path
-    strategy_id: str
+    deployment_id: str
     _trade_count: int = field(default=0, init=False)
     _error_count: int = field(default=0, init=False)
 
     @classmethod
-    def get_default_path(cls, strategy_id: str, state_dir: Path | None = None) -> Path:
+    def get_default_path(cls, deployment_id: str, state_dir: Path | None = None) -> Path:
         """Get the default trade history file path for a strategy.
 
         Args:
-            strategy_id: Strategy identifier
+            deployment_id: Deployment identifier
             state_dir: Optional state directory (defaults to ~/.almanak/paper/)
 
         Returns:
@@ -271,7 +271,7 @@ class TradeHistoryWriter:
         """
         if state_dir is None:
             state_dir = Path.home() / ".almanak" / "paper"
-        return state_dir / f"{strategy_id}.trades.jsonl"
+        return state_dir / f"{deployment_id}.trades.jsonl"
 
     def write_trade(self, trade: PaperTrade) -> None:
         """Append a trade to the history file.
@@ -400,7 +400,7 @@ class PaperTraderState:
     session, allowing it to be persisted to disk and resumed later.
 
     Attributes:
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         session_start: When the session started
         last_save: When state was last saved
         tick_count: Number of ticks executed
@@ -422,7 +422,7 @@ class PaperTraderState:
         last_trade_at: Timestamp of last successful trade execution (VIB-1957)
     """
 
-    strategy_id: str
+    deployment_id: str
     session_start: datetime
     last_save: datetime
     tick_count: int
@@ -451,7 +451,7 @@ class PaperTraderState:
             Dictionary representation suitable for JSON serialization
         """
         result = {
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "session_start": self.session_start.isoformat(),
             "last_save": self.last_save.isoformat(),
             "tick_count": self.tick_count,
@@ -510,7 +510,7 @@ class PaperTraderState:
             last_trade_at = datetime.fromisoformat(data["last_trade_at"])
 
         return cls(
-            strategy_id=data["strategy_id"],
+            deployment_id=data["deployment_id"],
             session_start=datetime.fromisoformat(data["session_start"]),
             last_save=datetime.fromisoformat(data["last_save"]),
             tick_count=data["tick_count"],
@@ -645,7 +645,7 @@ class BackgroundStatus:
     Attributes:
         is_running: Whether the process is running
         pid: Process ID if running
-        strategy_id: Strategy identifier
+        deployment_id: Deployment identifier
         session_start: When session started
         tick_count: Number of ticks executed
         trade_count: Number of successful trades
@@ -659,7 +659,7 @@ class BackgroundStatus:
 
     is_running: bool
     pid: int | None = None
-    strategy_id: str | None = None
+    deployment_id: str | None = None
     session_start: datetime | None = None
     tick_count: int = 0
     trade_count: int = 0
@@ -682,7 +682,7 @@ class BackgroundStatus:
         return {
             "is_running": self.is_running,
             "pid": self.pid,
-            "strategy_id": self.strategy_id,
+            "deployment_id": self.deployment_id,
             "session_start": self.session_start.isoformat() if self.session_start else None,
             "tick_count": self.tick_count,
             "trade_count": self.trade_count,
@@ -747,17 +747,17 @@ class BackgroundPaperTrader:
     @property
     def state_file(self) -> Path:
         """Get the state file path for this strategy."""
-        return self.state_dir / f"{self.config.strategy_id}.state.json"
+        return self.state_dir / f"{self.config.deployment_id}.state.json"
 
     @property
     def pid_file_path(self) -> Path:
         """Get the PID file path for this strategy."""
-        return PIDFile.get_default_path(self.config.strategy_id, self.state_dir)
+        return PIDFile.get_default_path(self.config.deployment_id, self.state_dir)
 
     @property
     def log_file(self) -> Path:
         """Get the log file path for this strategy."""
-        return self.state_dir / f"{self.config.strategy_id}.log"
+        return self.state_dir / f"{self.config.deployment_id}.log"
 
     def start(
         self,
@@ -782,12 +782,12 @@ class BackgroundPaperTrader:
         # Check if already running
         pid_file = PIDFile(
             path=self.pid_file_path,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
         )
 
         if pid_file.is_running():
             existing_pid = pid_file.get_pid()
-            raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
+            raise RuntimeError(f"Paper Trader for {self.config.deployment_id} already running (PID: {existing_pid})")
 
         # Fix SSL cert resolution for spawned subprocess (macOS
         # multiprocessing). The typed backtest config resolves a usable
@@ -822,10 +822,11 @@ class BackgroundPaperTrader:
         if self._process.pid is None:
             raise RuntimeError("Failed to start background process")
 
-        logger.info(f"Started background Paper Trader for {self.config.strategy_id} (PID: {self._process.pid})")
+        logger.info(f"Started background Paper Trader for {self.config.deployment_id} (PID: {self._process.pid})")
 
         return self._process.pid
 
+    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def stop(self, timeout: float = 30.0) -> bool:
         """Stop the background Paper Trader process.
 
@@ -839,12 +840,12 @@ class BackgroundPaperTrader:
         """
         pid_file = PIDFile(
             path=self.pid_file_path,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
         )
 
         pid = pid_file.get_pid()
         if pid is None or not pid_file.is_running():
-            logger.info(f"No running Paper Trader for {self.config.strategy_id}")
+            logger.info(f"No running Paper Trader for {self.config.deployment_id}")
             return False
 
         logger.info(f"Stopping Paper Trader (PID: {pid})...")
@@ -890,7 +891,7 @@ class BackgroundPaperTrader:
         """
         pid_file = PIDFile(
             path=self.pid_file_path,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
         )
 
         pid = pid_file.get_pid()
@@ -899,7 +900,7 @@ class BackgroundPaperTrader:
         status = BackgroundStatus(
             is_running=is_running,
             pid=pid,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
             status="running" if is_running else "stopped",
         )
 
@@ -959,7 +960,7 @@ class BackgroundPaperTrader:
     @property
     def trade_history_file(self) -> Path:
         """Get the trade history JSONL file path for this strategy."""
-        return TradeHistoryWriter.get_default_path(self.config.strategy_id, self.state_dir)
+        return TradeHistoryWriter.get_default_path(self.config.deployment_id, self.state_dir)
 
     def resume(
         self,
@@ -987,12 +988,12 @@ class BackgroundPaperTrader:
         # Check if already running
         pid_file = PIDFile(
             path=self.pid_file_path,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
         )
 
         if pid_file.is_running():
             existing_pid = pid_file.get_pid()
-            raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
+            raise RuntimeError(f"Paper Trader for {self.config.deployment_id} already running (PID: {existing_pid})")
 
         # Check if state exists and can be resumed
         if not self.state_file.exists():
@@ -1006,7 +1007,7 @@ class BackgroundPaperTrader:
             )
 
         logger.info(
-            f"Resuming Paper Trader for {self.config.strategy_id} "
+            f"Resuming Paper Trader for {self.config.deployment_id} "
             f"(tick_count={state.tick_count}, trades={len(state.trades)})"
         )
 
@@ -1030,7 +1031,7 @@ class BackgroundPaperTrader:
         if self._process.pid is None:
             raise RuntimeError("Failed to start background process")
 
-        logger.info(f"Resumed background Paper Trader for {self.config.strategy_id} (PID: {self._process.pid})")
+        logger.info(f"Resumed background Paper Trader for {self.config.deployment_id} (PID: {self._process.pid})")
 
         return self._process.pid
 
@@ -1045,7 +1046,7 @@ class BackgroundPaperTrader:
         # Check if running
         pid_file = PIDFile(
             path=self.pid_file_path,
-            strategy_id=self.config.strategy_id,
+            deployment_id=self.config.deployment_id,
         )
         if pid_file.is_running():
             raise RuntimeError(f"Cannot clear state while Paper Trader is running (PID: {pid_file.get_pid()})")
@@ -1142,7 +1143,7 @@ def _run_background_paper_trader(  # noqa: C901
     config = PaperTraderConfig.from_dict(config_dict)
 
     # Set up logging to file
-    log_file = state_path / f"{config.strategy_id}.log"
+    log_file = state_path / f"{config.deployment_id}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1156,12 +1157,12 @@ def _run_background_paper_trader(  # noqa: C901
     install_redaction()
 
     bg_logger = logging.getLogger("almanak.framework.backtesting.paper.background")
-    bg_logger.info(f"Starting background Paper Trader for {config.strategy_id}")
+    bg_logger.info(f"Starting background Paper Trader for {config.deployment_id}")
 
     # Acquire PID file
     pid_file = PIDFile(
-        path=PIDFile.get_default_path(config.strategy_id, state_path),
-        strategy_id=config.strategy_id,
+        path=PIDFile.get_default_path(config.deployment_id, state_path),
+        deployment_id=config.deployment_id,
     )
 
     if not pid_file.acquire():
@@ -1217,9 +1218,9 @@ def _run_background_paper_trader(  # noqa: C901
         sys.exit(1)
 
     # Initialize state and trade history writer
-    state_file = state_path / f"{config.strategy_id}.state.json"
-    trade_history_file = TradeHistoryWriter.get_default_path(config.strategy_id, state_path)
-    trade_history = TradeHistoryWriter(path=trade_history_file, strategy_id=config.strategy_id)
+    state_file = state_path / f"{config.deployment_id}.state.json"
+    trade_history_file = TradeHistoryWriter.get_default_path(config.deployment_id, state_path)
+    trade_history = TradeHistoryWriter(path=trade_history_file, deployment_id=config.deployment_id)
 
     # Handle resume vs fresh start
     if resume and state_file.exists():
@@ -1243,7 +1244,7 @@ def _run_background_paper_trader(  # noqa: C901
         # Create fresh state
         session_start = datetime.now(UTC)
         state = PaperTraderState(
-            strategy_id=config.strategy_id,
+            deployment_id=config.deployment_id,
             session_start=session_start,
             last_save=session_start,
             tick_count=0,
@@ -1289,7 +1290,7 @@ def _run_background_paper_trader(  # noqa: C901
         )
 
         portfolio_tracker = PaperPortfolioTracker(
-            strategy_id=config.strategy_id,
+            deployment_id=config.deployment_id,
             initial_balances=config.get_initial_balances(),
         )
 

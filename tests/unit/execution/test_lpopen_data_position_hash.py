@@ -165,8 +165,7 @@ def _make_result_with_lp_open(lp_open_data: LPOpenData | None) -> MagicMock:
 
 
 _COMMON_KWARGS = dict(
-    deployment_id="deploy-1",
-    strategy_id="strat-1",
+    deployment_id="strat-1",
     cycle_id="cycle-1",
     execution_mode="paper",
     chain="base",

@@ -39,7 +39,7 @@ def _make_strategy(
     with patch.object(CompoundV3AerodromeYieldFarmBaseStrategy, "__init__", lambda self, *a, **kw: None):
         strat = CompoundV3AerodromeYieldFarmBaseStrategy.__new__(CompoundV3AerodromeYieldFarmBaseStrategy)
 
-    strat._strategy_id = "test-compound-aero-paper"
+    strat._deployment_id = "test-compound-aero-paper"
     strat._chain = chain
     strat._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strat.config = {}
@@ -90,7 +90,7 @@ class TestPaperTraderConfig:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://mainnet.base.org",
-            strategy_id="compound_v3_aerodrome_yield_farm_base",
+            deployment_id="compound_v3_aerodrome_yield_farm_base",
             initial_eth=Decimal("100"),
             initial_tokens={"USDC": Decimal("10000"), "WETH": Decimal("1")},
             max_ticks=10,
@@ -106,7 +106,7 @@ class TestPaperTraderConfig:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://mainnet.base.org",
-            strategy_id="compound_v3_aerodrome_yield_farm_base",
+            deployment_id="compound_v3_aerodrome_yield_farm_base",
             initial_eth=Decimal("100"),
             initial_tokens={
                 "USDC": Decimal("10000"),
@@ -122,7 +122,7 @@ class TestPaperTraderConfig:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://mainnet.base.org",
-            strategy_id="compound_v3_aerodrome_yield_farm_base",
+            deployment_id="compound_v3_aerodrome_yield_farm_base",
             max_ticks=10,
             tick_interval_seconds=60,
         )
@@ -134,7 +134,7 @@ class TestPaperTraderConfig:
         config = PaperTraderConfig(
             chain="base",
             rpc_url="https://mainnet.base.org",
-            strategy_id="compound_v3_aerodrome_yield_farm_base",
+            deployment_id="compound_v3_aerodrome_yield_farm_base",
             anvil_port=8546,
         )
         assert config.fork_rpc_url == "http://localhost:8546"

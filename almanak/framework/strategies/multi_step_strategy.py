@@ -310,7 +310,7 @@ class MultiStepStrategy(IntentStrategy):
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.ERROR,
                     description=f"MultiStep decide() caught exception: {type(e).__name__}: {e}",
-                    strategy_id=getattr(self, "strategy_id", ""),
+                    deployment_id=getattr(self, "deployment_id", ""),
                     details={
                         "step": self._ms_state,
                         "exception_type": type(e).__name__,
@@ -486,7 +486,7 @@ class MultiStepStrategy(IntentStrategy):
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
                 description=description,
-                strategy_id=getattr(self, "strategy_id", ""),
+                deployment_id=getattr(self, "deployment_id", ""),
                 details=event_details,
             )
         )

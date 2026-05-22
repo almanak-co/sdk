@@ -41,7 +41,7 @@ def executor(mock_gateway):
         mock_gateway,
         policy=policy,
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-        strategy_id="test-strategy",
+        deployment_id="test-strategy",
         max_retries=0,  # No retries for fast tests
     )
 
@@ -179,7 +179,7 @@ class TestToolExecutorRetryIntegration:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             max_retries=2,
             initial_retry_delay=0.01,  # Fast for tests
         )
@@ -221,7 +221,7 @@ class TestToolExecutorRetryIntegration:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             max_retries=5,  # Many retries, but should not use them
             initial_retry_delay=0.01,
         )
@@ -275,7 +275,7 @@ class TestToolExecutorSadflowIntegration:
             mock_gateway,
             policy=policy,
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
-            strategy_id="test-strategy",
+            deployment_id="test-strategy",
             alert_manager=alert_manager,
             max_retries=0,
         )

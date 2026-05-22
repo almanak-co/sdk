@@ -33,8 +33,7 @@ def _make_minimal_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE transaction_ledger (
-            id TEXT PRIMARY KEY, cycle_id TEXT, strategy_id TEXT,
-            deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
+            id TEXT PRIMARY KEY, cycle_id TEXT, deployment_id TEXT, execution_mode TEXT, timestamp TEXT,
             intent_type TEXT, token_in TEXT, amount_in TEXT, token_out TEXT,
             amount_out TEXT, effective_price TEXT, slippage_bps INTEGER,
             gas_used INTEGER, gas_usd TEXT, tx_hash TEXT, chain TEXT,
@@ -51,7 +50,7 @@ def _make_minimal_schema(conn: sqlite3.Connection) -> None:
             tx_hash TEXT, ledger_entry_id TEXT
         );
         CREATE TABLE accounting_events (
-            id TEXT PRIMARY KEY, deployment_id TEXT, strategy_id TEXT,
+            id TEXT PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, timestamp TEXT, event_type TEXT, protocol TEXT,
             chain TEXT, asset TEXT, amount TEXT, amount_usd TEXT,
             payload_json TEXT, ledger_entry_id TEXT, schema_version INTEGER,
@@ -59,19 +58,19 @@ def _make_minimal_schema(conn: sqlite3.Connection) -> None:
             primitive_version INTEGER
         );
         CREATE TABLE portfolio_snapshots (
-            id TEXT PRIMARY KEY, strategy_id TEXT, deployment_id TEXT,
+            id TEXT PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, iteration_number INTEGER, timestamp TEXT,
             total_value_usd TEXT, available_cash_usd TEXT, execution_mode TEXT,
             positions_json TEXT, wallet_balances_json TEXT
         );
         CREATE TABLE portfolio_metrics (
-            strategy_id TEXT PRIMARY KEY, total_value_usd TEXT,
+            deployment_id TEXT PRIMARY KEY, total_value_usd TEXT,
             initial_value_usd TEXT, initial_timestamp TEXT, pnl_usd TEXT,
             pnl_pct TEXT, gas_spent_usd TEXT, last_updated TEXT,
-            cycle_id TEXT, deployment_id TEXT
+            cycle_id TEXT
         );
         CREATE TABLE position_state_snapshots (
-            id TEXT PRIMARY KEY, strategy_id TEXT, deployment_id TEXT,
+            id TEXT PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, position_type TEXT, protocol TEXT, chain TEXT,
             timestamp TEXT, value_usd TEXT, health_factor TEXT,
             supply_balance TEXT, borrow_balance TEXT
@@ -94,13 +93,12 @@ def _seed_deployment(
     for i in range(snapshot_count):
         conn.execute(
             "INSERT INTO position_state_snapshots "
-            "(id, strategy_id, deployment_id, cycle_id, position_type, protocol, chain, "
+            "(id, deployment_id, cycle_id, position_type, protocol, chain, "
             " timestamp, value_usd, health_factor, supply_balance, borrow_balance) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 f"pss-{deployment_id}-{i}",
                 f"strat-{deployment_id}",
-                deployment_id,
                 f"c-{deployment_id}-{i}",
                 "LENDING",
                 "morpho_blue",
@@ -115,14 +113,13 @@ def _seed_deployment(
     # Minimal snapshot + metrics + ledger rows so the report can render.
     conn.execute(
         "INSERT INTO portfolio_snapshots "
-        "(id, strategy_id, deployment_id, cycle_id, iteration_number, timestamp, "
+        "(id, deployment_id, cycle_id, iteration_number, timestamp, "
         " total_value_usd, available_cash_usd, execution_mode, positions_json, "
         " wallet_balances_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             f"ps-{deployment_id}-0",
             f"strat-{deployment_id}",
-            deployment_id,
             f"c-{deployment_id}-0",
             0,
             "2026-05-17T00:00:00Z",
@@ -135,9 +132,9 @@ def _seed_deployment(
     )
     conn.execute(
         "INSERT INTO portfolio_metrics "
-        "(strategy_id, total_value_usd, initial_value_usd, initial_timestamp, pnl_usd, "
-        " pnl_pct, gas_spent_usd, last_updated, cycle_id, deployment_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(deployment_id, total_value_usd, initial_value_usd, initial_timestamp, pnl_usd, "
+        " pnl_pct, gas_spent_usd, last_updated, cycle_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             f"strat-{deployment_id}",
             "100.0",
@@ -148,7 +145,6 @@ def _seed_deployment(
             "0",
             "2026-05-17T00:00:00Z",
             f"c-{deployment_id}-0",
-            deployment_id,
         ),
     )
     conn.commit()
@@ -176,7 +172,7 @@ class TestAccountantTestDeploymentScoping:
         matrix-runner contract)."""
         db = _make_db(tmp_path, [{"deployment_id": "A", "snapshot_count": 3}])
         report = run_against_sqlite(db, primitive="looping")
-        assert report.strategy_id == "strat-A"
+        assert report.deployment_id == "strat-A"
 
     def test_multi_deployment_db_no_filter_raises(self, tmp_path: Path) -> None:
         """If the DB has >1 deployment and no ``deployment_id`` is supplied,
@@ -196,7 +192,7 @@ class TestAccountantTestDeploymentScoping:
         assert "clean" in msg
         assert "broken" in msg
         # Programmatic access for callers that want to render their own UX.
-        assert sorted(excinfo.value.deployment_ids) == ["broken", "clean"]
+        assert sorted(excinfo.value.deployment_ids) == ["strat-broken", "strat-clean"]
 
     def test_multi_deployment_db_with_filter_isolates(self, tmp_path: Path) -> None:
         """When supplied, ``deployment_id`` MUST scope cell data. The
@@ -209,13 +205,13 @@ class TestAccountantTestDeploymentScoping:
                 {"deployment_id": "broken", "health_factor": "0.5"},
             ],
         )
-        clean = run_against_sqlite(db, primitive="looping", deployment_id="clean")
-        broken = run_against_sqlite(db, primitive="looping", deployment_id="broken")
+        clean = run_against_sqlite(db, primitive="looping", deployment_id="strat-clean")
+        broken = run_against_sqlite(db, primitive="looping", deployment_id="strat-broken")
 
-        # strategy_id is taken from portfolio_metrics[0], which is now
+        # deployment_id is taken from portfolio_metrics[0], which is now
         # deployment-scoped — proves the upstream rows were filtered.
-        assert clean.strategy_id == "strat-clean"
-        assert broken.strategy_id == "strat-broken"
+        assert clean.deployment_id == "strat-clean"
+        assert broken.deployment_id == "strat-broken"
 
     def test_table_rows_filter_applies_to_position_state_snapshots(
         self, tmp_path: Path
@@ -233,15 +229,15 @@ class TestAccountantTestDeploymentScoping:
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
         try:
-            rows_a = _table_rows(conn, "position_state_snapshots", deployment_id="A")
-            rows_b = _table_rows(conn, "position_state_snapshots", deployment_id="B")
+            rows_a = _table_rows(conn, "position_state_snapshots", deployment_id="strat-A")
+            rows_b = _table_rows(conn, "position_state_snapshots", deployment_id="strat-B")
         finally:
             conn.close()
 
         assert len(rows_a) == 4
         assert len(rows_b) == 7
-        assert all(r["deployment_id"] == "A" for r in rows_a)
-        assert all(r["deployment_id"] == "B" for r in rows_b)
+        assert all(r["deployment_id"] == "strat-A" for r in rows_a)
+        assert all(r["deployment_id"] == "strat-B" for r in rows_b)
         assert all(Decimal(str(r["health_factor"])) == Decimal("1.5") for r in rows_a)
         assert all(Decimal(str(r["health_factor"])) == Decimal("0.5") for r in rows_b)
 
@@ -272,7 +268,7 @@ class TestAccountantTestDeploymentScoping:
         db = _make_db(tmp_path, [{"deployment_id": "matrix_fixture", "snapshot_count": 2}])
         # No deployment_id passed — auto-pick the only candidate.
         report = run_against_sqlite(db, primitive="looping")
-        assert report.strategy_id == "strat-matrix_fixture"
+        assert report.deployment_id == "strat-matrix_fixture"
         assert report.cells  # report rendered without error
 
     def test_empty_db_proceeds_unfiltered(self, tmp_path: Path) -> None:
@@ -287,4 +283,4 @@ class TestAccountantTestDeploymentScoping:
         finally:
             conn.close()
         report = run_against_sqlite(db, primitive="looping")
-        assert report.strategy_id == ""
+        assert report.deployment_id == ""

@@ -82,7 +82,7 @@ _MISSING = "—"  # em dash: signals "not yet available"
 def _default_db_path() -> str:
     """Resolve the canonical local DB path (VIB-3761).
 
-    Hosted mode (``AGENT_ID`` set) has no local DB; ``almanak strat pnl``
+    Hosted mode (``ALMANAK_IS_HOSTED`` set) has no local DB; ``almanak strat pnl``
     is a local-only command, so callers in hosted mode should not be
     invoking this.
     """
@@ -624,9 +624,10 @@ def _emit_json_output(
     click.echo(json.dumps(out, indent=2))
 
 
+# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 @click.command("pnl")
 @click.option(
-    "--strategy-id",
+    "--deployment-id",
     "-s",
     required=True,
     help="Deployment ID of the strategy (as printed by `almanak strat list`).",
@@ -657,7 +658,7 @@ def _emit_json_output(
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Emit JSON instead of text.")
 def strat_pnl(  # noqa: C901
-    strategy_id: str,
+    deployment_id: str,
     db_path: str | None,
     ledger_limit: int,
     position_limit: int,
@@ -701,7 +702,7 @@ def strat_pnl(  # noqa: C901
         acct_data = asyncio.run(
             load_accounting_data(
                 resolved_db,
-                strategy_id,
+                deployment_id,
                 ledger_limit=ledger_limit + 1,
                 position_limit=position_limit + 1,
             )
@@ -735,7 +736,7 @@ def strat_pnl(  # noqa: C901
         and not acct_data.pendle_events
     ):
         click.secho(
-            f"No persisted data found for strategy '{strategy_id}' in {resolved_db}.",
+            f"No persisted data found for strategy '{deployment_id}' in {resolved_db}.",
             fg="red",
             err=True,
         )
@@ -743,7 +744,7 @@ def strat_pnl(  # noqa: C901
 
     # Generic portfolio summary (unchanged from VIB-3206)
     breakdown = compute_pnl_breakdown(
-        deployment_id=strategy_id,
+        deployment_id=deployment_id,
         metrics=metrics,
         ledger_entries=ledger_entries,
         position_events=position_events,

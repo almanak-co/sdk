@@ -12,7 +12,7 @@ Usage (programmatic)::
 
 Usage (CLI)::
 
-    almanak strat export --strategy-id my-strategy --data trades --format csv -o trades.csv
+    almanak strat export --deployment-id my-strategy --data trades --format csv -o trades.csv
 """
 
 import csv
@@ -34,7 +34,7 @@ EXPORT_FORMATS = ("csv", "json")
 
 def export_trades(
     client: "DashboardDataClient",
-    strategy_id: str,
+    deployment_id: str,
     since: datetime | None = None,
     limit: int = 10000,
     fmt: str = "csv",
@@ -43,7 +43,7 @@ def export_trades(
 
     Args:
         client: Connected DashboardDataClient.
-        strategy_id: Strategy to export.
+        deployment_id: Strategy to export.
         since: Only trades after this time.
         limit: Maximum records.
         fmt: Output format ("csv" or "json").
@@ -51,14 +51,14 @@ def export_trades(
     Returns:
         Encoded bytes (UTF-8).
     """
-    trades = client.get_trades(strategy_id, since=since, limit=limit)
+    trades = client.get_trades(deployment_id, since=since, limit=limit)
     rows = [t.to_dict() for t in trades]
     return _format_rows(rows, fmt)
 
 
 def export_timeline(
     client: "DashboardDataClient",
-    strategy_id: str,
+    deployment_id: str,
     limit: int = 10000,
     fmt: str = "csv",
 ) -> bytes:
@@ -66,14 +66,14 @@ def export_timeline(
 
     Args:
         client: Connected DashboardDataClient.
-        strategy_id: Strategy to export.
+        deployment_id: Strategy to export.
         limit: Maximum records.
         fmt: Output format ("csv" or "json").
 
     Returns:
         Encoded bytes (UTF-8).
     """
-    events = client.get_timeline(strategy_id, limit=limit)
+    events = client.get_timeline(deployment_id, limit=limit)
     rows = []
     for e in events:
         rows.append(
@@ -91,7 +91,7 @@ def export_timeline(
 
 def export_pnl(
     client: "DashboardDataClient",
-    strategy_id: str,
+    deployment_id: str,
     since: datetime | None = None,
     fmt: str = "csv",
 ) -> bytes:
@@ -99,14 +99,14 @@ def export_pnl(
 
     Args:
         client: Connected DashboardDataClient.
-        strategy_id: Strategy to export.
+        deployment_id: Strategy to export.
         since: Only data points after this time.
         fmt: Output format ("csv" or "json").
 
     Returns:
         Encoded bytes (UTF-8).
     """
-    points = client.get_pnl_history(strategy_id, since=since)
+    points = client.get_pnl_history(deployment_id, since=since)
     rows = [p.to_dict() for p in points]
     return _format_rows(rows, fmt)
 
