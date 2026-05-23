@@ -2,7 +2,7 @@
 
 Verifies that the IntentCompiler correctly handles Berachain:
 - Token resolution for WBERA, HONEY, USDC.E, WETH, WBTC
-- Enso swap compilation routes to _compile_enso_swap
+- Enso swap compilation routes through the connector compiler registry
 - Native token wrapping (BERA -> WBERA)
 
 These are unit tests (no Anvil required). External API calls are mocked.

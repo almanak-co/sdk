@@ -128,6 +128,14 @@ class CompilerRegistry:
             "almanak.framework.connectors.hyperliquid.compiler",
             "HyperliquidCompiler",
         ),
+        "enso": (
+            "almanak.framework.connectors.enso.compiler",
+            "EnsoCompiler",
+        ),
+        "lifi": (
+            "almanak.framework.connectors.lifi.compiler",
+            "LiFiCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

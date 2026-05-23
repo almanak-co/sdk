@@ -278,7 +278,7 @@ def _resolve_db_path(*, strict: bool = False) -> Path:
     """
     explicit = os.environ.get("ALMANAK_STATE_DB")
     if explicit and explicit.strip():
-        return Path(explicit.strip()).expanduser().resolve()
+        return Path(explicit.strip()).expanduser()
 
     folder = _strategy_folder()
     if folder is not None:

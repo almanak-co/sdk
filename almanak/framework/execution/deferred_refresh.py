@@ -16,6 +16,7 @@ no-op (zero overhead for all non-deferred protocols).
 
 import copy
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from ..models.reproduction_bundle import ActionBundle
@@ -172,15 +173,13 @@ def _fetch_fresh_transaction(
     Returns:
         Fresh transaction data dict, or None if the protocol is unknown.
     """
-    if protocol == "lifi":
-        return _refresh_lifi(metadata, wallet_address)
-    elif protocol == "enso":
-        return _refresh_enso(metadata, wallet_address)
-    else:
+    refresher = _DEFERRED_REFRESHERS.get(protocol)
+    if refresher is None:
         logger.warning(
             f"Unknown deferred protocol '{protocol}'; cannot refresh. Proceeding with stale transaction data."
         )
         return None
+    return refresher(metadata, wallet_address)
 
 
 def _refresh_lifi(
@@ -216,3 +215,9 @@ def _refresh_enso(
     )
     adapter = EnsoAdapter(config, allow_placeholder_prices=True)
     return adapter.get_fresh_swap_transaction(metadata)
+
+
+_DEFERRED_REFRESHERS: dict[str, Callable[[dict[str, Any], str], dict[str, Any]]] = {
+    "lifi": _refresh_lifi,
+    "enso": _refresh_enso,
+}

@@ -385,29 +385,43 @@ class TestCompileSwapErrorPaths:
 class TestCompileSwapDispatch:
     """Dispatch decisions that route away from the default router swap body."""
 
-    def test_lifi_protocol_dispatches_to_lifi_helper(self) -> None:
-        """protocol='lifi' routes to ``_compile_lifi_swap``."""
+    def test_lifi_protocol_dispatches_to_connector_compiler(self) -> None:
+        """protocol='lifi' routes through the connector compiler registry."""
 
         compiler = _make_compiler()
         sentinel = MagicMock(name="lifi-result")
-        with patch.object(compiler, "_compile_lifi_swap", return_value=sentinel) as mock_lifi:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_swap_intent(protocol="lifi")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_lifi.assert_called_once()
+        mock_get_compiler.assert_called_once_with("lifi")
+        connector_compiler.compile.assert_called_once()
 
-    def test_enso_protocol_dispatches_to_enso_helper(self) -> None:
-        """protocol='enso' routes to ``_compile_enso_swap``."""
+    def test_enso_protocol_dispatches_to_connector_compiler(self) -> None:
+        """protocol='enso' routes through the connector compiler registry."""
 
         compiler = _make_compiler()
         sentinel = MagicMock(name="enso-result")
-        with patch.object(compiler, "_compile_enso_swap", return_value=sentinel) as mock_enso:
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             intent = _make_swap_intent(protocol="enso")
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_enso.assert_called_once()
+        mock_get_compiler.assert_called_once_with("enso")
+        connector_compiler.compile.assert_called_once()
 
     def test_curve_protocol_dispatches_to_connector_compiler(self) -> None:
         compiler = _make_compiler(chain="ethereum")
@@ -508,14 +522,15 @@ class TestCompileSwapDispatch:
         mock_get_compiler.assert_called_once_with("pendle")
         connector_compiler.compile.assert_called_once()
 
-    def test_cross_chain_swap_routes_to_cross_chain(self) -> None:
-        """destination_chain != chain and protocol!=lifi => _compile_cross_chain_swap."""
+    def test_cross_chain_swap_routes_to_enso_connector(self) -> None:
+        """destination_chain != chain and protocol!=lifi => Enso connector compiler."""
 
         compiler = _make_compiler(chain="base")
         sentinel = MagicMock(name="cc-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
 
-        # Cross-chain swaps require protocol="enso" (or "lifi"). Enso is handled
-        # below in _compile_cross_chain_swap.
         intent = SwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -524,11 +539,15 @@ class TestCompileSwapDispatch:
             destination_chain="arbitrum",
             protocol="enso",
         )
-        with patch.object(compiler, "_compile_cross_chain_swap", return_value=sentinel) as mock_cc:
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_cc.assert_called_once()
+        mock_get_compiler.assert_called_once_with("enso")
+        connector_compiler.compile.assert_called_once()
 
 
 class TestCompileSwapAmountShapes:

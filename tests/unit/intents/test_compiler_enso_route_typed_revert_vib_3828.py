@@ -7,7 +7,7 @@ the typed exception. The wiring that landed in this follow-up PR connects
 the two upstream boundaries to the typed exception via
 :func:`check_known_router_revert`:
 
-1. ``compiler.py:_get_enso_route_via_gateway`` — used by the strategy
+1. ``connectors/enso/compiler.py:_get_enso_route_via_gateway`` — used by the strategy
    compiler when a gateway client is configured (production hosted +
    gateway-backed local).
 2. ``connectors/enso/client.py:_get_route_via_gateway`` — used by the
@@ -36,6 +36,8 @@ from almanak.framework.connectors.enso.exceptions import (
     EnsoAPIError,
     EnsoRouterRevertError,
 )
+from almanak.framework.connectors.enso.compiler import EnsoCompiler
+from almanak.framework.connectors.base.compiler import SwapCompilerContext
 from almanak.framework.intents.state_machine import IntentStateMachine
 
 
@@ -57,35 +59,39 @@ def _make_route_response(*, success: bool, error: str = "") -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Boundary 1: compiler._get_enso_route_via_gateway
+# Boundary 1: EnsoCompiler._get_enso_route_via_gateway
 # ---------------------------------------------------------------------------
 
 
 class TestCompilerGatewayEnsoRouteTypedRevert:
     """Pin the typed-revert behavior at the compiler's gateway boundary."""
 
-    def _make_compiler(self) -> object:
-        """Construct a minimal compiler-shaped object with the attributes
-        ``_get_enso_route_via_gateway`` reads. Avoids the full
-        ``IntentCompiler`` constructor (which pulls in chain config,
-        token resolver, etc.) — only the gateway-error path matters here.
-        """
-        from almanak.framework.intents.compiler import IntentCompiler
-
-        compiler = IntentCompiler.__new__(IntentCompiler)
-        compiler.chain = "base"
-        compiler.wallet_address = "0x0000000000000000000000000000000000000001"
-        compiler._gateway_client = MagicMock()
-        return compiler
+    def _make_ctx(self) -> SwapCompilerContext:
+        """Construct the minimal context the Enso gateway boundary reads."""
+        return SwapCompilerContext(
+            chain="base",
+            wallet_address="0x0000000000000000000000000000000000000001",
+            rpc_url=None,
+            rpc_timeout=10.0,
+            permission_discovery=False,
+            allow_placeholder_prices=True,
+            token_resolver=None,
+            gateway_client=MagicMock(),
+            price_oracle={},
+            cache={},
+            services=MagicMock(),
+            max_price_impact_pct=MagicMock(),
+            using_placeholders=True,
+        )
 
     def test_known_selector_raises_typed_revert(self) -> None:
-        compiler = self._make_compiler()
-        compiler._gateway_client.enso.GetRoute.return_value = _make_route_response(
-            success=False, error=_GATEWAY_REVERT_ERROR
-        )
+        compiler = EnsoCompiler()
+        ctx = self._make_ctx()
+        ctx.gateway_client.enso.GetRoute.return_value = _make_route_response(success=False, error=_GATEWAY_REVERT_ERROR)
 
         with pytest.raises(EnsoRouterRevertError) as excinfo:
             compiler._get_enso_route_via_gateway(
+                ctx,
                 token_in="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                 token_out="0x4200000000000000000000000000000000000006",
                 amount_in="1000000",
@@ -101,13 +107,13 @@ class TestCompilerGatewayEnsoRouteTypedRevert:
         """End-to-end property: typed revert message reaches the state
         machine and gets classified as ``COMPILATION_PERMANENT`` instead
         of falling through to ``REVERT`` (the retry-storm class)."""
-        compiler = self._make_compiler()
-        compiler._gateway_client.enso.GetRoute.return_value = _make_route_response(
-            success=False, error=_GATEWAY_REVERT_ERROR
-        )
+        compiler = EnsoCompiler()
+        ctx = self._make_ctx()
+        ctx.gateway_client.enso.GetRoute.return_value = _make_route_response(success=False, error=_GATEWAY_REVERT_ERROR)
 
         with pytest.raises(EnsoRouterRevertError) as excinfo:
             compiler._get_enso_route_via_gateway(
+                ctx,
                 token_in="USDC",
                 token_out="WETH",
                 amount_in="1000000",
@@ -117,13 +123,15 @@ class TestCompilerGatewayEnsoRouteTypedRevert:
         assert sm._categorize_error(str(excinfo.value)) == "COMPILATION_PERMANENT"
 
     def test_unknown_selector_falls_through_to_runtime_error(self) -> None:
-        compiler = self._make_compiler()
-        compiler._gateway_client.enso.GetRoute.return_value = _make_route_response(
+        compiler = EnsoCompiler()
+        ctx = self._make_ctx()
+        ctx.gateway_client.enso.GetRoute.return_value = _make_route_response(
             success=False, error=_GATEWAY_UNKNOWN_REVERT
         )
 
         with pytest.raises(RuntimeError) as excinfo:
             compiler._get_enso_route_via_gateway(
+                ctx,
                 token_in="0x0",
                 token_out="0x1",
                 amount_in="1",
@@ -135,13 +143,15 @@ class TestCompilerGatewayEnsoRouteTypedRevert:
         assert "0xdeadbeef" in str(excinfo.value)
 
     def test_transient_error_falls_through_to_runtime_error(self) -> None:
-        compiler = self._make_compiler()
-        compiler._gateway_client.enso.GetRoute.return_value = _make_route_response(
+        compiler = EnsoCompiler()
+        ctx = self._make_ctx()
+        ctx.gateway_client.enso.GetRoute.return_value = _make_route_response(
             success=False, error=_GATEWAY_TRANSIENT_ERROR
         )
 
         with pytest.raises(RuntimeError) as excinfo:
             compiler._get_enso_route_via_gateway(
+                ctx,
                 token_in="0x0",
                 token_out="0x1",
                 amount_in="1",
