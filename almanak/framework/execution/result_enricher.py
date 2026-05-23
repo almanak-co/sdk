@@ -1392,8 +1392,8 @@ class ResultEnricher:
         if field == "bridge_data":
             # VIB-3226: bridge receipts typically do not carry the user-facing
             # symbol or canonical chain names — they encode chain IDs and token
-            # addresses. The compiler writes the resolved intent shape into
-            # ``ActionBundle.metadata`` (see compiler._compile_bridge), so we
+            # addresses. The bridge compiler writes the resolved intent shape into
+            # ``ActionBundle.metadata`` (see BridgeCompiler.compile_bridge), so we
             # thread those hints into the parser to keep the typed output
             # stable and avoid re-deriving them at parse time.
             bridge_kwargs: dict[str, Any] = {}

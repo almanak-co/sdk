@@ -798,7 +798,7 @@ def _describe_bridge(metadata: dict[str, Any], protocol: str, chain: str) -> str
     token_data = metadata.get("token", {})
     token = _get_token_symbol(token_data)
     # Bridge metadata stores amounts as already-human Decimal strings
-    # (see ``IntentCompiler._compile_bridge``: ``"amount": str(amount_decimal)``).
+    # (see ``BridgeCompiler.compile_bridge``: ``"amount": str(amount_decimal)``).
     amount = _format_amount(metadata.get("amount", ""), token_data, is_wei=False)
     from_chain = metadata.get("from_chain", "")
     to_chain = metadata.get("to_chain", chain)

@@ -5,11 +5,13 @@ from decimal import Decimal
 import pytest
 
 from almanak.framework.connectors.bridge_base import BridgeQuote
+from almanak.framework.connectors.bridge_compiler import BridgeCompiler
+from almanak.framework.connectors.compiler_registry import get_compiler as get_connector_compiler
+from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.bridge_selector import (
     BridgeSelectionResult,
     NoBridgeAvailableError,
 )
-from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import (
     CompilationStatus,
     IntentCompiler,
@@ -51,6 +53,18 @@ def _make_compiler() -> IntentCompiler:
     )
 
 
+def test_bridge_compilers_are_registered_in_connector_registry() -> None:
+    """Across and Stargate BRIDGE compilation is owned by the connector registry."""
+    assert isinstance(get_connector_compiler("across"), BridgeCompiler)
+    assert isinstance(get_connector_compiler("stargate"), BridgeCompiler)
+
+
+def test_intent_compiler_bridge_methods_are_folded_out() -> None:
+    """Bridge compile logic should not live on IntentCompiler after the fold."""
+    assert not hasattr(IntentCompiler, "_compile_bridge")
+    assert not hasattr(IntentCompiler, "_get_bridge_selector")
+
+
 def test_compile_bridge_success_builds_action_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bridge intents compile into BRIDGE ActionBundle with required metadata."""
     compiler = _make_compiler()
@@ -72,7 +86,7 @@ def test_compile_bridge_success_builds_action_bundle(monkeypatch: pytest.MonkeyP
         quote=quote,
         selection_reasoning="mock selection",
     )
-    monkeypatch.setattr(compiler, "_get_bridge_selector", lambda: _MockSelector(selection))
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _MockSelector(selection))
 
     intent = BridgeIntent(
         token="USDC",
@@ -127,7 +141,7 @@ def test_compile_bridge_resolves_all_amount_from_chain_balance(monkeypatch: pyte
         quote=quote,
         selection_reasoning="mock selection",
     )
-    monkeypatch.setattr(compiler, "_get_bridge_selector", lambda: _MockSelector(selection))
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _MockSelector(selection))
     # Simulate a 500 USDC balance on the from_chain (base)
     monkeypatch.setattr(compiler, "_query_erc20_balance_for_chain", lambda *_: balance_wei)
 
@@ -223,7 +237,7 @@ def test_compile_bridge_all_amount_native_deducts_gas_reserve(monkeypatch: pytes
         quote=quote,
         selection_reasoning="mock selection",
     )
-    monkeypatch.setattr(compiler, "_get_bridge_selector", lambda: _MockSelector(selection))
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _MockSelector(selection))
     monkeypatch.setattr(compiler, "_query_native_balance_for_chain", lambda *_: balance_wei)
 
     intent = BridgeIntent(
@@ -244,7 +258,7 @@ def test_compile_bridge_all_amount_native_deducts_gas_reserve(monkeypatch: pytes
 def test_compile_bridge_fails_cleanly_for_unsupported_route(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unsupported bridge route/token should fail with explicit compiler error."""
     compiler = _make_compiler()
-    monkeypatch.setattr(compiler, "_get_bridge_selector", lambda: _RaisingSelector())
+    monkeypatch.setattr(BridgeCompiler, "_build_selector", lambda self, ctx: _RaisingSelector())
 
     intent = BridgeIntent(
         token="USDC",

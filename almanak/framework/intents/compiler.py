@@ -88,7 +88,6 @@ if TYPE_CHECKING:
     from ..data.tokens import TokenResolver as TokenResolverType
     from ..gateway_client import GatewayClient
     from .bridge import BridgeIntent
-    from .bridge_selector import BridgeSelector
     from .pool_validation import PoolValidationResult
     from .vocabulary import UnwrapNativeIntent, WrapNativeIntent
 
@@ -155,6 +154,12 @@ class _ConnectorCompilerServices:
     def query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
         return self.compiler._query_erc20_balance(token_address, wallet_address)
 
+    def query_erc20_balance_for_chain(self, token_address: str, wallet_address: str, chain: str) -> int | None:
+        return self.compiler._query_erc20_balance_for_chain(token_address, wallet_address, chain)
+
+    def query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None:
+        return self.compiler._query_native_balance_for_chain(wallet_address, chain)
+
     def default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter:
         """Construct a ``DefaultSwapAdapter`` for a V3 pre-swap leg.
 
@@ -173,6 +178,14 @@ class _ConnectorCompilerServices:
             rpc_timeout=self.compiler.rpc_timeout,
             gateway_client=self.compiler._gateway_client,
         )
+
+
+def _bridge_registry_protocol(intent: "BridgeIntent") -> str:
+    """Return the bridge compiler registry key for a BRIDGE intent."""
+    preferred = getattr(intent, "preferred_bridge", None)
+    if preferred and get_connector_compiler(preferred) is not None:
+        return preferred
+    return "across"
 
 
 # =============================================================================
@@ -557,7 +570,6 @@ class IntentCompiler:
 
         # Polymarket adapter for prediction market intents (Polygon only)
         self._polymarket_adapter: PolymarketAdapter | None = None
-        self._bridge_selector: BridgeSelector | None = None
         self._init_polymarket_adapter()
 
         # Cached Solana adapter instances (lazily initialized)
@@ -1051,7 +1063,18 @@ class IntentCompiler:
             elif intent_type == IntentType.PREDICTION_REDEEM:
                 return self._compile_prediction_redeem(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.BRIDGE:
-                return self._compile_bridge(intent)  # type: ignore[arg-type]
+                bridge_protocol = _bridge_registry_protocol(intent)  # type: ignore[arg-type]
+                connector_compiler = get_connector_compiler(bridge_protocol)
+                if connector_compiler is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"No connector compiler registered for bridge protocol {bridge_protocol}",
+                        intent_id=intent.intent_id,
+                    )
+                return connector_compiler.compile(
+                    self._build_compiler_context(bridge_protocol, connector_compiler),
+                    intent,
+                )
             elif intent_type == IntentType.VAULT_DEPOSIT:
                 return self._compile_vault_deposit(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.VAULT_REDEEM:
@@ -1095,185 +1118,6 @@ class IntentCompiler:
                 error=str(e),
                 intent_id=intent.intent_id,
             )
-
-    def _get_bridge_selector(self) -> "BridgeSelector":
-        """Get lazily-initialized BridgeSelector with default bridge adapters."""
-        if self._bridge_selector is not None:
-            return self._bridge_selector
-
-        from ..connectors.across.adapter import AcrossBridgeAdapter
-        from ..connectors.stargate.adapter import StargateBridgeAdapter
-        from .bridge_selector import BridgeSelector
-
-        bridges = [
-            AcrossBridgeAdapter(token_resolver=self._token_resolver),
-            StargateBridgeAdapter(token_resolver=self._token_resolver),
-        ]
-        self._bridge_selector = BridgeSelector(bridges=bridges)
-        return self._bridge_selector
-
-    def _compile_bridge(self, intent: "BridgeIntent") -> CompilationResult:  # noqa: C901
-        """Compile a BRIDGE intent into an ActionBundle."""
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-
-        try:
-            from_chain = intent.from_chain.lower()
-            to_chain = intent.to_chain.lower()
-            token_symbol = intent.token
-
-            token_info = self._resolve_token(token_symbol, chain=from_chain)
-            if token_info is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token for bridge on {from_chain}: {token_symbol}",
-                    intent_id=intent.intent_id,
-                )
-
-            if intent.amount == "all":
-                # Resolve 'all' to the actual on-chain token balance for from_chain.
-                # This mirrors how single-chain swaps/wraps handle amount='all'.
-                if token_info.is_native:
-                    balance_wei = self._query_native_balance_for_chain(self.wallet_address, from_chain)
-                else:
-                    balance_wei = self._query_erc20_balance_for_chain(
-                        token_info.address, self.wallet_address, from_chain
-                    )
-                if balance_wei is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Failed to query {token_symbol} balance on {from_chain} — RPC unavailable",
-                        intent_id=intent.intent_id,
-                    )
-                if balance_wei <= 0:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"No {token_symbol} balance to bridge on {from_chain}",
-                        intent_id=intent.intent_id,
-                    )
-                if token_info.is_native:
-                    # Reserve gas for the bridge deposit transaction itself.
-                    # Mirrors wrap compiler: deduct 0.001 native token as gas buffer.
-                    gas_reserve_wei = int(Decimal("0.001") * Decimal(10**token_info.decimals))
-                    balance_wei = max(balance_wei - gas_reserve_wei, 0)
-                    if balance_wei <= 0:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"Native balance too low to bridge {token_symbol} on {from_chain} after reserving gas",
-                            intent_id=intent.intent_id,
-                        )
-                amount_decimal = Decimal(balance_wei) / Decimal(10**token_info.decimals)
-            else:
-                amount_decimal = intent.amount  # type: ignore[assignment]
-
-            if not isinstance(amount_decimal, Decimal):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Bridge amount must be Decimal after resolution, got: {type(amount_decimal).__name__}",
-                    intent_id=intent.intent_id,
-                )
-
-            selector = self._get_bridge_selector()
-
-            # If preferred_bridge is set, exclude all other bridges
-            preferred = getattr(intent, "preferred_bridge", None)
-            excluded = None
-            if preferred:
-                excluded = [b.name.lower() for b in selector.bridges if b.name.lower() != preferred.lower()]
-
-            if excluded:
-                selection = selector.select_bridge_with_fallback(
-                    token=token_symbol,
-                    amount=amount_decimal,
-                    from_chain=from_chain,
-                    to_chain=to_chain,
-                    max_slippage=intent.max_slippage,
-                    excluded_bridges=excluded,
-                )
-            else:
-                selection = selector.select_bridge(
-                    token=token_symbol,
-                    amount=amount_decimal,
-                    from_chain=from_chain,
-                    to_chain=to_chain,
-                    max_slippage=intent.max_slippage,
-                )
-            if not selection.is_success or selection.bridge is None or selection.quote is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No bridge available for {token_symbol} from {from_chain} to {to_chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            quote = selection.quote
-            bridge = selection.bridge
-            # Use destination_address from intent or resolve from wallet registry
-            dest_wallet = getattr(intent, "destination_address", None) or self._resolve_dest_wallet(to_chain)
-            bridge_tx = bridge.build_deposit_tx(quote=quote, recipient=dest_wallet)
-
-            amount_in_wei: int | None = None
-            if quote.route_data and "amount_wei" in quote.route_data:
-                try:
-                    amount_in_wei = int(quote.route_data["amount_wei"])
-                except (ValueError, TypeError):
-                    amount_in_wei = None
-            if amount_in_wei is None:
-                amount_in_wei = int(amount_decimal * Decimal(10**token_info.decimals))
-
-            transactions: list[TransactionData] = []
-            if not token_info.is_native:
-                transactions.extend(
-                    self._build_approve_tx(
-                        token_address=token_info.address,
-                        spender=bridge_tx["to"],
-                        amount=amount_in_wei,
-                    )
-                )
-
-            bridge_transaction = TransactionData(
-                to=bridge_tx["to"],
-                value=int(bridge_tx.get("value", 0)),
-                data=bridge_tx["data"],
-                gas_estimate=int(bridge_tx.get("gas_estimate", get_gas_estimate(from_chain, "bridge_deposit"))),
-                description=f"Bridge {amount_decimal} {token_symbol} from {from_chain} to {to_chain} via {bridge.name}",
-                tx_type="bridge_deposit",
-            )
-            transactions.append(bridge_transaction)
-
-            metadata: dict[str, Any] = {
-                "from_chain": from_chain,
-                "to_chain": to_chain,
-                "token": token_symbol,
-                "amount": str(amount_decimal),
-                "bridge": bridge.name,
-                "estimated_time": int(quote.estimated_time_seconds),
-                "fee": str(quote.fee_amount),
-                "is_cross_chain": from_chain != to_chain,
-                "route": {"from_chain": quote.from_chain, "to_chain": quote.to_chain},
-                "quote_id": quote.quote_id,
-            }
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BRIDGE.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata=metadata,
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = sum(tx.gas_estimate for tx in transactions)
-
-            logger.info(
-                f"Compiled BRIDGE intent: {amount_decimal} {token_symbol} {from_chain}->{to_chain} via {bridge.name}, "
-                f"{len(transactions)} txs"
-            )
-        except Exception as e:
-            logger.exception("Failed to compile BRIDGE intent")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-        return result
 
     def _is_solana_chain(self) -> bool:
         """Check if the compiler's target chain is in the Solana family."""

@@ -136,6 +136,14 @@ class CompilerRegistry:
             "almanak.framework.connectors.lifi.compiler",
             "LiFiCompiler",
         ),
+        "across": (
+            "almanak.framework.connectors.bridge_compiler",
+            "BridgeCompiler",
+        ),
+        "stargate": (
+            "almanak.framework.connectors.bridge_compiler",
+            "BridgeCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
     from almanak.framework.connectors.base.swap_adapter import DefaultSwapAdapter
+    from almanak.framework.intents.bridge import BridgeIntent
     from almanak.framework.intents.compiler_models import CompilationResult, TokenInfo, TransactionData
     from almanak.framework.intents.vocabulary import (
         CollectFeesIntent,
@@ -55,6 +56,10 @@ class CompilerServices(Protocol):
     def query_position_tokens_owed(self, position_manager: str, token_id: int) -> tuple[int | None, int | None]: ...
 
     def query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None: ...
+
+    def query_erc20_balance_for_chain(self, token_address: str, wallet_address: str, chain: str) -> int | None: ...
+
+    def query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None: ...
 
     def default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter: ...
 
@@ -241,8 +246,28 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
     def compile_perp_close(self, ctx: PerpCompilerContext, intent: PerpCloseIntent) -> CompilationResult: ...
 
 
+class BaseBridgeCompiler(BaseProtocolCompiler[BaseCompilerContext]):
+    """Bridge connector compilers — cross-chain transfer intents."""
+
+    context_type: ClassVar[type[BaseCompilerContext]] = BaseCompilerContext
+
+    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+        from almanak.framework.intents.vocabulary import IntentType
+
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        if getattr(intent, "intent_type", None) == IntentType.BRIDGE:
+            return self.compile_bridge(ctx, intent)
+        return self._unsupported(intent)
+
+    @abstractmethod
+    def compile_bridge(self, ctx: BaseCompilerContext, intent: BridgeIntent) -> CompilationResult: ...
+
+
 __all__ = [
     "BaseCompilerContext",
+    "BaseBridgeCompiler",
     "BaseConcentratedLiquidityCompiler",
     "BasePerpCompiler",
     "BaseProtocolCompiler",

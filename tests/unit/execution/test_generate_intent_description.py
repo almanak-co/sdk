@@ -319,7 +319,7 @@ class TestPerpDescriptions:
 class TestBridgeDescriptions:
     def test_bridge_full(self) -> None:
         # Bridge metadata stores already-human Decimal strings (see
-        # ``IntentCompiler._compile_bridge``: ``"amount": str(amount_decimal)``).
+        # ``BridgeCompiler.compile_bridge``: ``"amount": str(amount_decimal)``).
         # The previous test used a synthetic wei integer that the heuristic
         # incidentally rescaled \u2014 replaced with the real shape now that
         # ``_format_amount`` honours an explicit ``is_wei=False`` for bridge.
