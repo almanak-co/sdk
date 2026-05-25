@@ -189,9 +189,17 @@ def get_discovery_vectors_override(
         connector_name, _ = mapping
     else:
         connector_name = mapping
+    module_path = f"almanak.framework.connectors.{connector_name}.permission_hints"
     try:
-        mod = importlib.import_module(f"almanak.framework.connectors.{connector_name}.permission_hints")
-    except ImportError:
-        return None
+        mod = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        # The override module (or a parent package along its path) is genuinely
+        # absent — connector has no override. Distinguish from a NESTED import
+        # error inside an existing override module (typo, broken refactor):
+        # those must surface, not silently disable the override and degrade
+        # the manifest.
+        if exc.name and module_path.startswith(exc.name):
+            return None
+        raise
     fn = getattr(mod, "build_discovery_vectors", None)
     return fn if callable(fn) else None
