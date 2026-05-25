@@ -31,6 +31,7 @@ import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
 
+from ..chain_family import ChainFamilyAdapter, SvmFamily, all_families, family_for
 from ..connectors.base.compiler import (
     BaseCompilerContext,
     BaseProtocolCompiler,
@@ -512,6 +513,12 @@ class IntentCompiler:
             self.chain = resolve_chain_name(chain)
         except (ValueError, ImportError):
             self.chain = chain
+        # VIB-4803: resolve the ChainFamily behavior adapter once at construction.
+        # Every per-intent dispatch site reads ``self._family`` instead of running
+        # an ad-hoc ``chain == "solana"`` test, so the family is a real seam: a
+        # hypothetical MoveFamily lands as one new adapter class without further
+        # edits in this file.
+        self._family: ChainFamilyAdapter = family_for(self.chain)
         # Checksum EVM wallet addresses at the boundary so every downstream
         # consumer (web3 build_transaction, get_transaction_count, balance
         # queries, bridge from_address) sees an EIP-55 string. Solana base58
@@ -582,7 +589,7 @@ class IntentCompiler:
         self._cached_jupiter_lend_adapter: Any = None
         self._cached_drift_adapter: Any = None
 
-        effective_protocol = "jupiter" if self._is_solana_chain() else default_protocol
+        effective_protocol = "jupiter" if isinstance(self._family, SvmFamily) else default_protocol
         logger.info(
             f"IntentCompiler initialized for chain={chain}, wallet={wallet_address[:10]}..., protocol={effective_protocol}, using_placeholders={self._using_placeholders}"
         )
@@ -1137,37 +1144,45 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
             )
 
-    def _is_solana_chain(self) -> bool:
-        """Check if the compiler's target chain is in the Solana family."""
-        from .compiler_solana import is_solana_chain
-
-        return is_solana_chain(self)
-
     # =========================================================================
-    # Solana adapter caching helpers (delegated to compiler_solana)
-    # =========================================================================
-
-    def _get_jupiter_adapter(self) -> Any:
-        """Get or create a cached JupiterAdapter instance."""
-        from .compiler_solana import get_jupiter_adapter
-
-        return get_jupiter_adapter(self)
-
-    def _get_kamino_adapter(self, *, needs_rpc: bool = False) -> Any:
-        """Get or create a cached KaminoAdapter instance."""
-        from .compiler_solana import get_kamino_adapter
-
-        return get_kamino_adapter(self, needs_rpc=needs_rpc)
-
-    # =========================================================================
-    # Solana compilation methods (delegated to compiler_solana)
+    # ChainFamily dispatch (VIB-4803)
+    #
+    # Solana SWAP / LP / lending compilation is owned by
+    # :class:`SvmFamily.compile_intent` (almanak.framework.chain_family). The
+    # historical ``_compile_jupiter_swap`` / ``_get_jupiter_adapter`` etc.
+    # wrapper methods on this class have been removed - they were thin
+    # delegates to the module-level helpers in ``compiler_solana``, and the
+    # dispatch now goes through :meth:`_family_compile_intent` below.
+    #
+    # Jupiter swap still lives in ``compiler_solana.compile_jupiter_swap``.
+    # Per-protocol Solana LP compilation (Meteora / Orca / Raydium) is owned
+    # by the per-connector compilers (#2416) and dispatched via
+    # :data:`CompilerRegistry`. Direct unit tests should target the
+    # connector compilers' ``compile()`` methods, or test dispatch through
+    # ``IntentCompiler.compile``.
     # =========================================================================
 
-    def _compile_jupiter_swap(self, intent: SwapIntent) -> CompilationResult:
-        """Compile a SWAP intent using Jupiter for Solana chains."""
-        from .compiler_solana import compile_jupiter_swap
+    def _family_compile_intent(self, intent: AnyIntent) -> CompilationResult | None:
+        """Ask every registered :class:`ChainFamilyAdapter` if it owns ``intent``.
 
-        return compile_jupiter_swap(self, intent)
+        Returns the first non-None response. Used by the per-intent dispatch
+        helpers (``_dispatch_swap_protocol_route`` /
+        ``_dispatch_lp_open_protocol_route`` / ``_dispatch_lp_close_protocol_route``)
+        to fold the historical ``self._is_solana_chain()`` branches into one
+        polymorphic call.
+
+        Iterating every family (instead of only ``self._family``) catches the
+        cross-chain edge case where an SVM-only protocol (``meteora_dlmm`` /
+        ``orca_whirlpools`` / ``raydium_clmm``) is submitted against an EVM
+        chain — SvmFamily returns an explicit "supported only on Solana"
+        :class:`CompilationResult` rather than letting the intent fall
+        through to the generic "unsupported protocol on <chain>" error.
+        """
+        for family in all_families():
+            result = family.compile_intent(self, intent)
+            if result is not None:
+                return result
+        return None
 
     def _compile_wrap_native(self, intent: "WrapNativeIntent") -> CompilationResult:
         """Compile a WRAP_NATIVE intent into an ActionBundle.
@@ -1439,18 +1454,17 @@ class IntentCompiler:
         handle it.
 
         Extracted in Phase 6B.3 so ``_compile_swap`` itself stays small.
+
+        VIB-4803: ask every registered ChainFamily whether it owns the
+        intent (in declaration order). The first non-None response wins.
+        This keeps protocol-level routing (e.g. Solana-only protocols
+        rejected on EVM chains with an explicit error) inside the family
+        adapters, not the compiler. EvmFamily currently returns None for
+        every intent — its dispatch is the default fall-through path.
         """
-        # Route to Jupiter for Solana chains
-        if self._is_solana_chain():
-            protocol = intent.protocol
-            allowed_solana_swap = {None, "jupiter"}
-            if protocol and protocol.lower() not in allowed_solana_swap:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=f"Protocol '{protocol}' is not supported for SWAP on Solana. Supported: jupiter",
-                )
-            return self._compile_jupiter_swap(intent)
+        family_result = self._family_compile_intent(intent)
+        if family_result is not None:
+            return family_result
 
         # Check for cross-chain swap - route to appropriate aggregator.
         # Preserve historical behavior: protocol=None defaults to Enso for cross-chain swaps.
@@ -1471,9 +1485,6 @@ class IntentCompiler:
             return connector_compiler.compile(
                 self._build_compiler_context(aggregator_protocol, connector_compiler), intent
             )
-
-        # Check for aggregator protocols
-        protocol = self._resolve_protocol(intent.protocol)
 
         # Auto-detect PT-/YT- prefixed tokens before generic default-protocol dispatch.
         # Must run before other protocol dispatches so that PT-/YT- tokens are routed to
@@ -1885,11 +1896,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP mint ActionBundle
         """
-        protocol = self._resolve_lp_protocol(intent.protocol, intent_type="LP_OPEN")
-        if isinstance(protocol, CompilationResult):
-            protocol.intent_id = intent.intent_id
-            return protocol
+        routed = self._dispatch_lp_open_protocol_route(intent)
+        if routed is not None:
+            return routed
 
+        protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
@@ -1908,51 +1919,30 @@ class IntentCompiler:
             error=f"Protocol '{protocol}' is not supported for LP_OPEN on {self.chain}.",
         )
 
-    # Solana LP protocols whose dedicated connector compilers handle the Solana
-    # chain. Used by ``_resolve_lp_protocol`` to gate EVM protocols away from
-    # Solana chains and to pick the default when ``intent.protocol is None``.
-    # Per-protocol "wrong chain" errors live in the connector compilers
-    # themselves (e.g. ``MeteoraCompiler`` fails with "Meteora DLMM is only
-    # supported on Solana" when called from an EVM chain).
-    _SOLANA_LP_PROTOCOLS: ClassVar[frozenset[str]] = frozenset({"raydium_clmm", "meteora_dlmm", "orca_whirlpools"})
-    _SOLANA_DEFAULT_LP_PROTOCOL: ClassVar[str] = "raydium_clmm"
+    def _dispatch_lp_open_protocol_route(self, intent: LPOpenIntent) -> CompilationResult | None:
+        """Route an LP_OPEN intent to the correct protocol-specific compiler.
 
-    def _resolve_lp_protocol(self, requested: str | None, *, intent_type: str) -> str | CompilationResult:
-        """Resolve the LP protocol name for connector-registry dispatch.
+        Returns the routed ``CompilationResult`` when a dedicated helper owns
+        the protocol, or ``None`` when connector dispatch should handle it.
 
-        On Solana chains:
-        - ``None`` is normalised to the default Solana LP protocol
-          (``raydium_clmm``), matching pre-fold dispatch behaviour.
-        - Non-Solana LP protocols are rejected up-front with the legacy
-          "not supported for {intent_type} on Solana" error so users get a
-          clean message instead of a downstream connector failure.
+        Extracted in Phase 6B.4 so ``_compile_lp_open`` itself stays small.
+        Dispatch order is preserved from the pre-refactor method.
 
-        On non-Solana chains, this is a thin pass-through to
-        :meth:`_resolve_protocol` (alias resolution for ``agni``, ``velodrome``
-        etc.).
+        VIB-4803: Solana protocol routing (meteora_dlmm / orca_whirlpools /
+        raydium_clmm) now lives in :class:`SvmFamily.compile_intent`. The
+        family.compile_intent contract:
+
+        * EvmFamily returns None -> fall through to connector dispatch.
+        * SvmFamily returns a CompilationResult for every (chain, protocol)
+          tuple it owns, including cross-chain mismatches (e.g. meteora_dlmm
+          on an EVM chain -> FAILED with explicit error).
+
+        We iterate every registered family (in :class:`ChainFamily` enum
+        order) so a cross-chain protocol mismatch (Solana-only protocol on
+        EVM chain) is caught by SvmFamily even when ``self._family`` is
+        :class:`EvmFamily`.
         """
-        if self._is_solana_chain():
-            # Normalize aliases / case / hyphens before the allowlist check so
-            # ``meteora-dlmm`` / ``METEORA_DLMM`` resolve to the canonical key,
-            # matching the rest of ``IntentCompiler``'s ingress behaviour.
-            # ``None`` keeps the existing default-protocol fallback so the
-            # caller can short-circuit without normalizing the default.
-            if requested is None:
-                resolved = self._SOLANA_DEFAULT_LP_PROTOCOL
-            else:
-                from ..connectors.protocol_aliases import normalize_protocol
-
-                resolved = normalize_protocol(self.chain, requested)
-            if resolved not in self._SOLANA_LP_PROTOCOLS:
-                supported = ", ".join(sorted(self._SOLANA_LP_PROTOCOLS))
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Protocol '{requested}' is not supported for {intent_type} on Solana. Supported: {supported}"
-                    ),
-                )
-            return resolved
-        return self._resolve_protocol(requested)
+        return self._family_compile_intent(intent)
 
     # crap-allowlist: VIB-4688 — pre-existing method (cc=10, under threshold); coverage-driven score from docstring touch during phase-2 fold. Unit-coverage backfill tracked in VIB-4688.
     def _fetch_lp_pool_slot0(
@@ -2018,11 +2008,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP close ActionBundle
         """
-        protocol = self._resolve_lp_protocol(intent.protocol, intent_type="LP_CLOSE")
-        if isinstance(protocol, CompilationResult):
-            protocol.intent_id = intent.intent_id
-            return protocol
+        routed = self._dispatch_lp_close_protocol_route(intent)
+        if routed is not None:
+            return routed
 
+        protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
@@ -2040,6 +2030,20 @@ class IntentCompiler:
             intent_id=intent.intent_id,
             error=f"Protocol '{protocol}' is not supported for LP_CLOSE on {self.chain}.",
         )
+
+    def _dispatch_lp_close_protocol_route(self, intent: LPCloseIntent) -> CompilationResult | None:
+        """Route an LP_CLOSE intent to the correct protocol-specific compiler.
+
+        Returns the routed ``CompilationResult`` when a dedicated helper owns
+        the protocol, or ``None`` when connector dispatch should handle it.
+
+        Extracted in Phase 6B backlog so ``_compile_lp_close`` itself stays small.
+        Dispatch order is preserved from the pre-refactor method.
+
+        VIB-4803: Solana protocol routing moved to :class:`SvmFamily.compile_intent`.
+        See :meth:`_dispatch_lp_open_protocol_route` for the contract.
+        """
+        return self._family_compile_intent(intent)
 
     # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     def _compile_collect_fees(self, intent: "CollectFeesIntent") -> CompilationResult:
@@ -2110,7 +2114,7 @@ class IntentCompiler:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
         primitive = intent.intent_type.value if hasattr(intent.intent_type, "value") else str(intent.intent_type)
-        supported = _PERP_PROTOCOLS_SOLANA if self._is_solana_chain() else _PERP_PROTOCOLS_NON_SOLANA
+        supported = _PERP_PROTOCOLS_SOLANA if isinstance(self._family, SvmFamily) else _PERP_PROTOCOLS_NON_SOLANA
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=(

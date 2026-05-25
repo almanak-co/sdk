@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import ClassVar
 
-from almanak.core.enums import Chain, ChainFamily, get_chain_family
+from almanak.framework.chain_family import SvmFamily, family_for
 from almanak.framework.connectors.base.compiler import BasePerpCompiler, PerpCompilerContext
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
@@ -28,7 +28,7 @@ class DriftCompiler(BasePerpCompiler):
     def compile_perp_open(self, ctx: PerpCompilerContext, intent: PerpOpenIntent) -> CompilationResult:
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
         try:
-            if not _is_solana_chain(ctx.chain):
+            if not isinstance(family_for(ctx.chain), SvmFamily):
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error="Drift is only supported on Solana",
@@ -63,7 +63,7 @@ class DriftCompiler(BasePerpCompiler):
     def compile_perp_close(self, ctx: PerpCompilerContext, intent: PerpCloseIntent) -> CompilationResult:
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
         try:
-            if not _is_solana_chain(ctx.chain):
+            if not isinstance(family_for(ctx.chain), SvmFamily):
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error="Drift is only supported on Solana",
@@ -91,14 +91,6 @@ class DriftCompiler(BasePerpCompiler):
             ),
             token_resolver=ctx.token_resolver,
         )
-
-
-def _is_solana_chain(chain: str) -> bool:
-    try:
-        chain_enum = Chain(chain.upper())
-        return get_chain_family(chain_enum) == ChainFamily.SOLANA
-    except (ValueError, KeyError):
-        return False
 
 
 __all__ = ["DriftCompiler"]

@@ -493,8 +493,11 @@ class GatewayExecutionOrchestrator:
             # Extract warnings if available (future-proofing for proto additions)
             extraction_warnings = list(getattr(response, "extraction_warnings", []))
 
-            # Normalize tx_hashes: add 0x prefix for EVM, preserve base58 for Solana
-            if self._chain and self._chain.lower() == "solana":
+            # Normalize tx_hashes: add 0x prefix for EVM, preserve base58 for Solana.
+            # VIB-4803: routes through the ChainFamily adapter.
+            from almanak.framework.chain_family import SvmFamily, family_for
+
+            if self._chain and isinstance(family_for(self._chain), SvmFamily):
                 tx_hashes = list(response.tx_hashes)
             else:
                 tx_hashes = [h if h.startswith("0x") else f"0x{h}" for h in response.tx_hashes]

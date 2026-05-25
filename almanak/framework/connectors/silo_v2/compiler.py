@@ -80,11 +80,6 @@ class _LendingCompilerAdapter:
     def _get_chain_rpc_url(self) -> str | None:
         return self._ctx.rpc_url
 
-    def _is_solana_chain(self) -> bool:
-        # Solana lending routes through ``connectors.jupiter_lend`` and
-        # ``connectors.kamino``; EVM connectors should never need this true.
-        return self._ctx.chain.lower() == "solana"
-
 
 def _failed(intent: Any, error: str) -> CompilationResult:
     return CompilationResult(

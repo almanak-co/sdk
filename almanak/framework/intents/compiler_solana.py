@@ -26,22 +26,6 @@ logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 # =============================================================================
-# Chain detection
-# =============================================================================
-
-
-def is_solana_chain(compiler) -> bool:
-    """Check if the compiler's target chain is in the Solana family."""
-    try:
-        from almanak.core.enums import Chain, ChainFamily, get_chain_family
-
-        chain_enum = Chain(compiler.chain.upper())
-        return get_chain_family(chain_enum) == ChainFamily.SOLANA
-    except (ValueError, KeyError):
-        return False
-
-
-# =============================================================================
 # Adapter caching helpers
 # =============================================================================
 

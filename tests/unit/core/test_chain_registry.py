@@ -554,10 +554,13 @@ class TestImportGraphIsolation:
             import sys
             import almanak.core.chains  # noqa: F401
 
-            forbidden_prefixes = ("almanak.framework.", "almanak.gateway.", "almanak.strategies.")
+            # Match both the exact root module ("almanak.framework") and any
+            # submodule ("almanak.framework.foo"). The prior prefix-only check
+            # missed exact-root imports, weakening the isolation guard.
+            forbidden_roots = ("almanak.framework", "almanak.gateway", "almanak.strategies")
             leaked = sorted(
                 m for m in sys.modules
-                if any(m.startswith(p) for p in forbidden_prefixes)
+                if m in forbidden_roots or any(m.startswith(f"{root}.") for root in forbidden_roots)
             )
             if leaked:
                 print("LEAKED:", *leaked, sep="\\n")

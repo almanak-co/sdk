@@ -246,7 +246,12 @@ def compute_gas_usd(
         canonical_chain = resolve_chain_name(chain) if chain else ""
     except Exception:  # noqa: BLE001
         canonical_chain = (chain or "").lower()
-    if canonical_chain == "solana":
+    # VIB-4803: route SVM chains through the family adapter — they have no
+    # wei/gwei accounting (lamports instead), so return None to indicate
+    # "no comparable gas-in-USD figure available".
+    from almanak.framework.chain_family import SvmFamily, family_for
+
+    if isinstance(family_for(canonical_chain), SvmFamily):
         return None
 
     if gas_cost_wei == 0:

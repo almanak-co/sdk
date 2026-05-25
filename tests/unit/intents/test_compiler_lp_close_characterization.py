@@ -411,12 +411,13 @@ class TestCompileLPCloseDispatch:
 class TestCompileLPCloseSolana:
     """Solana-chain-only dispatch and error messaging.
 
-    Post-fold: Meteora/Orca/Raydium LP compilers are connector-owned and
-    dispatched via :data:`CompilerRegistry`. The dispatch site
-    (``IntentCompiler._compile_lp_close`` via ``_resolve_lp_protocol``)
-    normalises the Solana default protocol and gates non-Solana protocols
-    BEFORE the registry lookup; per-protocol "wrong chain" errors come from
-    the connector compilers themselves.
+    Post-#2416 / VIB-4803: Meteora/Orca/Raydium LP compilers are
+    connector-owned and dispatched via :data:`CompilerRegistry`. The
+    dispatch site is now :class:`SvmFamily.compile_intent` (via
+    :mod:`almanak.framework.chain_family._svm_dispatch`) which normalises
+    the Solana default protocol and gates non-Solana protocols BEFORE the
+    registry lookup; per-protocol "wrong chain" errors come from the
+    connector compilers themselves.
     """
 
     def _assert_solana_connector_dispatch(self, *, protocol: str) -> None:
@@ -426,7 +427,7 @@ class TestCompileLPCloseSolana:
         connector_compiler.context_type = BaseCompilerContext
         connector_compiler.compile.return_value = sentinel
         with patch(
-            "almanak.framework.intents.compiler.get_connector_compiler",
+            "almanak.framework.chain_family._svm_dispatch.get_connector_compiler",
             return_value=connector_compiler,
         ) as mock_get_compiler:
             intent = _make_lp_close_intent(protocol=protocol)
@@ -514,7 +515,7 @@ class TestCompileLPCloseSolana:
         connector_compiler.chains = frozenset({"solana"})
         connector_compiler.compile.return_value = sentinel
         with patch(
-            "almanak.framework.intents.compiler.get_connector_compiler",
+            "almanak.framework.chain_family._svm_dispatch.get_connector_compiler",
             return_value=connector_compiler,
         ) as mock_get_compiler:
             intent = _make_lp_close_intent(protocol="Meteora-DLMM")

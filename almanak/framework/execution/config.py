@@ -345,8 +345,19 @@ class LocalRuntimeConfig:
             ) from None
 
     def _is_solana(self) -> bool:
-        """Check if this config is for a Solana chain."""
-        return self.chain.lower() == "solana"
+        """Check if this config is for a Solana chain.
+
+        VIB-4803: routes through the :class:`ChainFamily` adapter — the
+        single seam for "is this chain SVM?". Falls back to ``False`` for
+        unknown / unregistered chains, matching the legacy ``.lower() ==
+        "solana"`` contract.
+        """
+        # Import here to avoid pulling the framework chain_family module into
+        # every importer of execution.config — this method is only on the
+        # validation path.
+        from almanak.framework.chain_family import SvmFamily, family_for
+
+        return isinstance(family_for(self.chain), SvmFamily)
 
     def _validate_optional_fields(self) -> None:
         """Validate optional fields with defaults."""

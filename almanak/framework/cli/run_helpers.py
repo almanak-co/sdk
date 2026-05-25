@@ -1672,7 +1672,11 @@ def _resolve_effective_signing_key(
     from almanak.config.env import gateway_config_from_env
 
     _gw = gateway_config_from_env()
-    if (config_chain or "").strip().lower() == "solana":
+    # VIB-4803: route SVM chains through the ChainFamily adapter.
+    from almanak.framework.chain_family import SvmFamily as _SvmFamily
+    from almanak.framework.chain_family import family_for as _family_for
+
+    if isinstance(_family_for((config_chain or "").strip()), _SvmFamily):
         # The typed ``GatewayConfig.solana_private_key`` carries
         # SOLANA_PRIVATE_KEY via the canonical env-fallback ladder; falling
         # back to ``private_key`` (ALMANAK_PRIVATE_KEY) preserves the legacy
@@ -2319,8 +2323,12 @@ def _build_orchestrator_and_providers(  # noqa: C901
             chain=runtime_config.chain,
         )
 
-        # For Solana + --network anvil, start local solana-test-validator
-        if runtime_config.chain.lower() == "solana" and resolved_network == "anvil":
+        # For Solana + --network anvil, start local solana-test-validator.
+        # VIB-4803: route through the ChainFamily adapter.
+        from almanak.framework.chain_family import SvmFamily as _SvmFamily
+        from almanak.framework.chain_family import family_for as _family_for
+
+        if isinstance(_family_for(runtime_config.chain), _SvmFamily) and resolved_network == "anvil":
             from almanak.config import cli_runtime_config_from_env as _solana_cli_cfg
 
             from ..anvil.solana_fork_manager import SolanaForkManager

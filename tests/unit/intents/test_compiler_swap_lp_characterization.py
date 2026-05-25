@@ -1099,15 +1099,15 @@ class TestCompileLPOpenErrorPaths:
     """Explicit failure modes that strategies rely on."""
 
     def test_unsupported_solana_protocol_fails(self) -> None:
-        """Non-Solana LP protocol on Solana => FAILED with clear error."""
+        """Non-Solana LP protocol on Solana => FAILED with clear error.
 
-        # We can't easily build a Solana-flavoured compiler end-to-end here
-        # (chain name resolution + solana detection), so exercise the dispatch
-        # by forcing _is_solana_chain=True.
-        compiler = _make_compiler(chain="arbitrum")
-        with patch.object(compiler, "_is_solana_chain", return_value=True):
-            intent = _make_lp_intent(protocol="uniswap_v3")
-            result = compiler.compile(intent)
+        VIB-4803: build an actual Solana-flavoured compiler. The historical
+        ``_is_solana_chain`` patch hook is gone — dispatch is owned by the
+        family adapter resolved at construction time.
+        """
+        compiler = _make_compiler(chain="solana")
+        intent = _make_lp_intent(protocol="uniswap_v3")
+        result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert "not supported for LP_OPEN on Solana" in (result.error or "")
@@ -1117,11 +1117,14 @@ class TestCompileLPOpenErrorPaths:
 
         Symmetric with ``_compile_lp_close``; without this, downstream
         logging / correlation cannot tie the failure back to its intent.
+
+        VIB-4803: ``_is_solana_chain`` patch hook is gone — construct an
+        actual Solana-flavoured compiler so the family adapter resolved at
+        construction time owns the dispatch.
         """
-        compiler = _make_compiler(chain="arbitrum")
-        with patch.object(compiler, "_is_solana_chain", return_value=True):
-            intent = _make_lp_intent(protocol="uniswap_v3")
-            result = compiler.compile(intent)
+        compiler = _make_compiler(chain="solana")
+        intent = _make_lp_intent(protocol="uniswap_v3")
+        result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert result.intent_id == intent.intent_id
