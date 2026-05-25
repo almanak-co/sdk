@@ -40,6 +40,7 @@ from almanak.framework.connectors.lido.adapter import (
     LIDO_REQUEST_WITHDRAWALS_SELECTOR,
     LIDO_STAKE_SELECTOR,
 )
+from almanak.framework.connectors.lido.receipt_parser import LidoReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import (
     IntentCompiler,
@@ -279,15 +280,20 @@ class TestLidoStakeOnChain:
             f"Execution failed: {execution_result.error}"
         )
 
-        # Layer 3: Receipt — verify a log was emitted from stETH contract
-        # (the Submitted event). We don't rely on a specific event schema
-        # since the LidoReceiptParser surface is intentionally minimal.
+        # Layer 3: Receipt — parse the stake receipt with LidoReceiptParser
+        # and assert the Submitted-event amount; also confirm a log was emitted
+        # from the stETH contract.
+        parser = LidoReceiptParser(chain=CHAIN_NAME)
         steth_logs_found = False
         total_gas_cost = 0
+        parsed_stake_amount_wei = 0
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
             total_gas_cost += tx_result.gas_cost_wei or 0
+            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            if parsed.success and parsed.stakes:
+                parsed_stake_amount_wei = int(parsed.stakes[0].amount * Decimal(10**18))
             for log in tx_result.receipt.logs or []:
                 # ``logs`` is a list[dict] per TransactionReceipt; getattr would
                 # silently return None on a dict, so use dict access.
@@ -298,6 +304,11 @@ class TestLidoStakeOnChain:
         assert steth_logs_found, (
             "Expected at least one log emitted from the stETH contract "
             "(Submitted / Transfer event)"
+        )
+        assert parsed_stake_amount_wei == stake_amount_wei, (
+            f"LidoReceiptParser must report Submitted.amount equal to the "
+            f"stake amount. Expected: {stake_amount_wei}, "
+            f"Got: {parsed_stake_amount_wei}"
         )
 
         # Layer 4: Balance deltas
@@ -466,11 +477,21 @@ class TestLidoUnstakeOnChain:
             f"Unstake execution failed: {execution_result.error}"
         )
 
-        # Layer 3: Receipt — find a log from the WithdrawalQueue
+        # Layer 3: Receipt — parse the unstake receipt with LidoReceiptParser
+        # and assert a WithdrawalRequested event with a valid request_id and
+        # amount; also confirm a log was emitted from the WithdrawalQueue.
+        parser = LidoReceiptParser(chain=CHAIN_NAME)
         queue_logs_found = False
+        parsed_request_id: int | None = None
+        parsed_request_amount_wei = 0
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
+            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            if parsed.success and parsed.withdrawal_requests:
+                request = parsed.withdrawal_requests[0]
+                parsed_request_id = request.request_id
+                parsed_request_amount_wei = int(request.amount_of_steth * Decimal(10**18))
             for log in tx_result.receipt.logs or []:
                 # ``logs`` is a list[dict] per TransactionReceipt; getattr would
                 # silently return None on a dict, so use dict access.
@@ -481,6 +502,17 @@ class TestLidoUnstakeOnChain:
         assert queue_logs_found, (
             "Expected at least one log emitted from the Lido WithdrawalQueue "
             "after requestWithdrawals"
+        )
+        assert parsed_request_id is not None and parsed_request_id > 0, (
+            "LidoReceiptParser must report a WithdrawalRequested event with a "
+            "non-zero request_id after requestWithdrawals"
+        )
+        # Share-rounding may leave a wei or two behind; same tolerance as the
+        # Layer-4 delta check below.
+        assert abs(parsed_request_amount_wei - unstake_amount_wei) <= 10, (
+            f"LidoReceiptParser WithdrawalRequested.amount_of_steth "
+            f"({parsed_request_amount_wei}) must be within 10 wei of the "
+            f"requested amount ({unstake_amount_wei})"
         )
 
         # Layer 4: Balance deltas — stETH balance must have decreased.

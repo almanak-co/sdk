@@ -63,7 +63,7 @@ GIMO_UNSTAKE_SELECTOR = "0x2e17de78"  # unstake(uint256)
 # Gas estimates for Gimo operations
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "stake": 150000,  # Stake A0GI -> st0G
-    "unstake": 200000,  # Unstake st0G -> A0GI (initiate unbonding)
+    "unstake": 300000,  # Unstake st0G -> A0GI (initiate unbonding)
     "approve": 60000,  # ERC-20 approve for st0G
 }
 
@@ -333,7 +333,6 @@ class GimoAdapter:
         transactions: list[dict[str, Any]] = []
         total_gas = 0
 
-        # Approve exact st0G amount for StakePool (exact approval — Gimo contracts are unverified)
         amount_wei = int(amount * Decimal(10**18))
         approve_data = "0x095ea7b3" + self._pad_address(self.stake_pool_address) + self._pad_uint256(amount_wei)
         transactions.append(

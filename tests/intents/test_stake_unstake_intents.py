@@ -1,7 +1,7 @@
 """Tests for StakeIntent and UnstakeIntent compilation in IntentCompiler.
 
 Tests verify that IntentCompiler correctly routes stake/unstake intents
-to the appropriate protocol adapters (Lido, Ethena).
+to connector-owned compilers (Lido, Ethena, Gimo).
 
 To run:
     uv run pytest tests/intents/test_stake_unstake_intents.py -v
@@ -100,7 +100,7 @@ class TestCompileStakeIntentLido:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
-        assert "Ethereum mainnet" in result.error
+        assert "only supported on ethereum" in result.error
 
     def test_compile_stake_intent_lido_chained_amount_fails(self):
         """Test that chained amount='all' fails with clear error."""
@@ -165,7 +165,7 @@ class TestCompileStakeIntentEthena:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
-        assert "Ethereum mainnet" in result.error
+        assert "only supported on ethereum" in result.error
 
 
 class TestCompileStakeIntentUnsupported:
@@ -191,6 +191,7 @@ class TestCompileStakeIntentUnsupported:
         assert "Unsupported staking protocol" in result.error
         assert "lido" in result.error.lower()
         assert "ethena" in result.error.lower()
+        assert "gimo" in result.error.lower()
 
 
 # =============================================================================
@@ -262,7 +263,7 @@ class TestCompileUnstakeIntentLido:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
-        assert "Ethereum mainnet" in result.error
+        assert "only supported on ethereum" in result.error
 
 
 class TestCompileUnstakeIntentEthena:
@@ -310,7 +311,7 @@ class TestCompileUnstakeIntentEthena:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
-        assert "Ethereum mainnet" in result.error
+        assert "only supported on ethereum" in result.error
 
     def test_compile_unstake_intent_ethena_chained_amount_fails(self):
         """Test that chained amount='all' fails with clear error."""
@@ -355,6 +356,7 @@ class TestCompileUnstakeIntentUnsupported:
         assert "Unsupported unstaking protocol" in result.error
         assert "lido" in result.error.lower()
         assert "ethena" in result.error.lower()
+        assert "gimo" in result.error.lower()
 
 
 # =============================================================================

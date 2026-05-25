@@ -60,6 +60,18 @@ class CompilerRegistry:
             "almanak.framework.connectors.pendle.compiler",
             "PendleCompiler",
         ),
+        "lido": (
+            "almanak.framework.connectors.lido.compiler",
+            "LidoCompiler",
+        ),
+        "ethena": (
+            "almanak.framework.connectors.ethena.compiler",
+            "EthenaCompiler",
+        ),
+        "gimo": (
+            "almanak.framework.connectors.gimo.compiler",
+            "GimoCompiler",
+        ),
         "aave_v3": (
             "almanak.framework.connectors.aave_v3.compiler",
             "AaveV3Compiler",

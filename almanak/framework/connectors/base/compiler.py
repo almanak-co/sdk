@@ -18,7 +18,9 @@ if TYPE_CHECKING:
         LPOpenIntent,
         PerpCloseIntent,
         PerpOpenIntent,
+        StakeIntent,
         SwapIntent,
+        UnstakeIntent,
     )
 
 
@@ -265,12 +267,75 @@ class BaseBridgeCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     def compile_bridge(self, ctx: BaseCompilerContext, intent: BridgeIntent) -> CompilationResult: ...
 
 
+class BaseStakingCompiler(BaseProtocolCompiler[BaseCompilerContext]):
+    """Staking connector compilers — stake and unstake intents."""
+
+    context_type: ClassVar[type[BaseCompilerContext]] = BaseCompilerContext
+
+    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+        from almanak.framework.intents.vocabulary import IntentType
+
+        invalid_ctx = self._check_context(ctx, intent)
+        if invalid_ctx is not None:
+            return invalid_ctx
+        if self.chains is not None and ctx.chain not in self.chains:
+            supported = ", ".join(sorted(self.chains))
+            return _failed_result(
+                getattr(intent, "intent_id", ""),
+                f"{type(self).__name__} only supported on {supported}, got: {ctx.chain}",
+            )
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type == IntentType.STAKE:
+            return self.compile_stake(ctx, intent)
+        if intent_type == IntentType.UNSTAKE:
+            return self.compile_unstake(ctx, intent)
+        return self._unsupported(intent)
+
+    @abstractmethod
+    def compile_stake(self, ctx: BaseCompilerContext, intent: StakeIntent) -> CompilationResult: ...
+
+    @abstractmethod
+    def compile_unstake(self, ctx: BaseCompilerContext, intent: UnstakeIntent) -> CompilationResult: ...
+
+    def _bundle_to_result(self, intent: Any, action_bundle: Any, *, tx_type: str) -> CompilationResult:
+        """Convert adapter ActionBundle dict transactions into compiler result transactions."""
+        from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
+
+        if action_bundle.metadata.get("error"):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=action_bundle.metadata["error"],
+                intent_id=getattr(intent, "intent_id", ""),
+            )
+
+        transactions = [
+            TransactionData(
+                to=tx_dict.get("to", ""),
+                value=int(tx_dict.get("value") or 0),
+                data=tx_dict.get("data", "0x"),
+                gas_estimate=int(tx_dict.get("gas_estimate") or 0),
+                description=tx_dict.get("description", ""),
+                tx_type=tx_dict.get("tx_type", tx_type),
+            )
+            for tx_dict in action_bundle.transactions
+        ]
+        return CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=getattr(intent, "intent_id", ""),
+            action_bundle=action_bundle,
+            transactions=transactions,
+            total_gas_estimate=sum(tx.gas_estimate for tx in transactions),
+            warnings=[],
+        )
+
+
 __all__ = [
     "BaseCompilerContext",
     "BaseBridgeCompiler",
     "BaseConcentratedLiquidityCompiler",
     "BasePerpCompiler",
     "BaseProtocolCompiler",
+    "BaseStakingCompiler",
     "CLCompilerContext",
     "CompilerServices",
     "PerpCompilerContext",

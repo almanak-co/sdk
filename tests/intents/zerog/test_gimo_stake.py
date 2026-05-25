@@ -42,6 +42,11 @@ from almanak.framework.connectors.gimo.adapter import (
     GIMO_STAKE_SELECTOR,
     GIMO_UNSTAKE_SELECTOR,
 )
+from almanak.framework.connectors.gimo.receipt_parser import GimoReceiptParser
+
+# Pinned independently of DEFAULT_GAS_ESTIMATES so a regression in the adapter
+# constant surfaces here instead of silently passing.
+EXPECTED_GIMO_UNSTAKE_GAS = 300_000
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import (
     IntentCompiler,
@@ -158,6 +163,7 @@ class TestGimoUnstakeCompilation:
             f"Calldata must use Gimo unstake(uint256) selector "
             f"({GIMO_UNSTAKE_SELECTOR}); got {unstake_tx.data[:10]}"
         )
+        assert unstake_tx.gas_estimate == EXPECTED_GIMO_UNSTAKE_GAS
 
 
 # =============================================================================
@@ -235,14 +241,19 @@ class TestGimoStakeOnChain:
             f"Execution failed: {execution_result.error}"
         )
 
-        # Layer 3: Receipt — verify a log was emitted from the StakePool
-        # (StaFi LSD emits a Staked event on stake).
+        # Layer 3: Receipt — parse with GimoReceiptParser and assert the
+        # st0G mint amount; also confirm a log was emitted from the StakePool.
+        parser = GimoReceiptParser(chain=CHAIN_NAME)
         stake_pool_logs_found = False
         total_gas_cost = 0
+        parsed_stake_amount_wei = 0
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
             total_gas_cost += tx_result.gas_cost_wei or 0
+            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            if parsed.success and parsed.stakes:
+                parsed_stake_amount_wei = int(parsed.stakes[0].amount * Decimal(10**18))
             for log in tx_result.receipt.logs or []:
                 # ``logs`` is a list[dict] per TransactionReceipt; getattr would
                 # silently return None on a dict, so use dict access.
@@ -252,6 +263,9 @@ class TestGimoStakeOnChain:
                     break
         assert stake_pool_logs_found, (
             "Expected at least one log from the Gimo StakePool after staking"
+        )
+        assert parsed_stake_amount_wei > 0, (
+            "GimoReceiptParser must report a st0G mint amount > 0 after staking"
         )
 
         # Layer 4: Balance deltas
@@ -351,11 +365,17 @@ class TestGimoUnstakeOnChain:
             f"Unstake execution failed: {execution_result.error}"
         )
 
-        # Layer 3: Receipt — verify a log from the StakePool
+        # Layer 3: Receipt — parse with GimoReceiptParser and assert the
+        # st0G burn amount; also confirm a log was emitted from the StakePool.
+        parser = GimoReceiptParser(chain=CHAIN_NAME)
         stake_pool_logs_found = False
+        parsed_unstake_amount_wei = 0
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
+            parsed = parser.parse_receipt(tx_result.receipt.to_dict())
+            if parsed.success and parsed.unstakes:
+                parsed_unstake_amount_wei = int(parsed.unstakes[0].amount * Decimal(10**18))
             for log in tx_result.receipt.logs or []:
                 # ``logs`` is a list[dict] per TransactionReceipt; getattr would
                 # silently return None on a dict, so use dict access.
@@ -365,6 +385,10 @@ class TestGimoUnstakeOnChain:
                     break
         assert stake_pool_logs_found, (
             "Expected at least one log from the Gimo StakePool after unstaking"
+        )
+        assert parsed_unstake_amount_wei == unstake_amount_wei, (
+            f"GimoReceiptParser must report a st0G burn equal to the unstake "
+            f"amount. Expected: {unstake_amount_wei}, Got: {parsed_unstake_amount_wei}"
         )
 
         # Layer 4: Balance deltas — st0G balance must have decreased.

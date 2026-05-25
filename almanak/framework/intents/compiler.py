@@ -72,10 +72,8 @@ from .vocabulary import (
     PredictionRedeemIntent,
     PredictionSellIntent,
     RepayIntent,
-    StakeIntent,
     SupplyIntent,
     SwapIntent,
-    UnstakeIntent,
     VaultDepositIntent,
     VaultRedeemIntent,
     WithdrawIntent,
@@ -305,6 +303,11 @@ _LENDING_PROTOCOLS = (
 # sync with the perp entries in connectors.compiler_registry.CompilerRegistry.
 _PERP_PROTOCOLS_SOLANA = ("drift",)
 _PERP_PROTOCOLS_NON_SOLANA = ("gmx_v2", "aster_perps", "pancakeswap_perps", "hyperliquid")
+
+# Staking connectors with connector-owned compilers — used only to build the
+# "Supported: ..." hint in the unsupported-protocol error. Keep in sync with
+# the staking entries in connectors.compiler_registry.CompilerRegistry.
+_STAKING_PROTOCOLS = ("ethena", "gimo", "lido")
 
 
 def _is_solana_mint(token: str) -> bool:
@@ -1068,9 +1071,9 @@ class IntentCompiler:
             elif intent_type == IntentType.FLASH_LOAN:
                 return self._compile_flash_loan(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.STAKE:
-                return self._compile_stake_intent(intent)  # type: ignore[arg-type]
+                return self._compile_staking_via_registry(intent, "STAKE")
             elif intent_type == IntentType.UNSTAKE:
-                return self._compile_unstake_intent(intent)  # type: ignore[arg-type]
+                return self._compile_staking_via_registry(intent, "UNSTAKE")
             elif intent_type == IntentType.PREDICTION_BUY:
                 return self._compile_prediction_buy(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PREDICTION_SELL:
@@ -2131,6 +2134,19 @@ class IntentCompiler:
             intent_id=intent.intent_id,
         )
 
+    def _compile_staking_via_registry(self, intent: Any, primitive: str) -> CompilationResult:
+        """Compile a staking intent through a connector-owned compiler."""
+        protocol = self._resolve_protocol(intent.protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is not None:
+            return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+        action = "staking" if primitive == "STAKE" else "unstaking"
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unsupported {action} protocol: {intent.protocol}. Supported: {', '.join(_STAKING_PROTOCOLS)}",
+            intent_id=intent.intent_id,
+        )
+
     def _compile_ensure_balance(self, intent: Any) -> CompilationResult:
         """Compile an ENSURE_BALANCE meta-intent by resolving it first.
 
@@ -2317,268 +2333,6 @@ class IntentCompiler:
         from .compiler_flash_loan import encode_flash_loan_callbacks
 
         return encode_flash_loan_callbacks(callback_transactions)
-
-    def _compile_stake_intent(self, intent: StakeIntent) -> CompilationResult:
-        """Compile a STAKE intent into an ActionBundle.
-
-        Routes to the appropriate staking adapter based on protocol:
-        - 'lido': Uses LidoAdapter for ETH staking (stETH/wstETH)
-        - 'ethena': Uses EthenaAdapter for USDe staking (sUSDe)
-        - 'gimo': Uses GimoAdapter for A0GI staking (st0G) on 0G Chain
-
-        Args:
-            intent: StakeIntent to compile
-
-        Returns:
-            CompilationResult with stake ActionBundle
-        """
-        from ..connectors import EthenaAdapter, EthenaConfig, LidoAdapter, LidoConfig
-        from ..connectors.gimo import GimoAdapter, GimoConfig
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        warnings: list[str] = []
-
-        try:
-            protocol = intent.protocol.lower()
-
-            # Validate chained amount
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
-
-            # Route to appropriate adapter based on protocol
-            action_bundle: ActionBundle
-            if protocol == "lido":
-                # Validate chain - Lido only on Ethereum mainnet
-                if self.chain not in ["ethereum", "mainnet"]:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Lido staking only supported on Ethereum mainnet, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                lido_config = LidoConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                lido_adapter = LidoAdapter(lido_config)
-                action_bundle = lido_adapter.compile_stake_intent(intent)
-                if action_bundle.metadata.get("error"):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=action_bundle.metadata["error"],
-                        intent_id=intent.intent_id,
-                    )
-
-            elif protocol == "ethena":
-                # Validate chain - Ethena only on Ethereum mainnet
-                if self.chain not in ["ethereum", "mainnet"]:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Ethena staking only supported on Ethereum mainnet, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                ethena_config = EthenaConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                ethena_adapter = EthenaAdapter(ethena_config)
-                action_bundle = ethena_adapter.compile_stake_intent(intent)
-
-            elif protocol == "gimo":
-                # Validate chain - Gimo only on 0G Chain
-                if self.chain != "zerog":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Gimo staking only supported on 0G Chain (zerog), got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                gimo_config = GimoConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                gimo_adapter = GimoAdapter(gimo_config)
-                action_bundle = gimo_adapter.compile_stake_intent(intent)
-                if action_bundle.metadata.get("error"):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=action_bundle.metadata["error"],
-                        intent_id=intent.intent_id,
-                    )
-
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unsupported staking protocol: {protocol}. Supported: lido, ethena, gimo",
-                    intent_id=intent.intent_id,
-                )
-
-            # Convert ActionBundle transactions to TransactionData
-            transactions: list[TransactionData] = []
-            for tx_dict in action_bundle.transactions:
-                tx = TransactionData(
-                    to=tx_dict.get("to", ""),
-                    value=int(tx_dict.get("value", 0)),
-                    data=tx_dict.get("data", "0x"),
-                    gas_estimate=tx_dict.get("gas_estimate", 0),
-                    description=tx_dict.get("description", ""),
-                    tx_type=tx_dict.get("tx_type", "stake"),
-                )
-                transactions.append(tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled STAKE intent: {intent.amount} {intent.token_in} via {protocol}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile STAKE intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_unstake_intent(self, intent: UnstakeIntent) -> CompilationResult:
-        """Compile an UNSTAKE intent into an ActionBundle.
-
-        Routes to the appropriate staking adapter based on protocol:
-        - 'lido': Uses LidoAdapter for stETH/wstETH unstaking
-        - 'ethena': Uses EthenaAdapter for sUSDe unstaking (initiates cooldown)
-        - 'gimo': Uses GimoAdapter for st0G unstaking on 0G Chain
-
-        Args:
-            intent: UnstakeIntent to compile
-
-        Returns:
-            CompilationResult with unstake ActionBundle
-        """
-        from ..connectors import EthenaAdapter, EthenaConfig, LidoAdapter, LidoConfig
-        from ..connectors.gimo import GimoAdapter, GimoConfig
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        warnings: list[str] = []
-
-        try:
-            protocol = intent.protocol.lower()
-
-            # Validate chained amount
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
-
-            # Route to appropriate adapter based on protocol
-            action_bundle: ActionBundle
-            if protocol == "lido":
-                # Validate chain - Lido only on Ethereum mainnet
-                if self.chain not in ["ethereum", "mainnet"]:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Lido unstaking only supported on Ethereum mainnet, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                lido_config = LidoConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                lido_adapter = LidoAdapter(lido_config)
-                action_bundle = lido_adapter.compile_unstake_intent(intent)
-
-            elif protocol == "ethena":
-                # Validate chain - Ethena only on Ethereum mainnet
-                if self.chain not in ["ethereum", "mainnet"]:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Ethena unstaking only supported on Ethereum mainnet, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                ethena_config = EthenaConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                ethena_adapter = EthenaAdapter(ethena_config)
-                action_bundle = ethena_adapter.compile_unstake_intent(intent)
-
-            elif protocol == "gimo":
-                # Validate chain - Gimo only on 0G Chain
-                if self.chain != "zerog":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Gimo unstaking only supported on 0G Chain (zerog), got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                gimo_config = GimoConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                gimo_adapter = GimoAdapter(gimo_config)
-                action_bundle = gimo_adapter.compile_unstake_intent(intent)
-                if action_bundle.metadata.get("error"):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=action_bundle.metadata["error"],
-                        intent_id=intent.intent_id,
-                    )
-
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unsupported unstaking protocol: {protocol}. Supported: lido, ethena, gimo",
-                    intent_id=intent.intent_id,
-                )
-
-            # Convert ActionBundle transactions to TransactionData
-            transactions: list[TransactionData] = []
-            for tx_dict in action_bundle.transactions:
-                tx = TransactionData(
-                    to=tx_dict.get("to", ""),
-                    value=int(tx_dict.get("value", 0)),
-                    data=tx_dict.get("data", "0x"),
-                    gas_estimate=tx_dict.get("gas_estimate", 0),
-                    description=tx_dict.get("description", ""),
-                    tx_type=tx_dict.get("tx_type", "unstake"),
-                )
-                transactions.append(tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled UNSTAKE intent: {intent.amount} {intent.token_in} via {protocol}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile UNSTAKE intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
 
     # =========================================================================
     # Prediction Market Intent Compilation
