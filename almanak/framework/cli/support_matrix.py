@@ -163,10 +163,10 @@ def _collect_lending_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     _add_euler_v2(lending, all_chains)
     # Joe Lend (Banker Joe) — DORMANT (governance wound down the protocol; VIB-3960).
     # Connector kept in-tree only for historical receipt parsing; full removal in July.
-    # Jupiter Lend — Solana isolated-vault lending
-    _add_singleton_lending(
-        lending, all_chains, "jupiter_lend", "solana", "almanak.framework.connectors.jupiter_lend", "JupiterLendAdapter"
-    )
+    # Jupiter Lend — intentionally NOT emitted. The compiler_solana.py routing
+    # is unexercised (no demo, no incubating, no on-chain intent test). The
+    # connector is also omitted from ConnectorRegistry. Re-add this collector
+    # once a Solana lending demo + intent test cover the full lifecycle.
     _add_curvance(lending, all_chains)
     return lending
 
@@ -189,14 +189,11 @@ def _collect_perps_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     except ImportError:
         pass
 
-    # Hyperliquid
-    try:
-        from almanak.framework.connectors.hyperliquid import HyperliquidAdapter  # noqa: F401
-
-        perps.setdefault("hyperliquid", set()).add("hyperliquid")
-        all_chains.add("hyperliquid")
-    except ImportError:
-        pass
+    # Hyperliquid — intentionally NOT emitted. Production PERP execution has
+    # not shipped (VIB-4774) and zero strategies in the repo route through the
+    # adapter. The connector is also omitted from ConnectorRegistry. Re-add
+    # this import-probe once VIB-4774 lands and an on-chain intent test
+    # covers PERP_OPEN / PERP_CLOSE end-to-end.
 
     # Aster (ApolloX rebrand) — BSC perps (Diamond proxy, broker_id 0).
     # PancakeSwap Perps is a shim over aster_perps (broker_id 2), so it ships

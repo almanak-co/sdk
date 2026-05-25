@@ -274,7 +274,12 @@ class TestPreviouslyMissingConnectors:
         [
             ("silo_v2", "lending", {"avalanche"}),
             # joelend removed — Joe Lend wound down by governance; VIB-3960
-            ("jupiter_lend", "lending", {"solana"}),
+            # jupiter_lend removed — folded into compiler_solana.py but
+            # unexercised (no demo / no intent test); deregistered from
+            # ConnectorRegistry and from support_matrix.py
+            # hyperliquid removed — production PERP execution not shipped
+            # (VIB-4774); deregistered from ConnectorRegistry and from
+            # support_matrix.py
             ("aster_perps", "perps", {"bsc"}),
             ("pancakeswap_perps", "perps", {"bsc"}),
             ("gimo", "yield", {"zerog"}),
@@ -288,6 +293,24 @@ class TestPreviouslyMissingConnectors:
         entries = [p for p in matrix_data["protocols"] if p["name"] == name and p["category"] == category]
         assert len(entries) == 1, f"{name} ({category}) should appear exactly once"
         assert set(entries[0]["chains"]) == expected_chains
+
+    @pytest.mark.parametrize(
+        ("name", "category"),
+        [
+            # Deregistered from ConnectorRegistry and removed from
+            # support_matrix.py collectors. Re-emitting any of these would
+            # advertise an unexercised / not-production-ready connector in
+            # `almanak strat matrix`.
+            ("hyperliquid", "perps"),  # VIB-4774 — production PERP exec not shipped
+            ("jupiter_lend", "lending"),  # folded compiler unexercised
+            ("joelend", "lending"),  # VIB-3960 — protocol wound down
+        ],
+    )
+    def test_deregistered_connector_absent(
+        self, matrix_data: dict, name: str, category: str
+    ) -> None:
+        entries = [p for p in matrix_data["protocols"] if p["name"] == name and p["category"] == category]
+        assert entries == [], f"{name} ({category}) is deregistered; must not appear in matrix"
 
     def test_euler_v2_chains_match_adapter(self, matrix_data: dict) -> None:
         from almanak.framework.connectors.euler_v2.adapter import CHAIN_ADDRESSES

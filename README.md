@@ -34,14 +34,14 @@
 
 ---
 
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 17 chains and 42 protocol connectors.
+Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 17 chains and 40 protocol connectors.
 
 ## Features
 
 - **Intent-Based Architecture**: Express trading logic as high-level intents (Swap, LP, Borrow, etc.) - the framework handles compilation and execution
 - **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers for reliability
 - **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
-- **Multi-Chain Support**: 17 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma (chain configs present; protocol coverage pending). Hyperliquid is supported as a perpetuals venue through the `hyperliquid` connector.
+- **Multi-Chain Support**: 17 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma (chain configs present; protocol coverage pending).
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
 - **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 29 built-in tools and policy-enforced safety (BYO LLM API key)
@@ -243,20 +243,18 @@ For complete documentation, see [`almanak/framework/backtesting/README.md`](alma
 
 - Solana *
 
-Hyperliquid is supported as a perpetuals **venue** via the `hyperliquid` connector (it is not a registered `ChainDescriptor` in `almanak/core/chains/`).
-
 For the authoritative per-protocol chain matrix, see the [connector reference](https://sdk.docs.almanak.co/api/connectors/).
 
 ## Supported Protocols
 
-42 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
+40 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
 
 - **DEXs / AMMs**: Uniswap V3, Uniswap V4, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Camelot, Curve, Fluid, Pendle, Orca, Meteora, Raydium CLMM
 - **Swap aggregators**: Jupiter, Enso, LiFi
-- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark, Euler V2, Radiant V2, Fluid, BenQi, Silo V2, Curvance, Kamino, Jupiter Lend
+- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark, Euler V2, Radiant V2, Fluid, BenQi, Silo V2, Curvance, Kamino
 - **Liquid Staking & yield-bearing assets**: Lido, Ethena, Gimo
 - **Yield tokenization**: Pendle
-- **Perpetuals**: GMX V2, Hyperliquid, Aster Perps, PancakeSwap Perps, Drift
+- **Perpetuals**: GMX V2, Aster Perps, PancakeSwap Perps, Drift
 - **Prediction Markets**: Polymarket
 - **CEX Integration**: Kraken
 - **Bridges**: Across, Stargate, LiFi

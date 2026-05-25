@@ -196,11 +196,9 @@ nav:
       - api/connectors/compound_v3.md
       - api/connectors/silo_v2.md
       - api/connectors/enso.md
-      - api/connectors/joelend.md
       - api/connectors/euler_v2.md
       - api/connectors/radiant_v2.md
       - api/connectors/polymarket.md
-      - api/connectors/hyperliquid.md
       - api/connectors/lido.md
       - api/connectors/ethena.md
       - api/connectors/spark.md
@@ -215,7 +213,6 @@ nav:
       - api/connectors/raydium.md
       - api/connectors/gimo.md
       - api/connectors/jupiter.md
-      - api/connectors/jupiter_lend.md
       - api/connectors/kamino.md
       - api/connectors/lifi.md
       - api/connectors/across.md
