@@ -17,6 +17,7 @@ from grpc_health.v1.health import aio as health_aio
 from grpc_reflection.v1alpha import reflection
 
 from almanak.core.redaction import install_redaction
+from almanak.framework.utils.deployment_banner import emit_gateway_banner
 from almanak.gateway._server_start_helpers import (
     acquire_local_db_flock,
     build_interceptors,
@@ -738,6 +739,26 @@ def main() -> None:
 
     # Initialize structlog for audit logging
     configure_structlog()
+
+    # Fire the deployment-start banner before any other gateway-boot log so
+    # users can clearly see where this deployment's logs begin (vs the
+    # previous deployment's logs in the same Cloud Logging stream).
+    # Banner emission is observability — most failures (e.g. a formatting
+    # bug in identity helpers) must not stop the gateway from booting. But
+    # ``deployment_id()`` raises ``FatalBootError`` when hosted mode is
+    # set with a blank id; that is the hosted-misconfig boot guard and must
+    # propagate so the pod refuses to start rather than writing under an
+    # empty identity. ``FatalBootError`` is imported lazily to keep
+    # ``almanak.framework.deployment`` out of the gateway's module-load
+    # closure (enforced by tests/gateway/test_imports_lean.py).
+    try:
+        emit_gateway_banner(logger)
+    except Exception as exc:
+        from almanak.framework.deployment.mode import FatalBootError
+
+        if isinstance(exc, FatalBootError):
+            raise
+        logger.warning(f"Failed to emit deployment-start banner: {exc}")
 
     # Phase 1 (config-service plan): the standalone gateway entrypoint owns
     # its own dotenv ingest because there is no Click main group to call

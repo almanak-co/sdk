@@ -90,6 +90,7 @@ from ..models.operator_card import EventType, OperatorCard, PositionSummary, Sev
 from ..models.stuck_reason import StuckReason
 from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateManager
+from ..utils.deployment_banner import emit_strategy_banner
 from ..utils.grpc_utils import TRANSIENT_GRPC_CODES, get_grpc_status_code
 from ..utils.log_formatters import (
     _emojis_enabled,
@@ -1893,6 +1894,13 @@ class StrategyRunner:
         # delay", and `0 or default` would silently fall back to default_interval_seconds.
         interval = self.config.default_interval_seconds if interval_seconds is None else interval_seconds
         deployment_id = strategy.deployment_id
+
+        # Banner emission is observability, not critical infra — never stop
+        # a strategy from running because a log line could not be formed.
+        try:
+            emit_strategy_banner(logger, strategy)
+        except Exception as exc:
+            logger.warning(f"Failed to emit deployment-start banner: {exc}")
 
         max_iter_msg = f", max_iterations={max_iterations}" if max_iterations else ""
         logger.info(f"Starting run loop for strategy {deployment_id} with interval={interval}s{max_iter_msg}")

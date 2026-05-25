@@ -14,8 +14,12 @@ import pytest
 
 from almanak.framework.deployment import (
     FatalBootError,
+    deployment_commit_sha,
     deployment_id,
     deployment_mode,
+    deployment_sdk_version,
+    deployment_strategy_name,
+    deployment_strategy_version,
     is_hosted,
     is_local,
 )
@@ -200,6 +204,33 @@ def test_helper_module_reads_each_env_var_once():
     assert len(env_gets) == 1, f"Expected one os.environ.get in mode.py, found {len(env_gets)}"
     assert '"ALMANAK_IS_HOSTED"' in content
     assert '"ALMANAK_DEPLOYMENT_ID"' in content
+
+
+# --- Banner identity helpers (deployment_commit_sha / sdk_version / etc.) ---
+
+
+@pytest.mark.parametrize(
+    "helper,env_var",
+    [
+        (deployment_commit_sha, "ALMANAK_COMMIT_SHA"),
+        (deployment_sdk_version, "ALMANAK_SDK_VERSION"),
+        (deployment_strategy_name, "ALMANAK_STRATEGY_NAME"),
+        (deployment_strategy_version, "ALMANAK_STRATEGY_VERSION"),
+    ],
+)
+def test_banner_identity_helpers(monkeypatch, helper, env_var):
+    """Each helper: unset → None; whitespace-only → None; set → stripped value."""
+    monkeypatch.delenv(env_var, raising=False)
+    assert helper() is None, f"{helper.__name__} should return None when {env_var} is unset"
+
+    monkeypatch.setenv(env_var, "   ")
+    assert helper() is None, f"{helper.__name__} should return None for whitespace-only {env_var}"
+
+    monkeypatch.setenv(env_var, "  abc123  ")
+    assert helper() == "abc123", f"{helper.__name__} should strip surrounding whitespace"
+
+    monkeypatch.setenv(env_var, "v1.0.0")
+    assert helper() == "v1.0.0"
 
 
 if __name__ == "__main__":

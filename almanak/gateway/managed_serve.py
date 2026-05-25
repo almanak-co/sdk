@@ -31,6 +31,7 @@ import sys
 import threading
 
 from almanak.core.redaction import install_redaction
+from almanak.framework.utils.deployment_banner import emit_gateway_banner
 from almanak.gateway.audit import configure_structlog
 from almanak.gateway.managed import ManagedGateway
 
@@ -59,6 +60,26 @@ def main() -> int:
     # before it reaches Cloud Run Logging.
     install_redaction()
     configure_structlog()
+
+    # Fire the deployment-start banner before any other gateway-boot log so
+    # users can clearly see where this deployment's logs begin (vs the
+    # previous deployment's logs in the same Cloud Logging stream).
+    # Banner emission is observability — most failures (e.g. a formatting
+    # bug in identity helpers) must not stop the gateway from booting. But
+    # ``deployment_id()`` raises ``FatalBootError`` when hosted mode is
+    # set with a blank id; that is the hosted-misconfig boot guard and must
+    # propagate so the pod refuses to start rather than writing under an
+    # empty identity. ``FatalBootError`` is imported lazily to keep
+    # ``almanak.framework.deployment`` out of the gateway's module-load
+    # closure (enforced by tests/gateway/test_imports_lean.py).
+    try:
+        emit_gateway_banner(logger)
+    except Exception as exc:
+        from almanak.framework.deployment.mode import FatalBootError
+
+        if isinstance(exc, FatalBootError):
+            raise
+        logger.warning(f"Failed to emit deployment-start banner: {exc}")
 
     # Same dotenv + config-resolution path as ``python -m almanak.gateway.server``.
     # load_config() picks up ALMANAK_GATEWAY_* env vars via the typed pydantic

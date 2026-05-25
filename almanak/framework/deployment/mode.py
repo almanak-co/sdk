@@ -113,3 +113,45 @@ def deployment_id() -> str | None:
 def deployment_mode() -> DeploymentMode:
     """Return the deployment mode as a string token suitable for logging."""
     return "hosted" if is_hosted() else "local"
+
+
+def deployment_commit_sha() -> str | None:
+    """Return the deployer-injected git commit SHA, or ``None`` if unset.
+
+    Used by the deployment-start banner to surface *which build* a hosted
+    pod is running. Set by the deployer (``ALMANAK_COMMIT_SHA``) from
+    ``v2_metadata.commit_sha`` on the platform side; unset locally.
+    """
+    return _raw("ALMANAK_COMMIT_SHA") or None
+
+
+def deployment_sdk_version() -> str | None:
+    """Return the deployer-injected SDK version pin, or ``None`` if unset.
+
+    Set by the deployer from the strategy's ``pyproject.toml``/``uv.lock``
+    ``almanak`` pin (``ALMANAK_SDK_VERSION``). Distinct from the strategy's
+    own version: this is *which Almanak SDK release* the strategy was
+    deployed against.
+    """
+    return _raw("ALMANAK_SDK_VERSION") or None
+
+
+def deployment_strategy_name() -> str | None:
+    """Return the deployer-injected strategy name, or ``None`` if unset.
+
+    Used as the gateway-side banner fallback (the gateway does not import
+    strategy code, so the ``@almanak_strategy(name=…)`` decorator value is
+    not visible at gateway boot). The strategy container itself resolves
+    the name from ``STRATEGY_METADATA`` via ``_strategy_display_name``.
+    """
+    return _raw("ALMANAK_STRATEGY_NAME") or None
+
+
+def deployment_strategy_version() -> str | None:
+    """Return the deployer-injected strategy's own version, or ``None`` if unset.
+
+    Set by the deployer from ``pyproject.toml`` ``[project].version`` so the
+    gateway-side banner can render the strategy's package version without
+    importing strategy code.
+    """
+    return _raw("ALMANAK_STRATEGY_VERSION") or None

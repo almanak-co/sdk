@@ -35,8 +35,12 @@ from .canary import (
 from .mode import (
     DeploymentMode,
     FatalBootError,
+    deployment_commit_sha,
     deployment_id,
     deployment_mode,
+    deployment_sdk_version,
+    deployment_strategy_name,
+    deployment_strategy_version,
     is_hosted,
     is_local,
 )
@@ -61,4 +65,9 @@ __all__ = [
     "is_local",
     "DeploymentMode",
     "FatalBootError",
+    # Deployment-identity helpers used by the deployment-start banner.
+    "deployment_commit_sha",
+    "deployment_sdk_version",
+    "deployment_strategy_name",
+    "deployment_strategy_version",
 ]
