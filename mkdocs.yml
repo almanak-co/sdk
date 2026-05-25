@@ -149,7 +149,6 @@ nav:
     - Environment Variables: environment-variables.md
     - Agent Skills: agent-skills.md
     - Agentic Trading: agentic/index.md
-    - Solana: solana.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md
@@ -157,8 +156,10 @@ nav:
     - cli/strat-run.md
     - cli/strat-teardown.md
     - cli/strat-new.md
+    - cli/strat-example.md
     - cli/almanak-gateway.md
     - cli/almanak-dashboard.md
+    - cli/dashboard-test.md
   - Gateway:
     - gateway/api-reference.md
     - gateway/troubleshooting.md
@@ -196,9 +197,11 @@ nav:
       - api/connectors/compound_v3.md
       - api/connectors/silo_v2.md
       - api/connectors/enso.md
+      - api/connectors/joelend.md
       - api/connectors/euler_v2.md
       - api/connectors/radiant_v2.md
       - api/connectors/polymarket.md
+      - api/connectors/hyperliquid.md
       - api/connectors/lido.md
       - api/connectors/ethena.md
       - api/connectors/spark.md
@@ -213,6 +216,7 @@ nav:
       - api/connectors/raydium.md
       - api/connectors/gimo.md
       - api/connectors/jupiter.md
+      - api/connectors/jupiter_lend.md
       - api/connectors/kamino.md
       - api/connectors/lifi.md
       - api/connectors/across.md

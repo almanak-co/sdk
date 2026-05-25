@@ -24,6 +24,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Compound V3](compound_v3.md) | Lending | Ethereum, Arbitrum, Base | `compound_v3` |
 | [Enso](enso.md) | Aggregator | Multi-chain | `enso` |
 | [Polymarket](polymarket.md) | Prediction | Polygon | `polymarket` |
+| [Hyperliquid](hyperliquid.md) | Perpetuals | HyperEVM | `hyperliquid` |
 | [Lido](lido.md) | Liquid Staking | Ethereum | `lido` |
 | [Ethena](ethena.md) | Yield | Ethereum | `ethena` |
 | [Spark](spark.md) | Lending | Ethereum | `spark` |
@@ -36,12 +37,14 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [BenQi](benqi.md) | Lending | Avalanche | `benqi` |
 | [Silo V2](silo_v2.md) | Lending | Avalanche | `silo_v2` |
 | [Drift](drift.md) | Perpetuals | Solana | `drift` |
+| [Joe Lend](joelend.md) | Lending — DORMANT | Avalanche | `joelend` (deprecated; VIB-3960) |
 | [Euler V2](euler_v2.md) | Lending | Avalanche | `euler_v2` |
 | [Fluid DEX](fluid.md) | DEX | Ethereum, Arbitrum | `fluid` |
 | [Gimo Finance](gimo.md) | Liquid Staking | 0G Chain | `gimo` |
 | [Jupiter](jupiter.md) | DEX Aggregator | Solana | `jupiter` |
+| [Jupiter Lend](jupiter_lend.md) | Lending | Solana | `jupiter_lend` |
 | [Kamino](kamino.md) | Lending | Solana | `kamino` |
-| [Lagoon](lagoon.md) | Vault | Ethereum, Base | `lagoon` |
+| [Lagoon](lagoon.md) | Vault | Multi-chain | `lagoon` |
 | [Meteora](meteora.md) | DEX / LP | Solana | `meteora` |
 | [Morpho Vault](morpho_vault.md) | Vault | Ethereum, Base | `morpho_vault` |
 | [Orca](orca.md) | DEX / LP | Solana | `orca` |

@@ -1,20 +1,24 @@
-"""Jupiter Lend Connector — EXPERIMENTAL / NOT PRODUCTION-READY.
+"""Jupiter Lend Protocol Connector.
 
-The Solana lending compiler (``compiler_solana.py``) routes SUPPLY / BORROW /
-REPAY / WITHDRAW intents to ``JupiterLendAdapter`` when ``protocol == "jupiter_lend"``,
-but no demo, no incubating strategy, and no on-chain intent test exercises
-this path. The folded compiler integration is unverified.
+Jupiter Lend is the #2 Solana money market (~$1.65B TVL),
+featuring isolated vaults, rehypothecation, and aggressive LTV ratios.
 
-This connector is intentionally:
-- Omitted from ``ConnectorRegistry`` (see deregistration block at end of file)
-- Removed from ``almanak strat matrix`` (no longer added in
-  ``almanak/framework/cli/support_matrix.py``)
-- Removed from public docs (``docs/api/connectors/`` + ``mkdocs.yml`` nav)
+This connector provides:
+- JupiterLendClient: HTTP client for the Jupiter Lend API
+- JupiterLendAdapter: Adapter for converting lending intents to Solana transactions
+- JupiterLendReceiptParser: Balance-delta parser for extracting lending results
 
-See ``docs/internal/plans/connector-status-audit-2026-05-23.html`` for the
-audit that flagged the lack of demo / intent-test coverage. Re-register only
-once at least one on-chain Solana intent test exercises the full lending
-lifecycle against a live Jupiter Lend vault.
+Example:
+    from almanak.framework.connectors.jupiter_lend import JupiterLendClient, JupiterLendConfig
+
+    config = JupiterLendConfig(wallet_address="your-solana-pubkey")
+    client = JupiterLendClient(config)
+
+    # Get available vaults
+    vaults = client.get_vaults()
+
+    # Build a deposit transaction
+    tx = client.deposit(vault=vaults[0].address, amount="100.0")
 """
 
 from .adapter import JupiterLendAdapter
@@ -47,14 +51,19 @@ __all__ = [
     "JupiterLendConfigError",
 ]
 
-# Connector registration intentionally OMITTED.
-#
-# Folded into ``compiler_solana.py`` but completely unexercised: zero demo,
-# zero incubating strategy, zero on-chain intent test. Registering the
-# connector would pin four (jupiter_lend, SUPPLY/BORROW/REPAY/WITHDRAW, solana)
-# cells in the intent-coverage required-set with no path to satisfy them.
-#
-# The adapter / client / receipt parser stay (above) so the compiler routing
-# in ``compiler_solana.py`` keeps working for anyone hand-driving the SDK.
-# Re-add the ``register_connector(...)`` call once an on-chain intent test
-# covers the full lending lifecycle against a live Jupiter Lend vault.
+# Connector registration (VIB-4298). The registry powers the (connector,
+# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
+# and will be consumed by PR 2's intent-test coverage check.
+from almanak.framework.connectors.registry import register_connector  # noqa: E402
+from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+
+register_connector(
+    name="jupiter_lend",
+    intents=(
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+    ),
+    chains=("solana",),
+)
