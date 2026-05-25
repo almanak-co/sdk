@@ -65,6 +65,69 @@ class TestChainValidation:
             validate_chain("")
 
 
+class TestAllowedChainsTrustBoundary:
+    """Pin ``ALLOWED_CHAINS`` against an explicit historical snapshot.
+
+    VIB-4801 derives ``ALLOWED_CHAINS`` from ``ChainRegistry.all()`` so the
+    gateway allowlist tracks the single source of truth for supported
+    chains. This is convenient, but it also means a *future* descriptor-only
+    chain addition would implicitly widen the gateway trust boundary
+    without any explicit gateway review.
+
+    This guard pins the set against a snapshot of the pre-VIB-4801,
+    hand-maintained literal. Any drift (added chain, removed chain) trips
+    the test — adding a new chain requires deliberately editing this
+    snapshot, which forces an explicit gateway-side acknowledgement.
+
+    Mirror test under ``tests/unit/core/test_chain_registry.py`` covers the
+    same invariant from the registry side; this is the gateway-directory
+    surface so reviewers of ``almanak/gateway/`` see the boundary guard
+    next to the validation code it protects.
+    """
+
+    # Pre-VIB-4801 hand-maintained set from almanak/gateway/validation.py.
+    HISTORICAL_ALLOWED_CHAINS = frozenset(
+        {
+            "ethereum",
+            "arbitrum",
+            "base",
+            "optimism",
+            "polygon",
+            "avalanche",
+            "bsc",
+            "sonic",
+            "plasma",
+            "linea",
+            "blast",
+            "mantle",
+            "berachain",
+            "solana",
+            "monad",
+            "xlayer",
+            "zerog",
+        }
+    )
+
+    def test_allowed_chains_matches_historical_snapshot(self):
+        """ALLOWED_CHAINS must be byte-identical to the pre-VIB-4801 set.
+
+        If this test fails it means a chain was added or removed from the
+        registry without an explicit update here. Adding a chain to the
+        gateway boundary is a security review event — update the snapshot
+        deliberately, do not silently let the registry widen the
+        allowlist.
+        """
+        added = ALLOWED_CHAINS - self.HISTORICAL_ALLOWED_CHAINS
+        removed = self.HISTORICAL_ALLOWED_CHAINS - ALLOWED_CHAINS
+        assert ALLOWED_CHAINS == self.HISTORICAL_ALLOWED_CHAINS, (
+            f"ALLOWED_CHAINS drifted from the pre-VIB-4801 snapshot. "
+            f"Added: {sorted(added)}; removed: {sorted(removed)}. "
+            f"Adding a chain widens the gateway trust boundary — review "
+            f"the new chain's descriptor and update HISTORICAL_ALLOWED_CHAINS "
+            f"in this test deliberately."
+        )
+
+
 class TestAddressValidation:
     """Tests for Ethereum address validation."""
 

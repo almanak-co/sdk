@@ -22,9 +22,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.execution.gas.constants import (
-    CHAIN_GRPC_EXECUTE_TIMEOUTS,
-    CHAIN_TX_TIMEOUTS,
     DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS,
     DEFAULT_TX_TIMEOUT_SECONDS,
 )
@@ -340,14 +339,19 @@ class GatewayExecutionOrchestrator:
         self._client = client
         self._chain = chain
         self._wallet_address = wallet_address
-        self._timeout = (
-            timeout if timeout is not None else CHAIN_TX_TIMEOUTS.get(chain.lower(), DEFAULT_TX_TIMEOUT_SECONDS)
+        descriptor = ChainRegistry.try_resolve(chain)
+        chain_tx_timeout = (
+            descriptor.timeouts.tx_confirmation
+            if descriptor is not None and descriptor.timeouts.tx_confirmation is not None
+            else DEFAULT_TX_TIMEOUT_SECONDS
         )
-        self._execute_timeout = (
-            execute_timeout
-            if execute_timeout is not None
-            else CHAIN_GRPC_EXECUTE_TIMEOUTS.get(chain.lower(), DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS)
+        chain_grpc_timeout = (
+            descriptor.timeouts.grpc_execute
+            if descriptor is not None and descriptor.timeouts.grpc_execute is not None
+            else DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS
         )
+        self._timeout = timeout if timeout is not None else chain_tx_timeout
+        self._execute_timeout = execute_timeout if execute_timeout is not None else chain_grpc_timeout
         self._max_gas_price_gwei = max_gas_price_gwei
 
     @property

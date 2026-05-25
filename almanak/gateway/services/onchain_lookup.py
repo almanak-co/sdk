@@ -30,6 +30,7 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,18 +47,39 @@ logger = logging.getLogger(__name__)
 # Native token placeholder address (used by many protocols)
 NATIVE_SENTINEL_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-# Chain-specific native token info
-NATIVE_TOKEN_INFO: dict[str, dict[str, Any]] = {
-    "ethereum": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "arbitrum": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "optimism": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "base": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "polygon": {"symbol": "MATIC", "name": "Polygon", "decimals": 18},
-    "avalanche": {"symbol": "AVAX", "name": "Avalanche", "decimals": 18},
-    "bsc": {"symbol": "BNB", "name": "BNB", "decimals": 18},
-    "sonic": {"symbol": "S", "name": "Sonic", "decimals": 18},
-    "plasma": {"symbol": "XPL", "name": "Plasma", "decimals": 18},
-}
+
+# Chain-specific native token info.
+#
+# Derived from :class:`ChainRegistry` (VIB-4801). The legacy literal
+# covered only 9 chains; with the registry every supported EVM chain
+# now exposes its native token metadata here. Production code reads via
+# ``ChainRegistry.try_resolve(chain).native``; this dict is preserved
+# solely as a back-compat surface for regression tests that snapshot the
+# historical mapping. The outer view is wrapped in ``MappingProxyType``
+# so the registry is the single mutation surface; inner per-chain dicts
+# remain plain dicts because some callers iterate them as
+# ``info.items()`` and a few legacy tests construct adjacent dicts that
+# expect ``dict[str, Any]`` shape.
+def _build_native_token_info() -> Mapping[str, dict[str, Any]]:
+    from types import MappingProxyType
+
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    return MappingProxyType(
+        {
+            d.name: {
+                "symbol": d.native.symbol,
+                "name": d.native.name,
+                "decimals": d.native.decimals,
+            }
+            for d in ChainRegistry.all()
+            if d.family is ChainFamily.EVM
+        }
+    )
+
+
+NATIVE_TOKEN_INFO: Mapping[str, dict[str, Any]] = _build_native_token_info()
 
 # Minimal ERC20 ABI for metadata queries
 ERC20_METADATA_ABI = [
@@ -268,16 +290,19 @@ class OnChainLookup:
         Returns:
             TokenMetadata for the native token, or None if chain unknown
         """
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
+
         chain_lower = chain.lower()
-        if chain_lower not in NATIVE_TOKEN_INFO:
+        descriptor = ChainRegistry.try_resolve(chain_lower)
+        if descriptor is None or descriptor.family is not ChainFamily.EVM:
             logger.warning("Unknown chain for native token lookup: %s", chain)
             return None
 
-        info = NATIVE_TOKEN_INFO[chain_lower]
         return TokenMetadata(
-            symbol=info["symbol"],
-            name=info["name"],
-            decimals=info["decimals"],
+            symbol=descriptor.native.symbol,
+            name=descriptor.native.name,
+            decimals=descriptor.native.decimals,
             address=address,
             is_native=True,
         )

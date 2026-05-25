@@ -1,25 +1,17 @@
-"""Gas estimation constants and utilities.
+"""Gas estimation defaults.
 
-This package is the single source of truth for all gas-related constants
-used across the execution framework and gateway.
+Per-chain gas knobs are owned by :class:`almanak.core.chains.ChainRegistry`
+since VIB-4801. This package only re-exports the framework-wide defaults
+(``DEFAULT_GAS_BUFFER``, ``DEFAULT_SIMULATION_BUFFER``); read per-chain
+values via ``ChainRegistry.try_resolve(chain).gas.<field>``.
 """
 
 from almanak.framework.execution.gas.constants import (
-    CHAIN_GAS_BUFFERS,
-    CHAIN_SIMULATION_BUFFERS,
     DEFAULT_GAS_BUFFER,
     DEFAULT_SIMULATION_BUFFER,
 )
 
-# Backward-compatible aliases
-GAS_BUFFER_MULTIPLIERS = CHAIN_GAS_BUFFERS
-SIMULATION_GAS_BUFFERS = CHAIN_SIMULATION_BUFFERS
-
 __all__ = [
-    "CHAIN_GAS_BUFFERS",
-    "CHAIN_SIMULATION_BUFFERS",
     "DEFAULT_GAS_BUFFER",
     "DEFAULT_SIMULATION_BUFFER",
-    "GAS_BUFFER_MULTIPLIERS",
-    "SIMULATION_GAS_BUFFERS",
 ]

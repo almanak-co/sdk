@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 import click
 
 from almanak.config.cli_options import gateway_client_options
+from almanak.core.chains import ChainRegistry
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
-from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
@@ -1165,7 +1165,8 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_y
 
     # Detect native token output -- DEX swaps produce the wrapped version (e.g. WETH on Ethereum).
     # Check chain-aware: only show the hint when to_token IS this chain's native token.
-    _chain_native = NATIVE_TOKEN_SYMBOLS.get(_chain.lower(), "ETH")
+    _chain_descriptor = ChainRegistry.try_resolve(_chain)
+    _chain_native = _chain_descriptor.native.symbol if _chain_descriptor is not None else "ETH"
     wrapped_name = _NATIVE_TO_WRAPPED.get(to_token.upper()) if to_token.upper() == _chain_native else None
     is_native_output = wrapped_name is not None
     _ax_flags = f"--chain {_chain}" + (f" --network {_network}" if _network and _network != "mainnet" else "")

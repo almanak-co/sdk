@@ -1,4 +1,7 @@
+from types import MappingProxyType
+
 from almanak import Chain
+from almanak.core.chains import ChainRegistry
 
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
@@ -31,58 +34,21 @@ STABLECOINS: frozenset[str] = frozenset(
     }
 )
 
-# Numeric chain IDs for each chain (EIP-155)
-CHAIN_IDS: dict[Chain, int] = {
-    Chain.ETHEREUM: 1,
-    Chain.ARBITRUM: 42161,
-    Chain.OPTIMISM: 10,
-    Chain.BASE: 8453,
-    Chain.AVALANCHE: 43114,
-    Chain.POLYGON: 137,
-    Chain.BSC: 56,
-    Chain.SONIC: 146,
-    Chain.PLASMA: 9745,
-    Chain.BLAST: 81457,
-    Chain.LINEA: 59144,
-    Chain.MANTLE: 5000,
-    Chain.BERACHAIN: 80094,
-    Chain.MONAD: 143,
-    Chain.XLAYER: 196,
-    Chain.ZEROG: 16661,
-    Chain.SOLANA: 0,  # Non-EVM chain, no EIP-155 chain ID
-}
+# Numeric chain IDs for each chain (EIP-155).
+#
+# Derived view over :class:`ChainRegistry` (VIB-4801). The registry is the
+# single source of truth; this mapping is preserved as a read-only
+# :class:`MappingProxyType` so legacy imports keep working unchanged.
+# Do NOT mutate this — add or change a descriptor under
+# ``almanak/core/chains/`` instead.
+CHAIN_IDS: MappingProxyType[Chain, int] = MappingProxyType({d.enum: d.chain_id for d in ChainRegistry.all()})
 
-# Common aliases mapping to Chain enum
-_CHAIN_ALIASES: dict[str, Chain] = {
-    "ethereum": Chain.ETHEREUM,
-    "eth": Chain.ETHEREUM,
-    "mainnet": Chain.ETHEREUM,
-    "arbitrum": Chain.ARBITRUM,
-    "arb": Chain.ARBITRUM,
-    "optimism": Chain.OPTIMISM,
-    "op": Chain.OPTIMISM,
-    "base": Chain.BASE,
-    "avalanche": Chain.AVALANCHE,
-    "avax": Chain.AVALANCHE,
-    "polygon": Chain.POLYGON,
-    "matic": Chain.POLYGON,
-    "bsc": Chain.BSC,
-    "bnb": Chain.BSC,
-    "binance": Chain.BSC,
-    "sonic": Chain.SONIC,
-    "plasma": Chain.PLASMA,
-    "blast": Chain.BLAST,
-    "linea": Chain.LINEA,
-    "mantle": Chain.MANTLE,
-    "berachain": Chain.BERACHAIN,
-    "bera": Chain.BERACHAIN,
-    "monad": Chain.MONAD,
-    "xlayer": Chain.XLAYER,
-    "zerog": Chain.ZEROG,
-    "0g": Chain.ZEROG,
-    "solana": Chain.SOLANA,
-    "sol": Chain.SOLANA,
-}
+# Common aliases mapping to Chain enum.
+#
+# Derived view over :class:`ChainRegistry` (VIB-4801). Each descriptor's
+# canonical name and every alias resolve back to the descriptor; this map
+# preserves the legacy ``alias -> Chain`` shape.
+_CHAIN_ALIASES: MappingProxyType[str, Chain] = MappingProxyType(dict(ChainRegistry.aliases()))
 
 
 def resolve_chain_name(chain: str) -> str:

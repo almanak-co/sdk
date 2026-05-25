@@ -583,11 +583,12 @@ def _build_compilation_error(ctx: _Ctx) -> tuple[str, list[str]]:
 def _build_insufficient_native_eth(ctx: _Ctx) -> tuple[str, list[str]]:
     # Local import keeps the module-level import graph unchanged (matches
     # the pre-refactor behaviour of importing lazily inside the branch).
-    from almanak.framework.execution.chain_executor import _CHAIN_NATIVE_SYMBOL
+    from almanak.core.chains import ChainRegistry
 
     assert ctx.native_eth_check is not None  # guaranteed by predicate
     native_eth_check = ctx.native_eth_check
-    native = _CHAIN_NATIVE_SYMBOL.get(ctx.chain, "ETH") if ctx.chain else "ETH"
+    descriptor = ChainRegistry.try_resolve(ctx.chain) if ctx.chain else None
+    native = descriptor.native.symbol if descriptor is not None else "ETH"
     cause = f"Insufficient native {native} for gas + execution fees"
     suggestions = [
         f"Send at least {native_eth_check.shortfall:.6f} {native} to your wallet on this chain",

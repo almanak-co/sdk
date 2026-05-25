@@ -43,7 +43,9 @@ from hexbytes import HexBytes
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.types import TxParams, Wei
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.execution.config import CHAIN_IDS, ConfigurationError
+from almanak.framework.execution.gas.constants import DEFAULT_GAS_BUFFER
 from almanak.framework.execution.interfaces import (
     ExecutionError,
     GasEstimationError,
@@ -71,10 +73,18 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-# Chain-specific gas buffer multipliers - imported from shared constants module
-from almanak.framework.execution.gas.constants import CHAIN_GAS_BUFFERS, DEFAULT_GAS_BUFFER
+# Chain-specific gas buffer multipliers come from ``ChainRegistry``
+# (VIB-4801). Use ``ChainRegistry.try_resolve(chain).gas.buffer`` instead of
+# importing the legacy ``CHAIN_GAS_BUFFERS`` dict.
 
-GAS_BUFFER_MULTIPLIERS = CHAIN_GAS_BUFFERS
+
+def _gas_buffer_for(chain: str) -> float:
+    """Return the per-chain gas buffer multiplier, or the framework default."""
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.buffer is None:
+        return DEFAULT_GAS_BUFFER
+    return descriptor.gas.buffer
+
 
 # Default gas limits for different transaction types
 DEFAULT_GAS_LIMITS: dict[str, int] = {
@@ -118,29 +128,16 @@ CHAIN_RECEIPT_TIMEOUTS: dict[str, int] = {
 DEFAULT_RECEIPT_TIMEOUT: int = 120
 
 
-_CHAIN_NATIVE_SYMBOL: dict[str, str] = {
-    "ethereum": "ETH",
-    "arbitrum": "ETH",
-    "optimism": "ETH",
-    "base": "ETH",
-    "polygon": "MATIC",
-    "avalanche": "AVAX",
-    "bsc": "BNB",
-    "sonic": "S",
-    "plasma": "XPL",
-    "mantle": "MNT",
-    "monad": "MON",
-    "berachain": "BERA",
-    "xlayer": "OKB",
-    "zerog": "A0GI",
-}
+def _native_symbol_for(chain: str) -> str:
+    """Return the native symbol for ``chain``, or ``ETH`` as a fallback."""
+    descriptor = ChainRegistry.try_resolve(chain) if chain else None
+    return descriptor.native.symbol if descriptor is not None else "ETH"
 
 
 def _format_wei_as_native(wei: int, chain: str = "") -> str:
     """Format wei amount as human-readable native token string."""
     amount = Decimal(wei) / Decimal(10**18)
-    symbol = _CHAIN_NATIVE_SYMBOL.get(chain, "ETH")
-    return f"{amount:.6f} {symbol}"
+    return f"{amount:.6f} {_native_symbol_for(chain)}"
 
 
 # =============================================================================
@@ -200,7 +197,7 @@ class ChainExecutorConfig:
 
         # Set default gas buffer multiplier based on chain
         if self.gas_buffer_multiplier is None:
-            self.gas_buffer_multiplier = GAS_BUFFER_MULTIPLIERS.get(self.chain, DEFAULT_GAS_BUFFER)
+            self.gas_buffer_multiplier = _gas_buffer_for(self.chain)
 
         # Apply chain-specific receipt timeout default when not explicitly set.
         # Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
@@ -345,7 +342,7 @@ class ChainExecutor:
         if gas_buffer_multiplier is not None:
             self._gas_buffer_multiplier = gas_buffer_multiplier
         else:
-            self._gas_buffer_multiplier = GAS_BUFFER_MULTIPLIERS.get(chain_lower, DEFAULT_GAS_BUFFER)
+            self._gas_buffer_multiplier = _gas_buffer_for(chain_lower)
 
         # Initialize account from private key
         try:
@@ -793,7 +790,7 @@ class ChainExecutor:
                 # funds" — re-raise as a generic submission error so the upstream
                 # diagnostics aren't poisoned by a synthetic "need 0, have 0".
                 available, required = _parse_insufficient_funds_error(original_error)
-                native = _CHAIN_NATIVE_SYMBOL.get(self._chain, "ETH")
+                native = _native_symbol_for(self._chain)
 
                 if required > available:
                     deficit = required - available
@@ -1242,6 +1239,5 @@ __all__ = [
     "ChainExecutor",
     "ChainExecutorConfig",
     "TransactionExecutionResult",
-    "GAS_BUFFER_MULTIPLIERS",
     "DEFAULT_GAS_LIMITS",
 ]

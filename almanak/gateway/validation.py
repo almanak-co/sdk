@@ -8,28 +8,16 @@ injection attacks and ensure data integrity.
 import re
 from typing import Any
 
-# Allowed chains for all gateway operations
-ALLOWED_CHAINS = frozenset(
-    {
-        "ethereum",
-        "arbitrum",
-        "base",
-        "optimism",
-        "polygon",
-        "avalanche",
-        "bsc",
-        "sonic",
-        "plasma",
-        "linea",
-        "blast",
-        "mantle",
-        "berachain",
-        "solana",
-        "monad",
-        "xlayer",
-        "zerog",
-    }
-)
+from almanak.core.chains import ChainRegistry
+
+# Allowed chains for all gateway operations.
+#
+# Derived from :class:`ChainRegistry` (VIB-4801). This frozenset is the
+# gateway's trust-boundary allowlist for RPC operations — it must be
+# byte-identical to the hand-maintained set at PR-merge time. The
+# registry module has no import path to ``framework/connectors/`` or
+# strategy code, so this set is deterministic at import time.
+ALLOWED_CHAINS: frozenset[str] = frozenset(d.name for d in ChainRegistry.all())
 
 # RPC methods that are safe to expose to strategy containers
 # Excludes debug_*, admin_*, personal_*, and other sensitive methods

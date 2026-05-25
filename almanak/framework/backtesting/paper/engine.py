@@ -596,10 +596,11 @@ async def create_market_snapshot_from_fork(
 
         # Cross-populate native <-> wrapped alias for the snapshot's chain only.
         # Strategies may query market.balance("WETH") when the engine funded "ETH" (or vice versa).
-        from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+        from almanak.core.chains import ChainRegistry
 
         chain_lower = chain.lower() if isinstance(chain, str) else str(chain).lower()
-        chain_native = NATIVE_TOKEN_SYMBOLS.get(chain_lower)
+        descriptor = ChainRegistry.try_resolve(chain_lower)
+        chain_native = descriptor.native.symbol if descriptor is not None else None
         if chain_native:
             from almanak.framework.data.models import _NATIVE_TO_WRAPPED
 

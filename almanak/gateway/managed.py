@@ -354,23 +354,10 @@ class ManagedGateway:
     NATIVE_TOKEN_SYMBOLS = frozenset(
         {"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL", "A0GI"}
     )
-    CHAIN_NATIVE_SYMBOL: dict[str, str] = {
-        "ethereum": "ETH",
-        "arbitrum": "ETH",
-        "optimism": "ETH",
-        "base": "ETH",
-        "polygon": "MATIC",
-        "avalanche": "AVAX",
-        "bsc": "BNB",
-        "sonic": "S",
-        "blast": "ETH",
-        "linea": "ETH",
-        "plasma": "XPL",
-        "mantle": "MNT",
-        "berachain": "BERA",
-        "monad": "MON",
-        "xlayer": "OKB",
-        "zerog": "A0GI",
+    # Per-chain native symbols. Derived from :class:`ChainRegistry`
+    # (VIB-4801) — only EVM chains, matches legacy coverage.
+    CHAIN_NATIVE_SYMBOL: dict[str, str] = {  # noqa: RUF012
+        # Populated below via _populate_chain_native_symbol_from_registry.
     }
 
     # Default native-gas funding applied to every Anvil fork wallet so strategies
@@ -453,11 +440,14 @@ class ManagedGateway:
             else:
                 erc20_tokens[symbol] = parsed
 
+        from almanak.core.chains import ChainRegistry
+
         managers_to_fund = {c: m for c, m in self._anvil_managers.items() if chains is None or c in chains}
         for chain, manager in managers_to_fund.items():
             try:
-                # Only fund the native token that matches this chain
-                chain_native = self.CHAIN_NATIVE_SYMBOL.get(chain)
+                # Only fund the native token that matches this chain (VIB-4801)
+                _descriptor = ChainRegistry.try_resolve(chain)
+                chain_native = _descriptor.native.symbol if _descriptor is not None else None
                 # Warn if the user specified "ETH" but this chain uses a different native token.
                 # This is a common footgun: BSC/Avalanche/Polygon use BNB/AVAX/MATIC, not ETH.
                 if chain_native and chain_native != "ETH" and "ETH" in native_amounts:
@@ -763,3 +753,21 @@ class ManagedGateway:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
+
+
+def _populate_chain_native_symbol_from_registry() -> None:
+    """Populate ``ManagedGateway.CHAIN_NATIVE_SYMBOL`` from the registry.
+
+    Done at module import time after the class is fully defined. VIB-4801:
+    keeps the legacy class-attribute shape but sources values from the
+    single source of truth.
+    """
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    for descriptor in ChainRegistry.all():
+        if descriptor.family is ChainFamily.EVM:
+            ManagedGateway.CHAIN_NATIVE_SYMBOL[descriptor.name] = descriptor.native.symbol
+
+
+_populate_chain_native_symbol_from_registry()

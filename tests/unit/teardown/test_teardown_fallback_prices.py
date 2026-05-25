@@ -142,19 +142,43 @@ class TestGetFallbackTeardownPrices:
         # ``_NATIVE_TO_WRAPPED`` must NOT fall through to a string-prefix
         # phantom symbol. The fetch list collapses to the native only and
         # a WARNING surfaces the missing entry.
+        #
+        # VIB-4801: the chain ↔ native-symbol lookup now goes through
+        # ``ChainRegistry``; register a temporary descriptor for the
+        # synthetic chain so ``_get_fallback_teardown_prices`` resolves
+        # its native symbol to ``ZZZ``.
+        from almanak.core.chains import (
+            ChainDescriptor,
+            ChainRegistry,
+            GasProfile,
+            NativeToken,
+        )
+        from almanak.core.enums import Chain, ChainFamily
         from almanak.framework.runner import runner_teardown as rt
 
-        with patch.dict(
-            "almanak.gateway.data.balance.web3_provider.NATIVE_TOKEN_SYMBOLS",
-            {"_unknown_chain": "ZZZ"},
-            clear=False,
-        ):
+        synthetic = ChainDescriptor(
+            enum=Chain.ETHEREUM,  # placeholder; we patch the lookup map directly below
+            name="ethereum",  # placeholder
+            chain_id=999_999,
+            family=ChainFamily.EVM,
+            native=NativeToken(symbol="ZZZ", name="Synthetic", decimals=18),
+            gas=GasProfile(),
+        )
+        # Stash a synthetic-chain entry into the registry's name index so
+        # ``ChainRegistry.try_resolve("_unknown_chain")`` returns the
+        # synthetic descriptor for the duration of the test.
+        original_by_name = dict(ChainRegistry._by_name)
+        ChainRegistry._by_name["_unknown_chain"] = synthetic
+        try:
             market = MagicMock()
             market._chain = "_unknown_chain"
             market.price.side_effect = lambda sym: {"ZZZ": Decimal("9")}.get(sym, None)
 
             with caplog.at_level("WARNING", logger=rt.logger.name):
                 result = StrategyRunner._get_fallback_teardown_prices(market)
+        finally:
+            ChainRegistry._by_name.clear()
+            ChainRegistry._by_name.update(original_by_name)
 
         called_symbols = [call.args[0] for call in market.price.call_args_list]
         assert "WZZZ" not in called_symbols

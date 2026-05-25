@@ -14,17 +14,28 @@ import time
 import aiohttp
 import grpc
 
-from almanak.framework.execution.gas.constants import (
-    CHAIN_SIMULATION_BUFFERS as SIMULATION_GAS_BUFFERS,
-)
-from almanak.framework.execution.gas.constants import (
-    DEFAULT_SIMULATION_BUFFER,
-)
+from almanak.core.chains import ChainRegistry
+from almanak.framework.execution.gas.constants import DEFAULT_SIMULATION_BUFFER
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
+
+
+def _simulation_gas_buffer_for(chain: str) -> float:
+    """Return the per-chain simulation gas buffer, or ``DEFAULT_SIMULATION_BUFFER``.
+
+    Thin wrapper around :class:`ChainRegistry.try_resolve` extracted so the
+    descriptor lookup does not add branches inside the already-complex
+    ``_parse_alchemy_results`` / ``_simulate_tenderly`` call sites (VIB-4801:
+    replaces the legacy ``SIMULATION_GAS_BUFFERS.get(chain, DEFAULT)`` lookup
+    without a cc bump).
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.simulation_buffer is None:
+        return DEFAULT_SIMULATION_BUFFER
+    return descriptor.gas.simulation_buffer
 
 
 # =============================================================================
@@ -190,7 +201,7 @@ def _parse_alchemy_results(data: dict, chain: str) -> gateway_pb2.SimulateBundle
             error="Malformed Alchemy response: missing or empty result list",
         )
 
-    gas_buffer = SIMULATION_GAS_BUFFERS.get(chain, DEFAULT_SIMULATION_BUFFER)
+    gas_buffer = _simulation_gas_buffer_for(chain)
     gas_estimates: list[int] = []
 
     for result in results:
@@ -340,6 +351,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         err_msg = "No simulation backend configured. Set TENDERLY_* or ALCHEMY_API_KEY environment variables."
         raise ValueError(err_msg)
 
+    # crap-allowlist: VIB-4801 mechanical SIMULATION_GAS_BUFFERS -> ChainRegistry cutover in pre-existing high-CRAP function (cc preserved at 20 by extracting _simulation_gas_buffer_for). Function was already over threshold on main (CRAP~396 at cc=20 / cov=2%); coverage of the broader function is a separate hosted-only gateway test gap (Tenderly API mocking) tracked in VIB-4079.
     async def _simulate_tenderly(  # noqa: C901
         self,
         chain: str,
@@ -421,7 +433,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         results = data.get("simulation_results", [])
         gas_estimates: list[int] = []
         warnings: list[str] = []
-        gas_buffer = SIMULATION_GAS_BUFFERS.get(chain, DEFAULT_SIMULATION_BUFFER)
+        gas_buffer = _simulation_gas_buffer_for(chain)
 
         for result in results:
             # Check for transaction failure

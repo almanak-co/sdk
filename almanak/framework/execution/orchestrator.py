@@ -44,7 +44,12 @@ from typing import TYPE_CHECKING, Any, cast
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.types import HexStr, TxParams
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.execution.config import CHAIN_IDS
+from almanak.framework.execution.gas.constants import (
+    DEFAULT_GAS_BUFFER,
+    DEFAULT_GAS_PRICE_CAP_GWEI,
+)
 from almanak.framework.execution.signer.safe.base import SafeSigner
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
@@ -110,16 +115,29 @@ class ExecutionPhase(StrEnum):
     COMPLETE = "COMPLETE"
 
 
-# Chain-specific gas multipliers - imported from shared constants module
-from almanak.framework.execution.gas.constants import (
-    CHAIN_GAS_BUFFERS,
-    CHAIN_GAS_COST_CAPS_NATIVE,
-    CHAIN_GAS_PRICE_CAPS_GWEI,
-    DEFAULT_GAS_BUFFER,
-    DEFAULT_GAS_PRICE_CAP_GWEI,
-)
+# Chain-specific gas knobs come from ``ChainRegistry`` (VIB-4801). Use the
+# helpers below rather than re-introducing the legacy chain-keyed dicts.
 
-GAS_BUFFER_MULTIPLIERS = CHAIN_GAS_BUFFERS
+
+def _gas_buffer_for(chain: str) -> float:
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.buffer is None:
+        return DEFAULT_GAS_BUFFER
+    return descriptor.gas.buffer
+
+
+def _gas_price_cap_gwei_for(chain: str) -> int:
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.price_cap_gwei is None:
+        return DEFAULT_GAS_PRICE_CAP_GWEI
+    return descriptor.gas.price_cap_gwei
+
+
+def _gas_cost_cap_native_for(chain: str) -> float:
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.cost_cap_native is None:
+        return 0.0
+    return descriptor.gas.cost_cap_native
 
 
 # =============================================================================
@@ -434,9 +452,9 @@ class TransactionRiskConfig:
     def for_chain(cls, chain: str) -> "TransactionRiskConfig":
         """Create chain-specific risk configuration with recommended defaults.
 
-        Uses CHAIN_GAS_PRICE_CAPS_GWEI and CHAIN_GAS_COST_CAPS_NATIVE for
-        the specified chain, falling back to generic defaults. As with
-        ``default()``, ``max_value_usd`` is opt-in (off by default).
+        Reads per-chain caps from ``ChainRegistry``, falling back to
+        generic defaults. As with ``default()``, ``max_value_usd`` is
+        opt-in (off by default).
 
         Args:
             chain: Chain name (e.g., "arbitrum", "ethereum")
@@ -444,8 +462,8 @@ class TransactionRiskConfig:
         chain_lower = chain.lower()
         return cls(
             block_contract_deployment=True,
-            max_gas_price_gwei=CHAIN_GAS_PRICE_CAPS_GWEI.get(chain_lower, DEFAULT_GAS_PRICE_CAP_GWEI),
-            max_gas_cost_native=CHAIN_GAS_COST_CAPS_NATIVE.get(chain_lower, 0.0),
+            max_gas_price_gwei=_gas_price_cap_gwei_for(chain_lower),
+            max_gas_cost_native=_gas_cost_cap_native_for(chain_lower),
             max_daily_volume_eth=Decimal("100"),
         )
 
@@ -1152,13 +1170,15 @@ class ExecutionOrchestrator:
         self._event_callback = event_callback
 
         # Use chain-specific timeout if not explicitly provided
-        from almanak.framework.execution.gas.constants import CHAIN_TX_TIMEOUTS, DEFAULT_TX_TIMEOUT_SECONDS
+        from almanak.framework.execution.gas.constants import DEFAULT_TX_TIMEOUT_SECONDS
 
-        self.tx_timeout_seconds = (
-            tx_timeout_seconds
-            if tx_timeout_seconds is not None
-            else float(CHAIN_TX_TIMEOUTS.get(chain.lower(), DEFAULT_TX_TIMEOUT_SECONDS))
+        descriptor = ChainRegistry.try_resolve(chain)
+        chain_tx_timeout = (
+            descriptor.timeouts.tx_confirmation
+            if descriptor is not None and descriptor.timeouts.tx_confirmation is not None
+            else DEFAULT_TX_TIMEOUT_SECONDS
         )
+        self.tx_timeout_seconds = tx_timeout_seconds if tx_timeout_seconds is not None else float(chain_tx_timeout)
         self._session_store = session_store
         self.tx_risk_config = tx_risk_config or TransactionRiskConfig.default()
 
@@ -1166,7 +1186,7 @@ class ExecutionOrchestrator:
         if gas_buffer_multiplier is not None:
             self.gas_buffer_multiplier = gas_buffer_multiplier
         else:
-            self.gas_buffer_multiplier = GAS_BUFFER_MULTIPLIERS.get(chain.lower(), DEFAULT_GAS_BUFFER)
+            self.gas_buffer_multiplier = _gas_buffer_for(chain)
 
         # Web3 instance for nonce queries (lazy initialized)
         self._web3: AsyncWeb3 | None = None
@@ -3082,5 +3102,4 @@ __all__ = [
     "ExecutionEventType",
     "TransactionResult",
     "EventCallback",
-    "GAS_BUFFER_MULTIPLIERS",
 ]

@@ -30,6 +30,7 @@ import re
 import socket
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -99,25 +100,20 @@ def _get_anvil_supported_flags() -> set[str]:
 # =============================================================================
 
 
-# Chain IDs for supported chains
-CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "plasma": 9745,
-    "blast": 81457,
-    "mantle": 5000,
-    "berachain": 80094,
-    "sonic": 146,
-    "monad": 143,
-    "xlayer": 196,
-    "zerog": 16661,
-}
+# Chain IDs for supported chains.
+#
+# Derived view over :class:`ChainRegistry` (VIB-4801). Anvil can only fork
+# EVM chains, so Solana is excluded by family filter.
+def _build_chain_ids() -> Mapping[str, int]:
+    from types import MappingProxyType
+
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    return MappingProxyType({d.name: d.chain_id for d in ChainRegistry.all() if d.family is ChainFamily.EVM})
+
+
+CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 
 # Per-chain Anvil block gas limit overrides. When set, --gas-limit is passed to
 # the Anvil fork so transactions are never rejected for exceeding the block gas limit.

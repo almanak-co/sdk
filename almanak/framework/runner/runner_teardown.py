@@ -1227,8 +1227,8 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     Returns a dict with at least stablecoin prices, or None if nothing can be
     determined.
     """
+    from almanak.core.chains import ChainRegistry
     from almanak.framework.data.models import _NATIVE_TO_WRAPPED
-    from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
     chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
     chain_key = str(chain).lower() if chain else ""
@@ -1243,9 +1243,10 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     for symbol in _CHAIN_BRIDGED_STABLECOINS.get(chain_key, ()):
         fallback[symbol] = Decimal("1")
 
-    # Derive native + wrapped token symbols from existing registry maps
+    # Derive native + wrapped token symbols from the ChainRegistry
     # so new chains are picked up automatically without code changes here.
-    native = NATIVE_TOKEN_SYMBOLS.get(chain_key, "ETH") if chain else "ETH"
+    descriptor = ChainRegistry.try_resolve(chain_key) if chain else None
+    native = descriptor.native.symbol if descriptor is not None else "ETH"
     # No string-prefix fallback: chains like 0G break the ``W{native}`` rule
     # (A0GI -> W0G, not WA0GI) and a phantom symbol burns a 15s gateway
     # timeout per probe before silently returning None (VIB-3970).

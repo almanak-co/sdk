@@ -49,7 +49,6 @@ from almanak.framework.execution.simulator.config import (
     ALCHEMY_SUPPORTED_CHAINS,
     LOCAL_RPC_PATTERNS,
     LOCAL_RPC_PORTS,
-    SIMULATION_GAS_BUFFERS,
     TENDERLY_NETWORK_IDS,
     TENDERLY_SUPPORTED_CHAINS,
     SimulationConfig,
@@ -221,5 +220,4 @@ __all__ = [
     "ALCHEMY_NETWORKS",
     "ALCHEMY_SUPPORTED_CHAINS",
     "ALCHEMY_MAX_BUNDLE_SIZE",
-    "SIMULATION_GAS_BUFFERS",
 ]

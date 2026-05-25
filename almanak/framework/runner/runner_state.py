@@ -1335,15 +1335,15 @@ def _resolve_gas_context(
         return None, None
 
     try:
-        from almanak.gateway.services.onchain_lookup import NATIVE_TOKEN_INFO
+        from almanak.core.chains import ChainRegistry
     except Exception:  # noqa: BLE001 — optional dep path
         return None, None
 
-    info = NATIVE_TOKEN_INFO.get(str(chain).lower())
-    if not info:
+    descriptor = ChainRegistry.try_resolve(str(chain))
+    if descriptor is None:
         return None, None
 
-    symbol = info.get("symbol")
+    symbol = descriptor.native.symbol
     if not symbol:
         return None, None
 

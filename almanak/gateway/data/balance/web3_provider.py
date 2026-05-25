@@ -37,6 +37,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -156,26 +157,22 @@ def _reject_non_evm_chain(chain: str) -> None:
         raise NonEvmChainError(chain=chain, family=family.value)
 
 
-# Chain-specific native token symbols
-NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
-    "ethereum": "ETH",
-    "arbitrum": "ETH",
-    "optimism": "ETH",
-    "polygon": "MATIC",
-    "base": "ETH",
-    "avalanche": "AVAX",
-    "bsc": "BNB",
-    "sonic": "S",
-    "blast": "ETH",
-    "linea": "ETH",
-    "plasma": "XPL",
-    "mantle": "MNT",
-    "berachain": "BERA",
-    "monad": "MON",
-    "xlayer": "OKB",
-    "zerog": "A0GI",
-    "solana": "SOL",
-}
+# Per-chain native token symbols are owned by :class:`ChainRegistry`
+# (VIB-4801). The ``NATIVE_TOKEN_SYMBOLS`` name below is preserved as a
+# read-only derived view solely as a back-compat surface for regression
+# tests that snapshot the historical dict — production code reads via
+# ``ChainRegistry.try_resolve(chain).native.symbol``. Wrapped in
+# ``MappingProxyType`` so the registry remains the single mutation
+# surface; accidental ``NATIVE_TOKEN_SYMBOLS[...] = ...`` will TypeError.
+def _build_native_token_symbols() -> Mapping[str, str]:
+    from types import MappingProxyType
+
+    from almanak.core.chains import ChainRegistry
+
+    return MappingProxyType({d.name: d.native.symbol for d in ChainRegistry.all()})
+
+
+NATIVE_TOKEN_SYMBOLS: Mapping[str, str] = _build_native_token_symbols()
 
 
 # =============================================================================
@@ -419,8 +416,11 @@ class Web3BalanceProvider:
         # (CoinGecko / DexScreener / protocol-specific APIs).
         self._dynamic_symbol_resolver = dynamic_symbol_resolver
 
-        # Native token symbol for this chain
-        self._native_symbol = NATIVE_TOKEN_SYMBOLS.get(self._chain, "ETH")
+        # Native token symbol for this chain (VIB-4801: ChainRegistry is SoT)
+        from almanak.core.chains import ChainRegistry
+
+        _descriptor = ChainRegistry.try_resolve(self._chain)
+        self._native_symbol = _descriptor.native.symbol if _descriptor is not None else "ETH"
 
         # Balance cache: token_symbol -> BalanceCacheEntry
         self._cache: dict[str, BalanceCacheEntry] = {}

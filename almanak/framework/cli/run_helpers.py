@@ -1705,8 +1705,10 @@ def _build_sidecar_runtime_config(*, config_chain: str | None) -> Any:
     order; the gateway-wallets path leaves ``wallet_address`` empty for the
     later ``register_chains()`` call to populate.
     """
+    from almanak.core.chains import ChainRegistry
+
     from ..execution.config import GatewayRuntimeConfig
-    from ..execution.gas.constants import CHAIN_GAS_PRICE_CAPS_GWEI, DEFAULT_GAS_PRICE_CAP_GWEI
+    from ..execution.gas.constants import DEFAULT_GAS_PRICE_CAP_GWEI
 
     if not config_chain:
         raise click.ClickException(
@@ -1723,7 +1725,12 @@ def _build_sidecar_runtime_config(*, config_chain: str | None) -> Any:
             "ALMANAK_SAFE_ADDRESS, ALMANAK_EOA_ADDRESS, or ALMANAK_GATEWAY_WALLETS to be set."
         )
     wallet_address = wallet_address or ""
-    default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(config_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+    descriptor = ChainRegistry.try_resolve(config_chain)
+    default_gas_cap = (
+        descriptor.gas.price_cap_gwei
+        if descriptor is not None and descriptor.gas.price_cap_gwei is not None
+        else DEFAULT_GAS_PRICE_CAP_GWEI
+    )
     runtime_config = GatewayRuntimeConfig(
         chain=config_chain,
         wallet_address=wallet_address,

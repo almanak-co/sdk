@@ -1124,12 +1124,13 @@ class MultiChainOrchestrator:
 
         if self._use_gateway:
             assert self._gateway_client is not None, "Gateway client required in gateway mode"
+            from almanak.core.chains import ChainRegistry
             from almanak.gateway.proto import gateway_pb2
-            from almanak.gateway.services.onchain_lookup import NATIVE_TOKEN_INFO
 
             for chain in self._gw_chains:
                 try:
-                    native_symbol = NATIVE_TOKEN_INFO.get(chain, {}).get("symbol", "ETH")
+                    descriptor = ChainRegistry.try_resolve(chain)
+                    native_symbol = descriptor.native.symbol if descriptor is not None else "ETH"
                     effective_wallet = self._gw_wallet_address
                     if self._gw_chain_wallets and chain in self._gw_chain_wallets:
                         effective_wallet = self._gw_chain_wallets[chain]

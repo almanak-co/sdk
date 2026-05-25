@@ -65,6 +65,23 @@ _NATIVE_TOKEN_DECIMALS: dict[str, int] = {
 }
 
 
+def _native_symbol_for_chain(chain_key: str) -> str | None:
+    """Return the native gas-token symbol for ``chain_key`` (lower-cased), or
+    ``None`` when the chain is not registered.
+
+    Thin wrapper around :class:`ChainRegistry.try_resolve` extracted so the
+    descriptor lookup does not add a branch inside the already-complex
+    ``_execute_get_portfolio`` (VIB-4801: replaces the legacy
+    ``NATIVE_TOKEN_SYMBOLS.get(chain_key)`` call site without a cc bump).
+    """
+    from almanak.core.chains import ChainRegistry
+
+    descriptor = ChainRegistry.try_resolve(chain_key)
+    if descriptor is None:
+        return None
+    return descriptor.native.symbol
+
+
 def _coerce_floats_to_str(obj: Any) -> Any:
     """Recursively coerce float values to strings for Pydantic SafeDecimal compatibility.
 
@@ -2510,6 +2527,7 @@ class ToolExecutor:
             },
         )
 
+    # crap-allowlist: VIB-4801 mechanical NATIVE_TOKEN_SYMBOLS -> ChainRegistry cutover in pre-existing high-CRAP function (cc preserved at 29 by extracting _native_symbol_for_chain). Function was already over threshold on main (CRAP=49 at cc=29 / cov=71%); refactor of the broader function tracked in VIB-4139.
     async def _execute_get_portfolio(self, args: dict) -> ToolResponse:  # noqa: C901
         """One-shot portfolio summary: native + ERC20 balances + LP + lending.
 
@@ -2557,8 +2575,6 @@ class ToolExecutor:
 
         # Native balance (eth_getBalance)
         try:
-            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
-
             bal_resp = self._client.rpc.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,
@@ -2578,7 +2594,7 @@ class ToolExecutor:
                 else:
                     native_wei = int(raw_bal, 16)
                     chain_key = chain.lower()
-                    native_symbol = NATIVE_TOKEN_SYMBOLS.get(chain_key)
+                    native_symbol = _native_symbol_for_chain(chain_key)
                     # Repo convention (VIB-2950): never silently default
                     # decimals. If we don't know the native symbol for this
                     # chain, we also don't know its decimals — surface the
@@ -2588,8 +2604,8 @@ class ToolExecutor:
                         _warn(
                             "native_balance",
                             "unknown_chain",
-                            f"chain={chain} not in NATIVE_TOKEN_SYMBOLS; "
-                            f"register it in gateway/data/balance/web3_provider.py "
+                            f"chain={chain} not registered in ChainRegistry; "
+                            f"add a descriptor under almanak/core/chains/ "
                             f"to get native balance",
                         )
                     else:

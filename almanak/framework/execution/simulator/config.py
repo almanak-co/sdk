@@ -32,15 +32,18 @@ from dataclasses import dataclass, field
 
 from almanak.config import load_config
 from almanak.config.simulation import simulation_config_from_env
-from almanak.framework.execution.gas.constants import (
-    CHAIN_SIMULATION_BUFFERS,
-    DEFAULT_SIMULATION_BUFFER,
-)
+from almanak.core.chains import ChainRegistry
+from almanak.framework.execution.gas.constants import DEFAULT_SIMULATION_BUFFER
 
 logger = logging.getLogger(__name__)
 
-# Backward-compatible alias (tenderly.py, alchemy.py import this name)
-SIMULATION_GAS_BUFFERS = CHAIN_SIMULATION_BUFFERS
+
+def _simulation_buffer_for(chain: str) -> float:
+    """Return per-chain simulation buffer (VIB-4801)."""
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.gas.simulation_buffer is None:
+        return DEFAULT_SIMULATION_BUFFER
+    return descriptor.gas.simulation_buffer
 
 
 # =============================================================================
@@ -280,7 +283,7 @@ class SimulationConfig:
         Returns:
             Gas buffer as decimal (e.g., 0.1 for 10%)
         """
-        return CHAIN_SIMULATION_BUFFERS.get(chain.lower(), DEFAULT_SIMULATION_BUFFER)
+        return _simulation_buffer_for(chain)
 
     @classmethod
     def from_env(
@@ -368,7 +371,6 @@ __all__ = [
     "ALCHEMY_SUPPORTED_CHAINS",
     "TENDERLY_SUPPORTED_CHAINS",
     "ALCHEMY_MAX_BUNDLE_SIZE",
-    "SIMULATION_GAS_BUFFERS",
     "LOCAL_RPC_PATTERNS",
     "LOCAL_RPC_PORTS",
     "is_local_rpc",

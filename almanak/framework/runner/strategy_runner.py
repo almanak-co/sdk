@@ -4536,11 +4536,10 @@ class StrategyRunner:
         if tx_risk_cfg is not None and (tx_risk_cfg.max_gas_cost_usd > 0 or tx_risk_cfg.max_value_usd > 0):
             tx_risk_cfg.native_token_price_usd = 0.0
             if state.price_oracle:
-                from almanak.gateway.data.balance.web3_provider import (
-                    NATIVE_TOKEN_SYMBOLS,
-                )
+                from almanak.core.chains import ChainRegistry
 
-                native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
+                descriptor = ChainRegistry.try_resolve(strategy.chain)
+                native_symbol = descriptor.native.symbol if descriptor is not None else "ETH"
                 native_price = state.price_oracle.get(native_symbol, 0)
                 if native_price:
                     tx_risk_cfg.native_token_price_usd = float(native_price)

@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
@@ -113,27 +113,23 @@ class MissingEnvironmentVariableError(ConfigurationError):
 # =============================================================================
 
 
-# Chain ID mapping for supported chains. Canonical home; the legacy module
+# Chain ID mapping for supported chains.
+#
+# Derived view over :class:`ChainRegistry` (VIB-4801). The legacy module
 # in ``framework/execution/config.py`` re-exports this for back-compat.
-CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "plasma": 9745,
-    "blast": 81457,
-    "mantle": 5000,
-    "berachain": 80094,
-    "solana": 0,  # Non-EVM chain, no EVM chain ID
-    "sonic": 146,
-    "monad": 143,
-    "xlayer": 196,
-    "zerog": 16661,
-}
+# To change a chain_id, edit the corresponding descriptor file under
+# ``almanak/core/chains/``. Note: the integer chain_id values are the
+# on-the-wire identifiers owned by ``metrics-database`` — restructuring
+# how we source them is safe, **renumbering them is not**.
+def _build_chain_ids() -> Mapping[str, int]:
+    from types import MappingProxyType
+
+    from almanak.core.chains import ChainRegistry
+
+    return MappingProxyType({d.name: d.chain_id for d in ChainRegistry.all()})
+
+
+CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 
 
 # =============================================================================
@@ -580,7 +576,7 @@ def _gas_cap_for_chain(
     VIB-303 + VIB-304 + VIB-1719: Anvil mode always uses
     ``ANVIL_GAS_PRICE_CAP_GWEI`` (gas costs no real money, low caps cause
     false-positive errors on high-gas chains like Polygon). Mainnet uses
-    chain-specific defaults from ``CHAIN_GAS_PRICE_CAPS_GWEI`` with
+    chain-specific defaults read from ``ChainRegistry`` (VIB-4801) with
     ``DEFAULT_GAS_PRICE_CAP_GWEI`` as the fallback.
 
     ``chain`` is ``None`` for the multi-chain lane (no per-chain cap is
@@ -588,9 +584,9 @@ def _gas_cap_for_chain(
     ``DEFAULT_GAS_PRICE_CAP_GWEI``.
     """
     # Imported lazily so this module's startup cost stays low.
+    from almanak.core.chains import ChainRegistry
     from almanak.framework.execution.gas.constants import (
         ANVIL_GAS_PRICE_CAP_GWEI,
-        CHAIN_GAS_PRICE_CAPS_GWEI,
         DEFAULT_GAS_PRICE_CAP_GWEI,
     )
 
@@ -609,7 +605,12 @@ def _gas_cap_for_chain(
         return ANVIL_GAS_PRICE_CAP_GWEI
 
     if chain is not None:
-        default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+        descriptor = ChainRegistry.try_resolve(chain)
+        default_gas_cap = (
+            descriptor.gas.price_cap_gwei
+            if descriptor is not None and descriptor.gas.price_cap_gwei is not None
+            else DEFAULT_GAS_PRICE_CAP_GWEI
+        )
     else:
         default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
     return get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)

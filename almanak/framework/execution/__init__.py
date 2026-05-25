@@ -143,7 +143,6 @@ from almanak.framework.execution.multichain import (
 
 # Orchestrator
 from almanak.framework.execution.orchestrator import (
-    GAS_BUFFER_MULTIPLIERS,
     EventCallback,
     ExecutionContext,
     ExecutionOrchestrator,
@@ -295,7 +294,6 @@ __all__ = [
     "ExecutionPhase",
     "TransactionResult",
     "EventCallback",
-    "GAS_BUFFER_MULTIPLIERS",
     # Gateway-backed Orchestrator (for strategy containers)
     "GatewayExecutionOrchestrator",
     "GatewayExecutionResult",
