@@ -1353,12 +1353,10 @@ def run(  # noqa: C901
         _echo_strategy_runtime_summary,
         _execute_run_mode,
         _instantiate_strategy,
-        _load_resume_state,
         _load_strategy_bootstrap,
         _maybe_handle_run_early_exit,
         _maybe_start_dashboard_process,
         _prepare_runtime_bootstrap,
-        _print_startup_banner,
         _setup_gateway,
         _stop_dashboard,
         _wire_token_resolver,
@@ -1456,30 +1454,11 @@ def run(  # noqa: C901
         strategy_config=strategy_bootstrap.strategy_config,
     )
 
-    is_resume, existing_state_info = _load_resume_state(
-        deployment_id=runtime_bootstrap.deployment_id,
-    )
-
-    _print_startup_banner(
-        strategy_name=strategy_bootstrap.strategy_name,
-        deployment_id=runtime_bootstrap.deployment_id,
-        run_id=runtime_bootstrap.run_id,
-        is_resume=is_resume,
-        existing_state_info=existing_state_info,
-        once=once,
-        fresh=fresh,
-        multi_chain=strategy_bootstrap.multi_chain,
-        strategy_chains=strategy_bootstrap.strategy_chains,
-        strategy_protocols=strategy_bootstrap.strategy_protocols,
-        runtime_config=runtime_bootstrap.runtime_config,
-        interval=interval,
-        max_iterations=max_iterations,
-        effective_dry_run=strategy_bootstrap.effective_dry_run,
-        strategy_config=strategy_bootstrap.strategy_config,
-        gateway_host=gateway_host,
-        gateway_port=gateway_port,
-        dashboard=dashboard,
-    )
+    # The RESUME/FRESH-START mode label rendered by ``_print_startup_banner``
+    # has been retired in favour of the single user-facing deployment banner
+    # fired at the very top of ``almanak strat run`` (cli.py). State recovery
+    # itself happens inside ``StrategyRunner``, so no call to
+    # ``_load_resume_state`` is needed here.
 
     _echo_strategy_runtime_summary(
         strategy_class=strategy_bootstrap.strategy_class,

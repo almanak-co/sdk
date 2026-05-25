@@ -1713,6 +1713,32 @@ def strategy_run(
         # Run with live dashboard
         almanak strat run -d almanak/demo_strategies/uniswap_lp --network anvil --dashboard
     """
+    # Load environment from .env first so deployer-injected env vars
+    # (ALMANAK_DEPLOYMENT_ID / ALMANAK_COMMIT_SHA / ALMANAK_SDK_VERSION /
+    # ALMANAK_STRATEGY_NAME / ALMANAK_STRATEGY_VERSION) the banner reads
+    # below are populated before it fires.
+    from almanak.config.env import _load_dotenv_once
+
+    env_file = Path(working_dir) / ".env"
+    if env_file.exists():
+        _load_dotenv_once(str(env_file))
+
+    # Fire the deployment-start banner before any other startup output so it's
+    # the very first thing users see in the strategy container's log stream.
+    # The resolved ``working_dir`` basename is a useful local-mode fallback for
+    # the strategy name (``Path('.').name`` is the empty string, so we resolve
+    # first); the deployer-injected ALMANAK_STRATEGY_NAME wins when present
+    # (hosted deploy).
+    from almanak.framework.utils.deployment_banner import emit_cli_banner
+
+    try:
+        emit_cli_banner(strategy_name=Path(working_dir).resolve().name or None)
+    except Exception as exc:
+        click.echo(f"Failed to emit deployment-start banner: {exc}")
+
+    if env_file.exists():
+        click.echo(f"Loaded environment from: {env_file}")
+
     # Look for config.json or config.yaml in working directory if not specified
     if config_file is None:
         potential_configs = [
@@ -1725,14 +1751,6 @@ def strategy_run(
                 config_file = str(potential_config)
                 click.echo(f"Using config: {config_file}")
                 break
-
-    # Load environment from .env through the boundary helper.
-    from almanak.config.env import _load_dotenv_once
-
-    env_file = Path(working_dir) / ".env"
-    if env_file.exists():
-        _load_dotenv_once(str(env_file))
-        click.echo(f"Loaded environment from: {env_file}")
 
     boot_config = _prime_strategy_command_config(ctx)
 

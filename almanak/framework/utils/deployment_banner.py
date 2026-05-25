@@ -2,12 +2,15 @@
 
 Emits a visually distinct multi-line banner plus a structured single-line
 sentinel at the start of each deployment, so users can tell where one
-deployment's logs end and the next one's begin. Used at two boot points:
+deployment's logs end and the next one's begin. Fires once per process, as
+the very first log line:
 
-- ``StrategyRunner.run_loop`` — strategy container, first thing the runner
-  does once it has a strategy in hand.
+- ``almanak strat run`` (CLI entry) — emits in the strategy container before
+  any other startup output, via :func:`emit_cli_banner` (uses ``click.echo``
+  so it works before the framework's Python logging is configured).
 - Gateway server / managed_serve ``main()`` — strategy-pod and dashboard-pod
-  gateway sidecars at process boot.
+  gateway sidecars at process boot, via :func:`emit_gateway_banner` (uses
+  ``logger.info`` — structlog is configured first in those entrypoints).
 
 The frontend log viewer parses the ``ALMANAK_DEPLOYMENT_BANNER`` sentinel
 line; the surrounding ``=`` rule lines are for raw ``kubectl logs`` users.
@@ -16,11 +19,8 @@ line; the surrounding ``=`` rule lines are for raw ``kubectl logs`` users.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ..runner.runner_models import StrategyProtocol
 
 # Imports from ``almanak.framework.deployment.mode`` are deferred to the
 # emit functions: the import-leanness tests (``tests/framework/runner/
@@ -52,21 +52,45 @@ def _sdk_version_local() -> str:
         return "unknown"
 
 
-def emit_strategy_banner(logger: logging.Logger, strategy: StrategyProtocol) -> None:
-    """Emit the deployment-start banner from the strategy container."""
-    from ..deployment.mode import deployment_commit_sha, deployment_sdk_version
-    from ..runner.runner_gateway import _strategy_display_name
-
-    metadata = getattr(strategy, "STRATEGY_METADATA", None)
-    strategy_version = getattr(metadata, "version", "") or "unknown"
-    _emit(
-        logger,
-        deployment_id=getattr(strategy, "deployment_id", "") or "local",
-        strategy_name=_strategy_display_name(strategy),
-        strategy_version=strategy_version,
-        commit_sha=deployment_commit_sha() or "local",
-        sdk_version=deployment_sdk_version() or _sdk_version_local(),
+def _resolve_fields(
+    *,
+    strategy_name: str | None,
+    strategy_version: str | None,
+) -> dict[str, str]:
+    """Pull deployment identity from env, applying caller overrides."""
+    from ..deployment.mode import (
+        deployment_commit_sha,
+        deployment_id,
+        deployment_sdk_version,
+        deployment_strategy_name,
+        deployment_strategy_version,
     )
+
+    return {
+        "deployment_id": deployment_id() or "local",
+        "strategy_name": strategy_name or deployment_strategy_name() or "unknown",
+        "strategy_version": strategy_version or deployment_strategy_version() or "unknown",
+        "commit_sha": deployment_commit_sha() or "local",
+        "sdk_version": deployment_sdk_version() or _sdk_version_local(),
+    }
+
+
+def emit_cli_banner(
+    *,
+    strategy_name: str | None = None,
+    strategy_version: str | None = None,
+) -> None:
+    """Emit the banner via ``click.echo`` from the CLI entrypoint.
+
+    Used at the top of ``almanak strat run`` so the banner is the very
+    first line in the strategy container's logs — before config loading,
+    gateway connection, or any other startup output. ``click.echo`` writes
+    directly to stdout, which works regardless of whether Python logging
+    has been configured yet.
+    """
+    import click
+
+    _emit(click.echo, **_resolve_fields(strategy_name=strategy_name, strategy_version=strategy_version))
 
 
 def emit_gateway_banner(logger: logging.Logger) -> None:
@@ -76,30 +100,20 @@ def emit_gateway_banner(logger: logging.Logger) -> None:
     boots (e.g. ``almanak strat run``) where the strategy-side banner will
     fire instead and a gateway banner would just be noise.
     """
-    from ..deployment.mode import (
-        deployment_commit_sha,
-        deployment_id,
-        deployment_sdk_version,
-        deployment_strategy_name,
-        deployment_strategy_version,
-    )
-
-    dep_id = deployment_id()
-    if not dep_id:
+    fields = _resolve_fields(strategy_name=None, strategy_version=None)
+    if fields["deployment_id"] == "local":
         return
+    # The gateway has no decorator metadata to fall back on if the deployer
+    # didn't inject ALMANAK_STRATEGY_NAME — surface "unknown" rather than
+    # "local" so the gateway banner reads coherently.
+    if fields["commit_sha"] == "local":
+        fields["commit_sha"] = "unknown"
 
-    _emit(
-        logger,
-        deployment_id=dep_id,
-        strategy_name=deployment_strategy_name() or "unknown",
-        strategy_version=deployment_strategy_version() or "unknown",
-        commit_sha=deployment_commit_sha() or "unknown",
-        sdk_version=deployment_sdk_version() or _sdk_version_local(),
-    )
+    _emit(logger.info, **fields)
 
 
 def _emit(
-    logger: logging.Logger,
+    write: Callable[[str], object],
     *,
     deployment_id: str,
     strategy_name: str,
@@ -109,15 +123,15 @@ def _emit(
 ) -> None:
     started_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    logger.info(_RULE)
-    logger.info("  ▶  NEW DEPLOYMENT STARTED")
-    logger.info(f"     deployment_id   : {deployment_id}")
-    logger.info(f"     strategy        : {strategy_name} v{strategy_version}")
-    logger.info(f"     commit_sha      : {commit_sha}")
-    logger.info(f"     sdk_version     : {sdk_version}")
-    logger.info(f"     started_at      : {started_at}")
-    logger.info(_RULE)
-    logger.info(
+    write(_RULE)
+    write("  ▶  NEW DEPLOYMENT STARTED")
+    write(f"     deployment_id   : {deployment_id}")
+    write(f"     strategy        : {strategy_name} v{strategy_version}")
+    write(f"     commit_sha      : {commit_sha}")
+    write(f"     sdk_version     : {sdk_version}")
+    write(f"     started_at      : {started_at}")
+    write(_RULE)
+    write(
         f"{_SENTINEL} "
         f"deployment_id={_sanitize_sentinel_value(deployment_id)} "
         f"strategy={_sanitize_sentinel_value(strategy_name)} "
@@ -128,4 +142,4 @@ def _emit(
     )
 
 
-__all__ = ["emit_strategy_banner", "emit_gateway_banner"]
+__all__ = ["emit_cli_banner", "emit_gateway_banner"]

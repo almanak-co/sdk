@@ -1,29 +1,33 @@
 """Unit tests for the deployment-start banner.
 
 The banner is the user-visible boundary between consecutive deployments in
-the platform UI log viewer (and in raw ``kubectl logs``). Two things must
+the platform UI log viewer (and in raw ``kubectl logs``). Three things must
 hold for the boundary to render correctly:
 
 1. The ``ALMANAK_DEPLOYMENT_BANNER`` sentinel line must be parseable by the
    frontend's space-delimited ``(\\w+)=(\\S+)`` regex even when a value
-   contains whitespace (e.g. ``"Momentum Strategy"`` falling out of the
-   ``_strategy_display_name`` cascade) — values get whitespace-collapsed.
+   contains whitespace (e.g. ``"Momentum Strategy"``) — values get
+   whitespace-collapsed.
 2. The gateway banner is hosted-only — local-dev gateway boots must not
    emit it.
+3. The CLI banner accepts a caller-supplied strategy name override (so the
+   ``almanak strat run`` entrypoint can pass the working-dir basename
+   before the strategy class is loaded).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import cast
 
+import click
+import click.testing
 import pytest
 
 from almanak.framework.utils.deployment_banner import (
     _sanitize_sentinel_value,
+    emit_cli_banner,
     emit_gateway_banner,
-    emit_strategy_banner,
 )
 
 _SENTINEL_KV = re.compile(r"(\w+)=(\S+)")
@@ -91,28 +95,55 @@ def test_gateway_banner_emits_and_is_sentinel_parseable(monkeypatch, caplog):
     assert fields["sdk_version"] == "2.16.0"
 
 
-def test_strategy_banner_renders_with_none_metadata(monkeypatch, caplog):
-    """``getattr(None, 'version', '')`` returns the default safely.
+def test_cli_banner_uses_caller_override(monkeypatch, capsys):
+    """The CLI banner uses caller-supplied strategy name + version when given.
 
-    Strategies that omit ``STRATEGY_METADATA`` (e.g. quick local
-    prototypes) must not crash the banner.
+    The ``almanak strat run`` entrypoint fires this before the strategy
+    class is loaded; it derives a name from ``working_dir`` and passes it
+    in. Env-injected values should be the fallback, not the override.
     """
     _clear_env(monkeypatch)
 
-    class _FakeStrategy:
-        deployment_id = "local-deploy"
-        STRATEGY_METADATA = None
-        STRATEGY_NAME = "tiny_strategy"
+    runner = click.testing.CliRunner(mix_stderr=False)
 
-    logger = logging.getLogger("test_banner_no_metadata")
-    with caplog.at_level(logging.INFO, logger=logger.name):
-        emit_strategy_banner(logger, cast(object, _FakeStrategy()))  # type: ignore[arg-type]
+    @click.command()
+    def cmd():
+        emit_cli_banner(strategy_name="my_local_strategy")
 
-    sentinel_line = next(line for line in caplog.text.splitlines() if "ALMANAK_DEPLOYMENT_BANNER" in line)
+    result = runner.invoke(cmd)
+    assert result.exit_code == 0
+    sentinel_line = next(line for line in result.stdout.splitlines() if "ALMANAK_DEPLOYMENT_BANNER" in line)
     fields = dict(_SENTINEL_KV.findall(sentinel_line))
-    assert fields["deployment_id"] == "local-deploy"
-    assert fields["strategy"] == "tiny_strategy"
-    assert fields["strategy_version"] == "unknown"  # missing metadata → "unknown"
+    assert fields["deployment_id"] == "local"
+    assert fields["strategy"] == "my_local_strategy"
+    assert fields["strategy_version"] == "unknown"
+
+
+def test_cli_banner_prefers_env_when_no_override(monkeypatch):
+    """When the caller does not override, env-injected values fill the banner."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+    monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "deploy-456")
+    monkeypatch.setenv("ALMANAK_STRATEGY_NAME", "deployer_injected_name")
+    monkeypatch.setenv("ALMANAK_STRATEGY_VERSION", "2.0.0")
+    monkeypatch.setenv("ALMANAK_COMMIT_SHA", "deadbeef")
+    monkeypatch.setenv("ALMANAK_SDK_VERSION", "2.16.1rc5")
+
+    runner = click.testing.CliRunner(mix_stderr=False)
+
+    @click.command()
+    def cmd():
+        emit_cli_banner()
+
+    result = runner.invoke(cmd)
+    assert result.exit_code == 0
+    sentinel_line = next(line for line in result.stdout.splitlines() if "ALMANAK_DEPLOYMENT_BANNER" in line)
+    fields = dict(_SENTINEL_KV.findall(sentinel_line))
+    assert fields["deployment_id"] == "deploy-456"
+    assert fields["strategy"] == "deployer_injected_name"
+    assert fields["strategy_version"] == "2.0.0"
+    assert fields["commit_sha"] == "deadbeef"
+    assert fields["sdk_version"] == "2.16.1rc5"
 
 
 if __name__ == "__main__":
