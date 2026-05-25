@@ -409,102 +409,169 @@ class TestCompileLPCloseDispatch:
 
 
 class TestCompileLPCloseSolana:
-    """Solana-chain-only dispatch and error messaging."""
+    """Solana-chain-only dispatch and error messaging.
 
-    def test_meteora_dlmm_on_solana_dispatches_to_helper(self) -> None:
+    Post-fold: Meteora/Orca/Raydium LP compilers are connector-owned and
+    dispatched via :data:`CompilerRegistry`. The dispatch site
+    (``IntentCompiler._compile_lp_close`` via ``_resolve_lp_protocol``)
+    normalises the Solana default protocol and gates non-Solana protocols
+    BEFORE the registry lookup; per-protocol "wrong chain" errors come from
+    the connector compilers themselves.
+    """
+
+    def _assert_solana_connector_dispatch(self, *, protocol: str) -> None:
         compiler = _make_compiler(chain="solana")
-        sentinel = MagicMock(name="meteora-result")
-        with (
-            patch.object(compiler, "_is_solana_chain", return_value=True),
-            patch.object(
-                compiler, "_compile_meteora_lp_close", return_value=sentinel
-            ) as mock_meteora,
-        ):
-            intent = _make_lp_close_intent(protocol="meteora_dlmm")
+        sentinel = MagicMock(name=f"{protocol}-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            intent = _make_lp_close_intent(protocol=protocol)
             result = compiler.compile(intent)
 
         assert result is sentinel
-        mock_meteora.assert_called_once()
+        mock_get_compiler.assert_called_once_with(protocol)
+        connector_compiler.compile.assert_called_once()
+        ctx, routed_intent = connector_compiler.compile.call_args.args
+        assert isinstance(ctx, BaseCompilerContext)
+        assert ctx.chain == "solana"
+        assert routed_intent is intent
+
+    def test_meteora_dlmm_on_solana_dispatches_to_connector_compiler(self) -> None:
+        self._assert_solana_connector_dispatch(protocol="meteora_dlmm")
+
+    def test_orca_whirlpools_on_solana_dispatches_to_connector_compiler(self) -> None:
+        self._assert_solana_connector_dispatch(protocol="orca_whirlpools")
+
+    def test_raydium_clmm_on_solana_dispatches_to_connector_compiler(self) -> None:
+        self._assert_solana_connector_dispatch(protocol="raydium_clmm")
 
     def test_meteora_dlmm_off_solana_fails(self) -> None:
+        """Meteora on a non-Solana chain fails via the connector's own chain check.
+
+        The dispatch site no longer pre-rejects Meteora on EVM chains; the
+        connector ``MeteoraCompiler`` enforces ``chain in {"solana"}`` and
+        returns the canonical error message.
+        """
         compiler = _make_compiler(chain="ethereum")
         intent = _make_lp_close_intent(protocol="meteora_dlmm")
-        with patch.object(compiler, "_is_solana_chain", return_value=False):
-            result = compiler.compile(intent)
+        result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert "Meteora DLMM is only supported on Solana" in (result.error or "")
 
-    def test_orca_whirlpools_on_solana_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="solana")
-        sentinel = MagicMock(name="orca-result")
-        with (
-            patch.object(compiler, "_is_solana_chain", return_value=True),
-            patch.object(
-                compiler, "_compile_orca_lp_close", return_value=sentinel
-            ) as mock_orca,
-        ):
-            intent = _make_lp_close_intent(protocol="orca_whirlpools")
-            result = compiler.compile(intent)
-
-        assert result is sentinel
-        mock_orca.assert_called_once()
-
     def test_orca_whirlpools_off_solana_fails(self) -> None:
-        """Orca Whirlpools on non-Solana chain must FAIL with explicit message."""
+        """Orca Whirlpools on a non-Solana chain fails via the connector's own chain check."""
         compiler = _make_compiler(chain="ethereum")
         intent = _make_lp_close_intent(protocol="orca_whirlpools")
-        with patch.object(compiler, "_is_solana_chain", return_value=False):
-            result = compiler.compile(intent)
+        result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert "Orca Whirlpools is only supported on Solana" in (result.error or "")
 
-    def test_raydium_clmm_on_solana_dispatches_to_helper(self) -> None:
-        compiler = _make_compiler(chain="solana")
-        sentinel = MagicMock(name="raydium-result")
-        with (
-            patch.object(compiler, "_is_solana_chain", return_value=True),
-            patch.object(
-                compiler, "_compile_raydium_lp_close", return_value=sentinel
-            ) as mock_raydium,
-        ):
-            intent = _make_lp_close_intent(protocol="raydium_clmm")
-            result = compiler.compile(intent)
+    def test_raydium_clmm_off_solana_fails(self) -> None:
+        """Raydium on a non-Solana chain fails via the connector's own chain check.
 
-        assert result is sentinel
-        mock_raydium.assert_called_once()
-
-    def test_raydium_clmm_off_solana_routes_through_raydium_handler(self) -> None:
-        """protocol='raydium_clmm' is unconditionally routed to the Raydium helper.
-
-        Pre-refactor behaviour: the raydium route fires on ``protocol ==
-        'raydium_clmm'`` OR on Solana-chain-with-protocol=None. When we force
-        a non-Solana chain but keep protocol='raydium_clmm', the Raydium
-        helper still owns the call (and the helper itself raises the real
-        non-Solana error). Pin this so a regression that adds an early
-        off-Solana reject for raydium_clmm is caught.
+        Post-fold the connector compiler enforces ``chain in {"solana"}`` in
+        its own ``compile()``, replacing the pre-fold downstream Raydium
+        adapter error with a clean "only supported on Solana" message.
         """
         compiler = _make_compiler(chain="ethereum")
-        sentinel = MagicMock(name="raydium-result")
-        with (
-            patch.object(compiler, "_is_solana_chain", return_value=False),
-            patch.object(
-                compiler, "_compile_raydium_lp_close", return_value=sentinel
-            ) as mock_raydium,
-        ):
-            intent = _make_lp_close_intent(protocol="raydium_clmm")
-            result = compiler.compile(intent)
+        intent = _make_lp_close_intent(protocol="raydium_clmm")
+        result = compiler.compile(intent)
 
-        assert result is sentinel
-        mock_raydium.assert_called_once()
+        assert result.status == CompilationStatus.FAILED
+        assert "Raydium CLMM is only supported on Solana" in (result.error or "")
 
     def test_unsupported_protocol_on_solana_fails(self) -> None:
-        """Solana chain + non-Solana protocol => FAILED with explicit message."""
+        """Solana chain + non-Solana protocol => FAILED with the canonical message
+        (raised by the dispatch site before the connector registry lookup)."""
         compiler = _make_compiler(chain="solana")
         intent = _make_lp_close_intent(protocol="uniswap_v3")
-        with patch.object(compiler, "_is_solana_chain", return_value=True):
-            result = compiler.compile(intent)
+        result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.FAILED
         assert "not supported for LP_CLOSE on Solana" in (result.error or "")
+
+    def test_unsupported_protocol_on_solana_carries_intent_id(self) -> None:
+        """LP_CLOSE FAILED result from Solana protocol gate stamps intent_id."""
+        compiler = _make_compiler(chain="solana")
+        intent = _make_lp_close_intent(protocol="uniswap_v3")
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.intent_id == intent.intent_id
+
+    def test_solana_lp_close_protocol_alias_is_normalized(self) -> None:
+        """Case- and hyphen-variant aliases (e.g. ``Meteora-DLMM``) route to the canonical connector."""
+        compiler = _make_compiler(chain="solana")
+        sentinel = MagicMock(name="meteora-aliased-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.chains = frozenset({"solana"})
+        connector_compiler.compile.return_value = sentinel
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=connector_compiler,
+        ) as mock_get_compiler:
+            intent = _make_lp_close_intent(protocol="Meteora-DLMM")
+            result = compiler.compile(intent)
+
+        assert result is sentinel
+        # Canonical key (lowercased, hyphens to underscores) is what we look
+        # up in the registry, NOT the raw user-supplied alias.
+        mock_get_compiler.assert_called_once_with("meteora_dlmm")
+
+
+class TestBuildCompilerContextSolanaRPC:
+    """RPC-URL pass-through for Solana-only connector compilers.
+
+    Solana LP adapters (Meteora, Orca, Raydium) do not yet route through
+    the gateway and need a direct ``rpc_url``. ``_get_chain_rpc_url`` returns
+    ``None`` when a gateway client is connected, so the compiler must pass
+    the raw ``self.rpc_url`` straight through for Solana-only connectors.
+    """
+
+    def _make_compiler_with_gateway(self) -> IntentCompiler:
+        compiler = _make_compiler(chain="solana")
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        compiler._gateway_client = gateway_client
+        compiler.rpc_url = "https://api.mainnet-beta.solana.com"
+        return compiler
+
+    def test_solana_only_connector_receives_raw_rpc_url_with_connected_gateway(self) -> None:
+        compiler = self._make_compiler_with_gateway()
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.chains = frozenset({"solana"})
+
+        ctx = compiler._build_compiler_context("meteora_dlmm", connector_compiler)
+
+        assert ctx.rpc_url == "https://api.mainnet-beta.solana.com"
+
+    def test_non_solana_connector_still_resolves_via_gateway_aware_path(self) -> None:
+        """EVM connectors keep going through ``_get_chain_rpc_url`` (returns ``None``
+        when the gateway is connected — the gateway handles the call)."""
+        compiler = _make_compiler(chain="arbitrum")
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        compiler._gateway_client = gateway_client
+        compiler.rpc_url = "https://arb1.example.com"
+
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.chains = frozenset({"arbitrum", "ethereum"})
+
+        ctx = compiler._build_compiler_context("aave_v3", connector_compiler)
+
+        assert ctx.rpc_url is None
+
+    def test_solana_only_detector_rejects_unknown_chains_attribute(self) -> None:
+        """Connectors that don't expose a real ``chains`` iterable fall back to
+        the gateway-aware path (defensive — keeps test-double behaviour stable)."""
+        connector_compiler = MagicMock()  # ``chains`` is a MagicMock, not iterable.
+        assert IntentCompiler._is_solana_only_connector(connector_compiler) is False

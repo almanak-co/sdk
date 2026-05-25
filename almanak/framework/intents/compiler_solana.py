@@ -1,9 +1,9 @@
 """Solana compilation helpers extracted from IntentCompiler.
 
 These standalone functions receive the compiler instance as their first
-parameter and implement Solana spot/lending/LP compilation logic (Jupiter,
-Kamino, Raydium, Meteora, Orca). Drift perps live in the Drift connector
-compiler.
+parameter and implement Solana spot/lending compilation logic (Jupiter,
+Kamino, Jupiter Lend). Drift perps live in the Drift connector compiler;
+Raydium / Meteora / Orca LP live in their respective connector compilers.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from .compiler_models import CompilationResult, CompilationStatus
 if TYPE_CHECKING:
     from .vocabulary import (
         BorrowIntent,
-        LPCloseIntent,
-        LPOpenIntent,
         RepayIntent,
         SupplyIntent,
         SwapIntent,
@@ -84,61 +82,6 @@ def get_kamino_adapter(compiler, *, needs_rpc: bool = False) -> Any:
         config = KaminoConfig(wallet_address=compiler.wallet_address)
         compiler._cached_kamino_adapter = KaminoAdapter(config=config, token_resolver=compiler._token_resolver)
     return compiler._cached_kamino_adapter
-
-
-def get_raydium_adapter(compiler, *, needs_rpc: bool = False) -> Any:
-    """Get or create a cached RaydiumAdapter instance."""
-    if needs_rpc:
-        if compiler._cached_raydium_adapter_with_rpc is None:
-            from almanak.framework.connectors.raydium import RaydiumAdapter, RaydiumConfig
-
-            config = RaydiumConfig(wallet_address=compiler.wallet_address, rpc_url=compiler.rpc_url or "")
-            compiler._cached_raydium_adapter_with_rpc = RaydiumAdapter(
-                config=config, token_resolver=compiler._token_resolver
-            )
-        return compiler._cached_raydium_adapter_with_rpc
-    if compiler._cached_raydium_adapter is None:
-        from almanak.framework.connectors.raydium import RaydiumAdapter, RaydiumConfig
-
-        config = RaydiumConfig(wallet_address=compiler.wallet_address)
-        compiler._cached_raydium_adapter = RaydiumAdapter(config=config, token_resolver=compiler._token_resolver)
-    return compiler._cached_raydium_adapter
-
-
-def get_meteora_adapter(compiler, *, needs_rpc: bool = False) -> Any:
-    """Get or create a cached MeteoraAdapter instance."""
-    if needs_rpc:
-        if compiler._cached_meteora_adapter_with_rpc is None:
-            from almanak.framework.connectors.meteora import MeteoraAdapter, MeteoraConfig
-
-            config = MeteoraConfig(wallet_address=compiler.wallet_address, rpc_url=compiler.rpc_url or "")
-            compiler._cached_meteora_adapter_with_rpc = MeteoraAdapter(
-                config=config, token_resolver=compiler._token_resolver
-            )
-        return compiler._cached_meteora_adapter_with_rpc
-    if compiler._cached_meteora_adapter is None:
-        from almanak.framework.connectors.meteora import MeteoraAdapter, MeteoraConfig
-
-        config = MeteoraConfig(wallet_address=compiler.wallet_address)
-        compiler._cached_meteora_adapter = MeteoraAdapter(config=config, token_resolver=compiler._token_resolver)
-    return compiler._cached_meteora_adapter
-
-
-def get_orca_adapter(compiler, *, needs_rpc: bool = False) -> Any:
-    """Get or create a cached OrcaAdapter instance."""
-    if needs_rpc:
-        if compiler._cached_orca_adapter_with_rpc is None:
-            from almanak.framework.connectors.orca import OrcaAdapter, OrcaConfig
-
-            config = OrcaConfig(wallet_address=compiler.wallet_address, rpc_url=compiler.rpc_url or "")
-            compiler._cached_orca_adapter_with_rpc = OrcaAdapter(config=config, token_resolver=compiler._token_resolver)
-        return compiler._cached_orca_adapter_with_rpc
-    if compiler._cached_orca_adapter is None:
-        from almanak.framework.connectors.orca import OrcaAdapter, OrcaConfig
-
-        config = OrcaConfig(wallet_address=compiler.wallet_address)
-        compiler._cached_orca_adapter = OrcaAdapter(config=config, token_resolver=compiler._token_resolver)
-    return compiler._cached_orca_adapter
 
 
 def get_jupiter_lend_adapter(compiler) -> Any:
@@ -375,147 +318,6 @@ def compile_jupiter_lend_withdraw(compiler, intent: WithdrawIntent) -> Compilati
 
 
 # =============================================================================
-# Raydium LP
+# Raydium / Meteora / Orca LP — owned by connectors/{raydium,meteora,orca}/
+# compiler.py. Dispatched via almanak.framework.connectors.compiler_registry.
 # =============================================================================
-
-
-def compile_raydium_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
-    """Compile an LP_OPEN intent using Raydium CLMM for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_raydium_adapter(compiler)
-        bundle = adapter.compile_lp_open_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Raydium LP open compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-def compile_raydium_lp_close(compiler, intent: LPCloseIntent) -> CompilationResult:
-    """Compile an LP_CLOSE intent using Raydium CLMM for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_raydium_adapter(compiler, needs_rpc=True)
-        bundle = adapter.compile_lp_close_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Raydium LP close compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-# =============================================================================
-# Meteora LP
-# =============================================================================
-
-
-def compile_meteora_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
-    """Compile an LP_OPEN intent using Meteora DLMM for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_meteora_adapter(compiler)
-        bundle = adapter.compile_lp_open_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Meteora LP open compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-def compile_meteora_lp_close(compiler, intent: LPCloseIntent) -> CompilationResult:
-    """Compile an LP_CLOSE intent using Meteora DLMM for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_meteora_adapter(compiler, needs_rpc=True)
-        bundle = adapter.compile_lp_close_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Meteora LP close compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-# =============================================================================
-# Orca LP
-# =============================================================================
-
-
-def compile_orca_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
-    """Compile an LP_OPEN intent using Orca Whirlpools for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_orca_adapter(compiler)
-        bundle = adapter.compile_lp_open_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Orca LP open compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result
-
-
-def compile_orca_lp_close(compiler, intent: LPCloseIntent) -> CompilationResult:
-    """Compile an LP_CLOSE intent using Orca Whirlpools for Solana chains."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    try:
-        adapter = get_orca_adapter(compiler, needs_rpc=True)
-        bundle = adapter.compile_lp_close_intent(intent)
-
-        if bundle.metadata.get("error"):
-            result.status = CompilationStatus.FAILED
-            result.error = bundle.metadata["error"]
-        else:
-            result.action_bundle = bundle
-    except Exception as e:
-        logger.exception(f"Orca LP close compilation failed: {e}")
-        result.status = CompilationStatus.FAILED
-        result.error = str(e)
-    return result

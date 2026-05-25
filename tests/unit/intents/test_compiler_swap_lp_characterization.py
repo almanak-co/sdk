@@ -1112,6 +1112,20 @@ class TestCompileLPOpenErrorPaths:
         assert result.status == CompilationStatus.FAILED
         assert "not supported for LP_OPEN on Solana" in (result.error or "")
 
+    def test_unsupported_solana_protocol_lp_open_carries_intent_id(self) -> None:
+        """LP_OPEN FAILED result from the Solana protocol gate must stamp intent_id.
+
+        Symmetric with ``_compile_lp_close``; without this, downstream
+        logging / correlation cannot tie the failure back to its intent.
+        """
+        compiler = _make_compiler(chain="arbitrum")
+        with patch.object(compiler, "_is_solana_chain", return_value=True):
+            intent = _make_lp_intent(protocol="uniswap_v3")
+            result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.intent_id == intent.intent_id
+
     @patch(LP_ADAPTER_CLS)
     def test_unknown_position_manager_fails(self, mock_adapter_cls: MagicMock) -> None:
         """Adapter returning zero position manager => FAILED."""

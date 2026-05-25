@@ -577,12 +577,6 @@ class IntentCompiler:
         self._cached_kamino_adapter: Any = None
         self._cached_kamino_adapter_with_rpc: Any = None
         self._cached_jupiter_lend_adapter: Any = None
-        self._cached_raydium_adapter: Any = None
-        self._cached_raydium_adapter_with_rpc: Any = None
-        self._cached_meteora_adapter: Any = None
-        self._cached_meteora_adapter_with_rpc: Any = None
-        self._cached_orca_adapter: Any = None
-        self._cached_orca_adapter_with_rpc: Any = None
         self._cached_drift_adapter: Any = None
 
         effective_protocol = "jupiter" if self._is_solana_chain() else default_protocol
@@ -674,9 +668,30 @@ class IntentCompiler:
             return PerpCompilerContext(**self._base_compiler_context_kwargs(resolve_rpc_url=False), protocol=protocol)
         if issubclass(context_type, SwapCompilerContext):
             return SwapCompilerContext(**self._swap_compiler_context_kwargs())
+        # Solana-only connectors (Meteora DLMM, Orca Whirlpools, Raydium CLMM) hold
+        # their own Solana RPC client — they do NOT route through the gateway.
+        # ``_get_chain_rpc_url()`` returns ``None`` when a gateway client is
+        # connected, which would silently strand these adapters with an empty
+        # RPC URL. Force the raw ``self.rpc_url`` pathway for them, matching
+        # the pre-fold ``compiler_solana.py`` behaviour. VIB-4121.
+        resolve_rpc_url = not self._is_solana_only_connector(connector_compiler)
         if context_type is not BaseCompilerContext:
-            return context_type(**self._base_compiler_context_kwargs())
-        return BaseCompilerContext(**self._base_compiler_context_kwargs())
+            return context_type(**self._base_compiler_context_kwargs(resolve_rpc_url=resolve_rpc_url))
+        return BaseCompilerContext(**self._base_compiler_context_kwargs(resolve_rpc_url=resolve_rpc_url))
+
+    @staticmethod
+    def _is_solana_only_connector(connector_compiler: BaseProtocolCompiler) -> bool:
+        """Return True when the connector compiler is registered only for Solana.
+
+        Defensive against test doubles that don't expose a real iterable
+        ``chains`` classvar — we only opt into the raw-RPC pathway when we
+        can prove the connector restricts itself to Solana.
+        """
+        chains = getattr(connector_compiler, "chains", None)
+        if not isinstance(chains, frozenset | set | tuple | list):
+            return False
+        chains_set = frozenset(chains)
+        return bool(chains_set) and chains_set <= frozenset({"solana"})
 
     def _build_cl_compiler_context(self, protocol: str) -> CLCompilerContext:
         """Build the connector compiler context for concentrated-liquidity protocols."""
@@ -1141,24 +1156,6 @@ class IntentCompiler:
 
         return get_kamino_adapter(self, needs_rpc=needs_rpc)
 
-    def _get_raydium_adapter(self, *, needs_rpc: bool = False) -> Any:
-        """Get or create a cached RaydiumAdapter instance."""
-        from .compiler_solana import get_raydium_adapter
-
-        return get_raydium_adapter(self, needs_rpc=needs_rpc)
-
-    def _get_meteora_adapter(self, *, needs_rpc: bool = False) -> Any:
-        """Get or create a cached MeteoraAdapter instance."""
-        from .compiler_solana import get_meteora_adapter
-
-        return get_meteora_adapter(self, needs_rpc=needs_rpc)
-
-    def _get_orca_adapter(self, *, needs_rpc: bool = False) -> Any:
-        """Get or create a cached OrcaAdapter instance."""
-        from .compiler_solana import get_orca_adapter
-
-        return get_orca_adapter(self, needs_rpc=needs_rpc)
-
     # =========================================================================
     # Solana compilation methods (delegated to compiler_solana)
     # =========================================================================
@@ -1168,42 +1165,6 @@ class IntentCompiler:
         from .compiler_solana import compile_jupiter_swap
 
         return compile_jupiter_swap(self, intent)
-
-    def _compile_raydium_lp_open(self, intent: LPOpenIntent) -> CompilationResult:
-        """Compile an LP_OPEN intent using Raydium CLMM for Solana chains."""
-        from .compiler_solana import compile_raydium_lp_open
-
-        return compile_raydium_lp_open(self, intent)
-
-    def _compile_raydium_lp_close(self, intent: LPCloseIntent) -> CompilationResult:
-        """Compile an LP_CLOSE intent using Raydium CLMM for Solana chains."""
-        from .compiler_solana import compile_raydium_lp_close
-
-        return compile_raydium_lp_close(self, intent)
-
-    def _compile_meteora_lp_open(self, intent: LPOpenIntent) -> CompilationResult:
-        """Compile an LP_OPEN intent using Meteora DLMM for Solana chains."""
-        from .compiler_solana import compile_meteora_lp_open
-
-        return compile_meteora_lp_open(self, intent)
-
-    def _compile_meteora_lp_close(self, intent: LPCloseIntent) -> CompilationResult:
-        """Compile an LP_CLOSE intent using Meteora DLMM for Solana chains."""
-        from .compiler_solana import compile_meteora_lp_close
-
-        return compile_meteora_lp_close(self, intent)
-
-    def _compile_orca_lp_open(self, intent: LPOpenIntent) -> CompilationResult:
-        """Compile an LP_OPEN intent using Orca Whirlpools for Solana chains."""
-        from .compiler_solana import compile_orca_lp_open
-
-        return compile_orca_lp_open(self, intent)
-
-    def _compile_orca_lp_close(self, intent: LPCloseIntent) -> CompilationResult:
-        """Compile an LP_CLOSE intent using Orca Whirlpools for Solana chains."""
-        from .compiler_solana import compile_orca_lp_close
-
-        return compile_orca_lp_close(self, intent)
 
     def _compile_wrap_native(self, intent: "WrapNativeIntent") -> CompilationResult:
         """Compile a WRAP_NATIVE intent into an ActionBundle.
@@ -1921,11 +1882,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP mint ActionBundle
         """
-        routed = self._dispatch_lp_open_protocol_route(intent)
-        if routed is not None:
-            return routed
+        protocol = self._resolve_lp_protocol(intent.protocol, intent_type="LP_OPEN")
+        if isinstance(protocol, CompilationResult):
+            protocol.intent_id = intent.intent_id
+            return protocol
 
-        protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
@@ -1944,61 +1905,51 @@ class IntentCompiler:
             error=f"Protocol '{protocol}' is not supported for LP_OPEN on {self.chain}.",
         )
 
-    def _dispatch_lp_open_protocol_route(self, intent: LPOpenIntent) -> CompilationResult | None:
-        """Route an LP_OPEN intent to the correct protocol-specific compiler.
+    # Solana LP protocols whose dedicated connector compilers handle the Solana
+    # chain. Used by ``_resolve_lp_protocol`` to gate EVM protocols away from
+    # Solana chains and to pick the default when ``intent.protocol is None``.
+    # Per-protocol "wrong chain" errors live in the connector compilers
+    # themselves (e.g. ``MeteoraCompiler`` fails with "Meteora DLMM is only
+    # supported on Solana" when called from an EVM chain).
+    _SOLANA_LP_PROTOCOLS: ClassVar[frozenset[str]] = frozenset({"raydium_clmm", "meteora_dlmm", "orca_whirlpools"})
+    _SOLANA_DEFAULT_LP_PROTOCOL: ClassVar[str] = "raydium_clmm"
 
-        Returns the routed ``CompilationResult`` when a dedicated helper owns
-        the protocol, or ``None`` when connector dispatch should handle it.
+    def _resolve_lp_protocol(self, requested: str | None, *, intent_type: str) -> str | CompilationResult:
+        """Resolve the LP protocol name for connector-registry dispatch.
 
-        Extracted in Phase 6B.4 so ``_compile_lp_open`` itself stays small.
-        Dispatch order is preserved from the pre-refactor method.
+        On Solana chains:
+        - ``None`` is normalised to the default Solana LP protocol
+          (``raydium_clmm``), matching pre-fold dispatch behaviour.
+        - Non-Solana LP protocols are rejected up-front with the legacy
+          "not supported for {intent_type} on Solana" error so users get a
+          clean message instead of a downstream connector failure.
+
+        On non-Solana chains, this is a thin pass-through to
+        :meth:`_resolve_protocol` (alias resolution for ``agni``, ``velodrome``
+        etc.).
         """
-        # Solana chains route to Solana-only adapters or fail (delegated to keep CC small).
-        if self._is_solana_chain() or intent.protocol in {"meteora_dlmm", "orca_whirlpools", "raydium_clmm"}:
-            return self._dispatch_lp_open_solana_route(intent)
+        if self._is_solana_chain():
+            # Normalize aliases / case / hyphens before the allowlist check so
+            # ``meteora-dlmm`` / ``METEORA_DLMM`` resolve to the canonical key,
+            # matching the rest of ``IntentCompiler``'s ingress behaviour.
+            # ``None`` keeps the existing default-protocol fallback so the
+            # caller can short-circuit without normalizing the default.
+            if requested is None:
+                resolved = self._SOLANA_DEFAULT_LP_PROTOCOL
+            else:
+                from ..connectors.protocol_aliases import normalize_protocol
 
-        return None
-
-    def _dispatch_lp_open_solana_route(self, intent: LPOpenIntent) -> CompilationResult:
-        """Solana-side LP_OPEN dispatch.
-
-        Covers the Meteora/Orca/Raydium cases plus the explicit failure for
-        other protocols on Solana chains. Always returns a CompilationResult -
-        this helper is only entered when the caller has already established
-        that the intent is bound for Solana.
-        """
-        # Route Meteora DLMM to Solana-specific adapter
-        if intent.protocol == "meteora_dlmm":
-            if not self._is_solana_chain():
+                resolved = normalize_protocol(self.chain, requested)
+            if resolved not in self._SOLANA_LP_PROTOCOLS:
+                supported = ", ".join(sorted(self._SOLANA_LP_PROTOCOLS))
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Meteora DLMM is only supported on Solana",
+                    error=(
+                        f"Protocol '{requested}' is not supported for {intent_type} on Solana. Supported: {supported}"
+                    ),
                 )
-            return self._compile_meteora_lp_open(intent)
-
-        # Route Orca Whirlpools to Solana-specific adapter
-        if intent.protocol == "orca_whirlpools":
-            if not self._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Orca Whirlpools is only supported on Solana",
-                )
-            return self._compile_orca_lp_open(intent)
-
-        # Route Raydium CLMM to Solana-specific adapter (default LP protocol on Solana)
-        if intent.protocol == "raydium_clmm" or (self._is_solana_chain() and intent.protocol is None):
-            return self._compile_raydium_lp_open(intent)
-
-        # Fail explicitly for unsupported protocols on Solana. (Only reachable
-        # when ``_is_solana_chain()`` is True - the caller gates this helper.)
-        allowed_solana_lp = {"raydium_clmm", "meteora_dlmm", "orca_whirlpools"}
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for LP_OPEN on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
-        )
+            return resolved
+        return self._resolve_protocol(requested)
 
     # crap-allowlist: VIB-4688 — pre-existing method (cc=10, under threshold); coverage-driven score from docstring touch during phase-2 fold. Unit-coverage backfill tracked in VIB-4688.
     def _fetch_lp_pool_slot0(
@@ -2064,11 +2015,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP close ActionBundle
         """
-        routed = self._dispatch_lp_close_protocol_route(intent)
-        if routed is not None:
-            return routed
+        protocol = self._resolve_lp_protocol(intent.protocol, intent_type="LP_CLOSE")
+        if isinstance(protocol, CompilationResult):
+            protocol.intent_id = intent.intent_id
+            return protocol
 
-        protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
@@ -2085,62 +2036,6 @@ class IntentCompiler:
             status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
             error=f"Protocol '{protocol}' is not supported for LP_CLOSE on {self.chain}.",
-        )
-
-    def _dispatch_lp_close_protocol_route(self, intent: LPCloseIntent) -> CompilationResult | None:
-        """Route an LP_CLOSE intent to the correct protocol-specific compiler.
-
-        Returns the routed ``CompilationResult`` when a dedicated helper owns
-        the protocol, or ``None`` when connector dispatch should handle it.
-
-        Extracted in Phase 6B backlog so ``_compile_lp_close`` itself stays small.
-        Dispatch order is preserved from the pre-refactor method.
-        """
-        # Solana chains route to Solana-only adapters or fail (delegated to keep CC small).
-        if self._is_solana_chain() or intent.protocol in {"meteora_dlmm", "orca_whirlpools", "raydium_clmm"}:
-            return self._dispatch_lp_close_solana_route(intent)
-
-        return None
-
-    def _dispatch_lp_close_solana_route(self, intent: LPCloseIntent) -> CompilationResult:
-        """Solana-side LP_CLOSE dispatch.
-
-        Covers the Meteora/Orca/Raydium cases plus the explicit failure for
-        other protocols on Solana chains. Always returns a CompilationResult -
-        this helper is only entered when the caller has already established
-        that the intent is bound for Solana.
-        """
-        # Route Meteora DLMM to Solana-specific adapter
-        if intent.protocol == "meteora_dlmm":
-            if not self._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Meteora DLMM is only supported on Solana",
-                )
-            return self._compile_meteora_lp_close(intent)
-
-        # Route Orca Whirlpools to Solana-specific adapter
-        if intent.protocol == "orca_whirlpools":
-            if not self._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Orca Whirlpools is only supported on Solana",
-                )
-            return self._compile_orca_lp_close(intent)
-
-        # Route Raydium CLMM to Solana-specific adapter (default LP protocol on Solana)
-        if intent.protocol == "raydium_clmm" or (self._is_solana_chain() and intent.protocol is None):
-            return self._compile_raydium_lp_close(intent)
-
-        # Fail explicitly for unsupported protocols on Solana. (Only reachable
-        # when ``_is_solana_chain()`` is True - the caller gates this helper.)
-        allowed_solana_lp = {"raydium_clmm", "meteora_dlmm", "orca_whirlpools"}
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{intent.protocol}' is not supported for LP_CLOSE on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
         )
 
     # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.

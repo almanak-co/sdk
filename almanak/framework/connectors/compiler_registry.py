@@ -144,6 +144,18 @@ class CompilerRegistry:
             "almanak.framework.connectors.bridge_compiler",
             "BridgeCompiler",
         ),
+        "meteora_dlmm": (
+            "almanak.framework.connectors.meteora.compiler",
+            "MeteoraCompiler",
+        ),
+        "orca_whirlpools": (
+            "almanak.framework.connectors.orca.compiler",
+            "OrcaCompiler",
+        ),
+        "raydium_clmm": (
+            "almanak.framework.connectors.raydium.compiler",
+            "RaydiumCompiler",
+        ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 
