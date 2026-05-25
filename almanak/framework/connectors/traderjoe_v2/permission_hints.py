@@ -7,11 +7,14 @@ manifest always includes the LBRouter selectors.
 
 SWAP compilation offline succeeds through the connector-owned Liquidity Book
 compiler path, which falls back to a default bin_step when RPC auto-detection
-is unavailable. ``_build_swap_intents`` previously skipped TJv2 because its
-router is stored in ``LP_POSITION_MANAGERS`` rather than ``PROTOCOL_ROUTERS``.
-That gap is now closed in ``synthetic_intents._build_swap_intents``; the
-selector label below ensures the generated manifest carries a human-readable
-name for ``swapExactTokensForTokens`` (issue #1841).
+is unavailable. The connector owns its synthetic-intent dispatch via
+``build_discovery_vectors`` below — see
+:func:`almanak.framework.permissions.hints.get_discovery_vectors_override`
+for the dispatcher contract. This is the connector self-containment endpoint
+for TraderJoe V2 (VIB-4121): every SWAP / LP_OPEN / LP_CLOSE /
+LP_COLLECT_FEES synthetic for ``traderjoe_v2`` is produced here, and the
+framework-side ``_build_swap_intents`` router-exemption tuple no longer
+needs to special-case TraderJoe.
 
 LP_CLOSE additionally needs ``approveForAll`` on the LBPair (per-pair
 ERC1155-like contract). The pair address is dynamic (one contract per
@@ -32,9 +35,21 @@ LBPair function selectors:
 - collectFees(address,uint256[])        = 0x225b20b9
 """
 
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
 from almanak.core.contracts import TRADERJOE_V2_LBPAIRS
 from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
-from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
+from almanak.framework.permissions.hints import (
+    DiscoveryContext,
+    PermissionHints,
+    StaticPermissionEntry,
+)
+
+if TYPE_CHECKING:
+    from almanak.framework.intents.vocabulary import AnyIntent
 
 # TraderJoe V2 LBRouter selectors that need RPC for compilation
 _TRADERJOE_ADD_LIQUIDITY_SELECTOR = "0xa3c7271a"
@@ -159,45 +174,46 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     return result
 
 
+# Per-chain synthetic SWAP pair for TraderJoe V2. The framework default
+# ``(USDC, WETH-equivalent)`` has no usable liquidity at any TJv2 bin step on
+# several chains — the synthetic compile would abort before the LBRouter swap
+# selector lands on the manifest and every real TJv2 SWAP on those chains
+# would fail ``ConditionViolation`` (0xd0a9bf58) at
+# ``execTransactionWithRole``. Pin a known-liquid pair per chain.
+#
+# * ``ethereum``: WETH/USDC has no liquidity at any bin step at the current
+#   fork block — the only liquid TJv2 pair on Ethereum is USDT/USDC
+#   bin_step=1 (LBPair ``0x47B1CEC2D2370E11B049c73aB6732F03E920C71a``,
+#   verified 2026-05-14). ``get_swap_quote`` otherwise raises
+#   ``DivisionByZero`` because ``getSwapOut`` returns ``amount_out=0``
+#   against an empty pool. (VIB-4378.)
+# * ``bsc`` / ``bnb``: The framework's chain-default pair on bsc resolves
+#   to (USDC, WETH-bridged) which has no TJv2 LBPair — the canonical
+#   liquid pair is (USDT, WBNB). Registered under both ``"bsc"`` (the
+#   SDK canonical name, used by the compiler and intent runtime) AND
+#   ``"bnb"`` (the user-facing alias used by ConnectorRegistry /
+#   ``almanak ax`` / CLI surfaces). The dispatch below is a literal
+#   ``dict.get(chain)`` against whatever string the caller passes, with
+#   no alias normalisation upstream — omitting either key would leave
+#   the corresponding call site falling back to the default and
+#   silently emit an empty manifest. (VIB-4376.) Mirrors the
+#   sushiswap_v3 bsc override pattern from #1902.
+_SWAP_PAIR_BY_CHAIN: dict[str, tuple[str, str]] = {
+    "ethereum": ("USDT", "USDC"),
+    "bsc": (
+        "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
+        "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+    ),
+    "bnb": (
+        "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
+        "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+    ),
+}
+
+
 PERMISSION_HINTS = PermissionHints(
     supports_standalone_fee_collection=True,
     static_permissions=_build_static_permissions(),
-    # Synthetic SWAP discovery defaults to ``(USDC, WETH)``, but TraderJoe V2
-    # on several chains has no usable liquidity at that pair and the synthetic
-    # compile aborts before the LBRouter swap selector lands in the generated
-    # manifest — every real TJv2 SWAP on those chains then fails
-    # ``ConditionViolation`` (0xd0a9bf58) at ``execTransactionWithRole``.
-    # Pin a known-liquid pair per chain.
-    #
-    # * ``ethereum``: WETH/USDC has no liquidity at any bin step at the current
-    #   fork block — the only liquid TJv2 pair on Ethereum is USDT/USDC
-    #   bin_step=1 (LBPair ``0x47B1CEC2D2370E11B049c73aB6732F03E920C71a``,
-    #   verified 2026-05-14). ``get_swap_quote`` otherwise raises
-    #   ``DivisionByZero`` because ``getSwapOut`` returns ``amount_out=0``
-    #   against an empty pool. (VIB-4378.)
-    # * ``bsc`` / ``bnb``: The framework's chain-default pair on bsc resolves
-    #   to (USDC, WETH-bridged) which has no TJv2 LBPair — the canonical
-    #   liquid pair is (USDT, WBNB). Registered under both ``"bsc"`` (the
-    #   SDK canonical name, used by the compiler and intent runtime) AND
-    #   ``"bnb"`` (the user-facing alias used by ConnectorRegistry /
-    #   ``almanak ax`` / CLI surfaces). The lookup in
-    #   ``synthetic_intents._build_swap_intents`` is a literal
-    #   ``dict.get(chain)`` against whatever string the caller passes, with
-    #   no alias normalisation upstream — omitting either key would leave
-    #   the corresponding call site falling back to the default and
-    #   silently emit an empty manifest. (VIB-4376.) Mirrors the
-    #   sushiswap_v3 bsc override pattern from #1902.
-    synthetic_swap_pair={
-        "ethereum": ("USDT", "USDC"),
-        "bsc": (
-            "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
-            "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
-        ),
-        "bnb": (
-            "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC, 18 decimals)
-            "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
-        ),
-    },
     selector_labels={
         _TRADERJOE_ADD_LIQUIDITY_SELECTOR: "addLiquidity(LiquidityParameters)",
         _TRADERJOE_REMOVE_LIQUIDITY_SELECTOR: "removeLiquidity(address,address,uint16,uint256,uint256,uint256[],uint256[],address,uint256)",
@@ -206,3 +222,98 @@ PERMISSION_HINTS = PermissionHints(
         _TRADERJOE_COLLECT_FEES_SELECTOR: _TRADERJOE_COLLECT_FEES_SIG,
     },
 )
+
+
+def build_discovery_vectors(
+    protocol: str,
+    intent_type: str,
+    chain: str,
+    ctx: DiscoveryContext,
+) -> list[AnyIntent] | None:
+    """Emit synthetic intents covering every selector the manifest needs.
+
+    TraderJoe V2 lives in ``LP_POSITION_MANAGERS`` (not ``PROTOCOL_ROUTERS``)
+    because its LBRouter handles both SWAP and LP. The framework-side
+    ``_build_swap_intents`` used to special-case it via a router-exemption
+    tuple; with this override that tuple entry is removed and the connector
+    owns the entire ``(protocol, intent_type, chain)`` synthetic dispatch.
+
+    The compile path's per-pair liquidity check requires a chain-specific
+    canonical pair (see ``_SWAP_PAIR_BY_CHAIN`` rationale) — falling back to
+    the framework's chain-default ``(USDC, WETH)`` on ``ethereum`` / ``bsc`` /
+    ``bnb`` aborts the synthetic and drops the LBRouter swap selector from
+    the manifest. Per-pair ``approveForAll`` / ``collectFees`` are still
+    declared statically on ``PERMISSION_HINTS.static_permissions`` (one entry
+    per registered LBPair) — those are merged into the manifest regardless of
+    this override.
+
+    Returns ``None`` for any (intent_type, chain) the connector does not
+    deploy on so the framework default returns ``[]`` for those slots —
+    matching prior behaviour where the LBRouter is absent from
+    ``LP_POSITION_MANAGERS`` for the chain.
+    """
+    from almanak.framework.intents.vocabulary import (
+        CollectFeesIntent,
+        LPCloseIntent,
+        LPOpenIntent,
+        SwapIntent,
+    )
+
+    if intent_type == "SWAP":
+        from_token, to_token = _SWAP_PAIR_BY_CHAIN.get(chain, (ctx.usdc, ctx.weth))
+        return [
+            SwapIntent(
+                from_token=from_token,
+                to_token=to_token,
+                amount=Decimal("1"),
+                protocol=protocol,
+                chain=chain,
+            )
+        ]
+
+    # LP_OPEN / LP_CLOSE / LP_COLLECT_FEES all gate on the LBRouter being
+    # registered in ``LP_POSITION_MANAGERS`` for ``chain`` — preserve that
+    # gate here so the override's ``None`` short-circuits cleanly to the
+    # framework default's empty list for unsupported chains.
+    managers = LP_POSITION_MANAGERS.get(chain, {})
+    if "traderjoe_v2" not in managers:
+        return None
+
+    if intent_type == "LP_OPEN":
+        token0, token1 = ctx.usdc, ctx.weth
+        return [
+            LPOpenIntent(
+                pool=f"{token0}/{token1}",
+                amount0=Decimal("100"),
+                amount1=Decimal("0.05"),
+                range_lower=Decimal("1500"),
+                range_upper=Decimal("4000"),
+                protocol=protocol,
+                chain=chain,
+            )
+        ]
+
+    if intent_type == "LP_CLOSE":
+        # TraderJoe LP_CLOSE uses ``synthetic_position_id`` default ``"1"``
+        # — no protocol-specific template needed. Mirrors the framework
+        # default. ``ctx`` is unused for this branch because LPCloseIntent
+        # doesn't take token0/token1.
+        return [
+            LPCloseIntent(
+                position_id="1",
+                protocol=protocol,
+                chain=chain,
+            )
+        ]
+
+    if intent_type == "LP_COLLECT_FEES":
+        token0, token1 = ctx.usdc, ctx.weth
+        return [
+            CollectFeesIntent(
+                pool=f"{token0}/{token1}",
+                protocol=protocol,
+                chain=chain,
+            )
+        ]
+
+    return None

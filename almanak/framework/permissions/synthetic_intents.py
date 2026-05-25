@@ -236,14 +236,22 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
         if result is not None:
             return result
     # Check that this protocol has a router on this chain.
-    # Protocols with dedicated swap compile paths (enso, pendle,
-    # traderjoe_v2) are exempt because their router address is not stored in
-    # PROTOCOL_ROUTERS -- the compiler resolves it from protocol-specific
-    # registries (LP_POSITION_MANAGERS for TJv2's LBRouter, the connector's
-    # own module for Enso/Pendle). Their dedicated compile path
-    # returns FAILED with "not supported" for unsupported chains, which
-    # discover_permissions() treats as a non-fatal skip.
-    if protocol not in ("enso", "pendle", "traderjoe_v2"):
+    # Protocols with dedicated swap compile paths (enso, pendle) are exempt
+    # because their router address is not stored in PROTOCOL_ROUTERS -- the
+    # compiler resolves it from protocol-specific registries (the connector's
+    # own module for Enso/Pendle). Their dedicated compile path returns FAILED
+    # with "not supported" for unsupported chains, which discover_permissions()
+    # treats as a non-fatal skip.
+    #
+    # ``traderjoe_v2`` USED to be in this tuple for the same reason — its
+    # LBRouter lives in ``LP_POSITION_MANAGERS`` rather than
+    # ``PROTOCOL_ROUTERS`` — but its synthetic SWAP dispatch is now fully
+    # owned by ``connectors/traderjoe_v2/permission_hints.build_discovery_vectors``
+    # (VIB-4121 connector self-containment). The override returns the
+    # LBRouter swap synthetic above this gate ever fires; if the override
+    # ever returns ``None`` for SWAP on a supported chain, that's a connector
+    # bug — not a reason to keep the exemption.
+    if protocol not in ("enso", "pendle"):
         routers = PROTOCOL_ROUTERS.get(chain, {})
         if protocol not in routers:
             return []
@@ -374,6 +382,17 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     hints = get_permission_hints(protocol)
     if not hints.supports_standalone_fee_collection:
         return []
+    # Override hook runs BEFORE the position-manager gate so a connector that
+    # owns its discovery via ``build_discovery_vectors`` is never blocked by
+    # the framework's chain → position-manager registry. Mirrors
+    # ``_build_swap_intents`` / ``_build_supply_intents``.
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        usdc, weth = _get_token_pair(chain)
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "LP_COLLECT_FEES", chain, ctx)
+        if result is not None:
+            return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
     if protocol not in managers:
         return []
@@ -497,7 +516,18 @@ def _build_repay_intents(protocol: str, chain: str, usdc: str, weth: str) -> lis
 def _build_perp_open_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
     if protocol not in _PERP_PROTOCOLS:
         return []
-    intents: list[AnyIntent] = [
+    # Override hook runs BEFORE the protocol/chain dispatch so a connector that
+    # owns its discovery via ``build_discovery_vectors`` is never blocked by
+    # the legacy hardcoded chain branches. Mirrors ``_build_swap_intents`` /
+    # ``_build_supply_intents``.
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        _, weth = _get_token_pair(chain)
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "PERP_OPEN", chain, ctx)
+        if result is not None:
+            return result
+    return [
         PerpOpenIntent(
             market="ETH/USD",
             collateral_token=usdc,
@@ -509,49 +539,22 @@ def _build_perp_open_intents(protocol: str, chain: str, usdc: str) -> list[AnyIn
             chain=chain,
         )
     ]
-    # Aster Diamond (and PancakeSwap Perps which is broker_id=2 on the same
-    # Diamond) exposes a separate ``openMarketTradeBNB`` selector (0xb7aeae66)
-    # for native-BNB-collateral opens, distinct from ``openMarketTrade``
-    # (0x703085c7) for ERC20 collateral. The ERC20 synthetic above only
-    # authorises the ERC20 selector; without a native-collateral synthetic the
-    # manifest blocks every native-margin open at execTransactionWithRole.
-    if protocol in {"aster_perps", "pancakeswap_perps"} and chain == "bsc":
-        intents.append(
-            PerpOpenIntent(
-                market="ETH/USD",
-                collateral_token="BNB",
-                collateral_amount=Decimal("0.5"),
-                size_usd=Decimal("500"),
-                is_long=True,
-                leverage=Decimal("5"),
-                protocol=protocol,
-                chain=chain,
-            )
-        )
-    return intents
 
 
 def _build_perp_close_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
     if protocol not in _PERP_PROTOCOLS:
         return []
-    # Aster Diamond's PERP_CLOSE compile path requires ``position_id`` (a 0x-
-    # prefixed bytes32 tradeHash). Without one the synthetic compile fails with
-    # "PERP_CLOSE requires intent.position_id" and the manifest never sees the
-    # ``closeTrade(bytes32)`` selector (0x5177fd3b). Use a placeholder hash —
-    # the compiler validates shape, not on-chain existence.
-    placeholder_trade_hash = "0x" + "00" * 32
-    if protocol in {"aster_perps", "pancakeswap_perps"} and chain == "bsc":
-        return [
-            PerpCloseIntent(
-                market="ETH/USD",
-                collateral_token=usdc,
-                is_long=True,
-                size_usd=None,  # closeTrade(bytes32) is always full-close
-                protocol=protocol,
-                chain=chain,
-                position_id=placeholder_trade_hash,
-            )
-        ]
+    # Override hook runs BEFORE the protocol/chain dispatch so a connector that
+    # owns its discovery via ``build_discovery_vectors`` is never blocked by
+    # the legacy hardcoded chain branches. Mirrors ``_build_swap_intents`` /
+    # ``_build_supply_intents``.
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        _, weth = _get_token_pair(chain)
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "PERP_CLOSE", chain, ctx)
+        if result is not None:
+            return result
     return [
         PerpCloseIntent(
             market="ETH/USD",
