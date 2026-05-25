@@ -202,9 +202,14 @@ Read-only tools with no on-chain side effects. Risk tier: **NONE**.
 | `get_indicator` | Calculate technical indicator (RSI, SMA, EMA, MACD, BB, ATR) | `token`, `indicator`, `period`, `chain` |
 | `get_pool_state` | Get liquidity pool details (price, tick, TVL, fees) | `token_a`, `token_b`, `fee_tier`, `chain` |
 | `get_lp_position` | Get LP position details (range, liquidity, fees) | `position_id`, `chain` |
+| `list_lp_positions` | List all Uniswap V3-style LP positions owned by a wallet (compact per-position summary) | `wallet_address`, `chain` |
+| `list_lending_positions` | List a wallet's lending positions with account totals and health factor (Aave V3) | `wallet_address`, `chain` |
+| `get_portfolio` | Aggregate a wallet's on-chain state (native + ERC20 balances, LP positions, lending) | `wallet_address`, `chain` |
 | `resolve_token` | Resolve token symbol/address to full metadata | `token`, `chain` |
 | `get_risk_metrics` | Get portfolio risk metrics (VaR, Sharpe, vol, drawdown) | `chain` |
 | `get_vault_state` | Get Lagoon vault state (assets, deposits, share price) | `vault_address`, `chain` |
+| `get_wallet_overview` | Complete wallet balance overview in a single call (auto-queries common tokens, filters dust, totals USD) | `wallet_address`, `chain` |
+| `check_protocol_support` | Check whether the SDK supports a protocol on a chain (static registry; no network calls) | `protocol`, `chain` |
 
 ### Planning Tools (5)
 
@@ -230,6 +235,10 @@ On-chain execution tools. Risk tier: **MEDIUM** or **HIGH**. All support `dry_ru
 | `supply_lending` | MEDIUM | Supply tokens to lending protocol | `token`, `amount`, `protocol`, `chain` |
 | `borrow_lending` | HIGH | Borrow from lending protocol | `token`, `amount`, `collateral_token`, `chain` |
 | `repay_lending` | MEDIUM | Repay a lending position | `token`, `amount`, `chain` |
+| `withdraw_lending` | MEDIUM | Withdraw supplied tokens from a lending protocol (full or partial) | `token`, `amount`, `protocol`, `chain` |
+| `bridge_tokens` | MEDIUM | Bridge tokens cross-chain (Across or Stargate) | `token`, `amount`, `from_chain`, `to_chain` |
+| `wrap_native` | MEDIUM | Wrap native to ERC-20 (ETH → WETH, MATIC → WMATIC) — required before LP ops when wallet holds native | `token`, `amount`, `chain` |
+| `unwrap_native` | MEDIUM | Unwrap wrapped native back to native (WETH → ETH, WMATIC → MATIC) | `token`, `amount`, `chain` |
 | `execute_compiled_bundle` | HIGH | Execute a previously compiled ActionBundle | `bundle_id` |
 | `deploy_vault` | HIGH | Deploy a new Lagoon vault | `underlying_token`, `chain` |
 | `settle_vault` | MEDIUM | Run vault settlement cycle | `vault_address`, `chain` |

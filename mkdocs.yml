@@ -52,6 +52,7 @@ plugins:
             Gateway: 网关
             API Reference: API 参考
             Connectors: 连接器
+            Migrations: 迁移
         - locale: fr
           name: Français
           build: true
@@ -65,6 +66,7 @@ plugins:
             Gateway: Passerelle
             API Reference: Référence API
             Connectors: Connecteurs
+            Migrations: Migrations
         - locale: es
           name: Español
           build: true
@@ -78,6 +80,7 @@ plugins:
             Gateway: Pasarela
             API Reference: Referencia API
             Connectors: Conectores
+            Migrations: Migraciones
   # NOTE: llmstxt plugin moved to mkdocs-llms.yml (incompatible with i18n).
   # Run `make docs-llms` to generate llms.txt separately.
   - mkdocstrings:
@@ -157,6 +160,7 @@ nav:
     - cli/strat-run.md
     - cli/strat-teardown.md
     - cli/strat-new.md
+    - cli/strat-test.md
     - cli/almanak-gateway.md
     - cli/almanak-dashboard.md
   - Gateway:
@@ -224,3 +228,5 @@ nav:
     - api/backtesting.md
     - api/deployment.md
     - api/logging.md
+  - Migrations:
+    - migration/vib-4062-marketsnapshot.md

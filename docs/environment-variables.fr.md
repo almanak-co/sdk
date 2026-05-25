@@ -74,6 +74,33 @@ Nécessaires uniquement si votre stratégie utilise ces protocoles spécifiques.
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Clé API du protocole Pendle |
 
+### Solana
+
+| Variable | Description |
+|----------|-------------|
+| `SOLANA_PRIVATE_KEY` | Paire de clés Ed25519 au format base58 (ou semence hexadécimale de 64 caractères). Requise pour les stratégies Solana. |
+| `SOLANA_RPC_URL` | Point de terminaison RPC Solana. Par défaut `https://api.mainnet-beta.solana.com` (limité en débit). Utilisez Helius, QuickNode ou Triton en production. |
+| `JUPITER_API_KEY` | Clé API de l'agrégateur Jupiter. Niveau gratuit utilisé si non définie. |
+| `DRIFT_DATA_API_BASE_URL` | Surcharge de l'URL de base de l'API de données Drift (par défaut `https://data.api.drift.trade`). |
+| `METEORA_API_BASE_URL` | Surcharge de l'URL de base de l'API Meteora (par défaut `https://dlmm.datapi.meteora.ag`). |
+| `ORCA_API_BASE_URL` | Surcharge de l'URL de base de l'API Orca (par défaut `https://api.orca.so/v2/solana`). |
+| `RAYDIUM_API_BASE_URL` | Surcharge de l'URL de base de l'API Raydium (par défaut `https://api-v3.raydium.io`). |
+
+### Points de terminaison de données Polymarket
+
+| Variable | Description |
+|----------|-------------|
+| `POLYMARKET_GAMMA_URL` | Surcharge du point de terminaison Polymarket Gamma (métadonnées de marché). Repli sur la valeur amont par défaut si non définie. |
+| `POLYMARKET_CLOB_URL` | Surcharge du point de terminaison Polymarket CLOB (carnet d'ordres + gestion des ordres). |
+| `POLYMARKET_DATA_API_URL` | Surcharge du point de terminaison de l'API de données Polymarket (positions / historique). |
+
+### Autres intégrations externes
+
+| Variable | Description |
+|----------|-------------|
+| `LIFI_API_KEY` | Clé API de l'agrégateur de bridge / swap Li.Fi. |
+| `RUGCHECK_API_KEY` | Clé API Rugcheck.xyz pour le scoring de risque des tokens Solana. |
+
 ---
 
 ## Authentification et sécurité de la passerelle

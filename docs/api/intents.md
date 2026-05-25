@@ -40,6 +40,12 @@ Factory class for creating intents.
     options:
       show_root_heading: true
 
+## CollectFeesIntent
+
+::: almanak.framework.intents.CollectFeesIntent
+    options:
+      show_root_heading: true
+
 ## BorrowIntent
 
 ::: almanak.framework.intents.BorrowIntent
@@ -61,6 +67,18 @@ Factory class for creating intents.
 ## WithdrawIntent
 
 ::: almanak.framework.intents.WithdrawIntent
+    options:
+      show_root_heading: true
+
+## DeleverageIntent
+
+::: almanak.framework.intents.DeleverageIntent
+    options:
+      show_root_heading: true
+
+## FlashLoanIntent
+
+::: almanak.framework.intents.FlashLoanIntent
     options:
       show_root_heading: true
 
@@ -91,6 +109,30 @@ Factory class for creating intents.
 ## BridgeIntent
 
 ::: almanak.framework.intents.BridgeIntent
+    options:
+      show_root_heading: true
+
+## WrapNativeIntent
+
+::: almanak.framework.intents.WrapNativeIntent
+    options:
+      show_root_heading: true
+
+## UnwrapNativeIntent
+
+::: almanak.framework.intents.UnwrapNativeIntent
+    options:
+      show_root_heading: true
+
+## VaultDepositIntent
+
+::: almanak.framework.intents.VaultDepositIntent
+    options:
+      show_root_heading: true
+
+## VaultRedeemIntent
+
+::: almanak.framework.intents.VaultRedeemIntent
     options:
       show_root_heading: true
 

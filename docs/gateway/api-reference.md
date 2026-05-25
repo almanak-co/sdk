@@ -17,6 +17,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
+| PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Feature-flagged off by default; enable via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -334,6 +335,16 @@ Retrieve a single ledger entry by id (for re-derivation and audit lookups).
 rpc GetLedgerEntry(GetLedgerEntryRequest) returns (GetLedgerEntryResponse)
 ```
 
+### SumLedgerGasUsd
+
+Sum `transaction_ledger.gas_usd` across a deployment for the
+`portfolio_metrics.gas_spent_usd` aggregate (VIB-4247). The gateway performs the
+read because hosted strategy containers cannot access Postgres directly.
+
+```protobuf
+rpc SumLedgerGasUsd(SumLedgerGasUsdRequest) returns (SumLedgerGasUsdResponse)
+```
+
 ### SaveAccountingEvent
 
 Persist a typed accounting event (Layer 5 accounting). Writers must route through
@@ -370,6 +381,20 @@ Lending intents (`SUPPLY`, `BORROW`, `REPAY`, `WITHDRAW`) are intentionally
 
 ```protobuf
 rpc SavePositionEvent(SavePositionEventRequest) returns (SavePositionEventResponse)
+```
+
+### SavePositionStateSnapshots
+
+Persist per-iteration position state snapshots (tied to a parent
+`portfolio_snapshots.id`, one row per open position). Backs accountant cells
+G14 / G15 / L2 / L3 / L5. Non-blocking writes — logged and swallowed in
+non-live modes; raises `AccountingPersistenceError` in live via the runner's
+mode-aware caller. The hosted Postgres path returns `UNIMPLEMENTED` until the
+`metrics-database` migration adds `position_state_snapshots` (PRD T-DRAFT-25,
+Infra-owned).
+
+```protobuf
+rpc SavePositionStateSnapshots(SavePositionStateSnapshotsRequest) returns (SavePositionStateSnapshotsResponse)
 ```
 
 ### GetPositionHistory
@@ -1228,44 +1253,209 @@ Aggregated DEX pool analytics (TVL, volume, fees) sourced through the gateway's 
 rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse)
 ```
 
+## PoolHistoryService
+
+Historical pool snapshots — TVL, volume, fee revenue, and per-token reserves
+over time at 1h / 4h / 1d resolution.
+
+The service is **feature-flagged off by default** (`pool_history_enabled=False`
+in `GatewaySettings`). Set `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` on the
+gateway to enable. When the flag is off the handler returns `UNAVAILABLE` with
+a message pointing at VIB-4728; when the flag is on but providers are not yet
+wired (POOL-2 → POOL-5 window) it returns `UNIMPLEMENTED`.
+
+### GetPoolHistory
+
+Return a time-series of `PoolSnapshot` rows for a single pool. Provider fallback
+order is dispatcher policy (VIB-4753 / POOL-5):
+
+- **1h / 4h:** TheGraph → GeckoTerminal (DefiLlama is skipped — daily-only).
+- **1d:** TheGraph → DefiLlama → GeckoTerminal.
+
+Returns `UNAVAILABLE` when all eligible providers fail or when the pool is not
+found anywhere — **never** fake-success with an empty `snapshots` array.
+
+```protobuf
+rpc GetPoolHistory(PoolHistoryRequest) returns (PoolHistoryResponse)
+```
+
+**Request:**
+```protobuf
+message PoolHistoryRequest {
+  string pool_address = 1;       // EVM: case-insensitive; Solana: case-sensitive base58
+  string chain = 2;              // e.g. "arbitrum", "ethereum", "base"
+  string protocol = 3;           // e.g. "uniswap_v3", "aerodrome"
+  int64 start_ts = 4;            // Unix seconds, UTC
+  int64 end_ts = 5;              // Unix seconds, UTC (rejected if in the future)
+  Resolution resolution = 6;     // RESOLUTION_1H | RESOLUTION_4H | RESOLUTION_1D
+}
+```
+
+**Response:**
+```protobuf
+message PoolHistoryResponse {
+  repeated PoolSnapshot snapshots = 1;     // Ascending by timestamp, one row per aligned bucket
+  TruncationReason truncation_reason = 2;  // CAP_EXCEEDED | PROVIDER_PAGE_CAP | PROVIDER_RETENTION
+  int64 next_start_ts = 3;                 // Re-chunk hint for paged backfill
+  string source = 4;                       // "the_graph" | "defillama" | "geckoterminal"
+  bool finalized_only = 5;                 // false if any row is provisional within the finality cutoff
+  bool success = 6;
+  string error = 7;
+}
+```
+
+**Soft caps** are operator-tunable via `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_{1H,4H,1D}`
+(defaults: 90, 180, 730 days). When a request exceeds a cap the handler returns
+a `CAP_EXCEEDED` truncation and a `next_start_ts` hint for the next chunk.
+
 ## PolymarketService
 
 Proxy for the Polymarket CLOB API. Provides market data, order management, and position tracking.
 
-### Market Data Methods
+### GetMarket
 
-| Method | Description |
-|--------|-------------|
-| `GetMarket` | Get details for a single market |
-| `GetMarkets` | Get multiple markets with filters |
-| `GetSimplifiedMarkets` | Get simplified market summaries |
-| `GetOrderBook` | Get order book for a token |
-| `GetMidpoint` | Get midpoint price |
-| `GetPrice` | Get current price |
-| `GetSpread` | Get bid-ask spread |
-| `GetTickSize` | Get minimum tick size |
+Fetch metadata for a single Polymarket market (tokens, condition id, status).
 
-### Order Management Methods
+```protobuf
+rpc GetMarket(PolymarketGetMarketRequest) returns (PolymarketMarketResponse)
+```
 
-| Method | Description |
-|--------|-------------|
-| `CreateAndPostOrder` | Create and submit a limit order |
-| `CreateAndPostMarketOrder` | Create and submit a market order |
-| `CancelOrder` | Cancel a single order |
-| `CancelOrders` | Cancel multiple orders |
-| `CancelAll` | Cancel all open orders |
+### GetMarkets
 
-### Position and History Methods
+List markets with optional filters (category, status, cursor pagination).
 
-| Method | Description |
-|--------|-------------|
-| `GetPositions` | Get current positions |
-| `GetOpenOrders` | Get open orders |
-| `GetTradesHistory` | Get trade history |
-| `GetOrder` | Get order details |
-| `GetPriceHistory` | Get historical prices for a token (for backtesting and charts) |
-| `GetTradeTape` | Get time-ordered trade tape across markets |
-| `GetBalanceAllowance` | Get balance and allowance |
+```protobuf
+rpc GetMarkets(PolymarketGetMarketsRequest) returns (PolymarketMarketsResponse)
+```
+
+### GetMidpoint
+
+Return the current midpoint price for a token (CLOB outcome).
+
+```protobuf
+rpc GetMidpoint(PolymarketMidpointRequest) returns (PolymarketMidpointResponse)
+```
+
+### GetSimplifiedMarkets
+
+List condensed market summaries optimized for discovery flows.
+
+```protobuf
+rpc GetSimplifiedMarkets(PolymarketGetSimplifiedMarketsRequest) returns (PolymarketSimplifiedMarketsResponse)
+```
+
+### GetOrderBook
+
+Return the full bid / ask book for a token.
+
+```protobuf
+rpc GetOrderBook(PolymarketOrderBookRequest) returns (PolymarketOrderBookResponse)
+```
+
+### GetTickSize
+
+Return the minimum price increment (tick size) accepted for a token.
+
+```protobuf
+rpc GetTickSize(PolymarketTickSizeRequest) returns (PolymarketTickSizeResponse)
+```
+
+### GetSpread
+
+Return the current bid-ask spread for a token.
+
+```protobuf
+rpc GetSpread(PolymarketSpreadRequest) returns (PolymarketSpreadResponse)
+```
+
+### GetPriceHistory
+
+Return time-bucketed historical prices for a token (used for backtesting and charts).
+
+```protobuf
+rpc GetPriceHistory(PolymarketGetPriceHistoryRequest) returns (PolymarketPriceHistoryResponse)
+```
+
+### GetTradeTape
+
+Return a time-ordered trade tape across markets (most-recent first).
+
+```protobuf
+rpc GetTradeTape(PolymarketGetTradeTapeRequest) returns (PolymarketTradeTapeResponse)
+```
+
+### GetBalanceAllowance
+
+Return the funder's USDC balance and CLOB exchange allowance.
+
+```protobuf
+rpc GetBalanceAllowance(PolymarketBalanceAllowanceRequest) returns (PolymarketBalanceAllowanceResponse)
+```
+
+### GetOpenOrders
+
+List open orders for the configured funder, optionally filtered by market.
+
+```protobuf
+rpc GetOpenOrders(PolymarketGetOpenOrdersRequest) returns (PolymarketOpenOrdersResponse)
+```
+
+### GetOrder
+
+Return details for a single order by id.
+
+```protobuf
+rpc GetOrder(PolymarketGetOrderRequest) returns (PolymarketOrderInfoResponse)
+```
+
+### GetTradesHistory
+
+List historical fills for the funder, with cursor pagination.
+
+```protobuf
+rpc GetTradesHistory(PolymarketGetTradesRequest) returns (PolymarketTradesResponse)
+```
+
+### CancelOrder
+
+Cancel a single open order by id.
+
+```protobuf
+rpc CancelOrder(PolymarketCancelOrderRequest) returns (PolymarketCancelResponse)
+```
+
+### CancelOrders
+
+Cancel multiple open orders in a single call.
+
+```protobuf
+rpc CancelOrders(PolymarketCancelOrdersRequest) returns (PolymarketCancelResponse)
+```
+
+### CancelAll
+
+Cancel every open order for the funder.
+
+```protobuf
+rpc CancelAll(PolymarketCancelAllRequest) returns (PolymarketCancelResponse)
+```
+
+### CreateAndPostOrder
+
+Sign a limit order against the funder's key and POST it to the CLOB in a single
+RPC. Returns the order id and CLOB acknowledgement payload.
+
+```protobuf
+rpc CreateAndPostOrder(PolymarketCreateOrderRequest) returns (PolymarketOrderResponse)
+```
+
+### CreateAndPostMarketOrder
+
+Sign and submit a market order in a single RPC (fills against the resting book).
+
+```protobuf
+rpc CreateAndPostMarketOrder(PolymarketMarketOrderRequest) returns (PolymarketOrderResponse)
+```
 
 ## EnsoService
 
@@ -1412,38 +1602,203 @@ rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
 
 Hosted teardown state routing for V2 deployments. Splits into two halves: the **request half** (`teardown_requests`) which tracks operator-issued teardown signals through their lifecycle (acknowledged → started → progress → completed / failed / cancelled), and the **adapter half** (`teardown_execution_state` + `teardown_approvals`) which persists the in-flight intent state machine and operator approvals required for risk-elevated teardown steps. See `blueprints/14-teardown-system.md`.
 
-### Request Half (teardown_requests)
+### CreateTeardownRequest
 
-| Method | Description |
-|--------|-------------|
-| `CreateTeardownRequest` | Insert a new teardown request (operator-issued signal). |
-| `GetTeardownRequest` | Fetch a single teardown request by id. |
-| `GetActiveTeardownRequest` | Fetch the active (non-terminal) request for a strategy. |
-| `GetPendingTeardownRequests` | List requests not yet acknowledged by any runner. |
-| `GetAllActiveTeardownRequests` | List every non-terminal request across strategies. |
-| `GetAllTeardownRequests` | List every teardown request (admin / audit). |
-| `UpdateTeardownRequest` | Generic update (mode, slippage, operator note). |
-| `AcknowledgeTeardownRequest` | Mark a request acknowledged by the runner that owns the strategy. |
-| `MarkTeardownStarted` | Transition to `started` once the teardown manager begins executing. |
-| `UpdateTeardownProgress` | Stream per-step progress (intent index, status, last tx_hash). |
-| `MarkTeardownCompleted` | Terminal success state. |
-| `MarkTeardownFailed` | Terminal failure state with error code + message. |
-| `RequestTeardownCancel` | Operator-issued cancellation signal (cooperative). |
-| `MarkTeardownCancelled` | Terminal cancellation state. |
-| `DeleteTeardownRequest` | Hard-delete a request row (admin only). |
+Insert a new operator-issued teardown request. This is the row that
+`almanak strat teardown request -s <deployment_id>` writes; the runner's polling
+query picks it up by `deployment_id`.
 
-### Adapter Half (teardown_execution_state + teardown_approvals)
+```protobuf
+rpc CreateTeardownRequest(CreateTeardownRequestRequest) returns (CreateTeardownRequestResponse)
+```
 
-| Method | Description |
-|--------|-------------|
-| `SaveTeardownState` | Persist the teardown intent state machine snapshot. |
-| `LoadTeardownState` | Restore the state machine on runner restart. |
-| `DeleteTeardownState` | Clear teardown state after terminal completion. |
-| `CreateApprovalRequest` | Block on operator approval for risk-elevated steps (e.g., HARD-mode slippage bumps). |
-| `GetApprovalResponse` | Poll for an operator response by approval id. |
-| `WriteApprovalResponse` | Operator writes an approve/deny decision. |
-| `GetLatestPendingApproval` | Fetch the most recent pending approval for an operator UI. |
-| `WriteApprovalResponseByStrategy` | Approve/deny by strategy id when approval id is not known. |
+### GetTeardownRequest
+
+Fetch a single teardown request by id.
+
+```protobuf
+rpc GetTeardownRequest(GetTeardownRequestRequest) returns (GetTeardownRequestResponse)
+```
+
+### GetActiveTeardownRequest
+
+Fetch the active (non-terminal) teardown request for a strategy, if any.
+
+```protobuf
+rpc GetActiveTeardownRequest(GetActiveTeardownRequestRequest) returns (GetTeardownRequestResponse)
+```
+
+### GetPendingTeardownRequests
+
+List teardown requests not yet acknowledged by any runner (used by the runner
+polling loop and the operator dashboard's pending queue).
+
+```protobuf
+rpc GetPendingTeardownRequests(Empty) returns (ListTeardownRequestsResponse)
+```
+
+### GetAllActiveTeardownRequests
+
+List every non-terminal teardown request across all strategies (operator dashboard).
+
+```protobuf
+rpc GetAllActiveTeardownRequests(Empty) returns (ListTeardownRequestsResponse)
+```
+
+### GetAllTeardownRequests
+
+List every teardown request (administrative / audit endpoint).
+
+```protobuf
+rpc GetAllTeardownRequests(Empty) returns (ListTeardownRequestsResponse)
+```
+
+### UpdateTeardownRequest
+
+Generic update of a teardown request (mode, slippage tolerance, operator note).
+
+```protobuf
+rpc UpdateTeardownRequest(UpdateTeardownRequestRequest) returns (TeardownRequestMutationResponse)
+```
+
+### AcknowledgeTeardownRequest
+
+Mark a request as acknowledged by the runner that owns the strategy. Until this
+fires, the request is in `pending`.
+
+```protobuf
+rpc AcknowledgeTeardownRequest(AckTeardownRequestRequest) returns (TeardownRequestMutationResponse)
+```
+
+### MarkTeardownStarted
+
+Transition the request to `started` once the teardown manager begins executing
+intents (this is the state `almanak strat teardown request --wait` reports).
+
+```protobuf
+rpc MarkTeardownStarted(MarkTeardownStartedRequest) returns (TeardownRequestMutationResponse)
+```
+
+### UpdateTeardownProgress
+
+Stream per-step progress (current intent index, status, last tx_hash). Read by
+`teardown request --wait` to print the live progress feed.
+
+```protobuf
+rpc UpdateTeardownProgress(UpdateTeardownProgressRequest) returns (TeardownRequestMutationResponse)
+```
+
+### MarkTeardownCompleted
+
+Terminal success state — every teardown intent completed and the strategy is
+fully unwound.
+
+```protobuf
+rpc MarkTeardownCompleted(MarkTeardownCompletedRequest) returns (TeardownRequestMutationResponse)
+```
+
+### MarkTeardownFailed
+
+Terminal failure state with an error code + message. The on-chain state may be
+partially unwound; check the latest `transaction_ledger` rows for the strategy.
+
+```protobuf
+rpc MarkTeardownFailed(MarkTeardownFailedRequest) returns (TeardownRequestMutationResponse)
+```
+
+### RequestTeardownCancel
+
+Operator-issued cancellation signal (cooperative — the runner stops at the next
+safe checkpoint).
+
+```protobuf
+rpc RequestTeardownCancel(RequestTeardownCancelRequest) returns (BoolMutationResponse)
+```
+
+### MarkTeardownCancelled
+
+Terminal cancellation state — the runner halted teardown at a safe checkpoint.
+
+```protobuf
+rpc MarkTeardownCancelled(MarkTeardownCancelledRequest) returns (TeardownRequestMutationResponse)
+```
+
+### DeleteTeardownRequest
+
+Hard-delete a request row (administrative endpoint).
+
+```protobuf
+rpc DeleteTeardownRequest(DeleteTeardownRequestRequest) returns (BoolMutationResponse)
+```
+
+### SaveTeardownState
+
+Persist a snapshot of the teardown intent state machine. Used by the runner to
+survive restarts mid-teardown.
+
+```protobuf
+rpc SaveTeardownState(SaveTeardownStateRequest) returns (SaveTeardownStateResponse)
+```
+
+### LoadTeardownState
+
+Restore the teardown state machine on runner restart.
+
+```protobuf
+rpc LoadTeardownState(LoadTeardownStateRequest) returns (LoadTeardownStateResponse)
+```
+
+### DeleteTeardownState
+
+Clear persisted teardown state after a terminal transition.
+
+```protobuf
+rpc DeleteTeardownState(DeleteTeardownStateRequest) returns (DeleteTeardownStateResponse)
+```
+
+### CreateApprovalRequest
+
+Block teardown on operator approval for risk-elevated steps (e.g., HARD-mode
+slippage bumps). The runner waits on a matching `GetApprovalResponse` /
+`WriteApprovalResponse` pair.
+
+```protobuf
+rpc CreateApprovalRequest(CreateApprovalRequestRequest) returns (CreateApprovalRequestResponse)
+```
+
+### GetApprovalResponse
+
+Poll for an operator's response to an approval request by approval id.
+
+```protobuf
+rpc GetApprovalResponse(GetApprovalResponseRequest) returns (GetApprovalResponseResponse)
+```
+
+### WriteApprovalResponse
+
+Operator writes an approve / deny decision against an approval id.
+
+```protobuf
+rpc WriteApprovalResponse(WriteApprovalResponseRequest) returns (BoolMutationResponse)
+```
+
+### GetLatestPendingApproval
+
+Fetch the most recent pending approval for a strategy (operator UI lookup when
+approval id is not known).
+
+```protobuf
+rpc GetLatestPendingApproval(GetLatestPendingApprovalRequest) returns (GetLatestPendingApprovalResponse)
+```
+
+### WriteApprovalResponseByStrategy
+
+Approve / deny by strategy id (used when the operator UI does not yet have the
+approval id but has the strategy context).
+
+```protobuf
+rpc WriteApprovalResponseByStrategy(WriteApprovalResponseByStrategyRequest) returns (BoolMutationResponse)
+```
 
 ## PositionService
 

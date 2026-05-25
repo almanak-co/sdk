@@ -4,6 +4,9 @@ All strategies run through the **gateway sidecar** (auto-started by `almanak str
 
 Create a `.env` file in your strategy directory with the variables below.
 
+!!! info "ALMANAK_GATEWAY_ env_prefix"
+    Every field in `GatewaySettings` is automatically bound to `ALMANAK_GATEWAY_<UPPER_FIELD_NAME>`; only the ones documented below have load-bearing effects worth calling out. The full list lives in `almanak/gateway/core/settings.py` and in the project's [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example).
+
 ---
 
 ## Required
@@ -56,6 +59,16 @@ Set these based on which protocols and features your strategy uses.
 | `ALMANAK_DASHBOARD_API_KEY` | API key used by the operator dashboard when calling non-gateway REST endpoints (pause/resume go through gateway; `bump-gas` / `cancel-tx` still use REST). Must match a key listed in `ALMANAK_API_KEYS` on the API server. | `dash_abc123...` |
 | `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
+### Agentic CLI (`almanak ax -n`)
+
+Required for the natural-language mode of the operator CLI (`almanak ax -n "<prompt>"`). Any OpenAI-compatible chat-completions endpoint works.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_LLM_API_KEY` | API key for the LLM provider. Without this set, `almanak ax -n` refuses to run. | unset |
+| `AGENT_LLM_BASE_URL` | OpenAI-compatible base URL. Point at OpenAI, Anthropic via a compat proxy, Together, etc. | `https://api.openai.com/v1` |
+| `AGENT_LLM_MODEL` | Model identifier to use. | `gpt-4o` |
+
 ---
 
 ## Protocol-Specific
@@ -106,6 +119,7 @@ Notes:
 | Variable | Description |
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Pendle protocol API key |
+| `ALMANAK_GATEWAY_PENDLE_API_CACHE_TTL` | TTL (seconds) for the gateway's Pendle API response cache. Default `15.0`. |
 
 ### Solana
 
@@ -114,6 +128,25 @@ Notes:
 | `SOLANA_PRIVATE_KEY` | Ed25519 keypair in base58 format (or 64-char hex seed). Required for Solana strategies. |
 | `SOLANA_RPC_URL` | Solana RPC endpoint. Defaults to `https://api.mainnet-beta.solana.com` (rate-limited). Use Helius, QuickNode, or Triton for production. |
 | `JUPITER_API_KEY` | Jupiter aggregator API key. Free tier is used if unset. |
+| `DRIFT_DATA_API_BASE_URL` | Override for the Drift data API base URL (default `https://data.api.drift.trade`). |
+| `METEORA_API_BASE_URL` | Override for the Meteora API base URL (default `https://dlmm.datapi.meteora.ag`). |
+| `ORCA_API_BASE_URL` | Override for the Orca API base URL (default `https://api.orca.so/v2/solana`). |
+| `RAYDIUM_API_BASE_URL` | Override for the Raydium API base URL (default `https://api-v3.raydium.io`). |
+
+### Polymarket data endpoints
+
+| Variable | Description |
+|----------|-------------|
+| `POLYMARKET_GAMMA_URL` | Override for the Polymarket Gamma (market metadata) endpoint. Falls back to the upstream default when unset. |
+| `POLYMARKET_CLOB_URL` | Override for the Polymarket CLOB (orderbook + order management) endpoint. |
+| `POLYMARKET_DATA_API_URL` | Override for the Polymarket data API (positions / history) endpoint. |
+
+### Other external integrations
+
+| Variable | Description |
+|----------|-------------|
+| `LIFI_API_KEY` | Li.Fi bridge / swap aggregator API key. |
+| `RUGCHECK_API_KEY` | Rugcheck.xyz API key for Solana token risk scoring. |
 
 ---
 
@@ -129,6 +162,99 @@ Load-bearing for hosted (Almanak Infra) deployments. Each variable is read once 
 
 !!! danger "Hosted deployments are unsafe without these"
     Omitting `ALMANAK_GATEWAY_AUTH_TOKEN` (or enabling `ALMANAK_GATEWAY_ALLOW_INSECURE=true`) on a hosted gateway exposes every gRPC service to unauthenticated callers — including `ExecutionService`, which signs and submits transactions. Treat both as production secrets.
+
+---
+
+## Gateway Connection & Networking
+
+How the gateway binds itself and how strategy clients reach it. The defaults are tuned for local development on `localhost`; hosted deployments override these via the Infra-owned K8s manifest.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_GATEWAY_HOST` | HTTP server bind address (FastAPI). Set to `0.0.0.0` to bind externally (containers / shared dev hosts). | `127.0.0.1` |
+| `ALMANAK_GATEWAY_PORT` | HTTP server port. | `8000` |
+| `ALMANAK_GATEWAY_GRPC_HOST` | gRPC server bind address — this is the one strategy containers reach. | `127.0.0.1` |
+| `ALMANAK_GATEWAY_GRPC_PORT` | gRPC server port. | `50051` |
+| `ALMANAK_GATEWAY_TIMEOUT` | Default RPC deadline (seconds) for the strategy-side gRPC client. Must be `> 0`. | `30.0` |
+| `ALMANAK_GATEWAY_STANDALONE` | Opt-in flag — when `true` the gateway resolves its local SQLite path through the lenient `local_db_path` helper (falls back to `~/.local/share/almanak/utility/almanak_state.db`). When `false` (default in local mode), the gateway uses `local_strategy_db_path`, which raises `LocalPathError` rather than silently writing to the per-user utility DB. The CLI flag `almanak gateway --standalone` is the operator surface; `almanak ax` / test workflows that need a non-strategy gateway pass it explicitly. Hosted mode (`AGENT_ID` set) ignores this field. | `false` |
+| `ALMANAK_GATEWAY_LIFECYCLE_WRITER` | Hosted-only — distinguishes the strategy-pod gateway (writer) from the dashboard-pod gateway (reader). Both pods ship the same image; only the strategy-pod gateway sets this to `true`, so the dashboard-pod gateway stays read-only for lifecycle state and avoids racing the strategy's `agent_state` writes. Local mode ignores this field. | `false` |
+| `ALMANAK_GATEWAY_DATABASE_URL` | Postgres DSN for the hosted state backend (`metrics_db`). **Must be set in hosted mode; must NOT be set in local mode.** A mismatch is fatal at boot. | unset |
+| `ALMANAK_GATEWAY_CHAINS` | Comma-separated list of chains to pre-initialize at startup (`bnb,arb,base`). Empty = accept any chain on-demand. Each entry is canonicalized via `resolve_chain_name` so aliases work (`bsc`/`bnb`/`binance` all resolve). | unset |
+
+---
+
+## Logging & Audit
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_GATEWAY_DEBUG` | When `true`, the gateway runs in debug mode (verbose logging, FastAPI hot-reload). | `false` |
+| `ALMANAK_GATEWAY_LOG_LEVEL` | Log level for the gateway process: `debug`, `info`, `warning`, `error`. | `info` |
+| `ALMANAK_GATEWAY_AUDIT_ENABLED` | Toggle the audit-event log (mutation RPCs, executions). | `true` |
+| `ALMANAK_GATEWAY_AUDIT_LOG_LEVEL` | Log level for audit events (independent of `ALMANAK_GATEWAY_LOG_LEVEL`). | `info` |
+| `ALMANAK_LOG_EMOJIS` | Strategy-process log emoji prefixes. Set to `false` / `0` / `no` to disable. | `true` |
+| `ALMANAK_REDACT_SECRETS` | Redact known secret patterns (private keys, JWTs) from strategy logs. Set to `false` to disable. | `true` |
+
+---
+
+## Anvil & Fork Health
+
+Read by the strategy launcher and gateway when running against an Anvil fork (`almanak strat run --network anvil` / `almanak ax --network anvil`).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ANVIL_PORT` | Generic Anvil port. Per-chain overrides take precedence (see `ANVIL_<CHAIN>_PORT` in the strategy CLI docs). | `8545` |
+| `ANVIL_URL` | Explicit Anvil URL override (e.g., `http://localhost:8545`). When set, takes precedence over per-chain port discovery. | unset |
+| `ANVIL_FORK_BLOCK` | Generic fork block for all chains. | unset |
+| `ANVIL_FORK_BLOCK_<CHAIN>` | Per-chain fork block (e.g., `ANVIL_FORK_BLOCK_ARBITRUM=180000000`). Takes precedence over `ANVIL_FORK_BLOCK`. Invalid values fall back to chain head. | unset |
+| `ANVIL_FORK_CACHE_PATH` | Override for the Anvil fork-state cache directory. | platform default |
+| `ALMANAK_GATEWAY_ANVIL_WATCHDOG_INTERVAL` | Anvil-process watchdog interval (seconds). Must be `> 0`. | `5.0` |
+| `ALMANAK_FORK_RPC_TIMEOUT` | RPC timeout (seconds) for fork-mode strategies. | `8.0` |
+| `ALMANAK_FORK_HEALTH_TIMEOUT` | Health-probe timeout (seconds) when bringing up a fork. | `5.0` |
+| `SOLANA_VALIDATOR_PORT` | Solana local-validator port for fork tests. | `8899` |
+
+---
+
+## Strategy Runtime & Local Paths
+
+Strategy-process-side flags that govern how the SDK locates state and what guardrails it applies.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_STRATEGY_FOLDER` | Pin the active strategy folder. Auto-set when the CLI is launched from inside a strategy directory; only set manually when launching from elsewhere. | unset |
+| `ALMANAK_STATE_DB` | Explicit override for the strategy SQLite path. By default the SDK derives this from `local_db_path(strategy_folder)`; the cwd-relative `./almanak_state.db` legacy default is **removed** (VIB-3761). | unset |
+| `ALMANAK_DEMO_MODE` | When truthy, the SDK relaxes some safety checks intended for built-in demo strategies (smaller wallet balances, default funding plans). Never set on real strategies. | `false` |
+| `ALMANAK_FORCE_PRODUCTION` | Force-enable production guardrails even when other heuristics would relax them. | `false` |
+| `MAX_VALUE_USD` / `ALMANAK_MAX_VALUE_USD` | Hard ceiling (USD) on per-intent transaction value. Enforced at orchestrator submission time; non-zero values block live intents that exceed it. Decimal string; leading `$` and commas rejected. Gateway / paper-trading paths do not enforce this — it is an EOA-mode last-resort guardrail. | unset |
+| `ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S` | TTL (seconds) for the token-resolution negative cache (unknown-token responses). | `300` |
+| `ALMANAK_TOKEN_NEGATIVE_CACHE_MAX` | Max entries in the token-resolution negative cache. | `1000` |
+
+---
+
+## Pool History Service
+
+Operator tunables for the gateway's historical-pool snapshots service. The service is feature-flagged off by default — see the [PoolHistoryService section in the Gateway API reference](gateway/api-reference.md#poolhistoryservice) for behavior and provider order.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED` | Kill-switch (VIB-4728 / POOL-2). Default `false` until POOL-5 wires real providers. When `false`, `GetPoolHistory` returns `UNAVAILABLE`. | `false` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1H` | Soft cap (days) on 1h-resolution requests. Non-positive overrides fall back to the default. | `90` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_4H` | Soft cap (days) on 4h-resolution requests. | `180` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1D` | Soft cap (days) on 1d-resolution requests. | `730` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_ENTRIES` | In-memory cache entry cap. | `5000` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_BYTES` | In-memory cache byte cap. | `67108864` (64 MiB) |
+
+---
+
+## DexScreener Scam Gates
+
+Thresholds the gateway applies when accepting a DexScreener-sourced pool as a pricing reference. NaN or non-positive overrides are rejected at boot (so a typo can't silently disable the gates).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_GATEWAY_DEXSCREENER_MIN_LIQUIDITY_USD` | Minimum pool liquidity (USD). | `10000.0` |
+| `ALMANAK_GATEWAY_DEXSCREENER_MIN_VOLUME_USD` | Minimum 24h volume (USD). | `1000.0` |
+| `ALMANAK_GATEWAY_DEXSCREENER_MIN_TURNOVER_RATIO` | Minimum 24h volume / TVL ratio. Must be in `[0, 1]`. | `0.05` |
+| `ALMANAK_GATEWAY_DEXSCREENER_DOMINANCE_MULTIPLE` | Multiple of next-largest pool's TVL the candidate must beat to be considered dominant. | `3.0` |
 
 ---
 
@@ -222,4 +348,4 @@ ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
 
-All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) for the full list of advanced options.
+All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) for the full list of advanced options.

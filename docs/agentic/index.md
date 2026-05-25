@@ -111,7 +111,7 @@ The `PolicyEngine` enforces these constraints on **every tool call**. It cannot 
 ### 1. Install
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 ### 2. Start the gateway

@@ -74,6 +74,33 @@ Solo necesarias si tu estrategia usa estos protocolos específicos.
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Clave API del protocolo Pendle |
 
+### Solana
+
+| Variable | Descripción |
+|----------|-------------|
+| `SOLANA_PRIVATE_KEY` | Par de claves Ed25519 en formato base58 (o semilla hexadecimal de 64 caracteres). Requerido para estrategias de Solana. |
+| `SOLANA_RPC_URL` | Endpoint RPC de Solana. Por defecto `https://api.mainnet-beta.solana.com` (con límite de tasa). Usa Helius, QuickNode o Triton en producción. |
+| `JUPITER_API_KEY` | Clave API del agregador Jupiter. Se usa el nivel gratuito si no se define. |
+| `DRIFT_DATA_API_BASE_URL` | Sobrescritura de la URL base de la API de datos de Drift (por defecto `https://data.api.drift.trade`). |
+| `METEORA_API_BASE_URL` | Sobrescritura de la URL base de la API de Meteora (por defecto `https://dlmm.datapi.meteora.ag`). |
+| `ORCA_API_BASE_URL` | Sobrescritura de la URL base de la API de Orca (por defecto `https://api.orca.so/v2/solana`). |
+| `RAYDIUM_API_BASE_URL` | Sobrescritura de la URL base de la API de Raydium (por defecto `https://api-v3.raydium.io`). |
+
+### Endpoints de datos de Polymarket
+
+| Variable | Descripción |
+|----------|-------------|
+| `POLYMARKET_GAMMA_URL` | Sobrescritura del endpoint Polymarket Gamma (metadatos de mercado). Recurre al valor por defecto aguas arriba si no se define. |
+| `POLYMARKET_CLOB_URL` | Sobrescritura del endpoint Polymarket CLOB (libro de órdenes + gestión de órdenes). |
+| `POLYMARKET_DATA_API_URL` | Sobrescritura del endpoint de la API de datos de Polymarket (posiciones / historial). |
+
+### Otras integraciones externas
+
+| Variable | Descripción |
+|----------|-------------|
+| `LIFI_API_KEY` | Clave API del agregador de bridge / swap Li.Fi. |
+| `RUGCHECK_API_KEY` | Clave API de Rugcheck.xyz para puntuación de riesgo de tokens Solana. |
+
 ---
 
 ## Autenticación y seguridad de la pasarela

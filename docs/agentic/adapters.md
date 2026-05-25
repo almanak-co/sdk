@@ -78,17 +78,18 @@ chains = server.resources_read("almanak://chains")
 
 ### Claude Desktop Configuration
 
-To connect Claude Desktop to an Almanak MCP server, add to your Claude Desktop config:
+The planned entry point is the `almanak mcp serve` CLI command. Once it ships,
+the Claude Desktop config will look roughly like:
 
 ```json
 {
   "mcpServers": {
     "almanak": {
-      "command": "python",
-      "args": ["-m", "almanak.framework.agent_tools.adapters.mcp_adapter"],
+      "command": "almanak",
+      "args": ["mcp", "serve"],
       "env": {
-        "GATEWAY_HOST": "localhost",
-        "GATEWAY_PORT": "50051",
+        "ALMANAK_GATEWAY_GRPC_HOST": "localhost",
+        "ALMANAK_GATEWAY_GRPC_PORT": "50051",
         "ALMANAK_PRIVATE_KEY": "your-key"
       }
     }
@@ -96,8 +97,17 @@ To connect Claude Desktop to an Almanak MCP server, add to your Claude Desktop c
 }
 ```
 
-!!! note
-    The `almanak mcp serve` CLI command is not yet shipped. Use the Python module path or build a wrapper script.
+!!! warning "Not yet shipped"
+    The `almanak mcp serve` CLI is not yet available, and
+    `almanak.framework.agent_tools.adapters.mcp_adapter` does not currently
+    expose a `__main__` runner — invoking it directly with `python -m ...`
+    will not start an MCP server. Use the `AlmanakMCPServer` Python API
+    (above) from a wrapper script in the meantime; the CLI entry point is
+    tracked as a separate code change.
+
+    **TODO (doc):** `mcp_adapter.py:15` docstring still references
+    `server.run_stdio()`, which the adapter doesn't implement. Adapter wiring
+    is tracked as a code change separate from this docs PR.
 
 ## LangChain / LangGraph
 
