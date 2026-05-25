@@ -42,7 +42,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from almanak.framework.dashboard.plots import plot_price_with_signals
+from almanak.framework.dashboard.plots import plot_macd_indicator, plot_price_with_signals
 from almanak.framework.dashboard.plots.base import get_default_config
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
@@ -108,6 +108,53 @@ def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
     # avg_loss == 0 (no losses in window) collapses to RSI=100
     rsi = rsi.where(avg_loss != 0, other=100.0)
     return rsi.rename("rsi")
+
+
+def _ema_sma_seeded(values: pd.Series, period: int) -> pd.Series:
+    """Compute an EMA series seeded with the SMA of the first ``period`` values.
+
+    Mirrors the scalar implementation in
+    ``almanak.framework.data.indicators.macd.MACDCalculator._calculate_ema``
+    (k = 2 / (period + 1), SMA seed) but returns the rolling series. It is
+    reimplemented here rather than imported to keep the dashboard import lean —
+    see ``tests/framework/dashboard/test_imports_lean.py``. The first
+    ``period - 1`` entries are NaN; index ``period - 1`` holds the SMA seed.
+    """
+    floats = values.astype(float).to_numpy()
+    n = len(floats)
+    ema: list[float] = [float("nan")] * n
+    if n < period:
+        return pd.Series(ema, index=values.index)
+    k = 2.0 / (period + 1)
+    prev = float(floats[:period].mean())
+    ema[period - 1] = prev
+    for i in range(period, n):
+        prev = floats[i] * k + prev * (1 - k)
+        ema[i] = prev
+    return pd.Series(ema, index=values.index)
+
+
+def _macd_series_from_closes(closes: pd.Series, fast: int, slow: int, signal: int) -> pd.DataFrame:
+    """Compute the MACD line, signal line, and histogram series from closes.
+
+    Matches the framework's ``MACDCalculator`` (SMA-seeded EMAs; signal line is
+    the EMA of the MACD line; histogram = MACD - signal) so the dashboard chart
+    agrees with the strategy's own MACD signals. Returns an empty frame
+    (columns ``macd`` / ``signal`` / ``histogram``) when there are too few rows.
+    """
+    empty = pd.DataFrame(columns=["macd", "signal", "histogram"])
+    if len(closes) < slow + signal:
+        return empty
+    macd_line = (_ema_sma_seeded(closes, fast) - _ema_sma_seeded(closes, slow)).rename("macd")
+    valid = macd_line.dropna()
+    if len(valid) < signal:
+        return empty
+    # Signal line is the EMA of the (contiguous) valid MACD values, realigned.
+    signal_valid = _ema_sma_seeded(valid.reset_index(drop=True), signal)
+    signal_line = pd.Series(float("nan"), index=macd_line.index, name="signal")
+    signal_line.loc[valid.index] = signal_valid.to_numpy()
+    histogram = (macd_line - signal_line).rename("histogram")
+    return pd.DataFrame({"macd": macd_line, "signal": signal_line, "histogram": histogram})
 
 
 def _ohlcv_to_price_history(ohlcv: list[dict[str, Any]]) -> pd.DataFrame:
@@ -293,6 +340,58 @@ def _strategy_start_time(api_client: Any) -> datetime | pd.Timestamp | None:
     return parsed.min()
 
 
+def _apply_indicator_series(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Compute the indicator series (RSI or MACD) into ``result`` in place.
+
+    No-op when the caller already supplied the series, when there's no price
+    data, or when the indicator isn't one we compute client-side. RSI emits a
+    ``rsi_history`` Series; MACD emits a ``macd_data`` frame with
+    ``macd`` / ``signal`` / ``histogram`` columns indexed by time. Both degrade
+    silently on error so the dashboard still renders price + signals.
+    """
+    indicator_key = config.indicator_name.lower()
+    history_key = f"{indicator_key}_history"
+    data_key = f"{indicator_key}_data"
+    if history_key in result or data_key in result or price_df.empty:
+        return
+
+    if indicator_key == "rsi":
+        try:
+            rsi = _rsi_series_from_closes(price_df["price"], config.indicator_period)
+            # The renderer's RSI subplot consumes `rsi_history` as a pandas
+            # Series indexed by time, so emit a Series (renderer reads
+            # `rsi_series.values` without further coercion).
+            history_series = pd.Series(rsi.values, index=pd.DatetimeIndex(price_df["time"]), name="rsi").dropna()
+            if not history_series.empty:
+                result[history_key] = history_series
+                # Surface the latest value to the metric row too.
+                result.setdefault(f"{indicator_key}_value", float(history_series.iloc[-1]))
+                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
+        except Exception:  # noqa: BLE001
+            logger.debug("RSI series computation failed", exc_info=True)
+
+    elif indicator_key == "macd":
+        try:
+            periods = list(config.secondary_periods or [])
+            slow = int(periods[0]) if len(periods) > 0 else 26
+            signal_period = int(periods[1]) if len(periods) > 1 else 9
+            macd_df = _macd_series_from_closes(price_df["price"], int(config.indicator_period), slow, signal_period)
+            if not macd_df.empty:
+                macd_df.index = pd.DatetimeIndex(price_df["time"])
+                macd_df = macd_df.dropna(subset=["macd"])
+            if not macd_df.empty:
+                # The renderer's MACD branch consumes `macd_data` as a frame
+                # with `macd` / `signal` / `histogram` columns indexed by time.
+                result[data_key] = macd_df
+                latest = macd_df.iloc[-1]
+                result.setdefault(f"{indicator_key}_value", float(latest["macd"]))
+                result.setdefault("signal_line", float(latest["signal"]))
+                result.setdefault("histogram", float(latest["histogram"]))
+                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
+        except Exception:  # noqa: BLE001
+            logger.debug("MACD series computation failed", exc_info=True)
+
+
 def prepare_ta_session_state(
     api_client: Any,
     session_state: dict[str, Any] | None = None,
@@ -348,35 +447,9 @@ def prepare_ta_session_state(
         if isinstance(existing, pd.DataFrame):
             price_df = existing
 
-    # Indicator series — only RSI today; other indicators fall through.
-    indicator_key = config.indicator_name.lower()
-    history_key = f"{indicator_key}_history"
-    data_key = f"{indicator_key}_data"
-    if (
-        history_key not in result
-        and data_key not in result
-        and price_df is not None
-        and not price_df.empty
-        and indicator_key == "rsi"
-    ):
-        try:
-            rsi = _rsi_series_from_closes(price_df["price"], config.indicator_period)
-            # The renderer's RSI subplot consumes `rsi_history` as a
-            # pandas Series indexed by time (or a list of (time, value)
-            # tuples). Emit a Series so renderer's `rsi_series.values`
-            # access works without further coercion.
-            history_series = pd.Series(
-                rsi.values,
-                index=pd.DatetimeIndex(price_df["time"]),
-                name="rsi",
-            ).dropna()
-            if not history_series.empty:
-                result[history_key] = history_series
-                # Surface the latest value to the metric row too.
-                result.setdefault(f"{indicator_key}_value", float(history_series.iloc[-1]))
-                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
-        except Exception:  # noqa: BLE001
-            logger.debug("RSI series computation failed", exc_info=True)
+    # Indicator series (RSI / MACD) — computed client-side from price history.
+    if price_df is not None:
+        _apply_indicator_series(result, price_df, config)
 
     # Buy / sell signals from the trade tape (SWAP rows for this pair).
     if "buy_signals" not in result or "sell_signals" not in result:
@@ -707,6 +780,10 @@ def _render_charts_section(  # noqa: C901
 
         st.plotly_chart(fig, use_container_width=True)
 
+    elif config.indicator_name.upper() == "MACD" and _has_indicator_data(indicator_data):
+        # MACD needs line + signal + histogram, not the generic single line.
+        _render_macd_charts(price_df, buy_df, sell_df, indicator_data)
+
     else:
         # For other indicators, use separate charts
         # Price chart with signals
@@ -747,6 +824,31 @@ def _render_charts_section(  # noqa: C901
                 height=300,
             )
             st.plotly_chart(fig_indicator, use_container_width=True)
+
+
+def _render_macd_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    macd_data: Any,
+) -> None:
+    """Render the price+signals chart and the MACD line/signal/histogram chart."""
+    fig_price = plot_price_with_signals(
+        price_data=price_df,
+        buy_signals=buy_df,
+        sell_signals=sell_df,
+        title="Price with Buy/Sell Signals",
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    if isinstance(macd_data, pd.DataFrame) and not macd_data.empty:
+        fig_macd = plot_macd_indicator(
+            macd=macd_data["macd"],
+            macd_signal=macd_data["signal"],
+            macd_hist=macd_data["histogram"],
+            time_index=macd_data.index,
+        )
+        st.plotly_chart(fig_macd, use_container_width=True)
 
 
 def _render_signal_status(
@@ -855,12 +957,25 @@ def get_rsi_config(period: int = 14, overbought: float = 70, oversold: float = 3
     )
 
 
+def _macd_signal_fn(session_state: dict[str, Any]) -> str:
+    """Bullish/bearish/neutral text from the MACD histogram (MACD vs Signal)."""
+    macd = float(session_state.get("macd_value", session_state.get("macd", 0)) or 0)
+    signal = float(session_state.get("signal_line", 0) or 0)
+    hist = float(session_state.get("histogram", macd - signal) or 0)
+    if hist > 0:
+        return f"BULLISH: MACD ({macd:+.4f}) above Signal ({signal:+.4f})"
+    if hist < 0:
+        return f"BEARISH: MACD ({macd:+.4f}) below Signal ({signal:+.4f})"
+    return "NEUTRAL: MACD at Signal line"
+
+
 def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9) -> TADashboardConfig:
     """Get pre-configured MACD dashboard config."""
     return TADashboardConfig(
         indicator_name="MACD",
         indicator_period=fast,
         secondary_periods=[slow, signal],
+        custom_signal_fn=_macd_signal_fn,
         signal_type="momentum",
         value_format="{:+.2f}",
     )
