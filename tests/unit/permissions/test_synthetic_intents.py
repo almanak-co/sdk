@@ -358,6 +358,70 @@ class TestOverrideBypassesLendingPoolGate:
         assert result is sentinel
 
 
+class TestOverrideBypassesLpManagerGate:
+    """The ``build_discovery_vectors`` override MUST run before the
+    ``LP_POSITION_MANAGERS`` gate in the LP builders.
+
+    Mirror of ``TestOverrideBypassesLendingPoolGate`` for the LP surface. The
+    Pendle PR (#2414) added the override hook to ``_build_lp_open_intents`` and
+    ``_build_lp_close_intents``; this test pins the canonical ordering for both
+    so a future refactor can't flip it back. Pendle is the load-bearing example:
+    it uses single-sided LP into a market contract (no NFT position manager)
+    and is deliberately ABSENT from ``LP_POSITION_MANAGERS``, so it depends on
+    the override firing before the gate.
+
+    The test mocks ``get_discovery_vectors_override`` to return a stub yielding
+    a sentinel list, then calls each LP builder with ``sushiswap_v3`` on
+    ``monad`` — ``sushiswap_v3`` is in ``_LP_PROTOCOLS`` so the first gate
+    passes, but ``LP_POSITION_MANAGERS["monad"]`` has no entry for
+    sushiswap_v3, so the second gate would block. The sentinel coming back
+    proves the override ran first.
+    """
+
+    @pytest.mark.parametrize("intent_type", ["LP_OPEN", "LP_CLOSE"])
+    def test_override_result_returned_before_pool_gate(self, monkeypatch, intent_type):
+        from decimal import Decimal
+
+        from almanak.framework.permissions import synthetic_intents
+
+        cls = {"LP_OPEN": LPOpenIntent, "LP_CLOSE": LPCloseIntent}[intent_type]
+        if intent_type == "LP_OPEN":
+            sentinel = [
+                cls(
+                    pool="0xT0/0xT1/3000",
+                    amount0=Decimal("100"),
+                    amount1=Decimal("0.05"),
+                    range_lower=Decimal("1"),
+                    range_upper=Decimal("2"),
+                    protocol="sushiswap_v3",
+                    chain="monad",
+                )
+            ]
+        else:
+            sentinel = [
+                cls(
+                    pool="0xT0/0xT1/3000",
+                    position_id="1",
+                    protocol="sushiswap_v3",
+                    chain="monad",
+                )
+            ]
+
+        def stub_override(protocol):
+            def fn(p, it, ch, ctx):
+                return sentinel
+
+            return fn
+
+        monkeypatch.setattr(synthetic_intents, "get_discovery_vectors_override", stub_override)
+
+        # sushiswap_v3 IS in _LP_PROTOCOLS (passes first gate), sushiswap_v3 is
+        # NOT in LP_POSITION_MANAGERS["monad"] (would fail manager gate without
+        # the override). The fix ensures the override fires first.
+        result = synthetic_intents.build_synthetic_intents("sushiswap_v3", intent_type, "monad")
+        assert result is sentinel
+
+
 class TestFlashLoanIntents:
     """Test synthetic flash loan intent creation."""
 

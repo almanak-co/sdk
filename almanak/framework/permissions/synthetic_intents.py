@@ -235,13 +235,6 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
         result = override(protocol, "SWAP", chain, ctx)
         if result is not None:
             return result
-    # Pendle exposes four selectors on its Router for SWAP (one per
-    # direction × token kind) plus a pre-swap path through UniswapV3 when
-    # the user supplies a token that doesn't mint SY directly. A single
-    # synthetic only covers one selector — emit the full grid so the
-    # manifest authorises every PT/YT direction tests will exercise.
-    if protocol == "pendle":
-        return _build_pendle_swap_intents(chain, usdc)
     # Check that this protocol has a router on this chain.
     # Protocols with dedicated swap compile paths (enso, pendle,
     # traderjoe_v2) are exempt because their router address is not stored in
@@ -300,207 +293,25 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     return intents
 
 
-# Per-chain pre-swap input for the Pendle synthetic. This token DOESN'T mint
-# SY directly — supplying it forces the compiler's pre-swap path
-# (UniswapV3 → SY-mint token → Pendle Router). That transitive leg is what
-# authorises ``exactInputSingle`` on SwapRouter02 plus an approve on the
-# SY-mint token. Tests that pass WETH/USDC straight to a Pendle SwapIntent
-# rely on this entry being present in the manifest.
-#
-# Stable per-chain liquidity choice — not derivable from the connector
-# registry. arbitrum: WETH (closest path to wstETH). ethereum: USDC (deepest
-# pool to sUSDe-style markets and the value tests use first).
-_PENDLE_PRE_SWAP_DEFAULTS: dict[str, str] = {
-    "arbitrum": "WETH",
-    "ethereum": "USDC",
-}
-
-
-def _resolve_pendle_market_grid(chain: str) -> dict[str, str] | None:
-    """Pick the canonical synthetic market for ``chain`` from the connector registry.
-
-    Returns ``{"sy_token", "pt_name", "yt_name", "pre_swap_token"?}`` or
-    ``None`` when no fully-supported market is registered for ``chain``.
-
-    ``pre_swap_token`` is **optional** — it's only present when
-    ``_PENDLE_PRE_SWAP_DEFAULTS`` declares one for the chain. The four
-    direct PT/YT swap selectors and the LP_OPEN/LP_CLOSE selectors don't
-    need a pre-swap leg, so the resolver still returns a usable grid for
-    chains without a configured default (e.g. plasma's fUSDT0 market).
-    Tests that exercise the pre-swap transitive path are chain-specific
-    in the existing intent-test suite — those chains MUST configure a
-    default; the synthetic grid below silently skips the transitive
-    intent on chains that don't.
-
-    Source of truth — same dispatch as the live compile path:
-    - ``MARKET_BY_PT_TOKEN`` resolves PT names → market addresses.
-    - ``MARKET_BY_YT_TOKEN`` mirrors that for YT names.
-    - ``MARKET_TOKEN_MINT_SY`` resolves market addresses → SY-mint token.
-
-    Selection: walk ``MARKET_BY_PT_TOKEN[chain]`` in insertion order (the
-    maintainer's priority signal in this codebase — see also
-    ``_morpho_blue_synthetic_market_id``) and pick the first unique market
-    address that has both an SY-mint registry entry AND a YT counterpart.
-    Filters out partially-listed markets without parsing dated suffixes —
-    when the maintainer rotates an expired market and adds a replacement
-    above, this resolver auto-tracks without a code change here.
-
-    Returns SY-mint token by **address**: the compile path's
-    ``_resolve_token`` accepts both symbols and addresses, and not every
-    SY-mint token is in the global token resolver, so the address is the
-    universally safe handle.
-    """
-    try:
-        from ..connectors.pendle.sdk import (
-            MARKET_BY_PT_TOKEN,
-            MARKET_BY_YT_TOKEN,
-            MARKET_TOKEN_MINT_SY,
-            PT_TOKEN_INFO,
-            YT_TOKEN_INFO,
-        )
-    except ImportError:
-        return None
-    pt_markets = MARKET_BY_PT_TOKEN.get(chain, {})
-    yt_markets = MARKET_BY_YT_TOKEN.get(chain, {})
-    sy_mint = MARKET_TOKEN_MINT_SY.get(chain, {})
-    # The compile path's PT-sell / YT-sell branches resolve token info via
-    # ``PT_TOKEN_INFO`` / ``YT_TOKEN_INFO``. The market registries
-    # (``MARKET_BY_*_TOKEN``) sometimes carry an extra all-caps alias that
-    # those *_INFO maps don't (e.g. ethereum's ``YT-SUSDE-7MAY2026`` is in
-    # ``MARKET_BY_YT_TOKEN`` but not in ``YT_TOKEN_INFO``). Picking a name
-    # that isn't in *_INFO causes the compile path to FAIL with "not found in
-    # *_TOKEN_INFO" and the synthetic produces no permission entry. Filter
-    # by *_INFO membership so the resolver only returns names the live
-    # compile path can actually resolve.
-    pt_info = PT_TOKEN_INFO.get(chain, {})
-    yt_info = YT_TOKEN_INFO.get(chain, {})
-    if not pt_markets or not yt_markets or not sy_mint or not pt_info or not yt_info:
-        return None
-    pre_swap = _PENDLE_PRE_SWAP_DEFAULTS.get(chain)
-    seen_markets: set[str] = set()
-    for pt_name, market_addr in pt_markets.items():
-        market_lc = market_addr.lower()
-        if market_lc in seen_markets:
-            continue  # Skip aliases of the same market.
-        seen_markets.add(market_lc)
-        sy_addr = sy_mint.get(market_lc)
-        if not sy_addr:
-            continue  # Market without an SY-mint entry can't synthesize a swap.
-        if pt_name not in pt_info:
-            # Market alias missing from PT_TOKEN_INFO — try a sibling alias
-            # for the same market that IS in PT_TOKEN_INFO.
-            pt_name = next(
-                (name for name, addr in pt_markets.items() if addr.lower() == market_lc and name in pt_info),
-                None,  # type: ignore[assignment]
-            )
-            if pt_name is None:
-                continue
-        yt_name = next(
-            (name for name, addr in yt_markets.items() if addr.lower() == market_lc and name in yt_info),
-            None,
-        )
-        if yt_name is None:
-            continue  # No matching YT — can't cover the YT-direction selectors.
-        grid: dict[str, str] = {
-            "sy_token": sy_addr,
-            "pt_name": pt_name,
-            "yt_name": yt_name,
-        }
-        if pre_swap:
-            grid["pre_swap_token"] = pre_swap
-        return grid
-    return None
-
-
-def _build_pendle_swap_intents(chain: str, usdc: str) -> list[AnyIntent]:
-    """Emit Pendle synthetic SwapIntents covering every selector tests use.
-
-    Pendle's Router exposes four direction-specific selectors (token→PT,
-    PT→token, token→YT, YT→token) and the compile path may insert a
-    pre-swap through UniswapV3 SwapRouter02 when the user-supplied token
-    isn't the SY-mint token for the target market. A single synthetic only
-    authorises one selector, so we emit the full grid.
-
-    Order matters for ``send_allowed`` aggregation: the first synthetic is
-    the SY-direct PT-buy (fewest moving parts, used by the gate test).
-    Subsequent synthetics cover the remaining directions and the pre-swap
-    transitive path.
-
-    Returns an empty list for chains without a Pendle deployment so the
-    discovery loop treats them as a no-op.
-    """
-    market = _resolve_pendle_market_grid(chain)
-    if market is None:
-        return []
-    sy = market["sy_token"]
-    pt = market["pt_name"]
-    yt = market["yt_name"]
-    intents: list[AnyIntent] = [
-        # Direct: SY-mint → PT (covers ``swapExactTokenForPt`` on Pendle Router
-        # + approve on the SY token)
-        SwapIntent(
-            from_token=sy,
-            to_token=pt,
-            amount=Decimal("0.05"),
-            protocol="pendle",
-            chain=chain,
-        ),
-        # Direct: PT → SY-mint (covers ``swapExactPtForToken`` + approve on the
-        # PT/market LP token, which IS the market address)
-        SwapIntent(
-            from_token=pt,
-            to_token=sy,
-            amount=Decimal("0.05"),
-            protocol="pendle",
-            chain=chain,
-        ),
-        # Direct: SY-mint → YT (covers ``swapExactTokenForYt``)
-        SwapIntent(
-            from_token=sy,
-            to_token=yt,
-            amount=Decimal("0.05"),
-            protocol="pendle",
-            chain=chain,
-        ),
-        # Direct: YT → SY-mint (covers ``swapExactYtForToken``)
-        SwapIntent(
-            from_token=yt,
-            to_token=sy,
-            amount=Decimal("0.05"),
-            protocol="pendle",
-            chain=chain,
-        ),
-    ]
-    # Transitive: pre_swap_token → PT. The compile path emits a UniswapV3
-    # ``exactInputSingle`` first (pre-swap to the SY-mint token) and then a
-    # ``swapExactTokenForPt`` call on the Pendle Router. Only emitted on
-    # chains where ``_PENDLE_PRE_SWAP_DEFAULTS`` declares an input token —
-    # chains without a default still get the four direct selectors above
-    # (e.g. plasma's fUSDT0 market).
-    pre = market.get("pre_swap_token")
-    if pre:
-        intents.append(
-            SwapIntent(
-                from_token=pre,
-                to_token=pt,
-                amount=Decimal("0.05"),
-                protocol="pendle",
-                chain=chain,
-            )
-        )
-    return intents
-
-
 def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     if protocol not in _LP_PROTOCOLS:
         return []
-    # Pendle uses single-sided LP into a market contract — the market address
-    # IS the LP token, there's no NFT position manager and no fee-tier pair
-    # encoding. Pool format is ``"TOKEN/<PT-name-or-0xmarket>"`` (see
-    # compile_pendle_lp_open). Special-case before the LP_POSITION_MANAGERS
-    # gate because Pendle is not in that registry.
-    if protocol == "pendle":
-        return _build_pendle_lp_open_intents(chain)
+    # Override hook runs BEFORE the LP_POSITION_MANAGERS gate so a connector
+    # that owns its discovery via ``build_discovery_vectors`` is never blocked
+    # by the legacy hardcoded registry — same ordering as the lending builders
+    # (see commit 30b0b0e80 and ``TestOverrideBypassesLendingPoolGate``).
+    # Pendle is the canonical case: it uses single-sided LP into a market
+    # contract (no NFT position manager), so it's deliberately absent from
+    # LP_POSITION_MANAGERS and relies on the override hook firing first.
+    # ``ctx.usdc`` / ``ctx.weth`` carry the chain-default token pair so the
+    # callee doesn't have to re-import ``_get_token_pair``.
+    usdc, weth = _get_token_pair(chain)
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "LP_OPEN", chain, ctx)
+        if result is not None:
+            return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
     if protocol not in managers:
         return []
@@ -535,8 +346,15 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
 def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
     if protocol not in _LP_PROTOCOLS:
         return []
-    if protocol == "pendle":
-        return _build_pendle_lp_close_intents(chain)
+    # Override hook runs BEFORE the LP_POSITION_MANAGERS gate — see
+    # ``_build_lp_open_intents`` for the canonical placement rationale.
+    usdc, weth = _get_token_pair(chain)
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "LP_CLOSE", chain, ctx)
+        if result is not None:
+            return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
     if protocol not in managers:
         return []
@@ -548,87 +366,6 @@ def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
             position_id=position_id,
             protocol=protocol,
             chain=chain,
-        )
-    ]
-
-
-def _build_pendle_lp_open_intents(chain: str) -> list[AnyIntent]:
-    """Emit a Pendle synthetic LP_OPEN intent on chains with a curated market.
-
-    The compile path expects ``intent.pool == "TOKEN/<PT-name|0xmarket>"`` and
-    ``intent.amount0`` as the deposit amount. Single-sided liquidity — the
-    Pendle Router splits the deposit into SY + PT internally. The synthetic
-    pulls the SY-mint token + canonical PT name from
-    ``_resolve_pendle_market_grid`` so the connector registry is the single
-    source of truth (no hardcoded dated names).
-    """
-    market = _resolve_pendle_market_grid(chain)
-    if market is None:
-        return []
-    sy = market["sy_token"]
-    pt = market["pt_name"]
-    # Pendle ignores the V3-style ``range_lower`` / ``range_upper`` fields
-    # but pydantic's vocabulary still validates ``range_lower < range_upper``;
-    # use placeholder values that satisfy the model invariant without being
-    # interpreted by the connector's single-sided LP path.
-    return [
-        LPOpenIntent(
-            pool=f"{sy}/{pt}",
-            amount0=Decimal("0.05"),
-            amount1=Decimal("0"),  # single-sided; compiler reads amount0 only
-            range_lower=Decimal("1"),  # ignored by Pendle compile path
-            range_upper=Decimal("2"),
-            protocol="pendle",
-            chain=chain,
-        )
-    ]
-
-
-def _build_pendle_lp_close_intents(chain: str) -> list[AnyIntent]:
-    """Emit a Pendle synthetic LP_CLOSE intent.
-
-    The compile path expects:
-    - ``intent.pool`` = the 0x market address (resolves the LP token)
-    - ``intent.position_id`` = LP amount in wei (numeric string)
-    - ``protocol_params['token']`` (or ``token_a``) = output token symbol
-
-    Pulls the canonical (PT name, SY-mint token) pair from
-    ``_resolve_pendle_market_grid``, then resolves the market address with
-    an exact-or-uppercase fallback that mirrors ``compile_pendle_swap`` —
-    the live compile path accepts both, and aligning with it prevents a
-    silent ``[]`` return when the registry's casing drifts.
-    """
-    market = _resolve_pendle_market_grid(chain)
-    if market is None:
-        return []
-    sy = market["sy_token"]
-    pt = market["pt_name"]
-    # Defer the import so static-only callers (linters, doc builds) don't
-    # pull the connector graph.
-    try:
-        from ..connectors.pendle.sdk import MARKET_BY_PT_TOKEN
-    except ImportError:
-        return []
-    pt_markets = MARKET_BY_PT_TOKEN.get(chain, {})
-    # Mirror the compiler's exact-or-uppercase fallback (compile_pendle_swap
-    # ~line 196) so a casing drift in the registry doesn't break discovery
-    # while leaving the live compile path working.
-    market_addr = pt_markets.get(pt) or pt_markets.get(pt.upper())
-    if not market_addr:
-        return []
-    return [
-        LPCloseIntent(
-            position_id="1000000000000000000",  # 1 LP token in wei — synthetic floor
-            pool=market_addr,
-            protocol="pendle",
-            chain=chain,
-            # Pendle's compile path reads the output token from
-            # ``protocol_params['token']`` first (canonical) before falling
-            # back to ``token_a`` / ``token`` getattr probes. The model is
-            # frozen so we can't mutate post-init — passing it via
-            # protocol_params is the only path that doesn't require a
-            # vocabulary-level shape change.
-            protocol_params={"token": sy},
         )
     ]
 
