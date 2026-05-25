@@ -21,10 +21,20 @@ Schema discipline:
 
 from __future__ import annotations
 
+import json
+import os
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# Hosted-platform env var carrying the user's UI-edited strategy config.
+# The V2 agent deployer injects this on the strategy container as JSON;
+# ``framework/cli/run.py:load_strategy_config`` deep-merges the parsed dict
+# on top of whatever was loaded from disk so UI edits actually reach the
+# running strategy (the dashboard reads its own
+# ``ALMANAK_DASHBOARD_STRATEGY_CONFIG`` path).
+STRATEGY_CONFIG_OVERRIDE_ENV = "ALMANAK_STRATEGY_CONFIG"
 
 
 class StrategyConfig(BaseModel):
@@ -111,4 +121,45 @@ class StrategyConfig(BaseModel):
         return self
 
 
-__all__ = ["StrategyConfig"]
+class StrategyConfigEnvError(ValueError):
+    """Raised when ``ALMANAK_STRATEGY_CONFIG`` is set but cannot be parsed.
+
+    Separate from a generic ``ValueError`` so callers can wrap into their own
+    UX (``framework/cli/run.py:load_strategy_config`` re-raises as
+    ``click.ClickException`` naming the env var) without intercepting unrelated
+    value errors that bubble up through ``json.loads`` validation.
+    """
+
+
+def strategy_config_override_from_env() -> dict[str, Any] | None:
+    """Return the parsed ``ALMANAK_STRATEGY_CONFIG`` override, or ``None`` if unset.
+
+    Centralises the env read inside ``almanak.config`` so framework code does
+    not call ``os.environ`` directly (preserves the config-service boundary
+    enforced by ``scripts/ci/check_config_boundary.py``).
+
+    Raises ``StrategyConfigEnvError`` for malformed (non-JSON) or wrong-type
+    (non-object) env-var contents; returns ``None`` for unset or
+    whitespace-only values. An empty JSON object ``{}`` returns an empty
+    dict (the loader treats it as a no-op merge), distinct from ``None``.
+    """
+    raw = os.environ.get(STRATEGY_CONFIG_OVERRIDE_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise StrategyConfigEnvError(f"{STRATEGY_CONFIG_OVERRIDE_ENV} env var is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise StrategyConfigEnvError(
+            f"{STRATEGY_CONFIG_OVERRIDE_ENV} env var must encode a JSON object, got {type(parsed).__name__}."
+        )
+    return parsed
+
+
+__all__ = [
+    "STRATEGY_CONFIG_OVERRIDE_ENV",
+    "StrategyConfig",
+    "StrategyConfigEnvError",
+    "strategy_config_override_from_env",
+]

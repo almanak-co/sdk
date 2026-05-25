@@ -237,6 +237,53 @@ def _warn_missing_token_funding(config: dict[str, Any], config_path: Path) -> No
     )
 
 
+def _deep_merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` onto ``base``. Nested dicts merge; scalars / lists replace."""
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_configs(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _apply_env_strategy_config_override(config: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge the hosted-platform ``ALMANAK_STRATEGY_CONFIG`` env override onto ``config``.
+
+    Re-validates the merged dict through ``StrategyConfig`` so env-supplied
+    stringly-typed numerics coerce to ``Decimal`` consistently with the
+    file-loaded path. Returns ``config`` unchanged when the env var is unset
+    or empty. The env read itself lives in ``almanak.config.strategy``
+    (config-service boundary, scripts/ci/check_config_boundary.py).
+    """
+    from pydantic import ValidationError
+
+    from almanak.config.strategy import (
+        STRATEGY_CONFIG_OVERRIDE_ENV,
+        StrategyConfig,
+        StrategyConfigEnvError,
+        strategy_config_override_from_env,
+    )
+
+    try:
+        overrides = strategy_config_override_from_env()
+    except StrategyConfigEnvError as e:
+        raise click.ClickException(str(e)) from e
+    if not overrides:
+        return config
+
+    merged = _deep_merge_configs(config, overrides)
+
+    try:
+        validated = StrategyConfig.model_validate(merged)
+    except ValidationError as e:
+        raise click.ClickException(f"{STRATEGY_CONFIG_OVERRIDE_ENV} env override failed schema validation:\n{e}") from e
+
+    click.echo(f"Applied {STRATEGY_CONFIG_OVERRIDE_ENV} env override for top-level fields: {sorted(overrides.keys())}")
+    return validated.model_dump(mode="python", exclude_unset=True)
+
+
 # crap-allowlist: #2098/#2101 adds schema validation around the existing loader
 # without increasing its decision complexity.
 def load_strategy_config(
@@ -254,6 +301,12 @@ def load_strategy_config(
     The validated model is dumped back to ``dict`` (``mode="python"``) so
     downstream callers keep their dict API; Pydantic-coerced typed values
     (e.g. stringly-typed ``"0.005"`` -> ``Decimal("0.005")``) flow through.
+
+    On hosted deployments the ``ALMANAK_STRATEGY_CONFIG`` env var (injected by
+    the V2 agent deployer with the user's UI-edited config) is deep-merged on
+    top of whatever was loaded from disk via
+    ``_apply_env_strategy_config_override``, and the merged dict is
+    re-validated against ``StrategyConfig``.
 
     Args:
         strategy_name: Name of the strategy
@@ -300,30 +353,45 @@ def load_strategy_config(
         # the per-strategy dataclass extension keep working.
         return validated.model_dump(mode="python", exclude_unset=True)
 
+    config: dict[str, Any] | None = None
+    # Path of the source file the warning should name, if any.
+    loaded_config_path: Path | None = None
+
     if config_file:
         config_path = Path(config_file)
         if not config_path.exists():
             raise click.ClickException(f"Config file not found: {config_file}")
         config = _parse_file(config_path)
         click.echo(f"Loaded config from: {config_path}")
-        _warn_missing_token_funding(config, config_path)
-        return config
+        loaded_config_path = config_path
+    else:
+        # Search for config in standard locations
+        strategy_dir = find_strategy_dir(strategy_name)
+        if strategy_dir:
+            for name in ("config.json", "config.yaml", "config.yml"):
+                config_path = strategy_dir / name
+                if config_path.exists():
+                    config = _parse_file(config_path)
+                    click.echo(f"Loaded config from: {config_path}")
+                    loaded_config_path = config_path
+                    break
 
-    # Search for config in standard locations
-    strategy_dir = find_strategy_dir(strategy_name)
-    if strategy_dir:
-        for name in ("config.json", "config.yaml", "config.yml"):
-            config_path = strategy_dir / name
-            if config_path.exists():
-                config = _parse_file(config_path)
-                click.echo(f"Loaded config from: {config_path}")
-                _warn_missing_token_funding(config, config_path)
-                return config
+    if config is None:
+        # Minimal default config with generated UUID; still subject to the
+        # hosted env override so a hosted run without any file still picks up
+        # the platform-supplied config.
+        config = {
+            "deployment_id": f"{strategy_name}:{uuid.uuid4().hex[:12]}",
+        }
 
-    # Return minimal default config with generated UUID
-    return {
-        "deployment_id": f"{strategy_name}:{uuid.uuid4().hex[:12]}",
-    }
+    # Apply env override BEFORE the token-funding warning so the warning
+    # reflects the config the strategy actually runs with — a hosted override
+    # that supplies token_funding shouldn't trigger a false-positive warning,
+    # and conversely an override that removes it shouldn't hide a real one.
+    config = _apply_env_strategy_config_override(config)
+    if loaded_config_path is not None:
+        _warn_missing_token_funding(config, loaded_config_path)
+    return config
 
 
 # Re-exported from `chain_resolution` for back-compat. The canonical
