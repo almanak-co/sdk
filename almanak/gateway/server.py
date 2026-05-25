@@ -463,11 +463,40 @@ class GatewayServer:
         self._simulation_servicer = SimulationServiceServicer(self.settings)
         gateway_pb2_grpc.add_SimulationServiceServicer_to_server(self._simulation_servicer, self.server)
 
-        self._polymarket_servicer = PolymarketServiceServicer(self.settings)
-        gateway_pb2_grpc.add_PolymarketServiceServicer_to_server(self._polymarket_servicer, self.server)
+        # VIB-4810 — Polymarket + Enso servicers are owned by their respective
+        # connectors (`almanak.connectors.<protocol>.gateway.provider`). They
+        # are instantiated through GATEWAY_REGISTRY here; their
+        # `register_servicers` methods perform the existing
+        # `gateway_pb2_grpc.add_*ServiceServicer_to_server` calls. Phase 4
+        # collapses this block into a single loop over
+        # ``capability_providers(GatewayServicerCapability)``.
+        from almanak.connectors._base.gateway_capabilities import (
+            GatewayServicerCapability,
+        )
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 
-        self._enso_servicer = EnsoServiceServicer(self.settings)
-        gateway_pb2_grpc.add_EnsoServiceServicer_to_server(self._enso_servicer, self.server)
+        polymarket_provider = GATEWAY_REGISTRY.get(ProtocolName("polymarket"))
+        if not isinstance(polymarket_provider, GatewayServicerCapability):
+            # ``assert`` would be stripped under ``python -O`` and silently
+            # boot the gateway without the PolymarketService wired up.
+            # Refuse to start instead — there is no working fallback.
+            raise RuntimeError(
+                "PolymarketGatewayConnector missing from GATEWAY_REGISTRY or does "
+                "not implement GatewayServicerCapability — refusing to boot."
+            )
+        polymarket_provider.register_servicers(self.server, self.settings)
+        # Keep the named handle for the shutdown iteration loop below.
+        self._polymarket_servicer = polymarket_provider.servicer
+
+        enso_provider = GATEWAY_REGISTRY.get(ProtocolName("enso"))
+        if not isinstance(enso_provider, GatewayServicerCapability):
+            raise RuntimeError(
+                "EnsoGatewayConnector missing from GATEWAY_REGISTRY or does not "
+                "implement GatewayServicerCapability — refusing to boot."
+            )
+        enso_provider.register_servicers(self.server, self.settings)
+        self._enso_servicer = enso_provider.servicer
 
         # VIB-4727: pool analytics service. Owns the HTTP egress to
         # DefiLlama / GeckoTerminal so strategy containers do not.

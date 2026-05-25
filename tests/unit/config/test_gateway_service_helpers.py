@@ -13,7 +13,7 @@ from almanak.config.gateway_runtime import (
     portfolio_provider_cache_ttl,
     portfolio_provider_chain_filter,
 )
-from almanak.gateway.services.polymarket_service import (
+from almanak.connectors.polymarket.gateway.service import (
     POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
     POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS,
 )

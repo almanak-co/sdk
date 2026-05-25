@@ -1,41 +1,18 @@
-"""Hyperliquid Connector.
+"""Hyperliquid Connector — EXPERIMENTAL / NOT PRODUCTION-READY.
 
-This module provides an adapter for interacting with Hyperliquid perpetual futures
-exchange, supporting order management, position queries, and L1/L2 message signing.
+The Hyperliquid PERP production execution path has not shipped (VIB-4774).
+No demo, no incubating strategy, no on-chain intent test references this
+connector. The adapter / signer / type definitions remain in-tree as a
+scaffold for VIB-4774 — they are NOT a supported strategy-layer connector.
 
-Hyperliquid is a decentralized perpetual futures exchange supporting:
-- Long and short positions with up to 50x leverage
-- Limit and market orders with various time-in-force options
-- Cross and isolated margin modes
-- REST API and WebSocket for real-time data
+This connector is intentionally:
+- Omitted from ``ConnectorRegistry`` (see deregistration block at end of file)
+- Removed from ``almanak strat matrix`` (no longer probed in
+  ``almanak/framework/cli/support_matrix.py``)
+- Removed from public docs (``docs/api/connectors/`` + ``README.md``)
 
-Supported networks:
-- Mainnet (api.hyperliquid.xyz)
-- Testnet (api.hyperliquid-testnet.xyz)
-
-Example:
-    from almanak.framework.connectors.hyperliquid import HyperliquidAdapter, HyperliquidConfig
-
-    config = HyperliquidConfig(
-        network="mainnet",
-        wallet_address="0x...",
-        private_key="0x...",
-    )
-    adapter = HyperliquidAdapter(config)
-
-    # Place a limit order
-    result = adapter.place_order(
-        asset="ETH",
-        is_buy=True,
-        size=Decimal("0.1"),
-        price=Decimal("2000"),
-    )
-
-    # Check open orders
-    orders = adapter.get_open_orders()
-
-    # Get position
-    position = adapter.get_position("ETH")
+See ``docs/internal/plans/connector-status-audit-2026-05-23.html`` for the
+audit that flagged this gap and VIB-4774 for the production-execution work.
 """
 
 from .adapter import (
@@ -100,17 +77,12 @@ __all__ = [
     "HYPERLIQUID_GAS_ESTIMATES",
 ]
 
-# Connector registration (VIB-4298). The registry powers the (connector,
-# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
-# and will be consumed by PR 2's intent-test coverage check.
-from almanak.framework.connectors.registry import register_connector  # noqa: E402
-from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
-
-register_connector(
-    name="hyperliquid",
-    intents=(
-        IntentType.PERP_OPEN,
-        IntentType.PERP_CLOSE,
-    ),
-    chains=("hyperliquid",),
-)
+# Connector registration intentionally OMITTED (VIB-4774).
+#
+# Hyperliquid PERP production execution has not shipped. Registering the
+# connector would pin (hyperliquid, PERP_OPEN/PERP_CLOSE, hyperliquid) cells
+# in the intent-coverage required-set that no test or demo can satisfy.
+#
+# The adapter and signer code stay (above) as the scaffold for VIB-4774.
+# Re-add the ``register_connector(...)`` call when production exec lands and
+# at least one on-chain intent test + demo cover both PERP_OPEN / PERP_CLOSE.

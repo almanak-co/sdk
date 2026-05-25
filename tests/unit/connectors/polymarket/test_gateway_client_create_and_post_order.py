@@ -10,7 +10,7 @@ to accept the same kwarg, so every BUY/SELL through the gateway raised
 
 The fix accepts ``market=`` and ignores it — the gateway server re-fetches
 the market from ``token_id`` (see
-``almanak.gateway.services.polymarket_service.PolymarketServiceServicer.CreateAndPostOrder``),
+``almanak.connectors.polymarket.gateway.service.PolymarketServiceServicer.CreateAndPostOrder``),
 so the wrapper does not need (and must not propagate) the local Gamma
 object across the gRPC boundary.
 

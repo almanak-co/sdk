@@ -944,7 +944,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         would discard the loser's in-flight backfill state).
 
         VIB-4534 — immediately after construction, the canonical PoolKey
-        seed registry (:mod:`almanak.gateway.data.v4_canonical_pools`) is
+        seed registry (:mod:`almanak.connectors.uniswap_v4.gateway.canonical_pools`) is
         loaded so that WETH/USDC and other common pairs resolve on the
         first ``LookupV4PoolKey`` without an eth_getLogs scan. The seed is
         in-memory only (no network I/O); pre-seeding happens INSIDE the
@@ -959,10 +959,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Double-checked: another coroutine may have constructed while
             # we were waiting on the lock.
             if self._v4_pool_key_cache is None:
-                from almanak.gateway.data.v4_canonical_pools import (
+                from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
                     seed_canonical_pool_keys,
                 )
-                from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyCache
+                from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyCache
 
                 cache = V4PoolKeyCache(network=self.settings.network)
                 # Pre-seed canonical pairs BEFORE publishing the cache to
@@ -1022,7 +1022,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # both surfaced as ``NOT_FOUND``, which made operator
             # observability lie ("pool not found" when actually the gateway
             # had no RPC URL or could not call ``eth_blockNumber``).
-            from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyLookupError
+            from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
 
             if isinstance(exc, V4PoolKeyLookupError):
                 logger.warning(

@@ -26,7 +26,7 @@ from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
     make_sync_pool_key_lookup,
 )
 from almanak.framework.connectors.uniswap_v4.sdk import PoolKey as FrameworkPoolKey
-from almanak.gateway.data.v4_pool_key_cache import (
+from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     INITIALIZE_EVENT_TOPIC,
     NO_HOOKS,
     CachedPoolKey,
@@ -465,7 +465,7 @@ class TestV4PoolKeyCache:
 
         with (
             patch.object(cache, "_get_or_create_web3", return_value=w3),
-            patch("almanak.gateway.data.v4_pool_key_cache.UNISWAP_V4", {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}}),
+            patch("almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4", {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}}),
         ):
             # web3.py exposes block_number as an awaitable property; emulate that.
             w3.eth.block_number = _AwaitableInt(100)
@@ -497,7 +497,7 @@ class TestV4PoolKeyCache:
         with (
             patch.object(cache, "_get_or_create_web3", return_value=w3),
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.UNISWAP_V4",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
                 {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}},
             ),
         ):
@@ -530,11 +530,11 @@ class TestV4PoolKeyCache:
 
         with (
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.AsyncWeb3",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.AsyncWeb3",
                 return_value=w3,
             ) as web3_ctor,
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.UNISWAP_V4",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
                 {"base": {"pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b"}},
             ),
         ):
@@ -680,7 +680,7 @@ class TestLookupV4PoolKeyHandler:
         surface as FAILED_PRECONDITION, not NOT_FOUND. Pre-fix the operator
         chasing a missing-pool counter could not tell whether the gateway
         was misconfigured or the pool genuinely didn't exist on-chain."""
-        from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyLookupError
+        from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
 
         servicer = _make_servicer()
         ctx = _make_context()
@@ -705,7 +705,7 @@ class TestLookupV4PoolKeyHandler:
         """VIB-4426 P1 #2 — refresh-time upstream RPC failure
         (eth_blockNumber / eth_getLogs) must surface as UNAVAILABLE so
         operators see the right signal for a transient/upstream issue."""
-        from almanak.gateway.data.v4_pool_key_cache import V4PoolKeyLookupError
+        from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
 
         servicer = _make_servicer()
         ctx = _make_context()

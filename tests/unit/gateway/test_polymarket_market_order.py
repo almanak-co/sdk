@@ -28,7 +28,7 @@ from eth_account import Account
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.polymarket_service import (
+from almanak.connectors.polymarket.gateway.service import (
     CLOB_BASE_URL,
     PolymarketServiceServicer,
 )

@@ -770,7 +770,14 @@ class TestCanonicalTemplateId:
 
 
 class TestProtocolDerivation:
-    """Tests for protocol derivation from config."""
+    """Tests for protocol derivation from config.
+
+    The deployment-id substring-sniff ladder was deleted in VIB-4810
+    (Phase 1): a user-controlled ``deployment_id`` is not safe to route on,
+    and the canonical ``ProtocolName`` registry (Phase 3) carries protocol
+    identity. Only an explicit ``config["protocol"]`` string is honoured;
+    everything else returns ``"Unknown"``.
+    """
 
     def test_derive_protocol_from_explicit_config(self, dashboard_service):
         """Test deriving protocol when explicitly set in config."""
@@ -778,21 +785,27 @@ class TestProtocolDerivation:
         result = dashboard_service._derive_protocol_from_config(config, "test")
         assert result == "Custom Protocol"
 
-    def test_derive_protocol_from_pool_config(self, dashboard_service):
-        """Test deriving Uniswap from pool config."""
-        config = {"pool": "0x123"}
-        result = dashboard_service._derive_protocol_from_config(config, "test")
-        assert result == "Uniswap V3"
+    def test_unknown_when_no_explicit_protocol(self, dashboard_service):
+        """Test that unrecognised deployments without explicit protocol return Unknown.
 
-    def test_derive_protocol_from_deployment_id(self, dashboard_service):
-        """Test deriving protocol from deployment ID."""
-        assert dashboard_service._derive_protocol_from_config({}, "uniswap_lp") == "Uniswap V3"
-        assert dashboard_service._derive_protocol_from_config({}, "aave_lending") == "Aave V3"
-        assert dashboard_service._derive_protocol_from_config({}, "gmx_perps") == "GMX V2"
-        assert dashboard_service._derive_protocol_from_config({}, "pancake_swap") == "PancakeSwap V3"
-        assert dashboard_service._derive_protocol_from_config({}, "aerodrome_lp") == "Aerodrome"
-        assert dashboard_service._derive_protocol_from_config({}, "tj_liquidity") == "TraderJoe V2"
+        Pre-VIB-4810 these all returned protocol-specific strings via a
+        substring-sniff on ``deployment_id``. That ladder is gone — the
+        contract is now: explicit ``config["protocol"]`` or
+        ``"Unknown"``. Nothing in between.
+        """
+        assert dashboard_service._derive_protocol_from_config({}, "uniswap_lp") == "Unknown"
+        assert dashboard_service._derive_protocol_from_config({}, "aave_lending") == "Unknown"
+        assert dashboard_service._derive_protocol_from_config({}, "gmx_perps") == "Unknown"
+        assert dashboard_service._derive_protocol_from_config({}, "pancake_swap") == "Unknown"
+        assert dashboard_service._derive_protocol_from_config({}, "aerodrome_lp") == "Unknown"
+        assert dashboard_service._derive_protocol_from_config({}, "tj_liquidity") == "Unknown"
         assert dashboard_service._derive_protocol_from_config({}, "unknown_strategy") == "Unknown"
+
+    def test_pool_in_config_no_longer_routes_to_uniswap(self, dashboard_service):
+        """Pre-VIB-4810 ``"pool" in config`` returned ``"Uniswap V3"`` —
+        removed for the same reason as the deployment-id ladder. A config
+        key name is not a protocol identifier."""
+        assert dashboard_service._derive_protocol_from_config({"pool": "0x123"}, "test") == "Unknown"
 
 
 class TestDeployedModeIdentityPassThrough:

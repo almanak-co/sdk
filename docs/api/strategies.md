@@ -170,11 +170,15 @@ def _forced_intent(self, market: MarketSnapshot) -> Intent:
         )
     if self.force_action == "collect_fees":
         # Collects fees on an existing position. Drive AFTER "open".
-        return Intent.lp_collect_fees(
+        # NFT-based protocols (Uniswap V3 family, Uniswap V4, Aerodrome
+        # Slipstream) require the position's tokenId via protocol_params.
+        return Intent.collect_fees(
             pool=self.pool,
-            position_id=self.force_position_id or self._position_id,
             protocol=self.protocol,
             chain=self.chain,
+            protocol_params={
+                "position_id": self.force_position_id or self._position_id,
+            },
         )
     if self.force_action == "close":
         # Closes the position. SKIP this in --actions; teardown emits the same intent.
@@ -247,7 +251,14 @@ class MyLPStrategy(IntentStrategy):
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
         if self._has_position:
-            return Intent.collect_fees(position_id=self._position_id, protocol="uniswap_v3")
+            # Uniswap V3 / V4 / Aerodrome Slipstream identify the position by
+            # NFT tokenId — pass it through protocol_params, not as a
+            # top-level argument.
+            return Intent.collect_fees(
+                pool="WETH/USDC/3000",
+                protocol="uniswap_v3",
+                protocol_params={"position_id": self._position_id},
+            )
         return Intent.lp_open(
             token_a="WETH", token_b="USDC",
             amount_usd=Decimal("1000"), protocol="uniswap_v3",

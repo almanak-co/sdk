@@ -44,7 +44,7 @@ from eth_account import Account
 
 from almanak.framework.connectors.polymarket import TransactionData
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
+from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
 # Deterministic Anvil-style key — never funded, never used in production.
 TEST_PRIVATE_KEY = "0x" + "ab" * 32
@@ -454,7 +454,7 @@ class TestConcurrentSetupTxIsolation:
             return result
 
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.asyncio.to_thread",
+            "almanak.connectors.polymarket.gateway.service.asyncio.to_thread",
             _yielding_to_thread,
         )
 
@@ -493,7 +493,7 @@ class TestConcurrentSetupTxIsolation:
             return signed
 
         with patch(
-            "almanak.gateway.services.polymarket_service.Account.sign_transaction",
+            "almanak.connectors.polymarket.gateway.service.Account.sign_transaction",
             side_effect=_fake_sign,
         ):
             # Each call body owns its OWN list — that's exactly the
@@ -585,6 +585,6 @@ class TestConcurrentSetupTxIsolation:
 
         # Restore the real to_thread for any later tests in the same module.
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.asyncio.to_thread",
+            "almanak.connectors.polymarket.gateway.service.asyncio.to_thread",
             original_to_thread,
         )

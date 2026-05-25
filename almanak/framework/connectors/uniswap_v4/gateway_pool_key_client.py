@@ -7,7 +7,7 @@ enrich on-chain logs whose payload carries only the bytes32 id.
 Strategy-container code MUST NOT bypass this client to read PoolManager
 state directly -- the gateway boundary (AGENTS.md §Gateway boundary)
 forbids direct RPC from ``almanak/framework/``. The cache that backs the
-RPC lives in ``almanak/gateway/data/v4_pool_key_cache.py``.
+RPC lives in ``almanak/connectors/uniswap_v4/gateway/pool_key_cache.py``.
 """
 
 from __future__ import annotations

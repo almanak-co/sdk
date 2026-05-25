@@ -7,12 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.gateway.services.yearn_vault_lookup import (
+from almanak.connectors.yearn.gateway.vault_lookup import (
     CACHE_TTL_SECONDS,
     YearnVaultLookup,
     YearnVaultToken,
 )
-
 
 SAMPLE_VAULTS = [
     # Ethereum v3
@@ -206,7 +205,7 @@ class TestDiskCache:
 
     def test_read_disk_cache_returns_none_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH",
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH",
             tmp_path / "nope.json",
         )
         lookup = YearnVaultLookup()
@@ -221,7 +220,7 @@ class TestDiskCache:
         os.utime(cache_path, (stale_mtime, stale_mtime))
 
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = YearnVaultLookup()
         assert lookup._read_disk_cache() is None
@@ -230,7 +229,7 @@ class TestDiskCache:
         cache_path = tmp_path / "yearn_vault_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = YearnVaultLookup()
         data = lookup._read_disk_cache()
@@ -241,7 +240,7 @@ class TestDiskCache:
         cache_path = tmp_path / "yearn_vault_cache.json"
         cache_path.write_text('{"not":"a list"}')
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = YearnVaultLookup()
         assert lookup._read_disk_cache() is None
@@ -249,7 +248,7 @@ class TestDiskCache:
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "yearn_vault_cache.json"
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH", cache_path
         )
 
         lookup = YearnVaultLookup()
@@ -266,7 +265,7 @@ class TestLoadFlow:
         cache_path = tmp_path / "yearn_vault_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
         monkeypatch.setattr(
-            "almanak.gateway.services.yearn_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.yearn.gateway.vault_lookup.CACHE_PATH", cache_path
         )
 
         lookup = YearnVaultLookup()

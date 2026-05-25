@@ -73,6 +73,12 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
 
     mock_pb2_grpc = MagicMock()
     monkeypatch.setattr("almanak.gateway.server.gateway_pb2_grpc", mock_pb2_grpc)
+    # VIB-4810 — Enso + Polymarket gateway-side servicers are registered via
+    # connector providers. Each provider module has its own bound
+    # ``gateway_pb2_grpc`` reference; redirect those to the same MagicMock so
+    # the ``add_*ServiceServicer_to_server`` calls below assert correctly.
+    monkeypatch.setattr("almanak.connectors.enso.gateway.provider.gateway_pb2_grpc", mock_pb2_grpc)
+    monkeypatch.setattr("almanak.connectors.polymarket.gateway.provider.gateway_pb2_grpc", mock_pb2_grpc)
 
     reflection_enable = MagicMock()
     monkeypatch.setattr("almanak.gateway.server.reflection.enable_server_reflection", reflection_enable)
@@ -131,6 +137,19 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
         "LifecycleServiceServicer",
     ):
         monkeypatch.setattr(f"almanak.gateway.server.{cls_name}", MagicMock())
+
+    # VIB-4810 — Enso + Polymarket servicers are constructed inside their
+    # connector providers, not ``server.py``. Patch each provider's bound
+    # ``*ServiceServicer`` symbol so construction stays networkless / does
+    # not touch credentials under this fixture.
+    monkeypatch.setattr(
+        "almanak.connectors.enso.gateway.provider.EnsoServiceServicer",
+        MagicMock(),
+    )
+    monkeypatch.setattr(
+        "almanak.connectors.polymarket.gateway.provider.PolymarketServiceServicer",
+        MagicMock(),
+    )
 
     # MetricsServer — avoid binding port 9090.
     fake_metrics_server = MagicMock()

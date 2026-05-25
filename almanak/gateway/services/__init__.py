@@ -20,15 +20,20 @@ This package contains the gRPC service implementations for the gateway:
 - PositionService: On-chain reconciliation of position_registry (T24 / VIB-4210)
 """
 
+# VIB-4810: Enso + Polymarket servicers moved to their respective connector
+# folders (`almanak.connectors.<protocol>.gateway.service`). Re-exported here
+# so existing imports of ``*ServiceServicer`` from ``almanak.gateway.services``
+# keep working until Phase 4 collapses ``server.py`` to a registry-driven
+# loop and the re-exports can be dropped.
+from almanak.connectors.enso.gateway.service import EnsoServiceServicer
+from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
-from almanak.gateway.services.enso_service import EnsoServiceServicer
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
 from almanak.gateway.services.funding_rate_service import FundingRateServiceServicer
 from almanak.gateway.services.integration_service import IntegrationServiceServicer
 from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.gateway.services.observe_service import ObserveServiceServicer
-from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
 from almanak.gateway.services.pool_analytics_service import PoolAnalyticsServiceServicer
 from almanak.gateway.services.pool_history_service import PoolHistoryServiceServicer
 from almanak.gateway.services.position_service import PositionServiceServicer

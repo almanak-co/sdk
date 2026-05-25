@@ -47,7 +47,7 @@ class TestJupiterTokenLookup:
     ]
 
     def _make_lookup(self) -> "JupiterTokenLookup":
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         lookup = JupiterTokenLookup()
         lookup._build_indices(self.SAMPLE_TOKENS)
@@ -96,7 +96,7 @@ class TestJupiterTokenLookup:
 
     def test_is_loaded_before_init(self):
         """is_loaded returns False on fresh instance."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         lookup = JupiterTokenLookup()
         assert lookup.is_loaded is False
@@ -104,9 +104,7 @@ class TestJupiterTokenLookup:
     @pytest.mark.asyncio
     async def test_fetch_from_network_success(self, tmp_path):
         """_fetch_from_network fetches and caches on success."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
-
-        lookup = JupiterTokenLookup()
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -120,9 +118,14 @@ class TestJupiterTokenLookup:
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            # Redirect disk write to tmp_path
+            # Redirect disk write to tmp_path. ``JupiterTokenLookup``
+            # captures ``CACHE_PATH`` in ``__init__`` and stores it as
+            # ``self._cache_path``, so the instance MUST be constructed
+            # inside the patch context — otherwise the patch redirects
+            # nothing.
             cache_path = tmp_path / "jupiter_token_cache.json"
-            with patch("almanak.gateway.services.jupiter_token_lookup.CACHE_PATH", cache_path):
+            with patch("almanak.connectors.jupiter.gateway.token_lookup.CACHE_PATH", cache_path):
+                lookup = JupiterTokenLookup()
                 data = await lookup._fetch_from_network()
 
         assert data is not None
@@ -131,7 +134,7 @@ class TestJupiterTokenLookup:
     @pytest.mark.asyncio
     async def test_fetch_from_network_http_error_returns_none(self):
         """_fetch_from_network returns None on non-200 HTTP response."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         lookup = JupiterTokenLookup()
 
@@ -153,7 +156,7 @@ class TestJupiterTokenLookup:
     @pytest.mark.asyncio
     async def test_fetch_from_network_network_error_returns_none(self):
         """_fetch_from_network returns None on network error (no exception raised)."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         lookup = JupiterTokenLookup()
 
@@ -164,7 +167,7 @@ class TestJupiterTokenLookup:
 
     def test_read_disk_cache_fresh(self, tmp_path):
         """_read_disk_cache returns data when cache is fresh."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         cache_path = tmp_path / "jupiter_token_cache.json"
         cache_path.write_text(json.dumps(self.SAMPLE_TOKENS))
@@ -172,7 +175,7 @@ class TestJupiterTokenLookup:
         # Patch the module-level CACHE_PATH before constructing the lookup —
         # ``JupiterTokenLookup.__init__`` captures the path via the base
         # class, so the patch must be active at construction time.
-        with patch("almanak.gateway.services.jupiter_token_lookup.CACHE_PATH", cache_path):
+        with patch("almanak.connectors.jupiter.gateway.token_lookup.CACHE_PATH", cache_path):
             lookup = JupiterTokenLookup()
             data = lookup._read_disk_cache()
 
@@ -184,7 +187,7 @@ class TestJupiterTokenLookup:
         import os
         import time
 
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         cache_path = tmp_path / "jupiter_token_cache.json"
         cache_path.write_text(json.dumps(self.SAMPLE_TOKENS))
@@ -194,7 +197,7 @@ class TestJupiterTokenLookup:
         os.utime(cache_path, (old_mtime, old_mtime))
 
         # Patch CACHE_PATH before construction so the base class picks it up.
-        with patch("almanak.gateway.services.jupiter_token_lookup.CACHE_PATH", cache_path):
+        with patch("almanak.connectors.jupiter.gateway.token_lookup.CACHE_PATH", cache_path):
             lookup = JupiterTokenLookup()
             data = lookup._read_disk_cache()
 
@@ -202,7 +205,7 @@ class TestJupiterTokenLookup:
 
     def test_malformed_tokens_skipped(self):
         """Malformed token entries are skipped gracefully."""
-        from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
+        from almanak.connectors.jupiter.gateway.token_lookup import JupiterTokenLookup
 
         malformed = [
             {},  # empty

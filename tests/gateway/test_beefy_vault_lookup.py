@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.gateway.services.beefy_vault_lookup import (
+from almanak.connectors.beefy.gateway.vault_lookup import (
     CACHE_TTL_SECONDS,
     BeefyVaultLookup,
     BeefyVaultToken,
@@ -208,7 +208,7 @@ class TestDiskCache:
 
     def test_read_disk_cache_returns_none_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH",
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH",
             tmp_path / "nope.json",
         )
         lookup = BeefyVaultLookup()
@@ -223,7 +223,7 @@ class TestDiskCache:
         os.utime(cache_path, (stale_mtime, stale_mtime))
 
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = BeefyVaultLookup()
         assert lookup._read_disk_cache() is None
@@ -233,7 +233,7 @@ class TestDiskCache:
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
 
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = BeefyVaultLookup()
         data = lookup._read_disk_cache()
@@ -244,7 +244,7 @@ class TestDiskCache:
         cache_path = tmp_path / "beefy_vault_cache.json"
         cache_path.write_text('{"not":"a list"}')
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH", cache_path
         )
         lookup = BeefyVaultLookup()
         assert lookup._read_disk_cache() is None
@@ -252,7 +252,7 @@ class TestDiskCache:
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "beefy_vault_cache.json"
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH", cache_path
         )
 
         lookup = BeefyVaultLookup()
@@ -271,7 +271,7 @@ class TestLoadFlow:
         cache_path = tmp_path / "beefy_vault_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_VAULTS))
         monkeypatch.setattr(
-            "almanak.gateway.services.beefy_vault_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.beefy.gateway.vault_lookup.CACHE_PATH", cache_path
         )
 
         lookup = BeefyVaultLookup()

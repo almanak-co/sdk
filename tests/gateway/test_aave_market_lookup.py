@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.gateway.services.aave_market_lookup import (
+from almanak.connectors.aave_v3.gateway.market_lookup import (
     CACHE_TTL_SECONDS,
     AaveMarketLookup,
     AaveReserveToken,
@@ -254,7 +254,7 @@ class TestDiskCache:
 
     def test_read_disk_cache_returns_none_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH",
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH",
             tmp_path / "nope.json",
         )
         lookup = AaveMarketLookup()
@@ -269,7 +269,7 @@ class TestDiskCache:
         os.utime(cache_path, (stale_mtime, stale_mtime))
 
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = AaveMarketLookup()
         assert lookup._read_disk_cache() is None
@@ -279,7 +279,7 @@ class TestDiskCache:
         cache_path.write_text(json.dumps(SAMPLE_MARKETS))
 
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = AaveMarketLookup()
         data = lookup._read_disk_cache()
@@ -291,7 +291,7 @@ class TestDiskCache:
         cache_path = tmp_path / "aave_market_cache.json"
         cache_path.write_text('{"not":"a list"}')
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = AaveMarketLookup()
         assert lookup._read_disk_cache() is None
@@ -299,7 +299,7 @@ class TestDiskCache:
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "aave_market_cache.json"
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH", cache_path
         )
 
         lookup = AaveMarketLookup()
@@ -319,7 +319,7 @@ class TestLoadFlow:
         cache_path = tmp_path / "aave_market_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_MARKETS))
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH", cache_path
         )
 
         lookup = AaveMarketLookup()
@@ -335,7 +335,7 @@ class TestLoadFlow:
 
     def test_load_sets_backoff_when_everything_fails(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH",
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH",
             tmp_path / "missing.json",
         )
         lookup = AaveMarketLookup()
@@ -352,7 +352,7 @@ class TestLoadFlow:
 
     def test_retry_skipped_inside_backoff_window(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.gateway.services.aave_market_lookup.CACHE_PATH",
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH",
             tmp_path / "missing.json",
         )
         lookup = AaveMarketLookup()

@@ -275,7 +275,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
 
     def test_polymarket_service_unavailable_message_when_no_keys(self):
         """End-to-end: PolymarketServiceServicer flags the missing-key path with a clear reason."""
-        from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
+        from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
         env = self._clear_env()
         with patch.dict(os.environ, env, clear=False):

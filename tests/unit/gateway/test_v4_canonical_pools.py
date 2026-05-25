@@ -32,14 +32,14 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
 )
 from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 from almanak.framework.data.tokens.models import Chain
-from almanak.gateway.data.v4_canonical_pools import (
+from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
     CANONICAL_V4_PAIRS,
     CanonicalV4Pair,
     SeedReport,
     V4CanonicalSeedConfigError,
     seed_canonical_pool_keys,
 )
-from almanak.gateway.data.v4_pool_key_cache import (
+from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     NO_HOOKS,
     CachedPoolKey,
     V4CanonicalSeedCollisionError,
@@ -319,11 +319,11 @@ class TestSeedRobustness:
         # be strictly in-process — none of these constructors should fire.
         with (
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.AsyncWeb3",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.AsyncWeb3",
                 side_effect=AssertionError("seed must not construct AsyncWeb3"),
             ) as web3_ctor,
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.AsyncHTTPProvider",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.AsyncHTTPProvider",
                 side_effect=AssertionError("seed must not construct AsyncHTTPProvider"),
             ) as provider_ctor,
             patch(
@@ -423,7 +423,7 @@ class TestMarketServiceSeedWiring:
 
         observed_calls: list[V4PoolKeyCache] = []
 
-        from almanak.gateway.data.v4_canonical_pools import (
+        from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
             seed_canonical_pool_keys as real_seed,
         )
 
@@ -432,7 +432,7 @@ class TestMarketServiceSeedWiring:
             return real_seed(cache)
 
         with patch(
-            "almanak.gateway.data.v4_canonical_pools.seed_canonical_pool_keys",
+            "almanak.connectors.uniswap_v4.gateway.canonical_pools.seed_canonical_pool_keys",
             _tracking_seed,
         ):
             cache = await servicer._get_v4_pool_key_cache()
@@ -453,7 +453,7 @@ class TestMarketServiceSeedWiring:
         servicer = self._make_servicer()
 
         call_count = 0
-        from almanak.gateway.data.v4_canonical_pools import (
+        from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
             seed_canonical_pool_keys as real_seed,
         )
 
@@ -463,7 +463,7 @@ class TestMarketServiceSeedWiring:
             return real_seed(cache)
 
         with patch(
-            "almanak.gateway.data.v4_canonical_pools.seed_canonical_pool_keys",
+            "almanak.connectors.uniswap_v4.gateway.canonical_pools.seed_canonical_pool_keys",
             _tracking_seed,
         ):
             cache1 = await servicer._get_v4_pool_key_cache()
@@ -556,14 +556,14 @@ class TestSeedEdgeCases:
 
 
 def test_public_api_importable() -> None:
-    from almanak.gateway.data.v4_canonical_pools import (  # noqa: F401
+    from almanak.connectors.uniswap_v4.gateway.canonical_pools import (  # noqa: F401
         CANONICAL_V4_PAIRS,
         CanonicalV4Pair,
         SeedReport,
         V4CanonicalSeedConfigError,
         seed_canonical_pool_keys,
     )
-    from almanak.gateway.data.v4_pool_key_cache import (  # noqa: F401
+    from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (  # noqa: F401
         V4CanonicalSeedCollisionError,
     )
 

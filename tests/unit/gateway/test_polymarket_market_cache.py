@@ -40,7 +40,7 @@ from almanak.framework.connectors.polymarket.exceptions import (
     PolymarketInvalidTickSizeError,
 )
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.services.polymarket_service import (
+from almanak.connectors.polymarket.gateway.service import (
     POLYMARKET_MARKET_CACHE_MAX_ENTRIES,
     POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
     POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS,
@@ -232,7 +232,7 @@ class TestLruBound:
     ) -> None:
         # Shrink the cap so we don't have to insert 512 entries.
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
+            "almanak.connectors.polymarket.gateway.service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
             3,
         )
 
@@ -249,7 +249,7 @@ class TestLruBound:
     @pytest.mark.asyncio
     async def test_lru_touch_on_hit(self, servicer: PolymarketServiceServicer, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
+            "almanak.connectors.polymarket.gateway.service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
             3,
         )
         client = MagicMock()
@@ -378,7 +378,7 @@ class TestSingleFlight:
         than corrupt single-flight; the originals must remain identifiable.
         """
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
+            "almanak.connectors.polymarket.gateway.service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
             2,
         )
         # Manually populate two held locks (simulating in-flight fetches).
@@ -412,7 +412,7 @@ class TestSingleFlight:
         """When eviction has a choice (some locks held, some not), it
         must drop an unheld one rather than uselessly grow the dict."""
         monkeypatch.setattr(
-            "almanak.gateway.services.polymarket_service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
+            "almanak.connectors.polymarket.gateway.service.POLYMARKET_MARKET_CACHE_MAX_ENTRIES",
             2,
         )
         held = asyncio.Lock()

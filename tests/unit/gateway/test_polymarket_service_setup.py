@@ -23,7 +23,7 @@ from eth_account import Account
 
 from almanak.framework.connectors.polymarket import SignatureType, TransactionData
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
+from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
 # Deterministic Anvil-style key — never funded.
 TEST_PRIVATE_KEY = "0x" + "ab" * 32

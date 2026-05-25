@@ -33,7 +33,7 @@ from eth_account import Account
 
 from almanak.framework.connectors.polymarket import TransactionData
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.services.polymarket_service import (
+from almanak.connectors.polymarket.gateway.service import (
     POLYGON_MAINNET_CHAIN_ID,
     POLYGON_MIN_PRIORITY_FEE_WEI,
     PUSD_CACHE_STALE_BLOCKS,
@@ -339,7 +339,7 @@ class TestChainIdAssertion:
         # Pretend we're on a real polygon mainnet RPC (not anvil, not localhost).
         servicer.settings.polymarket_network = "mainnet"
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ):
             web3 = MagicMock()
@@ -357,7 +357,7 @@ class TestChainIdAssertion:
     async def test_passes_when_chain_id_is_polygon_mainnet(self, servicer: PolymarketServiceServicer) -> None:
         servicer.settings.polymarket_network = "mainnet"
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ):
             web3 = MagicMock()
@@ -374,7 +374,7 @@ class TestChainIdAssertion:
         ``eth_chainId`` round-trip per send."""
         servicer.settings.polymarket_network = "mainnet"
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ):
             web3 = MagicMock()
@@ -398,7 +398,7 @@ class TestChainIdAssertion:
 
         type(web3.eth).chain_id = _OneShot()  # type: ignore[misc]
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ):
             await servicer2._assert_polygon_chain_id(web3)
@@ -424,7 +424,7 @@ class TestChainIdAssertion:
         """Localhost RPC URL → treated as Anvil even without the env var."""
         servicer.settings.polymarket_network = "mainnet"
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="http://127.0.0.1:8545",
         ):
             web3 = MagicMock()
@@ -524,7 +524,7 @@ class TestCachedWeb3Integration:
         (not through a fresh ``HTTPProvider``)."""
         sentinel_web3 = MagicMock(name="cached_web3_instance")
         with patch(
-            "almanak.gateway.services.polymarket_service.get_cached_web3",
+            "almanak.connectors.polymarket.gateway.service.get_cached_web3",
             return_value=sentinel_web3,
         ) as mock_get_cached:
             result = servicer._get_polygon_web3()
@@ -539,7 +539,7 @@ class TestCachedWeb3Integration:
         servicer = PolymarketServiceServicer(settings=settings)
         sentinel_web3 = MagicMock()
         with patch(
-            "almanak.gateway.services.polymarket_service.get_cached_web3",
+            "almanak.connectors.polymarket.gateway.service.get_cached_web3",
             return_value=sentinel_web3,
         ) as mock_get_cached:
             servicer._get_polygon_web3()
@@ -555,7 +555,7 @@ class TestCachedWeb3Integration:
         attribute lookup in the hot path."""
         sentinel_web3 = MagicMock()
         with patch(
-            "almanak.gateway.services.polymarket_service.get_cached_web3",
+            "almanak.connectors.polymarket.gateway.service.get_cached_web3",
             return_value=sentinel_web3,
         ) as mock_get_cached:
             first = servicer._get_polygon_web3()
@@ -583,7 +583,7 @@ class TestSignAndSubmitChainIdGate:
         servicer._polygon_web3 = web3
 
         with patch(
-            "almanak.gateway.services.polymarket_service.get_rpc_url",
+            "almanak.connectors.polymarket.gateway.service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ), pytest.raises(ValueError, match="expected polygon mainnet"):
             # VIB-3710: _sign_and_submit_setup_tx now takes a request-scoped

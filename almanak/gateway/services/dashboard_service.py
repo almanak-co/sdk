@@ -788,47 +788,29 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             "paper_metrics_json": json.dumps(paper_metrics),
         }
 
-    def _derive_protocol_from_config(self, config: dict, deployment_id: str) -> str:  # noqa: C901
-        """Derive protocol string from config or deployment ID."""
+    def _derive_protocol_from_config(self, config: dict, _deployment_id: str) -> str:
+        """Derive protocol string from config.
+
+        Honours an explicit ``config["protocol"]`` string only. The previous
+        implementation also substring-sniffed the caller-supplied
+        ``_deployment_id`` against a hard-coded ladder of 14 protocol
+        keywords ("uniswap", "aave", "gmx", …) — a user-controlled string
+        used as a routing key is a real bug: any deployment id containing
+        one of those substrings would be misclassified on the dashboard,
+        and the ladder bypasses the connector-self-containment program's
+        canonical ``ProtocolName`` registry (VIB-4810).
+
+        ``_deployment_id`` is intentionally ignored (underscore-prefixed
+        so static analysis doesn't flag the unused argument). When no
+        explicit ``config["protocol"]`` is present, return ``"Unknown"``
+        and let the connector registry (Phase 3) carry the protocol
+        identity.
+        """
         # Same untrusted-JSON hazard as the caller: ``config["protocol"]`` could
-        # be a list / dict / None. Only honour a non-empty string; otherwise
-        # fall through to the deployment-id heuristics below.
+        # be a list / dict / None. Only honour a non-empty string.
         explicit = config.get("protocol")
         if isinstance(explicit, str) and explicit:
             return explicit
-
-        if "pool" in config:
-            return "Uniswap V3"
-
-        deployment_id_lower = deployment_id.lower()
-        if "uniswap" in deployment_id_lower:
-            return "Uniswap V3"
-        if "aave" in deployment_id_lower:
-            return "Aave V3"
-        if "gmx" in deployment_id_lower:
-            return "GMX V2"
-        if "enso" in deployment_id_lower:
-            return "Enso"
-        if "pancake" in deployment_id_lower:
-            return "PancakeSwap V3"
-        if "aerodrome" in deployment_id_lower:
-            return "Aerodrome"
-        if "traderjoe" in deployment_id_lower or "tj_" in deployment_id_lower:
-            return "TraderJoe V2"
-        if "benqi" in deployment_id_lower:
-            return "Benqi"
-        if "morpho" in deployment_id_lower:
-            return "Morpho"
-        if "compound" in deployment_id_lower:
-            return "Compound V3"
-        if "sushi" in deployment_id_lower:
-            return "SushiSwap V3"
-        if "curve" in deployment_id_lower:
-            return "Curve"
-        if "balancer" in deployment_id_lower:
-            return "Balancer"
-        if "velodrome" in deployment_id_lower:
-            return "Velodrome"
 
         return "Unknown"
 

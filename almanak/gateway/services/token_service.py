@@ -475,49 +475,49 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
     async def _get_jupiter(self) -> Any:
         """Get the JupiterTokenLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
+        from almanak.connectors.jupiter.gateway.token_lookup import get_jupiter_lookup
 
         return await get_jupiter_lookup()
 
     async def _get_pendle(self) -> Any:
         """Get the PendleMarketLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.pendle_market_lookup import get_pendle_lookup
+        from almanak.connectors.pendle.gateway.market_lookup import get_pendle_lookup
 
         return await get_pendle_lookup()
 
     async def _get_aave(self) -> Any:
         """Get the AaveMarketLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.aave_market_lookup import get_aave_lookup
+        from almanak.connectors.aave_v3.gateway.market_lookup import get_aave_lookup
 
         return await get_aave_lookup()
 
     async def _get_morpho(self) -> Any:
         """Get the MorphoVaultLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.morpho_vault_lookup import get_morpho_lookup
+        from almanak.connectors.morpho_vault.gateway.vault_lookup import get_morpho_lookup
 
         return await get_morpho_lookup()
 
     async def _get_compound(self) -> Any:
         """Get the CompoundMarketLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.compound_market_lookup import get_compound_lookup
+        from almanak.connectors.compound_v3.gateway.market_lookup import get_compound_lookup
 
         return await get_compound_lookup()
 
     async def _get_beefy(self) -> Any:
         """Get the BeefyVaultLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.beefy_vault_lookup import get_beefy_lookup
+        from almanak.connectors.beefy.gateway.vault_lookup import get_beefy_lookup
 
         return await get_beefy_lookup()
 
     async def _get_yearn(self) -> Any:
         """Get the YearnVaultLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.yearn_vault_lookup import get_yearn_lookup
+        from almanak.connectors.yearn.gateway.vault_lookup import get_yearn_lookup
 
         return await get_yearn_lookup()
 
     async def _get_fluid(self) -> Any:
         """Get the FluidMarketLookup singleton (factory handles retry/load)."""
-        from almanak.gateway.services.fluid_market_lookup import get_fluid_lookup
+        from almanak.connectors.fluid.gateway.market_lookup import get_fluid_lookup
 
         return await get_fluid_lookup()
 

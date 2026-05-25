@@ -44,7 +44,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.gateway.data.v4_pool_key_cache import (
+from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     NO_HOOKS,
     CachedPoolKey,
     V4PoolKeyCache,
@@ -250,11 +250,11 @@ class TestNoEgressAtScale:
         cache = V4PoolKeyCache()
         with (
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.AsyncWeb3",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.AsyncWeb3",
                 side_effect=AssertionError("seed must not construct AsyncWeb3"),
             ) as web3_ctor,
             patch(
-                "almanak.gateway.data.v4_pool_key_cache.AsyncHTTPProvider",
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.AsyncHTTPProvider",
                 side_effect=AssertionError("seed must not construct AsyncHTTPProvider"),
             ) as provider_ctor,
             patch(

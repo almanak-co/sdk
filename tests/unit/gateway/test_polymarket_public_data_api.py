@@ -33,7 +33,7 @@ from eth_account import Account
 from almanak.framework.connectors.polymarket.models import Position
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
+from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
 TEST_PRIVATE_KEY = "0x" + "ab" * 32
 TEST_ACCOUNT = Account.from_key(TEST_PRIVATE_KEY)

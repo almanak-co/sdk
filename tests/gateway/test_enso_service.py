@@ -5,16 +5,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.connectors.enso.gateway.service import (
+    CHAIN_MAPPING,
+    EnsoServiceServicer,
+    _decode_bundle_arg,
+)
 from almanak.framework.connectors.enso.client import (
     CHAIN_MAPPING as SDK_CHAIN_MAPPING,
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.enso_service import (
-    CHAIN_MAPPING,
-    EnsoServiceServicer,
-    _decode_bundle_arg,
-)
 
 
 @pytest.fixture
