@@ -23,10 +23,24 @@ from almanak.framework.models.base import (
 from .base import BaseIntent
 from .intent_errors import InvalidProtocolParameterError
 from .vocabulary import (
-    PROTOCOL_CAPABILITIES,
     IntentType,
     InterestRateMode,
 )
+
+
+def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
+    """Return the capability dict for ``protocol_lower`` via the connector registry.
+
+    Resolved lazily because the registry imports connector packages whose own
+    ``__init__.py`` modules pull symbols from this package -- pulling the
+    registry at module-import time would create a circular import on cold
+    boot. The lookup is cheap once the registry's aggregated view is built
+    (built on first call, cached for the life of the process).
+    """
+    # Local import: see docstring.
+    from almanak.framework.connectors.capabilities_registry import get_protocol_capabilities
+
+    return get_protocol_capabilities(protocol_lower)
 
 
 class BorrowIntent(BaseIntent):
@@ -84,7 +98,7 @@ class BorrowIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -198,7 +212,7 @@ class RepayIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -307,7 +321,7 @@ class SupplyIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -407,7 +421,7 @@ class WithdrawIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -515,7 +529,7 @@ class DeleverageIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters (mirrors RepayIntent)."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):

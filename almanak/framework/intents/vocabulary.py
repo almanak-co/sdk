@@ -90,124 +90,43 @@ InterestRateMode = Literal["variable"]
 # Protocol Capabilities
 # =============================================================================
 
-# Protocol capabilities for validation
-# Maps protocol names to their supported features/parameters
-PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
-    "aave_v3": {
-        "supports_interest_rate_mode": True,
-        "interest_rate_modes": ["variable"],  # stable rate deprecated on Aave V3 (most assets disabled)
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "morpho": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": True,  # Morpho Blue supports both collateral and loan-token supply
-        "requires_market_id": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "morpho_blue": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": True,  # Morpho Blue supports both collateral and loan-token supply
-        "requires_market_id": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "curvance": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": False,  # supply path always posts as collateral in v1
-        "requires_market_id": True,  # per-market cToken / BorrowableCToken addressing
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "spark": {
-        "supports_interest_rate_mode": True,
-        "interest_rate_modes": ["variable"],  # stable rate deprecated on Spark (most assets disabled)
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "compound_v3": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "benqi": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "silo_v2": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": False,  # All deposits are collateral in isolated pairs
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "gmx_v2": {
-        "supports_leverage": True,
-        "max_leverage": Decimal("100"),
-        "min_leverage": Decimal("1.1"),
-        "operations": ["perp_open", "perp_close"],
-    },
-    "hyperliquid": {
-        "supports_leverage": True,
-        "max_leverage": Decimal("50"),
-        "min_leverage": Decimal("1"),
-        "operations": ["perp_open", "perp_close"],
-    },
-    "drift": {
-        "supports_leverage": True,
-        "max_leverage": Decimal("20"),
-        "min_leverage": Decimal("1"),
-        "operations": ["perp_open", "perp_close"],
-    },
-    "uniswap_v3": {
-        "operations": ["swap", "lp_open", "lp_close"],
-    },
-    "enso": {
-        "operations": ["swap"],
-    },
-    "polymarket": {
-        "operations": ["prediction_buy", "prediction_sell", "prediction_redeem"],
-        "min_price": Decimal("0.01"),
-        "max_price": Decimal("0.99"),
-        "order_types": ["market", "limit"],
-        "time_in_force": ["GTC", "IOC", "FOK"],
-        "collateral_token": "USDC",
-    },
-    "pendle": {
-        "operations": ["swap", "lp_open", "lp_close", "withdraw"],
-        "supports_pt_yt": True,
-        "supports_maturity": True,
-    },
-    "metamorpho": {
-        "operations": ["vault_deposit", "vault_redeem"],
-        "supports_erc4626": True,
-    },
-    "kamino": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": False,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "raydium_clmm": {
-        "type": "clmm",
-        "operations": ["lp_open", "lp_close"],
-    },
-    "meteora_dlmm": {
-        "type": "dlmm",
-        "operations": ["lp_open", "lp_close"],
-    },
-    "orca_whirlpools": {
-        "type": "clmm",
-        "operations": ["lp_open", "lp_close"],
-    },
-    "radiant_v2": {
-        "supports_interest_rate_mode": True,
-        "interest_rate_modes": ["variable"],  # stable rate deprecated (Aave V2 fork)
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-    "euler_v2": {
-        "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": True,
-        "operations": ["supply", "withdraw", "borrow", "repay"],
-    },
-}
+# ``PROTOCOL_CAPABILITIES`` is a read-through aggregated view over every
+# connector's ``capabilities.py`` module. The actual data lives next to each
+# connector (see ``almanak/framework/connectors/<protocol>/capabilities.py``)
+# and is assembled by ``CapabilitiesRegistry``.
+#
+# The aggregator is resolved lazily via module-level ``__getattr__`` (PEP 562)
+# rather than eagerly at import time because the connector packages import
+# from this module (``IntentType``) -- eager aggregation would create an
+# import cycle on cold boot.
+#
+# Identity contract: every access returns the same aggregated dict instance,
+# and every value-dict is the connector module's own dict (not a copy). This
+# matches the long-standing semantics of the previous hand-written table:
+# tests that monkey-patch a single capability value (e.g.
+# ``PROTOCOL_CAPABILITIES["aave_v3"]["interest_rate_modes"] = [...]``) see the
+# change reflected in subsequent validator calls within the same process and
+# can restore the original value in ``finally``.
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy module-level attribute access (PEP 562) for ``PROTOCOL_CAPABILITIES``.
+
+    Resolves the aggregated capability view on first read and caches it in
+    this module's ``globals()`` so subsequent accesses skip ``__getattr__``
+    entirely (PEP 562 only fires for missing attributes). Mirrors the cache
+    pattern in ``almanak/framework/intents/__init__.py:__getattr__`` so both
+    re-export sites have identical lookup cost.
+    """
+    if name == "PROTOCOL_CAPABILITIES":
+        from almanak.framework.connectors.capabilities_registry import (
+            all_protocol_capabilities,
+        )
+
+        caps = all_protocol_capabilities()
+        globals()["PROTOCOL_CAPABILITIES"] = caps
+        return caps
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class IntentType(Enum):

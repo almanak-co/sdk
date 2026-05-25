@@ -24,9 +24,19 @@ from almanak.framework.models.base import (
 from .base import BaseIntent
 from .intent_errors import InvalidProtocolParameterError
 from .vocabulary import (
-    PROTOCOL_CAPABILITIES,
     IntentType,
 )
+
+
+def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
+    """Return the capability dict for ``protocol_lower`` via the connector registry.
+
+    Function-local import: see ``lending_intents._capabilities_for`` for the
+    full rationale. Same cold-boot circular-import constraint applies here.
+    """
+    from almanak.framework.connectors.capabilities_registry import get_protocol_capabilities
+
+    return get_protocol_capabilities(protocol_lower)
 
 
 class PerpOpenIntent(BaseIntent):
@@ -87,7 +97,7 @@ class PerpOpenIntent(BaseIntent):
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
-        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+        capabilities = _capabilities_for(protocol_lower)
 
         # Validate leverage if the protocol supports it
         if capabilities.get("supports_leverage", False):

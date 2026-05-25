@@ -100,8 +100,15 @@ from .tick_utils import (
     snap_to_tick_spacing,
     tick_to_price,
 )
+
+# NOTE: ``PROTOCOL_CAPABILITIES`` is intentionally NOT imported eagerly here.
+# It is exposed via module-level ``__getattr__`` below so the import is
+# deferred until a consumer actually reads the attribute. Eager import would
+# trigger ``CapabilitiesRegistry.all_capabilities()`` -> connector module
+# imports -> back into ``framework.intents`` while ``intents/__init__.py``
+# is still mid-execution, producing a partial-module ImportError on cold
+# boot.
 from .vocabulary import (
-    PROTOCOL_CAPABILITIES,
     BorrowIntent,
     ChainedAmount,
     CollectFeesIntent,
@@ -260,6 +267,18 @@ def __getattr__(name: str) -> object:
 
         globals()["PredictionExitConditions"] = PredictionExitConditions
         return PredictionExitConditions
+    if name == "PROTOCOL_CAPABILITIES":
+        # Lazy passthrough to the connector-owned registry. Resolved on first
+        # attribute access (after every framework package has finished
+        # importing) so connector capability modules can safely re-enter the
+        # intent layer without producing a partial-module ImportError. The
+        # registry caches the aggregated dict so identity is stable across
+        # repeated reads, matching the long-standing semantics of the
+        # previously hand-written table.
+        from .vocabulary import PROTOCOL_CAPABILITIES as _caps
+
+        globals()["PROTOCOL_CAPABILITIES"] = _caps
+        return _caps
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
