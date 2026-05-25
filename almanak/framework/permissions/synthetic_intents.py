@@ -40,7 +40,12 @@ from ..intents.vocabulary import (
     WithdrawIntent,
 )
 from .constants import VAULT_PROTOCOL_REPRESENTATIVE
-from .hints import PermissionHints, get_permission_hints
+from .hints import (
+    DiscoveryContext,
+    PermissionHints,
+    get_discovery_vectors_override,
+    get_permission_hints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -224,13 +229,12 @@ def build_synthetic_intents(
 def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _SWAP_PROTOCOLS:
         return []
-    # Curve is pool-specific: a single ``synthetic_swap_pair`` only authorises
-    # one of the curated pools per chain (e.g. 3pool USDC/USDT on ethereum),
-    # leaving every other registered pool — notably tricrypto2 — unauthorised
-    # on the Safe (issue #1903). Iterate the curated registry instead so the
-    # manifest covers the full surface a strategy author can route through.
-    if protocol == "curve":
-        return _build_curve_swap_intents(chain)
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "SWAP", chain, ctx)
+        if result is not None:
+            return result
     # Pendle exposes four selectors on its Router for SWAP (one per
     # direction × token kind) plus a pre-swap path through UniswapV3 when
     # the user supplies a token that doesn't mint SY directly. A single
@@ -290,59 +294,6 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
                 to_token=usdc,
                 amount=Decimal("0.01"),
                 protocol=protocol,
-                chain=chain,
-            )
-        )
-    return intents
-
-
-def _build_curve_swap_intents(chain: str) -> list[AnyIntent]:
-    """Emit one synthetic ``SwapIntent`` per curated curve pool on ``chain``.
-
-    Curve pools are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a
-    single token pair only resolves to one pool. ``CurveCompiler`` walks
-    ``CURVE_POOLS[chain]`` to match pool by
-    coin pair; emitting one intent per registered pool — using the first
-    two coin addresses of each — guarantees every pool's address lands on
-    the manifest.
-
-    The price-oracle gate in ``CurveCompiler`` (price_ratio for
-    CryptoSwap/Tricrypto pools) does NOT fire during permission discovery
-    because ``IntentCompiler`` is created with ``allow_placeholder_prices=True``
-    and ``_require_token_price`` returns the placeholder map (USDT=$1,
-    WETH=$2000, WBTC=$45000, …) — every pool's coin pair resolves to a
-    finite, positive price_ratio.
-
-    For polygon's am3pool which sets ``use_underlying=True``, the compiler
-    routes to ``exchange_underlying`` automatically based on the pool's
-    pool_type; no special-casing is needed here.
-    """
-    try:
-        from ..connectors.curve.adapter import CURVE_POOLS
-    except ImportError:
-        logger.debug("Curve adapter not importable; skipping synthetic swap discovery")
-        return []
-
-    chain_pools = CURVE_POOLS.get(chain, {})
-    if not chain_pools:
-        return []
-
-    intents: list[AnyIntent] = []
-    for pool_name, pool_data in chain_pools.items():
-        coins = pool_data.get("coin_addresses") or []
-        if len(coins) < 2:
-            logger.warning(
-                "Curve pool %s on %s has fewer than 2 coins; skipping synthetic discovery",
-                pool_name,
-                chain,
-            )
-            continue
-        intents.append(
-            SwapIntent(
-                from_token=coins[0],
-                to_token=coins[1],
-                amount=Decimal("1"),
-                protocol="curve",
                 chain=chain,
             )
         )

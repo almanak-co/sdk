@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import importlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from almanak.framework.intents.vocabulary import AnyIntent
 
 logger = logging.getLogger(__name__)
 
@@ -151,3 +156,42 @@ def get_permission_hints(protocol: str) -> PermissionHints:
     except (ImportError, ModuleNotFoundError):
         pass
     return _DEFAULT
+
+
+@dataclass(frozen=True)
+class DiscoveryContext:
+    """Per-chain inputs threaded to per-connector discovery_vectors overrides.
+
+    Connectors that take ownership of vector construction receive this so they
+    don't have to re-import the framework's default token pair / native-symbol
+    machinery. Fields are stable at the synthetic-intents call boundary; add
+    new ones only with backwards-compat defaults.
+    """
+
+    usdc: str  # default "from" token for the chain (from _get_token_pair)
+    weth: str  # default "to" token for the chain (from _get_token_pair)
+
+
+def get_discovery_vectors_override(
+    protocol: str,
+) -> Callable[[str, str, str, DiscoveryContext], list[AnyIntent] | None] | None:
+    """Resolve a connector's optional ``build_discovery_vectors`` function.
+
+    Mirrors :func:`get_permission_hints`' convention-based import + connector
+    alias map, but looks up an OPTIONAL module-level function named
+    ``build_discovery_vectors`` on the connector's ``permission_hints``
+    module. Returns ``None`` when the connector hasn't defined one (the
+    common case — most connectors stick with the declarative
+    ``PermissionHints`` knobs).
+    """
+    mapping = _PROTOCOL_CONNECTOR_MAP.get(protocol, protocol)
+    if isinstance(mapping, tuple):
+        connector_name, _ = mapping
+    else:
+        connector_name = mapping
+    try:
+        mod = importlib.import_module(f"almanak.framework.connectors.{connector_name}.permission_hints")
+    except ImportError:
+        return None
+    fn = getattr(mod, "build_discovery_vectors", None)
+    return fn if callable(fn) else None
