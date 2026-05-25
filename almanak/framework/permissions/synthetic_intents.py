@@ -204,13 +204,13 @@ def build_synthetic_intents(
     elif it == IntentType.LP_COLLECT_FEES:
         return _build_lp_collect_fees_intents(protocol_lower, chain)
     elif it == IntentType.SUPPLY:
-        return _build_supply_intents(protocol_lower, chain, usdc)
+        return _build_supply_intents(protocol_lower, chain, usdc, weth)
     elif it == IntentType.WITHDRAW:
-        return _build_withdraw_intents(protocol_lower, chain, usdc)
+        return _build_withdraw_intents(protocol_lower, chain, usdc, weth)
     elif it == IntentType.BORROW:
         return _build_borrow_intents(protocol_lower, chain, usdc, weth)
     elif it == IntentType.REPAY:
-        return _build_repay_intents(protocol_lower, chain, usdc)
+        return _build_repay_intents(protocol_lower, chain, usdc, weth)
     elif it == IntentType.PERP_OPEN:
         return _build_perp_open_intents(protocol_lower, chain, usdc)
     elif it == IntentType.PERP_CLOSE:
@@ -650,101 +650,24 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     ]
 
 
-def _morpho_blue_synthetic_market_id(chain: str, fallback: str | None) -> str | None:
-    """Return a valid synthetic market_id for morpho_blue on ``chain``.
-
-    Morpho Blue markets are chain-specific: a market_id valid on ethereum
-    will not resolve on arbitrum/base/polygon/monad. The adapter ships with
-    a per-chain registry in ``MORPHO_MARKETS``; prefer its first entry for
-    the requested chain so the compiler can actually build the supply tx.
-
-    Falls back to ``fallback`` (the hint-level default, ethereum-tuned) only
-    when the adapter registry has no entry for the chain.
-    """
-    try:
-        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
-    except ImportError:
-        return fallback
-    chain_markets = MORPHO_MARKETS.get(chain, {})
-    if chain_markets:
-        return next(iter(chain_markets))
-    return fallback
-
-
-def _morpho_blue_loan_token(chain: str, fallback: str) -> str:
-    """Return the loan-token address for morpho_blue's synthetic market.
-
-    The loan-token path (``supply`` with ``use_as_collateral=False``) requires
-    ``intent.token`` to match the market's loan token. Using the chain default
-    USDC can mismatch the selected market (e.g. polygon's first registered
-    market is USDT-quoted), producing a compile failure that drops both flag
-    variants from the manifest.
-    """
-    try:
-        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
-    except ImportError:
-        return fallback
-    chain_markets = MORPHO_MARKETS.get(chain, {})
-    if not chain_markets:
-        return fallback
-    first_market = next(iter(chain_markets.values()))
-    return first_market.get("loan_token_address") or fallback
-
-
-def _morpho_blue_collateral_token(chain: str, fallback: str) -> str:
-    """Return the collateral-token address for morpho_blue's synthetic market.
-
-    Mirror of :func:`_morpho_blue_loan_token` for the collateral path
-    (``supply`` with ``use_as_collateral=True`` / ``withdrawCollateral``).
-    """
-    try:
-        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
-    except ImportError:
-        return fallback
-    chain_markets = MORPHO_MARKETS.get(chain, {})
-    if not chain_markets:
-        return fallback
-    first_market = next(iter(chain_markets.values()))
-    return first_market.get("collateral_token_address") or fallback
-
-
-def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
+def _build_supply_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _LENDING_PROTOCOLS:
         return []
+    # Override hook runs BEFORE the chain/pool gate below so a connector that
+    # owns its discovery via ``build_discovery_vectors`` is never blocked by
+    # the legacy hardcoded singleton exception list. Mirrors
+    # ``_build_swap_intents``.
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "SUPPLY", chain, ctx)
+        if result is not None:
+            return result
     # Check lending pool exists for this chain
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
-
-    # Morpho Blue routes SUPPLY on ``use_as_collateral``: True calls
-    # ``supplyCollateral``, False calls ``supply``. The manifest needs BOTH
-    # selectors (a strategy may supply loan-side or collateral-side depending
-    # on intent), so we sweep the flag during discovery. Without this sweep,
-    # only one of the two selectors lands on the manifest and the other path
-    # reverts on the Safe.  See codex review 3135601928.
-    if protocol == "morpho_blue":
-        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
-        loan_token = _morpho_blue_loan_token(chain, usdc)
-        collateral_token = _morpho_blue_collateral_token(chain, usdc)
-        return [
-            SupplyIntent(
-                protocol=protocol,
-                token=collateral_token,
-                amount=Decimal("1"),
-                chain=chain,
-                market_id=market_id,
-                use_as_collateral=True,
-            ),
-            SupplyIntent(
-                protocol=protocol,
-                token=loan_token,
-                amount=Decimal("100"),
-                chain=chain,
-                market_id=market_id,
-                use_as_collateral=False,
-            ),
-        ]
 
     # Compound V3 routes SUPPLY on token-vs-Comet-base match: token==base calls
     # ``Comet.supply()``, anything else calls ``Comet.supplyCollateral()``. The
@@ -754,7 +677,8 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyInten
     # IS the Comet base there) but the collateral path on polygon (Comet base is
     # USDC.e, not native USDC). Either way, exactly one of the two selectors
     # lands on the manifest and the other path reverts on the Safe. Mirrors the
-    # morpho_blue sweep above.
+    # morpho_blue flag sweep, which lives in
+    # ``connectors/morpho_blue/permission_hints.build_discovery_vectors``.
     if protocol == "compound_v3":
         comp_tokens = _compound_v3_synthetic_tokens(chain, usdc, hints.synthetic_market_id)
         comp_base: str = comp_tokens[0]
@@ -825,39 +749,19 @@ def _compound_v3_synthetic_tokens(
     return base_token, collateral_token, market
 
 
-def _build_withdraw_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
+def _build_withdraw_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _LENDING_PROTOCOLS:
         return []
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "WITHDRAW", chain, ctx)
+        if result is not None:
+            return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
-
-    # Morpho Blue routes WITHDRAW on ``is_collateral`` (True → withdrawCollateral,
-    # False → withdraw). Sweep both flag variants so the manifest covers loan
-    # reclamation AND collateral withdrawal. See codex review 3135601928.
-    if protocol == "morpho_blue":
-        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
-        loan_token = _morpho_blue_loan_token(chain, usdc)
-        collateral_token = _morpho_blue_collateral_token(chain, usdc)
-        return [
-            WithdrawIntent(
-                protocol=protocol,
-                token=collateral_token,
-                amount=Decimal("1"),
-                chain=chain,
-                market_id=market_id,
-                is_collateral=True,
-            ),
-            WithdrawIntent(
-                protocol=protocol,
-                token=loan_token,
-                amount=Decimal("50"),
-                chain=chain,
-                market_id=market_id,
-                is_collateral=False,
-            ),
-        ]
 
     # Compound V3: use the Comet's base token, not the chain default USDC. On
     # polygon these differ (Comet base = USDC.e, chain default = native USDC),
@@ -891,33 +795,16 @@ def _build_withdraw_intents(protocol: str, chain: str, usdc: str) -> list[AnyInt
 def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _LENDING_PROTOCOLS:
         return []
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "BORROW", chain, ctx)
+        if result is not None:
+            return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
-
-    # Morpho Blue markets are chain-specific in both their pair AND their id
-    # (e.g. polygon's first registered market is WBTC/USDC, arbitrum/base use
-    # wstETH/USDC). Resolving each through its helper aligns the synthetic
-    # BorrowIntent with the same market the supply/withdraw paths discovered,
-    # so the manifest authorises the actual collateral approve + Blue.borrow
-    # selectors. Falling back to the chain-default ``weth`` declared the wrong
-    # collateral, dropping both selectors from the manifest. See #1904.
-    if protocol == "morpho_blue":
-        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
-        loan_token = _morpho_blue_loan_token(chain, usdc)
-        collateral_token = _morpho_blue_collateral_token(chain, weth)
-        return [
-            BorrowIntent(
-                protocol=protocol,
-                collateral_token=collateral_token,
-                collateral_amount=Decimal("1"),
-                borrow_token=loan_token,
-                borrow_amount=Decimal("100"),
-                chain=chain,
-                market_id=market_id,
-            )
-        ]
 
     # Compound V3: borrow_token must match the Comet base (USDC.e on polygon,
     # not native USDC). Collateral fallback to weth covers ethereum/arbitrum/
@@ -951,30 +838,19 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
     ]
 
 
-def _build_repay_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
+def _build_repay_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _LENDING_PROTOCOLS:
         return []
+    override = get_discovery_vectors_override(protocol)
+    if override is not None:
+        ctx = DiscoveryContext(usdc=usdc, weth=weth)
+        result = override(protocol, "REPAY", chain, ctx)
+        if result is not None:
+            return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
-
-    # Morpho Blue: resolve the loan token + market id from the per-chain registry
-    # so the synthetic RepayIntent targets the same market as the borrow path.
-    # Without this, polygon (USDT-quoted first market) would synthesise a USDC
-    # repay against a WBTC/USDC market, mismatching the discovered borrow.
-    if protocol == "morpho_blue":
-        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
-        loan_token = _morpho_blue_loan_token(chain, usdc)
-        return [
-            RepayIntent(
-                protocol=protocol,
-                token=loan_token,
-                amount=Decimal("50"),
-                chain=chain,
-                market_id=market_id,
-            )
-        ]
 
     # Compound V3: repay token must match the Comet base. Same rationale as
     # WITHDRAW above — polygon's base is USDC.e, not native USDC.

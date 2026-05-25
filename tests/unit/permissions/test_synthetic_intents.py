@@ -289,6 +289,75 @@ class TestRadiantV2LendingRegistration:
         assert intents[0].chain == "ethereum"
 
 
+class TestOverrideBypassesLendingPoolGate:
+    """The ``build_discovery_vectors`` override MUST run before the
+    ``LENDING_POOL_ADDRESSES`` gate in every lending builder.
+
+    Regression for the gate-ordering fix in commit 30b0b0e80 (PR #2412): if the
+    order is ever flipped back, any future singleton-based lending connector
+    that registers ``build_discovery_vectors`` but isn't in the hardcoded
+    ``("morpho_blue", "compound_v3")`` exception list silently gets killed by
+    the pool gate. The override mechanism's whole purpose — letting connectors
+    self-contain discovery without modifying central dispatch — depends on
+    this ordering.
+
+    The test mocks ``get_discovery_vectors_override`` to return a stub that
+    yields a sentinel intent list, then calls each lending builder with a
+    ``(protocol, chain)`` combo where the legacy pool gate WOULD return ``[]``
+    (``spark`` on ``monad`` — ``spark`` is in ``_LENDING_PROTOCOLS`` so the
+    first gate passes, but ``monad`` has no spark pool, so the second gate
+    would block). The sentinel coming back proves the override ran first.
+    """
+
+    @pytest.mark.parametrize("intent_type", ["SUPPLY", "WITHDRAW", "BORROW", "REPAY"])
+    def test_override_result_returned_before_pool_gate(self, monkeypatch, intent_type):
+        from decimal import Decimal
+
+        from almanak.framework.permissions import synthetic_intents
+
+        if intent_type == "BORROW":
+            sentinel = [
+                BorrowIntent(
+                    protocol="spark",
+                    collateral_token="0xC",
+                    collateral_amount=Decimal("1"),
+                    borrow_token="0xB",
+                    borrow_amount=Decimal("100"),
+                    chain="monad",
+                    market_id=None,
+                )
+            ]
+        else:
+            cls = {
+                "SUPPLY": SupplyIntent,
+                "WITHDRAW": WithdrawIntent,
+                "REPAY": RepayIntent,
+            }[intent_type]
+            sentinel = [
+                cls(
+                    protocol="spark",
+                    token="0xT",
+                    amount=Decimal("1"),
+                    chain="monad",
+                    market_id=None,
+                )
+            ]
+
+        def stub_override(protocol):
+            def fn(p, it, ch, ctx):
+                return sentinel
+
+            return fn
+
+        monkeypatch.setattr(synthetic_intents, "get_discovery_vectors_override", stub_override)
+
+        # spark IS in _LENDING_PROTOCOLS (passes first gate), spark is NOT in
+        # LENDING_POOL_ADDRESSES["monad"] (would fail pool gate without the
+        # override). The fix ensures the override fires first.
+        result = synthetic_intents.build_synthetic_intents("spark", intent_type, "monad")
+        assert result is sentinel
+
+
 class TestFlashLoanIntents:
     """Test synthetic flash loan intent creation."""
 
