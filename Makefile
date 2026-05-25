@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface
 
 # Load .env file if it exists
 -include .env
@@ -77,6 +77,14 @@ check-deployment-scoped-tables:
 
 check-deployment-id-proto-surface:
 	uv run python scripts/ci/check_deployment_id_proto_surface.py
+
+# Connector chain-support validator (VIB-4802 / epic VIB-4800). Refuses
+# connector code (and strategy decorators) that key off a chain
+# identifier the canonical chain resolver does not recognize. The
+# allowlist for legitimate cross-chain bridge targets lives at
+# scripts/ci/connector-chain-allowlist.yml.
+check-connector-chains:
+	uv run python scripts/ci/check_connector_chains.py
 
 # Run security checks (bandit for Python security issues)
 security:
