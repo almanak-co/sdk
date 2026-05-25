@@ -83,6 +83,24 @@ _ALLOWLIST_WRITERS_QUALNAMED: frozenset[tuple[str, str]] = frozenset({
         "almanak/gateway/services/state_service.py",
         "StateServiceServicer._save_ledger_and_registry_pg",
     ),
+    # VIB-4794 — Postgres half of the backfill writer (twin of
+    # `SQLiteStore.insert_position_registry_row_if_absent` above).
+    # Closes the in-process Python parity gap that VIB-4205 / T19 left:
+    # the gRPC RPC half landed but the WARM-backend method that
+    # `state_manager.get_position_registry_open_rows` /
+    # `insert_position_registry_row_if_absent` delegate to was missing
+    # on `PostgresStore`. Same cutover spec §3.4 semantics as the SQLite
+    # twin: idempotent `INSERT ... ON CONFLICT DO NOTHING` keyed on
+    # `(deployment_id, chain, primitive, physical_identity_hash)`,
+    # one-time observation of legacy `position_events` rows, never
+    # mutates already-existing registry rows. Runtime status flips on
+    # CLOSE still go through the atomic primitive
+    # (`StateServiceServicer._save_ledger_and_registry_pg`) per
+    # blueprint 28 §4.3 — NOT through this path.
+    (
+        "almanak/framework/state/state_manager.py",
+        "PostgresStore.insert_position_registry_row_if_absent",
+    ),
 })
 
 

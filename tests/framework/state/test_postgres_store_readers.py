@@ -1151,3 +1151,214 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
     # Override positions_json explicitly.
     args2 = build_pg_upsert_args(inputs, request, now, Decimal("0"), positions_json='[{"x":1}]')
     assert args2[11] == '[{"x":1}]'
+
+
+# =============================================================================
+# position_registry readers + backfill writer (VIB-4794)
+# =============================================================================
+
+
+def _registry_row(**overrides):
+    """Build an asyncpg-shaped row dict matching the SELECT column list in
+    :meth:`PostgresStore.get_position_registry_open_rows`."""
+    base = {
+        "deployment_id": _DEPLOYMENT_ID,
+        "chain": "arbitrum",
+        "primitive": "lp",
+        "accounting_category": "lp",
+        "physical_identity_hash": "0xdeadbeef",
+        "semantic_grouping_key": "arbitrum:0xpool",
+        "grouping_policy_version": "univ3_lp@v1",
+        "handle": None,
+        "status": "open",
+        "payload_text": '{"token_id": "5503050", "liquidity": "12345"}',
+        "opened_at_block": 100,
+        "opened_tx": "0xopen",
+        "closed_at_block": None,
+        "closed_tx": None,
+        "last_reconciled_at_block": None,
+        "matching_policy_version": 3,
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_basic_select_and_order():
+    """SQL keys on deployment_id + status=open with NULLS-FIRST ordering."""
+    conn = _FakeConn(fetch_rows=[_registry_row()])
+    store = _make_store(conn)
+
+    rows = await store.get_position_registry_open_rows(_DEPLOYMENT_ID)
+
+    assert len(rows) == 1
+    row = rows[0]
+    # payload_text alias is consumed by the parser and replaced with parsed
+    # payload dict — caller never sees the raw text alias.
+    assert "payload_text" not in row
+    assert row["payload"] == {"token_id": "5503050", "liquidity": "12345"}
+    assert row["deployment_id"] == _DEPLOYMENT_ID
+
+    _, sql, args = conn.calls[0]
+    assert "FROM position_registry" in sql
+    assert "WHERE deployment_id = $1 AND status = 'open'" in sql
+    # Cross-backend determinism contract: NULLS FIRST pinned explicitly
+    # because Postgres ASC defaults to NULLS LAST while SQLite ASC
+    # defaults to NULLS FIRST.
+    assert "ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST" in sql
+    # JSONB column SELECT'd as text so the parser can mirror SQLite shape.
+    assert "payload::text AS payload_text" in sql
+    assert args == (_DEPLOYMENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_returns_empty_when_no_rows():
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+
+    rows = await store.get_position_registry_open_rows(_DEPLOYMENT_ID)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_applies_optional_filters():
+    """Each optional filter appends a placeholder and a parameter."""
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+
+    await store.get_position_registry_open_rows(
+        _DEPLOYMENT_ID,
+        chain="arbitrum",
+        primitive="lp",
+        accounting_category="lp",
+    )
+
+    _, sql, args = conn.calls[0]
+    assert "AND chain = $2" in sql
+    assert "AND primitive = $3" in sql
+    assert "AND accounting_category = $4" in sql
+    assert args == (_DEPLOYMENT_ID, "arbitrum", "lp", "lp")
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_handles_payload_decode_error():
+    """Corrupt JSON payload is coerced to {} with diagnostic fields."""
+    conn = _FakeConn(fetch_rows=[_registry_row(payload_text="{not json")])
+    store = _make_store(conn)
+
+    rows = await store.get_position_registry_open_rows(_DEPLOYMENT_ID)
+
+    assert len(rows) == 1
+    assert rows[0]["payload"] == {}
+    assert rows[0]["payload_raw"] == "{not json"
+    assert "payload_decode_error" in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_handles_non_dict_payload():
+    """Non-dict JSON (e.g. array) is coerced to {} with a shape-error field."""
+    conn = _FakeConn(fetch_rows=[_registry_row(payload_text="[1, 2, 3]")])
+    store = _make_store(conn)
+
+    rows = await store.get_position_registry_open_rows(_DEPLOYMENT_ID)
+
+    assert len(rows) == 1
+    assert rows[0]["payload"] == {}
+    assert rows[0]["payload_raw"] == "[1, 2, 3]"
+    assert "payload_shape_error" in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_get_position_registry_open_rows_preserves_multiple_rows_in_order():
+    """fetch order is preserved (asyncpg respects ORDER BY at the SQL layer)."""
+    conn = _FakeConn(
+        fetch_rows=[
+            _registry_row(physical_identity_hash="0xa", opened_at_block=10),
+            _registry_row(physical_identity_hash="0xb", opened_at_block=20),
+        ]
+    )
+    store = _make_store(conn)
+
+    rows = await store.get_position_registry_open_rows(_DEPLOYMENT_ID)
+
+    assert [r["physical_identity_hash"] for r in rows] == ["0xa", "0xb"]
+
+
+class _FakeRegistryRow:
+    """Stand-in for ``almanak.framework.accounting.commit.RegistryRow``.
+
+    The real class is a frozen dataclass that requires enum-validated
+    primitive / accounting_category values. The PostgresStore method only
+    calls the three ``*_value()`` / ``payload_json()`` accessors and reads
+    attributes — duck-typing here keeps the test free of import-side enum
+    validation and matches the calling contract documented on the method.
+    """
+
+    def __init__(self, **kwargs):
+        self.deployment_id = kwargs.get("deployment_id", _DEPLOYMENT_ID)
+        self.chain = kwargs.get("chain", "arbitrum")
+        self._primitive = kwargs.get("primitive", "lp")
+        self._accounting_category = kwargs.get("accounting_category", "lp")
+        self.physical_identity_hash = kwargs.get("physical_identity_hash", "0xhash")
+        self.semantic_grouping_key = kwargs.get("semantic_grouping_key", "arbitrum:0xpool")
+        self.grouping_policy_version = kwargs.get("grouping_policy_version", "univ3_lp@v1")
+        self.handle = kwargs.get("handle")
+        self.status = kwargs.get("status", "open")
+        self._payload_json = kwargs.get("payload_json", '{"token_id": "5503050"}')
+        self.opened_at_block = kwargs.get("opened_at_block", 100)
+        self.opened_tx = kwargs.get("opened_tx", "0xopen")
+        self.closed_at_block = kwargs.get("closed_at_block")
+        self.closed_tx = kwargs.get("closed_tx")
+        self.last_reconciled_at_block = kwargs.get("last_reconciled_at_block")
+        self.matching_policy_version = kwargs.get("matching_policy_version", 3)
+
+    def primitive_value(self) -> str:
+        return self._primitive
+
+    def accounting_category_value(self) -> str:
+        return self._accounting_category
+
+    def payload_json(self) -> str:
+        return self._payload_json
+
+
+@pytest.mark.asyncio
+async def test_insert_position_registry_row_if_absent_inserts_new():
+    """``INSERT 0 1`` command tag → True (new row inserted)."""
+    conn = _FakeConn(execute_result="INSERT 0 1")
+    store = _make_store(conn)
+
+    inserted = await store.insert_position_registry_row_if_absent(row=_FakeRegistryRow())
+
+    assert inserted is True
+    _, sql, args = conn.calls[0]
+    assert "INSERT INTO position_registry" in sql
+    assert "ON CONFLICT (deployment_id, chain, primitive, physical_identity_hash)" in sql
+    assert "DO NOTHING" in sql
+    # 16 positional placeholders matching the SQLite column order.
+    assert len(args) == 16
+    assert args[0] == _DEPLOYMENT_ID  # deployment_id
+    assert args[2] == "lp"  # primitive
+    assert args[3] == "lp"  # accounting_category
+
+
+@pytest.mark.asyncio
+async def test_insert_position_registry_row_if_absent_returns_false_on_conflict():
+    """``INSERT 0 0`` command tag → False (conflict skipped, no new row)."""
+    conn = _FakeConn(execute_result="INSERT 0 0")
+    store = _make_store(conn)
+
+    inserted = await store.insert_position_registry_row_if_absent(row=_FakeRegistryRow())
+
+    assert inserted is False
+
+
+@pytest.mark.asyncio
+async def test_insert_position_registry_row_if_absent_returns_false_on_unexpected_tag():
+    """Unknown / malformed command tag → False (fail-closed)."""
+    conn = _FakeConn(execute_result="")
+    store = _make_store(conn)
+
+    inserted = await store.insert_position_registry_row_if_absent(row=_FakeRegistryRow())
+
+    assert inserted is False

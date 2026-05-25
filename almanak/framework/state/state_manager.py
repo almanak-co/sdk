@@ -1219,6 +1219,190 @@ class PostgresStore:
                 )
         return matched is not None
 
+    # -------------------------------------------------------------------------
+    # Position registry read/write (VIB-4794) — hosted parity with SQLite.
+    # -------------------------------------------------------------------------
+    #
+    # VIB-4205 / T19 landed the `SaveLedgerAndRegistry` + `GetPositionRegistryOpenRows`
+    # gRPC RPCs (raw PG SQL via the snapshot pool) but never added the equivalent
+    # Python methods on PostgresStore. `state_manager.get_position_registry_open_rows()`
+    # delegates to the WARM backend via `hasattr(warm, ...)`; without these methods,
+    # the in-process path raises CutoverStorageNotSupported, which silently degrades
+    # `DashboardService.GetPositions` to an empty Positions panel on every hosted
+    # V2 deployment. The companion `insert_position_registry_row_if_absent` is the
+    # backfill writer used by `almanak.framework.migration.BackfillReader`.
+
+    async def get_position_registry_open_rows(
+        self,
+        deployment_id: str,
+        *,
+        chain: str | None = None,
+        primitive: str | None = None,
+        accounting_category: str | None = None,
+    ) -> list[dict]:
+        """Return open ``position_registry`` rows for a deployment (hosted PG).
+
+        Mirrors :meth:`SQLiteStore.get_position_registry_open_rows`
+        (``sqlite.py:4065``) and matches the in-handler SQL in
+        ``state_service.GetPositionRegistryOpenRows`` (``state_service.py:3661``)
+        — same column list, same dynamic-WHERE shape, same payload-parse
+        guards, same cross-backend ordering (``ORDER BY opened_at_block ASC
+        NULLS FIRST, opened_tx ASC NULLS FIRST`` — Postgres defaults ASC to
+        NULLS LAST while SQLite defaults to NULLS FIRST, so the qualifier is
+        pinned to keep the fold-order contract deterministic across
+        backends).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        sql_parts = [
+            "SELECT deployment_id, chain, primitive, accounting_category,",
+            "       physical_identity_hash, semantic_grouping_key,",
+            "       grouping_policy_version, handle, status,",
+            "       payload::text AS payload_text,",
+            "       opened_at_block, opened_tx,",
+            "       closed_at_block, closed_tx,",
+            "       last_reconciled_at_block, matching_policy_version",
+            "FROM position_registry",
+            "WHERE deployment_id = $1 AND status = 'open'",
+        ]
+        params: list[Any] = [deployment_id]
+        next_placeholder = 2
+        if chain is not None:
+            sql_parts.append(f"  AND chain = ${next_placeholder}")
+            params.append(chain)
+            next_placeholder += 1
+        if primitive is not None:
+            sql_parts.append(f"  AND primitive = ${next_placeholder}")
+            params.append(primitive)
+            next_placeholder += 1
+        if accounting_category is not None:
+            sql_parts.append(f"  AND accounting_category = ${next_placeholder}")
+            params.append(accounting_category)
+            next_placeholder += 1
+        sql_parts.append("ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("\n".join(sql_parts), *params)
+
+        out: list[dict] = []
+        for row in rows:
+            # ``payload`` is JSONB at the column level but we SELECT it as text
+            # and parse here so the SQLite payload-parse error / shape-error
+            # diagnostics (``sqlite.py:4108-4153``) round-trip identically.
+            # Same coerce-to-{} fallback so downstream callers can always
+            # ``.get(...)`` regardless of which backend served the row.
+            d: dict = dict(row)
+            payload_text = d.pop("payload_text", None) or "{}"
+            try:
+                parsed = json.loads(payload_text)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "position_registry.payload JSON decode failed (PG) for "
+                    "deployment_id=%s chain=%s primitive=%s "
+                    "physical_identity_hash=%s: %s",
+                    d.get("deployment_id"),
+                    d.get("chain"),
+                    d.get("primitive"),
+                    d.get("physical_identity_hash"),
+                    exc,
+                )
+                d["payload_raw"] = payload_text
+                d["payload_decode_error"] = str(exc)
+                d["payload"] = {}
+            else:
+                if isinstance(parsed, dict):
+                    d["payload"] = parsed
+                else:
+                    logger.warning(
+                        "position_registry.payload is not a JSON object "
+                        "(PG, got %s) for deployment_id=%s chain=%s "
+                        "primitive=%s physical_identity_hash=%s — "
+                        "coercing to {}.",
+                        type(parsed).__name__,
+                        d.get("deployment_id"),
+                        d.get("chain"),
+                        d.get("primitive"),
+                        d.get("physical_identity_hash"),
+                    )
+                    d["payload_raw"] = payload_text
+                    d["payload_shape_error"] = f"expected JSON object, got {type(parsed).__name__}"
+                    d["payload"] = {}
+            out.append(d)
+        return out
+
+    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
+        """Backfill insert: add a registry row only if absent (hosted PG).
+
+        Mirrors :meth:`SQLiteStore.insert_position_registry_row_if_absent`
+        (``sqlite.py:4160``). ``INSERT ... ON CONFLICT DO NOTHING`` keyed on
+        ``(deployment_id, chain, primitive, physical_identity_hash)`` —
+        same conflict target as the live atomic primitive's UPSERT in
+        ``state_service.py:4281``. SIGKILL-and-restart of the backfill
+        leaves the existing row untouched. Runtime status flips on CLOSE
+        still go through the live atomic primitive — this is the
+        observation-only backfill path per cutover spec §3.4.
+
+        Returns ``True`` if a new row was inserted; ``False`` if the row
+        already existed.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        primitive_str = row.primitive_value()
+        category_str = row.accounting_category_value()
+        payload_json = row.payload_json()
+
+        async with self._pool.acquire() as conn:
+            # asyncpg's ``execute`` returns the command tag (e.g. "INSERT 0 1"
+            # on success, "INSERT 0 0" on conflict-skip). The trailing integer
+            # is the affected-row count — split() and parse instead of
+            # depending on a cursor.rowcount that asyncpg does not expose.
+            tag = await conn.execute(
+                """
+                INSERT INTO position_registry (
+                    deployment_id, chain, primitive, accounting_category,
+                    physical_identity_hash, semantic_grouping_key, grouping_policy_version,
+                    handle, status, payload,
+                    opened_at_block, opened_tx, closed_at_block, closed_tx,
+                    last_reconciled_at_block, matching_policy_version
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+                    $11, $12, $13, $14, $15, $16
+                )
+                ON CONFLICT (deployment_id, chain, primitive, physical_identity_hash)
+                DO NOTHING
+                """,
+                row.deployment_id,
+                row.chain,
+                primitive_str,
+                category_str,
+                row.physical_identity_hash,
+                row.semantic_grouping_key,
+                row.grouping_policy_version,
+                row.handle,
+                row.status,
+                payload_json,
+                row.opened_at_block,
+                row.opened_tx,
+                row.closed_at_block,
+                row.closed_tx,
+                row.last_reconciled_at_block,
+                row.matching_policy_version,
+            )
+
+        parts = (tag or "").split()
+        try:
+            return int(parts[-1]) > 0
+        except (ValueError, IndexError):
+            # Defensive — if asyncpg ever changes the tag shape we'd rather
+            # fail closed (report "not inserted") than silently report success.
+            logger.warning(
+                "insert_position_registry_row_if_absent: unexpected command tag %r; reporting as not-inserted",
+                tag,
+            )
+            return False
+
 
 # =============================================================================
 # Postgres row → framework type conversions (VIB-3933)
@@ -2709,16 +2893,19 @@ class StateManager:
           primitives.
 
         Audit M3 (CodeRabbit): on a backend that does not implement
-        cutover storage (``GatewayStateManager`` until T19/VIB-4205
-        ships the Postgres equivalent), this method raises
-        :class:`CutoverStorageNotSupported` rather than silently
-        returning ``[]``. A silent ``[]`` is indistinguishable from
-        "fresh DB, no rows" — the boot guard would interpret the
+        cutover storage (``GatewayStateManager`` — see
+        :class:`CutoverStorageNotSupported`), this method raises rather
+        than silently returning ``[]``. A silent ``[]`` is indistinguishable
+        from "fresh DB, no rows" — the boot guard would interpret the
         empty result as "registry is the source of truth and it is
         empty", potentially marking still-open positions as gone. The
         cutover boot guard catches this exception and chooses degrade
         vs hard refusal based on whether the cutover is meant to be
         active for this build.
+
+        SQLite and Postgres both implement this method (Postgres via
+        VIB-4794, closing the in-process parity gap left by VIB-4205
+        which only delivered the gRPC RPC half).
         """
         if not self._initialized:
             await self.initialize()
@@ -2728,8 +2915,7 @@ class StateManager:
             raise CutoverStorageNotSupported(
                 f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
                 "does not implement get_position_registry_open_rows; cutover storage "
-                "is unavailable on this backend (T19/VIB-4205 lands the hosted "
-                "equivalent)."
+                "is unavailable on this backend."
             )
         return await self._warm.get_position_registry_open_rows(
             deployment_id,
