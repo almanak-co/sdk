@@ -149,6 +149,7 @@ nav:
     - Environment Variables: environment-variables.md
     - Agent Skills: agent-skills.md
     - Agentic Trading: agentic/index.md
+    - Solana: solana.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md
@@ -156,10 +157,8 @@ nav:
     - cli/strat-run.md
     - cli/strat-teardown.md
     - cli/strat-new.md
-    - cli/strat-example.md
     - cli/almanak-gateway.md
     - cli/almanak-dashboard.md
-    - cli/dashboard-test.md
   - Gateway:
     - gateway/api-reference.md
     - gateway/troubleshooting.md

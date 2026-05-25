@@ -21,8 +21,12 @@ All three Solana demo strategies have been verified on mainnet with real funds.
 | Protocol | Intent Types | EVM Equivalent | Description |
 |----------|-------------|----------------|-------------|
 | **Jupiter** | `SwapIntent` | Enso | Swap aggregator routing across Solana DEXs |
-| **Kamino** | `SupplyIntent`, `WithdrawIntent` | Aave V3 | Lending and borrowing on Solana |
-| **Raydium CLMM** | `LPOpenIntent`, `LPCloseIntent` | Uniswap V3 | Concentrated liquidity positions |
+| **Jupiter Lend** | `SupplyIntent`, `BorrowIntent`, `RepayIntent`, `WithdrawIntent` | Aave V3 | Lending and borrowing via Jupiter Lend |
+| **Kamino** | `SupplyIntent`, `BorrowIntent`, `RepayIntent`, `WithdrawIntent` | Aave V3 | Lending and borrowing on Kamino |
+| **Drift** | `PerpOpenIntent`, `PerpCloseIntent` | GMX V2 | Perpetual futures on Drift |
+| **Raydium CLMM** | `LPOpenIntent`, `LPCloseIntent` | Uniswap V3 | Concentrated liquidity positions on Raydium |
+| **Orca** | `LPOpenIntent`, `LPCloseIntent` | Uniswap V3 | Whirlpools concentrated liquidity |
+| **Meteora** | `LPOpenIntent`, `LPCloseIntent` | TraderJoe V2 | DLMM dynamic-liquidity bins |
 
 ## Environment Setup
 
@@ -50,7 +54,7 @@ Three demo strategies are included to cover all supported intent types.
 
 Swaps a fixed amount of USDC to SOL on every iteration using the Jupiter aggregator. The simplest possible Solana strategy.
 
-**`strategies/demo/solana_swap/config.json`:**
+**`almanak/demo_strategies/solana_swap/config.json`:**
 
 ```json
 {
@@ -66,7 +70,7 @@ Swaps a fixed amount of USDC to SOL on every iteration using the Jupiter aggrega
 
 Supplies a fixed amount of USDC to Kamino Finance on every iteration. Demonstrates the lending intent path on Solana.
 
-**`strategies/demo/solana_lend/config.json`:**
+**`almanak/demo_strategies/solana_lend/config.json`:**
 
 ```json
 {
@@ -80,7 +84,7 @@ Supplies a fixed amount of USDC to Kamino Finance on every iteration. Demonstrat
 
 Opens a concentrated liquidity position on Raydium CLMM in the SOL/USDC pool with a specified price range.
 
-**`strategies/demo/solana_lp/config.json`:**
+**`almanak/demo_strategies/solana_lp/config.json`:**
 
 ```json
 {
@@ -99,13 +103,13 @@ Solana strategies run through the gateway, just like EVM strategies. The gateway
 
 ```bash
 # Real execution on mainnet (gateway auto-starts)
-almanak strat run -d strategies/demo/solana_swap --once
+almanak strat run -d almanak/demo_strategies/solana_swap --once
 
 # Dry run (compile intents, no submission)
-almanak strat run -d strategies/demo/solana_swap --once --dry-run
+almanak strat run -d almanak/demo_strategies/solana_swap --once --dry-run
 
 # Local fork testing with solana-test-validator
-almanak strat run -d strategies/demo/solana_swap --network anvil --once
+almanak strat run -d almanak/demo_strategies/solana_swap --network anvil --once
 ```
 
 !!! warning
@@ -115,7 +119,7 @@ almanak strat run -d strategies/demo/solana_swap --network anvil --once
     Use `--dry-run` first to verify that intent compilation succeeds before executing with real funds:
 
     ```bash
-    almanak strat run -d strategies/demo/solana_swap --once --dry-run
+    almanak strat run -d almanak/demo_strategies/solana_swap --once --dry-run
     ```
 
 ## Local Testing
@@ -147,12 +151,19 @@ uv run pytest tests/intents/solana/test_jupiter_swap.py -v
 
 ## Architecture
 
-Solana strategies follow the same gateway-mediated path as EVM strategies. The gateway routes Solana-specific operations to the appropriate providers:
+Solana strategies follow the same gateway-mediated path as EVM strategies. The chain family adapter (VIB-4803) routes Solana SWAP and LP intents through `SvmFamily`; lending and perp intents fall through to the connector registry:
 
-```
+```text
 decide() -> Intent
          -> Gateway (CompileIntent)
-         -> SolanaIntentCompiler (dispatches to protocol adapters)
+         -> IntentCompiler.compile()
+              -> family_for(chain) -> SvmFamily.compile_intent(...)
+                   -> SWAP -> _svm_dispatch.dispatch_swap
+                              -> compile_jupiter_swap (compiler_solana.py)
+                   -> LP_OPEN / LP_CLOSE -> _svm_dispatch.dispatch_lp_*
+                              -> Raydium / Meteora / Orca connector compilers
+                   -> LEND / PERP -> None (fall-through)
+              -> connector registry (Kamino, Jupiter Lend, Drift)
          -> ActionBundle (contains serialized VersionedTransaction)
          -> Gateway (Execute)
          -> SolanaExecutionPlanner (blockhash, signing, RPC submission)
@@ -162,12 +173,12 @@ decide() -> Intent
 
 Key components:
 
-- **`ChainFamily.SOLANA`** -- enum value that routes execution away from the EVM pipeline
-- **`SolanaIntentCompiler`** -- maps intent types to protocol-specific adapters (Jupiter, Kamino, Raydium)
-- **`SolanaExecutionPlanner`** -- handles recent blockhash fetching, transaction signing, and RPC submission
-- **`SolanaSigner`** -- wraps Ed25519 keypair operations; auto-detects base58 vs hex seed format
-- **`SolanaBalanceProvider`** -- queries native SOL and SPL token balances via Solana JSON-RPC (`getBalance`, `getTokenAccountsByOwner`)
-- **Token resolution** -- preserves base58 case for Solana addresses (EVM addresses are lowercased)
+- **`ChainFamily.SOLANA`** -- enum kind that routes execution away from the EVM pipeline.
+- **`SvmFamily`** (`almanak/framework/chain_family/_family.py`) -- the `ChainFamilyAdapter` implementation for SVM chains. Its `compile_intent` intercepts only SWAP and LP intents: SWAP delegates to `compile_jupiter_swap` in `almanak/framework/intents/compiler_solana.py`; LP routes through `_svm_dispatch` to connector-owned compilers in `almanak/framework/connectors/{raydium,orca,meteora}/`. Lending and Perp intents return `None` from `SvmFamily` and are dispatched via the connector registry (Kamino, Jupiter Lend, Drift).
+- **`SolanaExecutionPlanner`** -- handles recent blockhash fetching, transaction signing, and RPC submission.
+- **`SolanaSigner`** -- wraps Ed25519 keypair operations; auto-detects base58 vs hex seed format.
+- **`SolanaBalanceProvider`** -- queries native SOL and SPL token balances via Solana JSON-RPC (`getBalance`, `getTokenAccountsByOwner`).
+- **Token resolution** -- preserves base58 case for Solana addresses (EVM addresses are lowercased).
 
 ### Gateway integration
 
