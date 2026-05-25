@@ -353,20 +353,14 @@ class TestChainFamilyAntiBypass:
 
 
 # ---------------------------------------------------------------------------
-# VIB-4803: SvmFamily.signer_factory is deferred to VIB-4804
+# VIB-4804: SvmFamily.signer_factory wired (mirrors EvmFamily)
 # ---------------------------------------------------------------------------
 
 
-class TestSvmFamilySignerFactoryDeferred:
-    """The SVM signer is intentionally unwired until VIB-4804."""
-
-    def test_svm_signer_factory_raises_not_implemented(self):
-        import pytest as _pytest
-
-        adapter = SvmFamily()
-        with _pytest.raises(NotImplementedError) as exc_info:
-            adapter.signer_factory(descriptor=None)
-        assert "VIB-4804" in str(exc_info.value)
+class TestSvmFamilySignerFactory:
+    """The SVM signer namespace is now exposed via SvmFamily.signer_factory,
+    mirroring the shape EvmFamily uses. Pinned in :issue:`VIB-4804`.
+    """
 
     def test_evm_signer_factory_returns_signer_namespace(self):
         adapter = EvmFamily()
@@ -375,3 +369,33 @@ class TestSvmFamilySignerFactoryDeferred:
         # (LocalKeySigner, DirectSafeSigner, ZodiacSigner, etc.).
         assert hasattr(signer_ns, "LocalKeySigner")
         assert hasattr(signer_ns, "create_safe_signer")
+
+    def test_svm_signer_factory_returns_signer_namespace(self):
+        adapter = SvmFamily()
+        signer_ns = adapter.signer_factory(descriptor=None)
+        # The SVM signer factory hands back the
+        # almanak.framework.execution.solana module
+        # (SolanaSigner, SolanaSignerError, SolanaExecutionPlanner, ...).
+        assert hasattr(signer_ns, "SolanaSigner")
+        assert hasattr(signer_ns, "SolanaSignerError")
+        assert hasattr(signer_ns, "SolanaExecutionPlanner")
+
+    def test_signer_factory_shape_parity(self):
+        """Both families return the same KIND of value (a module namespace
+        with a Signer class). This is the contract every future family
+        adapter must honour, and it lets the gateway-side caller do a
+        single isinstance-free lookup against ``family.signer_factory``.
+        """
+        evm_ns = EvmFamily().signer_factory(descriptor=None)
+        svm_ns = SvmFamily().signer_factory(descriptor=None)
+        # Both are modules.
+        import types as _types
+
+        assert isinstance(evm_ns, _types.ModuleType)
+        assert isinstance(svm_ns, _types.ModuleType)
+        # Both expose a concrete signer class.
+        from almanak.framework.execution.signer import LocalKeySigner as _Local
+        from almanak.framework.execution.solana import SolanaSigner as _Solana
+
+        assert getattr(evm_ns, "LocalKeySigner") is _Local
+        assert getattr(svm_ns, "SolanaSigner") is _Solana

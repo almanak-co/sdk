@@ -84,11 +84,34 @@ class ChainFamilyAdapter(Protocol):
     via this field."""
 
     def signer_factory(self, descriptor: Any) -> Any:
-        """Return a Signer (or signer factory) appropriate for the family.
+        """Return the family's signer namespace.
 
-        VIB-4804 will tighten the return type. For VIB-4803 the EVM
-        implementation hands back the existing EVM signer hierarchy and the
-        SVM implementation explicitly raises :class:`NotImplementedError`.
+        Each implementation hands back the module that owns the signer
+        hierarchy for its substrate:
+
+        * :class:`EvmFamily` returns ``almanak.framework.execution.signer``
+          (with :class:`LocalKeySigner`, :func:`create_safe_signer`,
+          :class:`DirectSafeSigner`, :class:`ZodiacSigner`, ...).
+        * :class:`SvmFamily` returns ``almanak.framework.execution.solana``
+          (with :class:`SolanaSigner`, :class:`SolanaSignerError`,
+          :class:`SolanaExecutionPlanner`, ...).
+
+        The ``descriptor`` argument is currently unused — both substrates
+        instantiate their concrete signer from a private key held by the
+        gateway, not from per-chain descriptor state. Reserved for a later
+        cutover where the descriptor carries chain-specific signer config
+        (e.g. wrapped-native, signing program ID).
+
+        Gateway boundary
+        ----------------
+
+        Returning a module *namespace* rather than a constructed signer is
+        deliberate: the caller (gateway ``ExecutionService``) is the only
+        component that holds key material and is the only component allowed
+        to call ``LocalKeySigner(...)`` / ``SolanaSigner.from_base58(...)``.
+        Framework and strategy code may consume the returned namespace for
+        type imports (``SignedTransaction``, ``SolanaSignerError``) without
+        ever invoking the constructors.
         """
         ...
 
@@ -184,18 +207,49 @@ class SvmFamily:
     kind: ChainFamily = ChainFamily.SOLANA
 
     def signer_factory(self, descriptor: Any) -> Any:
-        """Solana signing is intentionally unwired in VIB-4803.
+        """Return the SVM signer namespace.
 
-        VIB-4804 (Stage 4 of the parent epic VIB-4800) will land the SVM
-        signer. Raising here — rather than returning a stub — guarantees that
-        accidentally taking the SVM signer path before VIB-4804 fails loudly.
+        Mirrors :meth:`EvmFamily.signer_factory` — hands back the module
+        that owns the Solana signing hierarchy
+        (:class:`SolanaSigner`, :class:`SolanaSignerError`,
+        :class:`SolanaExecutionPlanner`).
+
+        Gateway boundary
+        ----------------
+
+        The returned namespace is the *only* SVM signing seam in the
+        codebase. The keypair lives in the gateway's
+        :attr:`Settings.solana_private_key` and is consumed by
+        :meth:`gateway.services.execution_service.ExecutionService._get_solana_planner`,
+        which constructs the :class:`SolanaExecutionPlanner` (which in
+        turn constructs the :class:`SolanaSigner`). Strategy code and
+        framework connector code (Jupiter, Kamino, Raydium, Orca,
+        Meteora) never touch the keypair — they emit unsigned
+        base64-encoded ``VersionedTransaction`` blobs through
+        :class:`ActionBundle.transactions` and the gateway-side planner
+        is the one component that opens them, signs them, and submits
+        them.
+
+        Speculative-refactor scope note (VIB-4804)
+        ------------------------------------------
+
+        The parent ticket explicitly flagged this stage as deferrable
+        until a real new SVM consumer appears. The user overrode that
+        deferral. To honour the "don't speculatively expand" constraint:
+        we do NOT introduce a new ``SignerFactory``-style class, a new
+        descriptor argument, or per-chain signer config. We return the
+        module namespace — the same shape :class:`EvmFamily` uses — and
+        rely on the existing :class:`SolanaSigner` (which already
+        handles legacy + versioned base64 transactions, multi-signer
+        bundles for Raydium NFT-mint flows, and arbitrary-message
+        signing). When a future SVM connector needs something the
+        current ``SolanaSigner`` cannot do — Address Lookup Table
+        resolution at sign time, partial-sign for multi-party flows,
+        signer rotation — that connector's PR will widen the namespace.
         """
-        raise NotImplementedError(
-            "SvmFamily.signer_factory will be implemented in VIB-4804 "
-            "(Stage 4 of parent epic VIB-4800). Today the Solana signing "
-            "path is owned by per-protocol adapters under "
-            "almanak.framework.connectors.{jupiter,kamino,raydium,...}."
-        )
+        from almanak.framework.execution import solana as svm_signer
+
+        return svm_signer
 
     def address_checksum(self, addr: str) -> str:
         """Solana mints / pubkeys are base58 and case-sensitive.
