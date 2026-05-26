@@ -146,6 +146,20 @@ class ChainFamilyAdapter(Protocol):
         """
         ...
 
+    def default_swap_protocol(self) -> str | None:
+        """Family-default protocol used in IntentCompiler init logging.
+
+        Returns ``None`` for families that have no opinion (EVM uses the
+        compiler's ``default_protocol`` constructor argument). Override on
+        families with a single dominant on-chain swap venue (e.g. SVM
+        returns ``"jupiter"``).
+
+        This is logging-only — runtime dispatch still goes through
+        :meth:`compile_intent`. The seam exists so framework code stays
+        free of ``isinstance(self._family, SvmFamily)`` checks.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # EvmFamily
@@ -192,6 +206,10 @@ class EvmFamily:
     def parse_receipt(self, raw: Any) -> Any:
         """Identity pass-through (see module docstring)."""
         return raw
+
+    def default_swap_protocol(self) -> str | None:  # noqa: D401
+        """EVM has no single dominant venue; defer to the compiler's default_protocol."""
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +337,10 @@ class SvmFamily:
     def parse_receipt(self, raw: Any) -> Any:
         """Identity pass-through (see module docstring)."""
         return raw
+
+    def default_swap_protocol(self) -> str | None:
+        """Solana's dominant on-chain swap aggregator is Jupiter."""
+        return "jupiter"
 
 
 # ---------------------------------------------------------------------------

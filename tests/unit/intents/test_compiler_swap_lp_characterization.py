@@ -24,7 +24,6 @@ from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.connectors.base.compiler import BaseCompilerContext
 from almanak.framework.intents import LPOpenIntent
 from almanak.framework.intents.compiler import CompilationStatus
-from almanak.framework.intents.vocabulary import Intent
 
 # ---------------------------------------------------------------------------
 # Module-level patch targets for framework swap compilation and connector-owned
@@ -1370,41 +1369,11 @@ class TestCompileLPOpenTickSpacing:
 # ---------------------------------------------------------------------------
 
 
-class TestConnectorMissingFailsClosed:
-    """A V3-fork with no registered connector compiler must fail closed.
-
-    UNISWAP_V3_FORKS mirrors the registry exactly, so reaching the
-    fall-through with a fork means the registry/import is broken. That must
-    surface as a clear "not registered" error (mirroring ``_compile_swap``),
-    not a misleading "unsupported protocol" using the raw intent.protocol
-    (which can be ``None`` on default-protocol flows).
-    """
-
-    GET_CONNECTOR = "almanak.framework.intents.compiler.get_connector_compiler"
-    _EXPECTED = "Connector compiler for protocol 'uniswap_v3' is not registered."
-
-    def _assert_fail_closed(self, result) -> None:
-        assert result.status == CompilationStatus.FAILED
-        assert result.error == self._EXPECTED
-        assert "None" not in result.error
-        assert "is not supported" not in result.error
-
-    def test_lp_open_fork_missing_connector_fails_closed(self) -> None:
-        compiler = _make_compiler()
-        with patch(self.GET_CONNECTOR, return_value=None):
-            result = compiler.compile(_make_lp_intent(protocol="uniswap_v3"))
-        self._assert_fail_closed(result)
-
-    def test_lp_close_fork_missing_connector_fails_closed(self) -> None:
-        compiler = _make_compiler()
-        intent = Intent.lp_close(position_id="123", pool="USDC/WETH/3000", protocol="uniswap_v3")
-        with patch(self.GET_CONNECTOR, return_value=None):
-            result = compiler.compile(intent)
-        self._assert_fail_closed(result)
-
-    def test_collect_fees_fork_missing_connector_fails_closed(self) -> None:
-        compiler = _make_compiler()
-        intent = Intent.collect_fees("USDC/WETH/3000", protocol="uniswap_v3")
-        with patch(self.GET_CONNECTOR, return_value=None):
-            result = compiler.compile(intent)
-        self._assert_fail_closed(result)
+# ``TestConnectorMissingFailsClosed`` removed in VIB-4818: the prior
+# ``UNISWAP_V3_FORKS`` gate it pinned is structurally unreachable in
+# production (CompilerRegistry.get either returns a compiler or raises;
+# it never returns None for a registered loader), so the helper that
+# distinguished "broken registry" from "unsupported protocol" was deleted.
+# Any user-facing "unsupported" message is now identical regardless of
+# whether the protocol has a stale loader entry — the registry IS the
+# source of truth and inconsistencies should fail at import time.

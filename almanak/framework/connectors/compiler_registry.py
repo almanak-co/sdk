@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import importlib
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from almanak.framework.connectors.base.compiler import BaseProtocolCompiler
 
 
 class CompilerRegistry:
     """Protocol-name to connector compiler registry."""
+
+    # Connector-name defaults for dispatch keys whose protocol isn't carried on
+    # the intent itself. Keeps the strings connector-adjacent so framework code
+    # (``intents/compiler.py``) doesn't hardcode protocol names. Add a new key
+    # when a new dispatch fallback emerges; remove a key when the underlying
+    # decision moves onto the intent vocabulary.
+    _DEFAULT_BY_KEY: ClassVar[dict[str, str]] = {
+        # BridgeIntent.preferred_bridge=None falls back to this.
+        "BRIDGE": "across",
+        # SwapIntent.protocol=None on a cross-chain swap falls back to this.
+        "SWAP_CROSS_CHAIN": "enso",
+    }
 
     _BUILTIN_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
         "uniswap_v3": (
@@ -214,6 +226,41 @@ class CompilerRegistry:
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return all protocol names with connector-owned compilers."""
         return tuple(sorted(cls._BUILTIN_LOADERS))
+
+    @classmethod
+    def _load_class(cls, key: str) -> type[BaseProtocolCompiler] | None:
+        """Import a connector compiler class without instantiating it."""
+        loader = cls._BUILTIN_LOADERS.get(key)
+        if loader is None:
+            return None
+        module_path, class_name = loader
+        module = importlib.import_module(module_path)
+        compiler_cls = getattr(module, class_name)
+        if not isinstance(compiler_cls, type) or not issubclass(compiler_cls, BaseProtocolCompiler):
+            raise TypeError(f"{module_path}.{class_name} is not a BaseProtocolCompiler class")
+        return compiler_cls
+
+    @classmethod
+    def protocols_for_intent(cls, intent_type: Any) -> tuple[str, ...]:
+        """Return loader-key protocol names whose connector declares ``intent_type``.
+
+        Backs error-message hints in framework code ("Supported: ...") so
+        per-intent lists don't have to be hand-maintained in
+        ``intents/compiler.py``.
+        """
+        out: list[str] = []
+        for key in sorted(cls._BUILTIN_LOADERS):
+            compiler_cls = cls._load_class(key)
+            if compiler_cls is None:
+                continue
+            if intent_type in compiler_cls.intents:
+                out.append(key)
+        return tuple(out)
+
+    @classmethod
+    def default_protocol(cls, dispatch_key: str) -> str | None:
+        """Return the configured fallback protocol for a dispatch key, or None."""
+        return cls._DEFAULT_BY_KEY.get(dispatch_key)
 
 
 def get_compiler(protocol: str) -> BaseProtocolCompiler | None:

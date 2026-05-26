@@ -31,7 +31,7 @@ import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
 
-from ..chain_family import ChainFamilyAdapter, SvmFamily, all_families, family_for
+from ..chain_family import ChainFamilyAdapter, all_families, family_for
 from ..connectors.base.compiler import (
     BaseCompilerContext,
     BaseProtocolCompiler,
@@ -177,7 +177,17 @@ def _bridge_registry_protocol(intent: "BridgeIntent") -> str:
     preferred = getattr(intent, "preferred_bridge", None)
     if preferred and get_connector_compiler(preferred) is not None:
         return preferred
-    return "across"
+    from ..connectors.compiler_registry import CompilerRegistry
+
+    default = CompilerRegistry.default_protocol("BRIDGE")
+    # The registry is the single source of truth for which bridge is the
+    # fallback. If no default is configured something is structurally wrong
+    # (the dispatch key disappeared) — fail loud rather than silently swap
+    # in a stale string. ``RuntimeError`` (not ``assert``) so the check
+    # survives ``python -O``.
+    if default is None:
+        raise RuntimeError("CompilerRegistry missing BRIDGE default")
+    return default
 
 
 # =============================================================================
@@ -271,37 +281,6 @@ from .compiler_models import (  # noqa: F401
 # compiler's hot path (unit tests monkeypatch ``web3``). Mirrors
 # ``almanak.framework.data.tokens.resolver.SOLANA_ADDRESS_PATTERN``.
 _SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-
-# Lending connectors with connector-owned compilers — used only to build the
-# "Supported: ..." hint in the unsupported-protocol error. Keep in sync with
-# the lending entries in connectors.compiler_registry.CompilerRegistry.
-_LENDING_PROTOCOLS = (
-    "aave_v3",
-    "benqi",
-    "compound_v3",
-    "curvance",
-    "euler_v2",
-    "jupiter_lend",
-    "kamino",
-    "morpho",
-    "morpho_blue",
-    "radiant_v2",
-    "silo_v2",
-    "spark",
-)
-
-# Perp connectors with connector-owned compilers — used only to build the
-# "known perp protocols" hint in the unsupported-protocol error. Grouped by
-# chain family (Solana vs non-Solana); the hint deliberately does NOT claim
-# per-chain support — each venue compiles only on its own chains. Keep in
-# sync with the perp entries in connectors.compiler_registry.CompilerRegistry.
-_PERP_PROTOCOLS_SOLANA = ("drift",)
-_PERP_PROTOCOLS_NON_SOLANA = ("gmx_v2", "aster_perps", "pancakeswap_perps", "hyperliquid")
-
-# Staking connectors with connector-owned compilers — used only to build the
-# "Supported: ..." hint in the unsupported-protocol error. Keep in sync with
-# the staking entries in connectors.compiler_registry.CompilerRegistry.
-_STAKING_PROTOCOLS = ("ethena", "gimo", "lido")
 
 
 def _is_solana_mint(token: str) -> bool:
@@ -572,10 +551,7 @@ class IntentCompiler:
         # Log stablecoin price fallbacks once per symbol per compiler instance.
         self._stablecoin_fallback_logged: set[str] = set()
 
-        # Cached Solana adapter instances (lazily initialized by connector compilers)
-        self._cached_drift_adapter: Any = None
-
-        effective_protocol = "jupiter" if isinstance(self._family, SvmFamily) else default_protocol
+        effective_protocol = self._family.default_swap_protocol() or default_protocol
         logger.info(
             f"IntentCompiler initialized for chain={chain}, wallet={wallet_address[:10]}..., protocol={effective_protocol}, using_placeholders={self._using_placeholders}"
         )
@@ -1349,15 +1325,6 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-
-        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
-
-        if protocol in UNISWAP_V3_FORKS:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Connector compiler for protocol '{protocol}' is not registered.",
-            )
         return self._compile_default_router_swap_body(intent, protocol)
 
     def _dispatch_swap_protocol_route(self, intent: SwapIntent) -> CompilationResult | None:
@@ -1381,12 +1348,22 @@ class IntentCompiler:
             return family_result
 
         # Check for cross-chain swap - route to appropriate aggregator.
-        # Preserve historical behavior: protocol=None defaults to Enso for cross-chain swaps.
+        # Preserve historical behavior: protocol=None defaults to the registry's
+        # cross-chain aggregator. An explicit ``lifi`` override is honoured;
+        # other protocol names fall through to the default. The strings live
+        # in ``CompilerRegistry`` so framework code stays connector-agnostic.
         if intent.is_cross_chain:
-            aggregator_protocol = "enso"
+            from ..connectors.compiler_registry import CompilerRegistry
+
+            aggregator_protocol = CompilerRegistry.default_protocol("SWAP_CROSS_CHAIN")
+            if aggregator_protocol is None:
+                raise RuntimeError("CompilerRegistry missing SWAP_CROSS_CHAIN default")
             if intent.protocol is not None:
                 from ..connectors.protocol_aliases import normalize_protocol
 
+                # Historical: only ``lifi`` overrides the default. Other
+                # protocol names on a cross-chain intent fall through to the
+                # default aggregator (preserves behaviour pre-VIB-4818).
                 if normalize_protocol(self.chain, intent.protocol) == "lifi":
                     aggregator_protocol = "lifi"
             connector_compiler = get_connector_compiler(aggregator_protocol)
@@ -1818,15 +1795,6 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-
-        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
-
-        if protocol in UNISWAP_V3_FORKS:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Connector compiler for protocol '{protocol}' is not registered.",
-            )
         return CompilationResult(
             status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
@@ -1930,15 +1898,6 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-
-        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
-
-        if protocol in UNISWAP_V3_FORKS:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Connector compiler for protocol '{protocol}' is not registered.",
-            )
         return CompilationResult(
             status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
@@ -1981,26 +1940,15 @@ class IntentCompiler:
             )
 
         protocol = self._resolve_protocol(intent.protocol)
-        from ..connectors.protocol_aliases import UNISWAP_V3_FORKS
-
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+        from ..connectors.compiler_registry import CompilerRegistry
 
-        if protocol in UNISWAP_V3_FORKS:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Connector compiler for protocol '{protocol}' is not registered.",
-                intent_id=intent.intent_id,
-            )
-
+        supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=(
-                f"Protocol '{protocol}' does not support LP_COLLECT_FEES. "
-                f"Supported: traderjoe_v2, uniswap_v4, aerodrome_slipstream, "
-                f"and Uniswap-V3 forks ({', '.join(sorted(UNISWAP_V3_FORKS))})"
-            ),
+            error=(f"Protocol '{protocol}' does not support LP_COLLECT_FEES. Supported: {', '.join(supported)}"),
             intent_id=intent.intent_id,
         )
 
@@ -2027,8 +1975,10 @@ class IntentCompiler:
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
+        from ..connectors.compiler_registry import CompilerRegistry
+
         primitive = intent.intent_type.value if hasattr(intent.intent_type, "value") else str(intent.intent_type)
-        supported = _PERP_PROTOCOLS_SOLANA if isinstance(self._family, SvmFamily) else _PERP_PROTOCOLS_NON_SOLANA
+        supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=(
@@ -2043,11 +1993,14 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+
+        from ..connectors.compiler_registry import CompilerRegistry
+
+        supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
             status=CompilationStatus.FAILED,
             error=(
-                f"Unsupported lending protocol for {primitive}: {intent.protocol}. "
-                f"Supported: {', '.join(_LENDING_PROTOCOLS)}"
+                f"Unsupported lending protocol for {primitive}: {intent.protocol}. Supported: {', '.join(supported)}"
             ),
             intent_id=intent.intent_id,
         )
@@ -2058,10 +2011,14 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+
+        from ..connectors.compiler_registry import CompilerRegistry
+
         action = "staking" if primitive == "STAKE" else "unstaking"
+        supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Unsupported {action} protocol: {intent.protocol}. Supported: {', '.join(_STAKING_PROTOCOLS)}",
+            error=f"Unsupported {action} protocol: {intent.protocol}. Supported: {', '.join(supported)}",
             intent_id=intent.intent_id,
         )
 
