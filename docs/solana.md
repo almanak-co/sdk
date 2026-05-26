@@ -174,7 +174,7 @@ decide() -> Intent
 Key components:
 
 - **`ChainFamily.SOLANA`** -- enum kind that routes execution away from the EVM pipeline.
-- **`SvmFamily`** (`almanak/framework/chain_family/_family.py`) -- the `ChainFamilyAdapter` implementation for SVM chains. Its `compile_intent` intercepts only SWAP and LP intents: SWAP delegates to `compile_jupiter_swap` in `almanak/framework/intents/compiler_solana.py`; LP routes through `_svm_dispatch` to connector-owned compilers in `almanak/framework/connectors/{raydium,orca,meteora}/`. Lending and Perp intents return `None` from `SvmFamily` and are dispatched via the connector registry (Kamino, Jupiter Lend, Drift).
+- **`SvmFamily`** (`almanak/framework/chain_family/_family.py`) -- the `ChainFamilyAdapter` implementation for SVM chains. Its `compile_intent` intercepts only SWAP and LP intents: SWAP delegates to `compile_jupiter_swap` in `almanak/framework/intents/compiler_solana.py`; LP routes through `_svm_dispatch` to connector-owned compilers in `almanak/connectors/{raydium,orca,meteora}/`. Lending and Perp intents return `None` from `SvmFamily` and are dispatched via the connector registry (Kamino, Jupiter Lend, Drift).
 - **`SolanaExecutionPlanner`** -- handles recent blockhash fetching, transaction signing, and RPC submission.
 - **`SolanaSigner`** -- wraps Ed25519 keypair operations; auto-detects base58 vs hex seed format.
 - **`SolanaBalanceProvider`** -- queries native SOL and SPL token balances via Solana JSON-RPC (`getBalance`, `getTokenAccountsByOwner`).

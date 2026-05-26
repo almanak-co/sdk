@@ -51,10 +51,10 @@ check-xfail-hygiene:
 check-config-boundary:
 	uv run python scripts/ci/check_config_boundary.py --check --verbose
 
-# Enforce that every connector dir under almanak/framework/connectors/
-# registers itself in ConnectorRegistry (VIB-4298 PR 1). The registry is the
-# source of truth for the (connector, intent, chain) universe consumed by
-# PR 2's intent-test coverage gate and future tooling.
+# Enforce that every connector dir under almanak/connectors/ registers itself
+# in ConnectorRegistry (VIB-4298 PR 1; lazy registration shape from VIB-4835).
+# The registry is the source of truth for the (connector, intent, chain)
+# universe consumed by PR 2's intent-test coverage gate and future tooling.
 check-connector-registry:
 	uv run python scripts/ci/check_connector_registry.py --verbose
 
@@ -110,8 +110,8 @@ test-unit:
 test: test-unit
 
 # Run connector tests (consolidated under tests/unit/connectors/ — the inline
-# almanak/framework/connectors/<X>/tests/ directories were merged into the
-# central tree; see CLAUDE.md "Repo Conventions").
+# per-connector tests/ directories were merged into the central tree;
+# see CLAUDE.md "Repo Conventions").
 test-connectors:
 	uv run pytest tests/unit/connectors/ -v --import-mode=importlib
 

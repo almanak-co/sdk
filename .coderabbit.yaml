@@ -23,7 +23,7 @@ reviews:
         CHECK TEST COVERAGE for every code change:
 
         Intent tests (tests/intents/{chain}/test_{protocol}_{action}.py) are MANDATORY when:
-        - Protocol connector/adapter/SDK code changes (almanak/framework/connectors/)
+        - Protocol connector/adapter/SDK code changes (almanak/connectors/)
         - Receipt parser changes
         - Intent compiler changes (almanak/framework/intents/compiler.py)
         - Execution pipeline changes (almanak/framework/execution/)
@@ -46,7 +46,7 @@ reviews:
         Exception: pure refactors with no behavior change, documentation-only, or config changes.
 
     # -- Connector-specific: always require intent tests --
-    - path: "almanak/framework/connectors/**"
+    - path: "almanak/connectors/**"
       instructions: |
         Protocol connector changes REQUIRE intent tests on all affected chains.
         Verify the PR includes tests in tests/intents/{chain}/ with 4-layer verification.

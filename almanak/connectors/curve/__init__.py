@@ -122,15 +122,19 @@ def _register_once() -> None:
     global _registered
     if _registered:
         return
-    from almanak.connectors._strategy_base.registry import register_connector
-    from almanak.framework.intents.vocabulary import IntentType
-
-    register_connector(
-        name="curve",
-        intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
-        chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
-    )
     _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            name="curve",
+            intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
+            chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
+        )
+    except Exception:
+        _registered = False
+        raise
 
 
 def __getattr__(name: str) -> Any:

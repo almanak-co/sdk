@@ -74,7 +74,7 @@ class JupiterConfig:
             )
         # Fall back to typed config for API key (Phase 5b of the
         # config-service migration). The lazy import avoids pulling
-        # ``almanak.config`` into ``framework.connectors`` at module load.
+        # ``almanak.config`` into ``almanak.connectors`` at module load.
         if not self.api_key:
             from almanak.config.connectors import connectors_config_from_env
 

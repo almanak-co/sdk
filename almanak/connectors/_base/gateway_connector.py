@@ -1,8 +1,7 @@
 """Gateway-side connector base class.
 
 Each protocol's gateway-side code lives under
-``almanak/connectors/<protocol>/gateway/`` (or, during the migration,
-``almanak/framework/connectors/<protocol>/gateway/``) and exports a single
+``almanak/connectors/<protocol>/gateway/`` and exports a single
 ``GatewayConnector`` subclass. The gateway boot loop discovers these via
 ``GatewayConnectorRegistry`` and inspects them for capabilities through
 ``isinstance(connector, Gateway*Capability)`` checks.

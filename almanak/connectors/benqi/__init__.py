@@ -140,15 +140,19 @@ def _register_once() -> None:
     global _registered
     if _registered:
         return
-    from almanak.connectors._strategy_base.registry import register_connector
-    from almanak.framework.intents.vocabulary import IntentType
-
-    register_connector(
-        name="benqi",
-        intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
-        chains=("avalanche",),
-    )
     _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            name="benqi",
+            intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
+            chains=("avalanche",),
+        )
+    except Exception:
+        _registered = False
+        raise
 
 
 def __getattr__(name: str) -> Any:

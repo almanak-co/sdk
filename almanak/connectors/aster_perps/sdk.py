@@ -357,7 +357,7 @@ def get_margin_token_address(
         )
     if token_resolver is None:
         # Lazy import: keeps SDK import light and avoids a circular dep on
-        # framework.data (which itself imports from framework.connectors.base).
+        # framework.data (which itself imports from almanak.connectors._strategy_base.base).
         from almanak.framework.data.tokens import get_token_resolver
 
         token_resolver = get_token_resolver()

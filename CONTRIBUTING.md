@@ -111,7 +111,7 @@ test: add golden tests for perp funding calculation
 ## What Makes a Good Contribution
 
 - **Bug fixes** with a regression test
-- **New protocol connectors** following the existing adapter pattern in `almanak/framework/connectors/`
+- **New protocol connectors** following the existing adapter pattern in `almanak/connectors/`
 - **New demo strategies** in `strategies/demo/` with documentation
 - **Documentation improvements** - typos, missing examples, clarifications
 - **Test coverage** for untested paths

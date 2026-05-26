@@ -454,19 +454,23 @@ def _register_once() -> None:
     global _registered
     if _registered:
         return
-    from almanak.connectors._strategy_base.registry import register_connector
-    from almanak.framework.intents.vocabulary import IntentType
-
-    register_connector(
-        name="polymarket",
-        intents=(
-            IntentType.PREDICTION_BUY,
-            IntentType.PREDICTION_SELL,
-            IntentType.PREDICTION_REDEEM,
-        ),
-        chains=("polygon",),
-    )
     _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            name="polymarket",
+            intents=(
+                IntentType.PREDICTION_BUY,
+                IntentType.PREDICTION_SELL,
+                IntentType.PREDICTION_REDEEM,
+            ),
+            chains=("polygon",),
+        )
+    except Exception:
+        _registered = False
+        raise
 
 
 def __getattr__(name: str) -> Any:

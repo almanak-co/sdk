@@ -3,8 +3,7 @@
 Phase 5b of the config-service migration (see
 ``docs/internal/config-service-plan.md``). Owns every env read for
 connector-side API keys and base-URL overrides that previously lived
-inside individual connector modules under
-``almanak/framework/connectors/*``.
+inside individual connector modules under ``almanak/connectors/*``.
 
 Two surfaces consolidated here:
 
@@ -77,7 +76,7 @@ DEFAULT_SOLANA_RPC_URL_JUPITER: str = "https://api.mainnet-beta.solana.com"
 
 
 class ConnectorsConfig(BaseModel):
-    """Typed configuration for every connector under ``framework/connectors/*``.
+    """Typed configuration for every connector under ``almanak/connectors/*``.
 
     Every field is optional from the connector's standpoint — when a value
     is ``None``, the connector's existing missing-env-var behaviour fires
@@ -236,7 +235,7 @@ def connectors_config_from_env(
     """Construct a :class:`ConnectorsConfig` from environment variables.
 
     Single env-reading entry point for every connector under
-    ``framework/connectors/*``. Mirrors the legacy per-connector lookups
+    ``almanak/connectors/*``. Mirrors the legacy per-connector lookups
     bit-for-bit:
 
     * ``ENSO_API_KEY`` → ``enso_api_key``

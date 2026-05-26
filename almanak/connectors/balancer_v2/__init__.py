@@ -82,19 +82,23 @@ def _register_once() -> None:
     global _registered
     if _registered:
         return
-    from almanak.connectors._strategy_base.registry import register_connector
-    from almanak.framework.intents.vocabulary import IntentType
-
-    register_connector(
-        # Renamed during VIB-4835 Phase 2 — see the rename commit message.
-        # Strategies that referenced ``balancer`` need to update; coverage
-        # gate entries under ``scripts/ci/intent-coverage-excused.yml``
-        # follow the new name too.
-        name="balancer_v2",
-        intents=(IntentType.FLASH_LOAN,),
-        chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
-    )
     _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            # Renamed during VIB-4835 Phase 2 — see the rename commit message.
+            # Strategies that referenced ``balancer`` need to update; coverage
+            # gate entries under ``scripts/ci/intent-coverage-excused.yml``
+            # follow the new name too.
+            name="balancer_v2",
+            intents=(IntentType.FLASH_LOAN,),
+            chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+        )
+    except Exception:
+        _registered = False
+        raise
 
 
 def __getattr__(name: str) -> Any:

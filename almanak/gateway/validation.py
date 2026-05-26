@@ -15,8 +15,8 @@ from almanak.core.chains import ChainRegistry
 # Derived from :class:`ChainRegistry` (VIB-4801). This frozenset is the
 # gateway's trust-boundary allowlist for RPC operations — it must be
 # byte-identical to the hand-maintained set at PR-merge time. The
-# registry module has no import path to ``framework/connectors/`` or
-# strategy code, so this set is deterministic at import time.
+# registry module has no import path to ``almanak/connectors/`` or strategy
+# code, so this set is deterministic at import time.
 ALLOWED_CHAINS: frozenset[str] = frozenset(d.name for d in ChainRegistry.all())
 
 # RPC methods that are safe to expose to strategy containers

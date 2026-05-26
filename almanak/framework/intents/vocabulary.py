@@ -92,7 +92,7 @@ InterestRateMode = Literal["variable"]
 
 # ``PROTOCOL_CAPABILITIES`` is a read-through aggregated view over every
 # connector's ``capabilities.py`` module. The actual data lives next to each
-# connector (see ``almanak/framework/connectors/<protocol>/capabilities.py``)
+# connector (see ``almanak/connectors/<protocol>/capabilities.py``)
 # and is assembled by ``CapabilitiesRegistry``.
 #
 # The aggregator is resolved lazily via module-level ``__getattr__`` (PEP 562)

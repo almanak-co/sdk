@@ -1,28 +1,32 @@
-"""Top-level connectors package — foundation for connector self-containment.
+"""Top-level connectors package — connector self-containment.
 
-The connector self-containment program (PR 2169 / VIB-4121) moves each
-protocol's strategy-side and gateway-side code into a single
-self-contained ``almanak/connectors/<protocol>/`` folder. The foundation
-that both halves share lives under ``_base/``.
+The connector self-containment program (VIB-4121, with the strategy-side
+migration finalised in VIB-4835) keeps each protocol's strategy-side and
+gateway-side code in a single self-contained ``almanak/connectors/<protocol>/``
+folder. Foundation primitives shared by both halves live under
+``_base/`` (gateway-side) and ``_strategy_base/`` (strategy-side).
 
-Phase 0 — this PR — lands the gateway-side foundation only:
+Current state (post-VIB-4835 Phase 2):
 
-* ``_base.types`` — strategy-safe shared types (``ProtocolName``,
-  ``ProtocolKind``, re-exported ``Chain`` / ``ChainFamily``).
-* ``_base.gateway_connector`` — abstract base for gateway-side connectors.
-* ``_base.gateway_capabilities`` — runtime-checkable Protocols a connector
-  declares it implements.
-* ``_base.gateway_registry`` — the ``GatewayConnectorRegistry`` the gateway
-  boot loop talks to.
+* ``_base/`` — gateway-side foundation:
+  * ``_base.types`` — strategy-safe shared types (``ProtocolName``,
+    ``ProtocolKind``, re-exported ``Chain`` / ``ChainFamily``).
+  * ``_base.gateway_connector`` — abstract base for gateway-side connectors.
+  * ``_base.gateway_capabilities`` — runtime-checkable Protocols a connector
+    declares it implements.
+  * ``_base.gateway_registry`` — the ``GatewayConnectorRegistry`` the
+    gateway boot loop talks to.
 * ``_gateway_registry`` — outer registration point (imports every concrete
-  gateway-side connector; empty until Phase 2 migrations land).
+  gateway-side connector).
+* ``_strategy_base/`` — strategy-side foundation (base receipt parser,
+  registries, compilers, bridge base, contract registry, protocol aliases,
+  capabilities registry).
+* ``<protocol>/`` — every concrete connector. Each one ships ``adapter.py``,
+  ``receipt_parser.py``, optional ``sdk.py``, optional
+  ``permission_hints.py``, and an ``__init__.py`` that wires lazy PEP 562
+  exports plus a ``_register_once()`` helper invoked on first attribute
+  access. See ``blueprints/05-connectors.md`` for the canonical pattern.
 
-Strategy-side foundation (``_base.strategy_connector``,
-``_base.strategy_capabilities``, ``_base.strategy_registry``) is part of the
-broader 9-12 month program and is NOT included in this PR.
-
-Concrete connectors continue to live under
-``almanak/framework/connectors/<protocol>/`` for the duration of the
-migration; their gateway-side bits move to
-``almanak/connectors/<protocol>/gateway/`` in Phase 2 PRs.
+``almanak.framework.connectors`` is no longer a valid import path; the CI
+ratchet ``tests/static/test_legacy_connector_imports.py`` blocks regressions.
 """

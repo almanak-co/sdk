@@ -110,11 +110,15 @@ def _register_once() -> None:
     global _registered
     if _registered:
         return
-    from almanak.connectors._strategy_base.registry import register_connector
-    from almanak.framework.intents.vocabulary import IntentType
-
-    register_connector(name="lido", intents=(IntentType.STAKE, IntentType.UNSTAKE), chains=("ethereum",))
     _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(name="lido", intents=(IntentType.STAKE, IntentType.UNSTAKE), chains=("ethereum",))
+    except Exception:
+        _registered = False
+        raise
 
 
 def __getattr__(name: str) -> Any:
