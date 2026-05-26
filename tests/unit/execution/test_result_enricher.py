@@ -1512,13 +1512,113 @@ class TestExtractionSpecRemoveOverlay:
         # lp_close_data is the structured path — must remain.
         assert "lp_close_data" in effective
 
-    # ----- 9. Cross-protocol regression guard: UniV3 LP_CLOSE unaffected.
+    # ----- 9. VIB-4805: UniV3 LP_CLOSE flat fields suppressed (ship via lp_close_data).
+    #
+    # Prior to VIB-4805 this test was a cross-protocol regression guard that
+    # asserted the flat fields were PRESENT on uniswap_v3. Now they are
+    # intentionally removed because the data ships via lp_close_data; the old
+    # assertion is updated to confirm suppression.
 
-    def test_uniswap_v3_lp_close_unaffected_by_aerodrome_narrowing(self) -> None:
+    def test_uniswap_v3_lp_close_flat_fields_suppressed(self) -> None:
+        """VIB-4805: uniswap_v3 LP_CLOSE removes redundant flat fields.
+
+        ``amount0_collected`` / ``amount1_collected`` / ``fees0`` / ``fees1``
+        are inside the ``LPCloseData`` struct returned by ``lp_close_data``.
+        No standalone ``extract_<field>`` methods exist on
+        ``UniswapV3ReceiptParser``, so without suppression every LP_CLOSE
+        enrichment emits four false info-warnings. After VIB-4805, those
+        fields are removed from the effective spec while ``lp_close_data``
+        remains — no data is lost.
+        """
         effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
-        for field_name in ("lp_close_data", "amount0_collected", "amount1_collected", "fees0", "fees1"):
-            assert field_name in effective, (
-                f"Uniswap V3 LP_CLOSE effective spec must still contain "
-                f"{field_name!r}. Aerodrome's REMOVE entries must not leak. "
-                f"Got: {effective}"
+        # Flat fields must be suppressed (they live inside lp_close_data).
+        for field_name in ("amount0_collected", "amount1_collected", "fees0", "fees1"):
+            assert field_name not in effective, (
+                f"VIB-4805: uniswap_v3 LP_CLOSE effective spec must suppress "
+                f"{field_name!r} — it ships via lp_close_data, not a standalone "
+                f"extractor. Got: {effective}"
             )
+        # lp_close_data must remain — it IS the source of truth.
+        assert "lp_close_data" in effective, (
+            f"lp_close_data must remain in uniswap_v3 LP_CLOSE effective spec. "
+            f"Got: {effective}"
+        )
+
+
+# ===========================================================================
+# VIB-4805 — Uni V3 fork LP_CLOSE extraction-warning suppression
+# ===========================================================================
+
+
+class TestVib4805LpCloseFlatFieldSuppression:
+    """VIB-4805: sushiswap_v3 / pancakeswap_v3 / agni_finance LP_CLOSE flat fields suppressed.
+
+    Mirror of the uniswap_v3 test above — all UNISWAP_V3_FORKS share the same
+    SUPPORTED_EXTRACTIONS shape (lp_close_data present, flat fields absent)
+    and therefore receive the same REMOVE narrowing.
+    """
+
+    _FLAT_CLOSE_FIELDS = ("amount0_collected", "amount1_collected", "fees0", "fees1")
+
+    @staticmethod
+    def _assert_flat_suppressed_lp_close_data_kept(protocol: str) -> None:
+        effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", protocol)
+        for field_name in TestVib4805LpCloseFlatFieldSuppression._FLAT_CLOSE_FIELDS:
+            assert field_name not in effective, (
+                f"VIB-4805: {protocol} LP_CLOSE effective spec must suppress "
+                f"{field_name!r} (ships via lp_close_data). Got: {effective}"
+            )
+        assert "lp_close_data" in effective, (
+            f"lp_close_data must remain in {protocol} LP_CLOSE effective spec "
+            f"(it is the sole data source for close amounts and fees). Got: {effective}"
+        )
+
+    def test_sushiswap_v3_lp_close_flat_fields_suppressed(self) -> None:
+        self._assert_flat_suppressed_lp_close_data_kept("sushiswap_v3")
+
+    def test_pancakeswap_v3_lp_close_flat_fields_suppressed(self) -> None:
+        self._assert_flat_suppressed_lp_close_data_kept("pancakeswap_v3")
+
+    def test_agni_finance_lp_close_flat_fields_suppressed(self) -> None:
+        # agni_finance (Mantle) is in UNISWAP_V3_FORKS and aliases to the
+        # uniswap_v3 receipt parser, so its lp_close_data path is identical.
+        self._assert_flat_suppressed_lp_close_data_kept("agni_finance")
+
+    def test_no_extraction_warnings_on_uniswap_v3_lp_close(self) -> None:
+        """End-to-end: enriching a Uniswap V3 LP_CLOSE emits zero field warnings.
+
+        Uses the real ``UniswapV3ReceiptParser`` (pinned via ``_PinnedRegistry``)
+        with an empty receipt (no logs) so the parser returns no data but does
+        not raise. The important assertion is that the enricher produces
+        zero ``does not declare support`` warnings — the suppression REMOVE
+        overlay is the only mechanism that prevents them.
+        """
+        from almanak.connectors.uniswap_v3.receipt_parser import (
+            UniswapV3ReceiptParser,
+        )
+
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt())])
+        intent = _FakeIntent(intent_type="LP_CLOSE", protocol="uniswap_v3")
+        context = _FakeContext(chain="arbitrum", protocol="uniswap_v3")
+
+        enriched = enricher.enrich(result, intent, context)
+
+        for field_name in ("amount0_collected", "amount1_collected", "fees0", "fees1"):
+            assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
+                f"VIB-4805: zero 'does not declare support' warnings expected "
+                f"for {field_name!r} on uniswap_v3 LP_CLOSE — the REMOVE "
+                f"overlay must suppress the field before the capability check. "
+                f"Got warnings: {enriched.extraction_warnings}"
+            )
+        # lp_close_data field must still be attempted (and return None on empty
+        # receipt — parser returns None gracefully, not a warning).
+        lp_close_warning = any(
+            "'lp_close_data'" in w for w in enriched.extraction_warnings
+        )
+        assert not lp_close_warning, (
+            f"lp_close_data must not produce a 'does not declare support' "
+            f"warning — UniswapV3ReceiptParser declares it in SUPPORTED_EXTRACTIONS. "
+            f"Got: {enriched.extraction_warnings}"
+        )

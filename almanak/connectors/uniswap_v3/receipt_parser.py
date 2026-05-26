@@ -1674,11 +1674,18 @@ class UniswapV3ReceiptParser:
                 pool_address = str(addr_attr).lower()
             current_tick = self._current_tick_from_swap_event(logs, pool_address)
 
-            logger.info(
-                f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} "
-                f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
-                f"current_tick={current_tick}"
-            )
+            if current_tick is None:
+                logger.debug(
+                    f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} "
+                    f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
+                    f"current_tick=None (no Swap event in receipt; framework slot0 fallback will resolve)"
+                )
+            else:
+                logger.info(
+                    f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} "
+                    f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
+                    f"current_tick={current_tick}"
+                )
             return LPOpenData(
                 position_id=token_id,
                 tick_lower=tick_lower,

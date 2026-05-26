@@ -37,6 +37,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from ..accounting.deferred_log import (
     DeferredWrite,
 )
@@ -190,213 +192,227 @@ async def commit_teardown_intent(
     saved_cycle_id = get_cycle_id()
     set_cycle_id(teardown_cycle_id)
 
+    # VIB-4807: bind log-line context so structlog fields match the persisted
+    # rows.  The iteration lane sets ``cycle_id`` + ``correlation_id`` via
+    # ``add_context`` (strategy_runner.py:865/872); teardown must mirror that
+    # so log lines emitted here carry ``teardown-{id}`` rather than the stale
+    # iteration values.  ``structlog.contextvars.bound_contextvars`` is the
+    # context-manager form of ``bind_contextvars`` — it saves and restores
+    # exactly the keys it bound via ``reset_contextvars`` on ``__exit__``,
+    # even on exception.  Nothing leaks into the post-teardown iteration.
+    # ``correlation_id`` uses the teardown cycle id as a unique run identifier,
+    # consistent with how iteration derives its correlation_id.
     ledger_entry_id: str | None = None
     enriched_result = execution_result
-    try:
-        # ----- Step 1: ResultEnricher (best-effort) ----------------------
+    with structlog.contextvars.bound_contextvars(cycle_id=teardown_cycle_id, correlation_id=teardown_cycle_id):
         try:
-            from ..execution.result_enricher import ResultEnricher
-
-            # VIB-4477 (T08): thread V4 pool_key_lookup bridge so teardown-lane
-            # V4 LP_CLOSE receipts get the same PoolKey-driven attribution as
-            # the iteration-lane closes.
-            enricher = ResultEnricher(
-                live_mode=runner._is_live_mode(),
-                pool_key_lookup=runner._build_v4_pool_key_lookup(),
-            )
-            enriched_result = enricher.enrich(
-                execution_result,
-                intent,
-                execution_context,
-                bundle_metadata=bundle_metadata,
-            )
-        except Exception as exc:  # noqa: BLE001 — never propagate
-            logger.error(
-                "commit_teardown_intent: enrichment failed for %s/%s: %s",
-                deployment_id,
-                intent_type or "unknown-intent",
-                exc,
-                exc_info=True,
-            )
-            _record("enrich", exc)
-
-        # ----- Step 2: ledger entry --------------------------------------
-        # G12 wiring (Accounting-AttemptNo17 §A4): the teardown lane has no
-        # ``state.price_oracle`` because there's no per-iteration state, so
-        # the pre-teardown bracket stashes the priced PortfolioSnapshot's
-        # token_prices on ``runner._teardown_price_oracle`` after re-shaping
-        # to the build_ledger_entry contract. Without this, every teardown
-        # row landed with empty ``price_inputs_json`` and ``gas_usd``.
-        #
-        # VIB-4318 — the pre-teardown stash only contains assets HELD at
-        # pre-teardown time. A teardown intent whose token_in is a non-stable
-        # token that is NOT yet in the wallet (e.g. a swap WETH → USDC that
-        # consolidates LP-returned WETH back to stablecoin after the
-        # LP_CLOSE) has no WETH price in the stash, so the ledger row's
-        # ``price_inputs_json`` lands WITHOUT WETH and the SWAP handler's
-        # fail-closed contract (VIB-3886) leaves
-        # ``accounting_events.payload_json.amount_in_usd=NULL`` even though
-        # the close-time WETH price was available on the gateway. Merge
-        # intent-token prices into the stash BEFORE the ledger write so
-        # every priced token the intent touches lands on the row. The
-        # merge updates ``runner._teardown_price_oracle`` in place so
-        # subsequent teardown intents in the same loop benefit (the
-        # post-teardown bracket clears the stash so an iteration after
-        # teardown never reads stale teardown prices).
-        from ._run_loop_helpers import _ensure_intent_tokens_in_teardown_oracle
-
-        runner._teardown_price_oracle = await _ensure_intent_tokens_in_teardown_oracle(
-            runner,
-            strategy,
-            intent,
-            getattr(runner, "_teardown_price_oracle", None),
-        )
-        teardown_price_oracle = runner._teardown_price_oracle
-
-        # VIB-3918: build pre/post state dicts from the per-intent balance
-        # captures so ``transaction_ledger.pre_state_json`` and
-        # ``post_state_json`` land populated on every teardown row, lane-
-        # symmetric with iteration. ``pre_snapshot`` is captured by the
-        # teardown manager BEFORE ``orchestrator.execute``; ``recon`` is
-        # captured AFTER. Either may be ``None`` when the runner_helpers
-        # bag wasn't fully wired (older callers / unit-test stubs) — we
-        # silently fall back to ``None``, preserving the pre-VIB-3918
-        # empty-string column.
-        pre_state_dict: dict[str, Any] | None = None
-        post_state_dict: dict[str, Any] | None = None
-        try:
-            from .strategy_runner import (
-                _build_post_state_for_ledger,
-                _build_pre_state_for_ledger,
-            )
-
-            intent_protocol = (getattr(intent, "protocol", "") or "").lower()
-
-            # VIB-3934 — capture lending POST-state on the teardown lane so
-            # ``transaction_ledger.post_state_json`` carries
-            # collateral/debt/HF for REPAY/WITHDRAW/DELEVERAGE intents,
-            # lane-symmetric with iteration. Without this the lending handler
-            # falls back to ESTIMATED confidence on every teardown row even
-            # though the protocol state is readable on-chain. ``pre_state``
-            # is supplied by the teardown manager (captured BEFORE
-            # submission); attempting to read it here would return
-            # post-state values because the TX has already landed.
-            lending_post_state = None
+            # ----- Step 1: ResultEnricher (best-effort) ----------------------
             try:
-                gateway_client = runner._get_gateway_client()
-                teardown_price_oracle_for_state = getattr(runner, "_teardown_price_oracle", None)
-                # VIB-4589 / F7 — pin post-state read to receipt block.
-                # ``strategy_runner._last_receipt_block`` is the single
-                # source of truth; we import lazily to keep the
-                # teardown-commit module free of strategy_runner import-time
-                # coupling.
-                from .strategy_runner import _last_receipt_block
+                from ..execution.result_enricher import ResultEnricher
 
-                lending_post_state = runner._capture_lending_state_safe(
-                    intent=intent,
-                    chain=getattr(strategy, "chain", "") or "",
-                    wallet_address=getattr(strategy, "wallet_address", "") or "",
-                    gateway_client=gateway_client,
-                    price_oracle=teardown_price_oracle_for_state,
-                    phase="post",
-                    block=_last_receipt_block(execution_result),
+                # VIB-4477 (T08): thread V4 pool_key_lookup bridge so teardown-lane
+                # V4 LP_CLOSE receipts get the same PoolKey-driven attribution as
+                # the iteration-lane closes.
+                enricher = ResultEnricher(
+                    live_mode=runner._is_live_mode(),
+                    pool_key_lookup=runner._build_v4_pool_key_lookup(),
                 )
-            except Exception as exc:  # noqa: BLE001 — never propagate
-                logger.debug(
-                    "commit_teardown_intent: lending post-state capture failed for %s: %s",
-                    deployment_id,
-                    exc,
+                enriched_result = enricher.enrich(
+                    execution_result,
+                    intent,
+                    execution_context,
+                    bundle_metadata=bundle_metadata,
                 )
-
-            if pre_snapshot is not None or lending_pre_state is not None:
-                pre_state_dict = _build_pre_state_for_ledger(
-                    pre_snapshot,
-                    lending_pre_state,
-                    protocol=intent_protocol,
-                )
-            if recon is not None or lending_post_state is not None:
-                post_state_dict = _build_post_state_for_ledger(
-                    recon,
-                    lending_post_state,
-                    protocol=intent_protocol,
-                )
-        except Exception as exc:  # noqa: BLE001 — never propagate state-building
-            logger.debug(
-                "commit_teardown_intent: pre/post state build failed for %s: %s",
-                deployment_id,
-                exc,
-            )
-
-        try:
-            ledger_entry_id = await runner._write_ledger_entry(
-                strategy,
-                intent,
-                result=enriched_result,
-                success=True,
-                price_oracle=teardown_price_oracle,
-                pre_state=pre_state_dict,
-                post_state=post_state_dict,
-            )
-        except Exception as exc:  # noqa: BLE001 — never propagate
-            logger.error(
-                "commit_teardown_intent: ledger write failed for %s/%s tx=%s: %s",
-                deployment_id,
-                intent_type or "unknown-intent",
-                tx_hash or "-",
-                exc,
-                exc_info=True,
-            )
-            _record("ledger", exc)
-
-        # ----- Step 3: outbox + fire processor ---------------------------
-        if ledger_entry_id:
-            try:
-                await runner._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(
-                    "commit_teardown_intent: outbox+fire failed for %s ledger=%s: %s",
+                    "commit_teardown_intent: enrichment failed for %s/%s: %s",
                     deployment_id,
-                    ledger_entry_id,
+                    intent_type or "unknown-intent",
                     exc,
                     exc_info=True,
                 )
-                _record("outbox", exc, ledger_entry_id=ledger_entry_id)
+                _record("enrich", exc)
 
-        # ----- Step 4: sidecar (best-effort) -----------------------------
-        try:
-            from ..accounting.sidecar import AccountingSidecarWriter
+            # ----- Step 2: ledger entry --------------------------------------
+            # G12 wiring (Accounting-AttemptNo17 §A4): the teardown lane has no
+            # ``state.price_oracle`` because there's no per-iteration state, so
+            # the pre-teardown bracket stashes the priced PortfolioSnapshot's
+            # token_prices on ``runner._teardown_price_oracle`` after re-shaping
+            # to the build_ledger_entry contract. Without this, every teardown
+            # row landed with empty ``price_inputs_json`` and ``gas_usd``.
+            #
+            # VIB-4318 — the pre-teardown stash only contains assets HELD at
+            # pre-teardown time. A teardown intent whose token_in is a non-stable
+            # token that is NOT yet in the wallet (e.g. a swap WETH → USDC that
+            # consolidates LP-returned WETH back to stablecoin after the
+            # LP_CLOSE) has no WETH price in the stash, so the ledger row's
+            # ``price_inputs_json`` lands WITHOUT WETH and the SWAP handler's
+            # fail-closed contract (VIB-3886) leaves
+            # ``accounting_events.payload_json.amount_in_usd=NULL`` even though
+            # the close-time WETH price was available on the gateway. Merge
+            # intent-token prices into the stash BEFORE the ledger write so
+            # every priced token the intent touches lands on the row. The
+            # merge updates ``runner._teardown_price_oracle`` in place so
+            # subsequent teardown intents in the same loop benefit (the
+            # post-teardown bracket clears the stash so an iteration after
+            # teardown never reads stale teardown prices).
+            from ._run_loop_helpers import _ensure_intent_tokens_in_teardown_oracle
 
-            chain = getattr(strategy, "chain", "") or getattr(runner.config, "chain", "")
-            # Pass the SAME teardown-stash oracle the ledger write used
-            # (Accounting-AttemptNo17 §A4) so the local-dashboard sidecar
-            # row carries the same priced asset set as the canonical SQLite
-            # row. Without this, the teardown sidecar JSONL line was missing
-            # the price_oracle entirely.
-            AccountingSidecarWriter().append(
-                deployment_id=deployment_id,
-                intent=intent,
-                result=enriched_result,
-                chain=chain,
-                price_oracle=teardown_price_oracle,
+            runner._teardown_price_oracle = await _ensure_intent_tokens_in_teardown_oracle(
+                runner,
+                strategy,
+                intent,
+                getattr(runner, "_teardown_price_oracle", None),
             )
-        except Exception as exc:  # noqa: BLE001 — never propagate
-            logger.error(
-                "commit_teardown_intent: sidecar append failed for %s: %s",
-                deployment_id,
-                exc,
-                exc_info=True,
-            )
-            _record("sidecar", exc, ledger_entry_id=ledger_entry_id)
-    finally:
-        # Restore the contextvar. ``set_cycle_id`` accepts ``str``; for
-        # ``None`` we use ``clear_cycle_id``-equivalent semantics
-        # (the underlying ContextVar holds None at default).
-        if saved_cycle_id is None:
-            from ..observability.context import clear_cycle_id
+            teardown_price_oracle = runner._teardown_price_oracle
 
-            clear_cycle_id()
-        else:
-            set_cycle_id(saved_cycle_id)
+            # VIB-3918: build pre/post state dicts from the per-intent balance
+            # captures so ``transaction_ledger.pre_state_json`` and
+            # ``post_state_json`` land populated on every teardown row, lane-
+            # symmetric with iteration. ``pre_snapshot`` is captured by the
+            # teardown manager BEFORE ``orchestrator.execute``; ``recon`` is
+            # captured AFTER. Either may be ``None`` when the runner_helpers
+            # bag wasn't fully wired (older callers / unit-test stubs) — we
+            # silently fall back to ``None``, preserving the pre-VIB-3918
+            # empty-string column.
+            pre_state_dict: dict[str, Any] | None = None
+            post_state_dict: dict[str, Any] | None = None
+            try:
+                from .strategy_runner import (
+                    _build_post_state_for_ledger,
+                    _build_pre_state_for_ledger,
+                )
+
+                intent_protocol = (getattr(intent, "protocol", "") or "").lower()
+
+                # VIB-3934 — capture lending POST-state on the teardown lane so
+                # ``transaction_ledger.post_state_json`` carries
+                # collateral/debt/HF for REPAY/WITHDRAW/DELEVERAGE intents,
+                # lane-symmetric with iteration. Without this the lending handler
+                # falls back to ESTIMATED confidence on every teardown row even
+                # though the protocol state is readable on-chain. ``pre_state``
+                # is supplied by the teardown manager (captured BEFORE
+                # submission); attempting to read it here would return
+                # post-state values because the TX has already landed.
+                lending_post_state = None
+                try:
+                    gateway_client = runner._get_gateway_client()
+                    teardown_price_oracle_for_state = getattr(runner, "_teardown_price_oracle", None)
+                    # VIB-4589 / F7 — pin post-state read to receipt block.
+                    # ``strategy_runner._last_receipt_block`` is the single
+                    # source of truth; we import lazily to keep the
+                    # teardown-commit module free of strategy_runner import-time
+                    # coupling.
+                    from .strategy_runner import _last_receipt_block
+
+                    lending_post_state = runner._capture_lending_state_safe(
+                        intent=intent,
+                        chain=getattr(strategy, "chain", "") or "",
+                        wallet_address=getattr(strategy, "wallet_address", "") or "",
+                        gateway_client=gateway_client,
+                        price_oracle=teardown_price_oracle_for_state,
+                        phase="post",
+                        block=_last_receipt_block(execution_result),
+                    )
+                except Exception as exc:  # noqa: BLE001 — never propagate
+                    logger.debug(
+                        "commit_teardown_intent: lending post-state capture failed for %s: %s",
+                        deployment_id,
+                        exc,
+                    )
+
+                if pre_snapshot is not None or lending_pre_state is not None:
+                    pre_state_dict = _build_pre_state_for_ledger(
+                        pre_snapshot,
+                        lending_pre_state,
+                        protocol=intent_protocol,
+                    )
+                if recon is not None or lending_post_state is not None:
+                    post_state_dict = _build_post_state_for_ledger(
+                        recon,
+                        lending_post_state,
+                        protocol=intent_protocol,
+                    )
+            except Exception as exc:  # noqa: BLE001 — never propagate state-building
+                logger.debug(
+                    "commit_teardown_intent: pre/post state build failed for %s: %s",
+                    deployment_id,
+                    exc,
+                )
+
+            try:
+                ledger_entry_id = await runner._write_ledger_entry(
+                    strategy,
+                    intent,
+                    result=enriched_result,
+                    success=True,
+                    price_oracle=teardown_price_oracle,
+                    pre_state=pre_state_dict,
+                    post_state=post_state_dict,
+                )
+            except Exception as exc:  # noqa: BLE001 — never propagate
+                logger.error(
+                    "commit_teardown_intent: ledger write failed for %s/%s tx=%s: %s",
+                    deployment_id,
+                    intent_type or "unknown-intent",
+                    tx_hash or "-",
+                    exc,
+                    exc_info=True,
+                )
+                _record("ledger", exc)
+
+            # ----- Step 3: outbox + fire processor ---------------------------
+            if ledger_entry_id:
+                try:
+                    await runner._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+                except Exception as exc:  # noqa: BLE001 — never propagate
+                    logger.error(
+                        "commit_teardown_intent: outbox+fire failed for %s ledger=%s: %s",
+                        deployment_id,
+                        ledger_entry_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    _record("outbox", exc, ledger_entry_id=ledger_entry_id)
+
+            # ----- Step 4: sidecar (best-effort) -----------------------------
+            try:
+                from ..accounting.sidecar import AccountingSidecarWriter
+
+                chain = getattr(strategy, "chain", "") or getattr(runner.config, "chain", "")
+                # Pass the SAME teardown-stash oracle the ledger write used
+                # (Accounting-AttemptNo17 §A4) so the local-dashboard sidecar
+                # row carries the same priced asset set as the canonical SQLite
+                # row. Without this, the teardown sidecar JSONL line was missing
+                # the price_oracle entirely.
+                AccountingSidecarWriter().append(
+                    deployment_id=deployment_id,
+                    intent=intent,
+                    result=enriched_result,
+                    chain=chain,
+                    price_oracle=teardown_price_oracle,
+                )
+            except Exception as exc:  # noqa: BLE001 — never propagate
+                logger.error(
+                    "commit_teardown_intent: sidecar append failed for %s: %s",
+                    deployment_id,
+                    exc,
+                    exc_info=True,
+                )
+                _record("sidecar", exc, ledger_entry_id=ledger_entry_id)
+        finally:
+            # Restore the cycle_id contextvar. ``set_cycle_id`` accepts
+            # ``str``; for ``None`` we use ``clear_cycle_id``-equivalent
+            # semantics (the underlying ContextVar holds None at default).
+            # The structlog log-context (cycle_id / correlation_id) is
+            # restored automatically by the enclosing
+            # ``bound_contextvars`` block's __exit__ (VIB-4807).
+            if saved_cycle_id is None:
+                from ..observability.context import clear_cycle_id
+
+                clear_cycle_id()
+            else:
+                set_cycle_id(saved_cycle_id)
 
     accounting_degraded = bool(degraded_records)
     degraded_reason = "; ".join(degraded_reasons) if degraded_reasons else None

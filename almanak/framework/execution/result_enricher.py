@@ -262,8 +262,8 @@ class ResultEnricher:
     # EXTRACTIONS capability check inside ``_extract_field`` would otherwise
     # emit a chronic info-warning on every receipt.
     #
-    # Two narrowing dimensions today (Aerodrome Classic + Slipstream, LP_OPEN
-    # and LP_CLOSE):
+    # Narrowing dimensions (Aerodrome Classic + Slipstream, Uniswap V3 forks,
+    # LP_OPEN and LP_CLOSE):
     #
     # * ``"aerodrome"`` — Classic V1 (Solidly fork) — fungible LP, no NFT, no
     #   ticks, no structured ``lp_open_data`` and no standalone ``amount0_collected`` /
@@ -280,6 +280,16 @@ class ResultEnricher:
     #   ``amount0_collected`` / ``amount1_collected``), so those flat fields
     #   are narrowed too. ``fees0`` / ``fees1`` remain in the Slipstream
     #   SUPPORTED_EXTRACTIONS set (Slipstream-only standalone extractors).
+    # * ``"uniswap_v3"`` / ``"sushiswap_v3"`` / ``"pancakeswap_v3"`` — V3
+    #   concentrated-liquidity forks. LP_CLOSE data ships entirely via
+    #   ``lp_close_data`` (Burn + Collect path); the standalone flat fields
+    #   ``amount0_collected`` / ``amount1_collected`` / ``fees0`` / ``fees1``
+    #   are NOT declared in SUPPORTED_EXTRACTIONS for any of these parsers and
+    #   are NOT standalone ``extract_*`` methods — they live inside the
+    #   ``LPCloseData`` struct. Removing them from the effective spec silences
+    #   the chronic info-warnings on every LP_CLOSE without losing any data
+    #   (VIB-4805). Empty ≠ Zero — ``lp_close_data`` itself remains in the
+    #   spec and carries all fee/amount fields.
     #
     # Values are ``frozenset[str]`` rather than ``list[str]`` because
     # ``_merge_spec_with_overlay`` only needs O(1) membership tests against
@@ -296,6 +306,22 @@ class ResultEnricher:
         "aerodrome_slipstream": {
             "LP_OPEN": frozenset({"tick_lower", "tick_upper"}),
             "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected"}),
+        },
+        # VIB-4805: V3 concentrated-liquidity forks — LP_CLOSE flat fields
+        # ship inside lp_close_data; no standalone extractors exist. Covers the
+        # full UNISWAP_V3_FORKS set (protocol_aliases.py) — each fork keeps its
+        # own protocol slug at overlay-lookup time, so each needs its own entry.
+        "uniswap_v3": {
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
+        },
+        "sushiswap_v3": {
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
+        },
+        "pancakeswap_v3": {
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
+        },
+        "agni_finance": {
+            "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
         },
     }
 

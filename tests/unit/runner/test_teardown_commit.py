@@ -1129,3 +1129,108 @@ async def test_vib4318_unresolvable_address_dropped_not_fabricated(
     # The unresolvable address must NOT have hit the gateway as a phantom symbol.
     assert unknown_address not in queried_symbols
     assert unknown_address.upper() not in queried_symbols
+
+
+# ---------------------------------------------------------------------------
+# VIB-4807: Logging context (structlog contextvars) set + restored
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vib4807_log_context_set_to_teardown_cycle_id(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """VIB-4807: log lines emitted inside commit_teardown_intent carry the
+    teardown cycle_id and correlation_id, not stale iteration values.
+
+    ``structlog.contextvars.get_contextvars()`` captures the bound context
+    during the writer calls. Both ``cycle_id`` and ``correlation_id`` must
+    equal ``teardown_cycle_id`` for the duration of the helper, so that
+    structlog-formatted log lines (JSON / console) carry the right IDs.
+    """
+    import structlog
+
+    runner = _make_runner(live_mode=True)
+    seen_log_ctx: list[dict] = []
+
+    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None, **_kwargs):
+        # Read the structlog bound context at the moment the ledger writer runs.
+        seen_log_ctx.append(dict(structlog.contextvars.get_contextvars()))
+        return "ledger-1"
+
+    runner._write_ledger_entry = AsyncMock(side_effect=_capture_ledger)
+
+    # Bind an "outer" context that should NOT appear inside teardown.
+    structlog.contextvars.bind_contextvars(cycle_id="outer-cycle", correlation_id="outer-corr")
+    try:
+        outcome = await commit_teardown_intent(
+            runner,
+            fake_strategy,
+            _make_intent("SWAP"),
+            execution_result=_make_execution_result(),
+            execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+            teardown_cycle_id="teardown-vib4807-1",
+        )
+
+        assert outcome.accounting_degraded is False
+        assert len(seen_log_ctx) == 1, "Expected exactly one ledger-writer capture"
+        ctx = seen_log_ctx[0]
+        assert ctx.get("cycle_id") == "teardown-vib4807-1", (
+            f"Log context cycle_id must equal teardown_cycle_id during commit. "
+            f"Got: {ctx}"
+        )
+        assert ctx.get("correlation_id") == "teardown-vib4807-1", (
+            f"Log context correlation_id must equal teardown_cycle_id during commit. "
+            f"Got: {ctx}"
+        )
+    finally:
+        structlog.contextvars.clear_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_vib4807_log_context_restored_after_teardown(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """VIB-4807: after commit_teardown_intent exits, the structlog context is
+    restored to the pre-teardown state so log lines in the next iteration
+    do not carry stale teardown IDs.
+
+    ``with_context`` uses ``tmp_bind_contextvars`` which saves/restores
+    exactly the keys it bound; other pre-existing keys are unaffected.
+    """
+    import structlog
+
+    runner = _make_runner(live_mode=True)
+
+    # Simulate an iteration context that was active before teardown.
+    structlog.contextvars.bind_contextvars(
+        cycle_id="iter-cycle-abc",
+        correlation_id="iter-corr-abc",
+        deployment_id="dep-1",
+    )
+    try:
+        await commit_teardown_intent(
+            runner,
+            fake_strategy,
+            _make_intent("SWAP"),
+            execution_result=_make_execution_result(),
+            execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+            teardown_cycle_id="teardown-vib4807-2",
+        )
+
+        ctx_after = structlog.contextvars.get_contextvars()
+        assert ctx_after.get("cycle_id") == "iter-cycle-abc", (
+            f"cycle_id must be restored to the pre-teardown value after commit exits. "
+            f"Got: {ctx_after}"
+        )
+        assert ctx_after.get("correlation_id") == "iter-corr-abc", (
+            f"correlation_id must be restored to the pre-teardown value. "
+            f"Got: {ctx_after}"
+        )
+        # deployment_id (not bound by with_context) must be preserved untouched.
+        assert ctx_after.get("deployment_id") == "dep-1", (
+            f"Unrelated context keys must not be cleared by the teardown commit. "
+            f"Got: {ctx_after}"
+        )
+    finally:
+        structlog.contextvars.clear_contextvars()
