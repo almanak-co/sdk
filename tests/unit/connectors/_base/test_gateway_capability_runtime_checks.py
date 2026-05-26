@@ -11,8 +11,9 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayMarketLookupCapability,
-    GatewayPoolKeySeedCapability,
+    GatewayPoolKeyCacheCapability,
     GatewayServicerCapability,
+    PoolKeyCacheProtocol,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -35,12 +36,16 @@ class _LookupOnly(GatewayConnector):
         return object()
 
 
-class _SeedOnly(GatewayConnector):
-    protocol: ClassVar[ProtocolName] = ProtocolName("seed_demo")
+class _CacheOnly(GatewayConnector):
+    protocol: ClassVar[ProtocolName] = ProtocolName("cache_demo")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
 
-    def seed_pool_keys(self, cache: Any) -> None:
-        pass
+    def build_cache(self, *, network: str) -> PoolKeyCacheProtocol:
+        class _Cache:
+            async def lookup(self, chain: str, pool_id: bytes) -> Any | None:
+                return None
+
+        return _Cache()
 
 
 class _BareConnector(GatewayConnector):
@@ -59,9 +64,9 @@ def test_lookup_capability_runtime_isinstance() -> None:
     assert not isinstance(_ServicerOnly(), GatewayMarketLookupCapability)
 
 
-def test_pool_key_seed_capability_runtime_isinstance() -> None:
-    assert isinstance(_SeedOnly(), GatewayPoolKeySeedCapability)
-    assert not isinstance(_LookupOnly(), GatewayPoolKeySeedCapability)
+def test_pool_key_cache_capability_runtime_isinstance() -> None:
+    assert isinstance(_CacheOnly(), GatewayPoolKeyCacheCapability)
+    assert not isinstance(_LookupOnly(), GatewayPoolKeyCacheCapability)
 
 
 def test_multi_capability_inheritance() -> None:
@@ -72,10 +77,14 @@ def test_multi_capability_inheritance() -> None:
         def market_lookup(self) -> Any:
             return object()
 
-        def seed_pool_keys(self, cache: Any) -> None:
-            pass
+        def build_cache(self, *, network: str) -> PoolKeyCacheProtocol:
+            class _Cache:
+                async def lookup(self, chain: str, pool_id: bytes) -> Any | None:
+                    return None
+
+            return _Cache()
 
     inst = _DualCap()
     assert isinstance(inst, GatewayMarketLookupCapability)
-    assert isinstance(inst, GatewayPoolKeySeedCapability)
+    assert isinstance(inst, GatewayPoolKeyCacheCapability)
     assert not isinstance(inst, GatewayServicerCapability)

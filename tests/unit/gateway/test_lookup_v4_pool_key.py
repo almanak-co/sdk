@@ -643,7 +643,7 @@ class TestLookupV4PoolKeyHandler:
                 hooks=_HOOKS,
             ),
         )
-        servicer._v4_pool_key_cache = cache
+        servicer._pool_key_cache = cache
 
         request = gateway_pb2.LookupV4PoolKeyRequest(
             pool_id=_POOL_ID_BYTES, chain="base"
@@ -665,7 +665,7 @@ class TestLookupV4PoolKeyHandler:
         cache = V4PoolKeyCache()
         # No registration; lookup() will call _refresh_chain — stub it.
         with patch.object(cache, "_refresh_chain", AsyncMock()):
-            servicer._v4_pool_key_cache = cache
+            servicer._pool_key_cache = cache
             request = gateway_pb2.LookupV4PoolKeyRequest(
                 pool_id=_POOL_ID_BYTES, chain="base"
             )
@@ -680,17 +680,17 @@ class TestLookupV4PoolKeyHandler:
         surface as FAILED_PRECONDITION, not NOT_FOUND. Pre-fix the operator
         chasing a missing-pool counter could not tell whether the gateway
         was misconfigured or the pool genuinely didn't exist on-chain."""
-        from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
+        from almanak.connectors._base.gateway_capabilities import PoolKeyCacheError
 
         servicer = _make_servicer()
         ctx = _make_context()
         cache = MagicMock()
         cache.lookup = AsyncMock(
-            side_effect=V4PoolKeyLookupError(
+            side_effect=PoolKeyCacheError(
                 "no RPC URL configured for chain=base", code="failed_precondition"
             )
         )
-        servicer._v4_pool_key_cache = cache
+        servicer._pool_key_cache = cache
 
         request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="base")
         resp = await servicer.LookupV4PoolKey(request, ctx)
@@ -705,18 +705,18 @@ class TestLookupV4PoolKeyHandler:
         """VIB-4426 P1 #2 — refresh-time upstream RPC failure
         (eth_blockNumber / eth_getLogs) must surface as UNAVAILABLE so
         operators see the right signal for a transient/upstream issue."""
-        from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
+        from almanak.connectors._base.gateway_capabilities import PoolKeyCacheError
 
         servicer = _make_servicer()
         ctx = _make_context()
         cache = MagicMock()
         cache.lookup = AsyncMock(
-            side_effect=V4PoolKeyLookupError(
+            side_effect=PoolKeyCacheError(
                 "eth_blockNumber failed for chain=base: rpc down",
                 code="unavailable",
             )
         )
-        servicer._v4_pool_key_cache = cache
+        servicer._pool_key_cache = cache
 
         request = gateway_pb2.LookupV4PoolKeyRequest(pool_id=_POOL_ID_BYTES, chain="base")
         resp = await servicer.LookupV4PoolKey(request, ctx)
@@ -740,7 +740,7 @@ class TestLookupV4PoolKeyHandler:
                 "kaboom: ssl handshake to https://archive.internal/rpc/secret-token failed"
             )
         )
-        servicer._v4_pool_key_cache = cache
+        servicer._pool_key_cache = cache
 
         request = gateway_pb2.LookupV4PoolKeyRequest(
             pool_id=_POOL_ID_BYTES, chain="base"

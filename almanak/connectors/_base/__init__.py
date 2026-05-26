@@ -10,7 +10,7 @@ them via explicit submodule paths::
     from almanak.connectors._base.gateway_capabilities import (
         GatewayServicerCapability,
         GatewayMarketLookupCapability,
-        GatewayPoolKeySeedCapability,
+        GatewayPoolKeyCacheCapability,
     )
 
 The import-graph lint (``tests/static/test_strategy_import_boundary.py``)

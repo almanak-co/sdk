@@ -13,6 +13,12 @@ from typing import Any
 
 import grpc
 
+from almanak.connectors._base.gateway_capabilities import (
+    GatewayPoolKeyCacheCapability,
+    PoolKeyCacheError,
+    PoolKeyCacheProtocol,
+)
+from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -156,15 +162,18 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # Negative-miss cache: (chain, symbol) -> expiry monotonic time.
         # Prevents repeated slow API calls for symbols that don't exist.
         self._dynamic_miss_cache: dict[tuple[str, str], float] = {}
-        # Uniswap V4 pool_id -> PoolKey cache (VIB-4472 / T03). Lazy-built
-        # via observed PoolManager.Initialize events on first lookup miss.
-        # VIB-4426 — ``_v4_pool_key_cache_lock`` serialises concurrent
+        # pool_id -> PoolKey cache (VIB-4472 / T03). Lazy-built via the
+        # ``GatewayPoolKeyCacheCapability`` provider's ``build_cache`` on
+        # first ``LookupV4PoolKey`` lookup miss. Today's sole provider is
+        # the Uniswap V4 connector — adding another pool-keyed protocol
+        # is a connector edit, not a market_service edit (VIB-4818).
+        # VIB-4426 — ``_pool_key_cache_lock`` serialises concurrent
         # first-call construction. Without it, two concurrent
         # ``LookupV4PoolKey`` requests could both observe ``None``, both
         # instantiate, and the second one would silently overwrite the
         # first — discarding any in-flight backfill progress.
-        self._v4_pool_key_cache: Any = None
-        self._v4_pool_key_cache_lock = asyncio.Lock()
+        self._pool_key_cache: PoolKeyCacheProtocol | None = None
+        self._pool_key_cache_lock = asyncio.Lock()
 
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""
@@ -931,59 +940,61 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.IndicatorResponse()
 
-    async def _get_v4_pool_key_cache(self):
-        """Lazy-construct the V4 pool key cache (VIB-4472 / T03).
+    async def _get_pool_key_cache(self) -> PoolKeyCacheProtocol:
+        """Lazy-construct the pool-key cache (VIB-4472 / T03; VIB-4818).
 
         Constructed on first ``LookupV4PoolKey`` call so the gateway boot
         path is unaffected when no caller exercises V4. Single instance
-        shared across the gateway lifecycle so the backfill cursor and the
-        in-memory index survive between requests.
+        shared across the gateway lifecycle so the cache's backfill cursor
+        and in-memory index survive between requests.
 
-        VIB-4426 — construction is guarded by ``_v4_pool_key_cache_lock``
-        so two concurrent first-callers cannot each instantiate (which
-        would discard the loser's in-flight backfill state).
+        Construction routes through
+        ``GATEWAY_REGISTRY.capability_providers(GatewayPoolKeyCacheCapability)``
+        and the chosen provider's ``build_cache(network=...)`` returns a
+        ready-to-query :class:`PoolKeyCacheProtocol` instance (including any
+        canonical-pair seeding the connector requires). The gateway holds
+        the cache behind the Protocol — no concrete connector class is
+        named here.
 
-        VIB-4534 — immediately after construction, the canonical PoolKey
-        seed registry (:mod:`almanak.connectors.uniswap_v4.gateway.canonical_pools`) is
-        loaded so that WETH/USDC and other common pairs resolve on the
-        first ``LookupV4PoolKey`` without an eth_getLogs scan. The seed is
-        in-memory only (no network I/O); pre-seeding happens INSIDE the
-        lock so the seed is visible to the very first lookup. A
-        configuration failure in the seed table fails loudly here
-        (V4CanonicalSeedConfigError / V4CanonicalSeedCollisionError) — a
-        misconfigured seed is a boot-time bug, not a runtime degradation.
+        Today exactly one provider is expected (Uniswap V4). The
+        single-provider invariant is enforced loudly: zero providers is a
+        misconfigured deployment; more than one is an ambiguity the
+        gateway refuses to silently resolve (winner-takes-all would mask
+        the bug).
+
+        VIB-4426 — construction is guarded by ``_pool_key_cache_lock`` so
+        two concurrent first-callers cannot each instantiate (which would
+        discard the loser's in-flight backfill state). The seed step runs
+        INSIDE the lock and BEFORE publishing the cache to
+        ``self._pool_key_cache`` so a concurrent reader cannot observe a
+        partially-seeded cache.
         """
-        if self._v4_pool_key_cache is not None:
-            return self._v4_pool_key_cache
-        async with self._v4_pool_key_cache_lock:
+        if self._pool_key_cache is not None:
+            return self._pool_key_cache
+        async with self._pool_key_cache_lock:
             # Double-checked: another coroutine may have constructed while
             # we were waiting on the lock.
-            if self._v4_pool_key_cache is None:
-                # VIB-4817 — seeding now dispatches through
-                # ``GATEWAY_REGISTRY.capability_providers(
-                # GatewayPoolKeySeedCapability)`` so the gateway no
-                # longer hardcodes a uniswap_v4 import to invoke the
-                # seed table. The cache type itself stays V4-specific
-                # — the gateway's V4 PoolKey backfill cursor lives on
-                # the cache instance.
-                from almanak.connectors._base.gateway_capabilities import (
-                    GatewayPoolKeySeedCapability,
-                )
-                from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
-                from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyCache
-
-                cache = V4PoolKeyCache(network=self.settings.network)
-                # Pre-seed canonical pairs BEFORE publishing the cache to
-                # ``self._v4_pool_key_cache``. A concurrent reader observing
-                # a partially-seeded cache could mis-classify a canonical
-                # pool as "not found"; doing the work before the assignment
-                # closes that window.
+            if self._pool_key_cache is None:
                 # mypy: ``@runtime_checkable`` Protocol is the registry
                 # contract; see ``pool_history_service._derive_pool_history_tables``.
-                for provider in GATEWAY_REGISTRY.capability_providers(GatewayPoolKeySeedCapability):  # type: ignore[type-abstract]
-                    provider.seed_pool_keys(cache)
-                self._v4_pool_key_cache = cache
-            return self._v4_pool_key_cache
+                providers = list(
+                    GATEWAY_REGISTRY.capability_providers(GatewayPoolKeyCacheCapability)  # type: ignore[type-abstract]
+                )
+                if not providers:
+                    raise RuntimeError(
+                        "No GatewayPoolKeyCacheCapability provider registered; cannot serve LookupV4PoolKey"
+                    )
+                if len(providers) > 1:
+                    # Two providers would silently winner-takes-all. If a
+                    # second pool-keyed protocol ever lands we want a
+                    # boot-time error so the dispatcher can be designed
+                    # explicitly (e.g. chain-keyed) rather than implicit.
+                    names = sorted(type(p).__name__ for p in providers)
+                    raise RuntimeError(
+                        f"Ambiguous GatewayPoolKeyCacheCapability: {len(providers)} providers registered ({names})"
+                    )
+                self._pool_key_cache = providers[0].build_cache(network=self.settings.network)
+            return self._pool_key_cache
 
     async def LookupV4PoolKey(
         self,
@@ -1024,39 +1035,42 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.LookupV4PoolKeyResponse()
 
-        cache = await self._get_v4_pool_key_cache()
+        # Cache acquisition is INSIDE the try/except so the
+        # zero-provider / multi-provider ``RuntimeError`` from
+        # ``_get_pool_key_cache`` flows through the same sanitised
+        # ``INTERNAL`` mapping as any other backend error — a stack
+        # trace from a misconfigured deployment must not cross the
+        # gRPC trust boundary.
         try:
+            cache = await self._get_pool_key_cache()
             cached = await cache.lookup(chain, request.pool_id)
-        except Exception as exc:  # noqa: BLE001
+        except PoolKeyCacheError as exc:
             # VIB-4426 P1 #2 — distinguish typed cache-refresh failures
             # (config / upstream-RPC) from genuinely unknown pools. Pre-fix,
             # both surfaced as ``NOT_FOUND``, which made operator
             # observability lie ("pool not found" when actually the gateway
             # had no RPC URL or could not call ``eth_blockNumber``).
-            from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyLookupError
-
-            if isinstance(exc, V4PoolKeyLookupError):
-                logger.warning(
-                    "LookupV4PoolKey: refresh failed for chain=%s pool_id=0x%s code=%s: %s",
-                    chain,
-                    request.pool_id.hex(),
-                    exc.code,
-                    exc,
+            logger.warning(
+                "LookupV4PoolKey: refresh failed for chain=%s pool_id=0x%s code=%s: %s",
+                chain,
+                request.pool_id.hex(),
+                exc.code,
+                exc,
+            )
+            if exc.code == "failed_precondition":
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    f"V4 pool key resolution unavailable on chain {chain}: "
+                    "gateway is not configured to query this chain"
                 )
-                if exc.code == "failed_precondition":
-                    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-                    context.set_details(
-                        f"V4 pool key resolution unavailable on chain {chain}: "
-                        "gateway is not configured to query this chain"
-                    )
-                else:  # "unavailable"
-                    context.set_code(grpc.StatusCode.UNAVAILABLE)
-                    context.set_details(
-                        f"V4 pool key resolution temporarily unavailable on chain {chain}: "
-                        "upstream RPC failed; see gateway logs"
-                    )
-                return gateway_pb2.LookupV4PoolKeyResponse()
-
+            else:  # "unavailable"
+                context.set_code(grpc.StatusCode.UNAVAILABLE)
+                context.set_details(
+                    f"V4 pool key resolution temporarily unavailable on chain {chain}: "
+                    "upstream RPC failed; see gateway logs"
+                )
+            return gateway_pb2.LookupV4PoolKeyResponse()
+        except Exception:  # noqa: BLE001
             # VIB-4426 — log full diagnostic context server-side; return a
             # sanitised generic message to the gRPC client. ``str(exc)`` on
             # an unexpected backend error can leak SDK paths, RPC URLs, or

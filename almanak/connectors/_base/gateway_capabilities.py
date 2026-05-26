@@ -13,8 +13,15 @@ Phase 0 ships the three capabilities Phase 2 needs immediately:
 * ``GatewayMarketLookupCapability`` — connector provides a token / market
   metadata lookup (Phase 2 callers: aave / compound / fluid / morpho /
   pendle / jupiter / beefy / yearn lookups).
-* ``GatewayPoolKeySeedCapability`` — connector pre-seeds the gateway's
-  pool-key cache at boot (Phase 2 caller: ``uniswap_v4``).
+* ``GatewayPoolKeyCacheCapability`` — connector builds the gateway's
+  pool-key cache, including any pre-seeding (Phase 2 caller:
+  ``uniswap_v4``). Supersedes the original ``GatewayPoolKeySeedCapability``
+  (VIB-4810): folding "construct" + "seed" into one call lets
+  ``MarketService`` hold the cache instance behind a structural Protocol
+  (``PoolKeyCacheProtocol``) instead of importing a connector-specific
+  cache class. The corresponding lookup-failure exception
+  (``PoolKeyCacheError``) lives here so the gateway's ``except`` branch
+  no longer imports a connector-specific error type either.
 
 Phase 3 (VIB-4811) replaces the gateway's hardcoded protocol-keyed
 dispatch tables with registry queries by adding:
@@ -82,17 +89,81 @@ class GatewayMarketLookupCapability(Protocol):
     def market_lookup(self) -> Any: ...
 
 
-@runtime_checkable
-class GatewayPoolKeySeedCapability(Protocol):
-    """Connector pre-seeds the gateway's pool-key cache at boot.
+class PoolKeyCacheError(Exception):
+    """Refresh-time failure that prevented a pool-key cache from
+    answering a lookup.
 
-    Used by Uniswap V4 to register canonical PoolKeys (WETH/USDC,
-    WBTC/WETH, …) whose Initialize event is too old to be discovered by
-    the runtime log-scan window. The connector receives the cache
-    instance and calls ``cache.register(...)`` for each canonical pool.
+    Surfaced through caches produced by ``GatewayPoolKeyCacheCapability``.
+    The gateway's ``LookupV4PoolKey`` servicer catches this base type and
+    translates ``code`` to a gRPC status:
+
+    * ``"failed_precondition"`` — cache has no upstream configured for
+      the requested chain (e.g. no contract address resolved, no RPC URL,
+      RPC URL resolver raised). Maps to ``FAILED_PRECONDITION``.
+    * ``"unavailable"`` — upstream was reachable but the call itself
+      failed (``eth_blockNumber`` / ``eth_getLogs`` raised). Maps to
+      ``UNAVAILABLE``.
+
+    The two codes carry distinct operational signals: ``failed_precondition``
+    is a deployment / config issue (operator action), ``unavailable`` is a
+    transient upstream problem (retry / circuit-breaker territory).
+    Without the distinction operators chasing a missing-pool counter
+    cannot tell whether their gateway is misconfigured or the pool
+    genuinely doesn't exist on-chain.
     """
 
-    def seed_pool_keys(self, cache: Any) -> None: ...
+    def __init__(self, message: str, *, code: str) -> None:
+        if code not in ("failed_precondition", "unavailable"):
+            raise ValueError(f"PoolKeyCacheError.code must be one of failed_precondition/unavailable, got {code!r}")
+        self.code = code
+        super().__init__(message)
+
+
+@runtime_checkable
+class PoolKeyCacheProtocol(Protocol):
+    """Cache interface the gateway invokes for ``LookupV4PoolKey``.
+
+    Concrete implementations carry additional connector-specific state
+    (backfill cursors, in-memory derivation indexes, per-chain RPC
+    clients) but only ``lookup`` is called at the gateway boundary.
+
+    Contract:
+
+    * Returns ``None`` for "scanned and the pool is not in the cache" —
+      the gateway translates this to ``NOT_FOUND``.
+    * Raises :class:`PoolKeyCacheError` for refresh-time failures the
+      cache could not paper over (no upstream configured, RPC raised,
+      …) — the gateway translates these per the error's ``code``.
+
+    The return type is ``Any`` because the cached object's field shape
+    is connector-specific (the V4 cache returns a ``CachedPoolKey`` with
+    V4 PoolManager struct fields); coupling ``_base/`` to a concrete
+    cache module would break the foundation's leaf-of-the-import-graph
+    invariant. The gateway reads the fields it needs by name.
+    """
+
+    async def lookup(self, chain: str, pool_id: bytes) -> Any | None: ...
+
+
+@runtime_checkable
+class GatewayPoolKeyCacheCapability(Protocol):
+    """Connector builds the gateway's pool-key cache.
+
+    ``MarketService`` holds at most one cache instance per process
+    lifetime, constructed lazily on first ``LookupV4PoolKey`` request via
+    ``GATEWAY_REGISTRY.capability_providers(GatewayPoolKeyCacheCapability)``.
+    The connector's ``build_cache`` is responsible for any seeding the
+    cache needs (e.g. registering canonical pools whose ``Initialize``
+    event is older than the runtime log-scan window) — by the time the
+    method returns, the cache must be ready to answer ``lookup`` calls.
+
+    Folding construction + seeding into one method (vs. the original
+    VIB-4810 split into ``GatewayPoolKeySeedCapability``) lets the
+    gateway hold the cache instance behind ``PoolKeyCacheProtocol``
+    instead of importing the connector's cache class to instantiate it.
+    """
+
+    def build_cache(self, *, network: str) -> PoolKeyCacheProtocol: ...
 
 
 @runtime_checkable

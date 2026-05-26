@@ -41,7 +41,9 @@ Layering:
 * :data:`CANONICAL_V4_PAIRS` — the static table.
 * :func:`seed_canonical_pool_keys` — orchestration: resolve tokens, build
   :class:`CachedPoolKey`, register into the cache; called once at gateway
-  boot from :meth:`MarketService._get_v4_pool_key_cache`.
+  boot from :meth:`UniswapV4GatewayConnector.build_cache` (which
+  :meth:`MarketService._get_pool_key_cache` invokes via the
+  ``GatewayPoolKeyCacheCapability`` registry dispatch).
 """
 
 from __future__ import annotations

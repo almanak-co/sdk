@@ -42,6 +42,7 @@ from typing import Any
 
 from web3 import AsyncHTTPProvider, AsyncWeb3
 
+from almanak.connectors._base.gateway_capabilities import PoolKeyCacheError
 from almanak.core.contracts import UNISWAP_V4
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
@@ -88,26 +89,12 @@ class V4CanonicalSeedCollisionError(RuntimeError):
     """
 
 
-class V4PoolKeyLookupError(Exception):
-    """Refresh-time failure that prevented the cache from being able to
-    answer the lookup. VIB-4426 P1 #2 — distinguishes "we cannot query
-    the chain" (FAILED_PRECONDITION / UNAVAILABLE) from "we scanned and
-    the pool isn't there" (NOT_FOUND). Without the distinction operators
-    chasing a missing-pool counter cannot tell whether their gateway is
-    misconfigured or the pool genuinely doesn't exist on-chain.
-
-    ``code`` is the gRPC status the servicer should translate to:
-    - ``"failed_precondition"``: no PoolManager configured for this chain,
-      or the RPC URL resolver returned empty / raised.
-    - ``"unavailable"``: the upstream RPC was reachable but the call
-      itself failed (``eth_blockNumber`` / ``eth_getLogs`` raised).
-    """
-
-    def __init__(self, message: str, *, code: str) -> None:
-        if code not in ("failed_precondition", "unavailable"):
-            raise ValueError(f"V4PoolKeyLookupError.code must be one of failed_precondition/unavailable, got {code!r}")
-        self.code = code
-        super().__init__(message)
+# VIB-4818 — refresh-time failures raise the gateway-side base type
+# ``PoolKeyCacheError``. The gateway's ``LookupV4PoolKey`` servicer catches
+# the base type and discriminates by ``.code`` without importing any V4
+# symbol. The original ``V4PoolKeyLookupError`` was a strict subset of the
+# base type — same constructor signature, same ``code`` field — so the
+# rename is purely cosmetic at the call sites.
 
 
 @dataclass(frozen=True)
@@ -374,7 +361,7 @@ class V4PoolKeyCache:
         Called while holding ``self._lock``.
 
         Raises:
-            V4PoolKeyLookupError: on configuration / upstream-RPC failure
+            PoolKeyCacheError: on configuration / upstream-RPC failure
                 so the servicer can map to ``FAILED_PRECONDITION`` /
                 ``UNAVAILABLE`` rather than masking as ``NOT_FOUND``
                 (Codex P1 #2). Returns normally only when the scan
@@ -383,7 +370,7 @@ class V4PoolKeyCache:
         """
         chain_addrs = UNISWAP_V4.get(chain)
         if not chain_addrs or "pool_manager" not in chain_addrs:
-            raise V4PoolKeyLookupError(
+            raise PoolKeyCacheError(
                 f"no V4 PoolManager configured for chain={chain}",
                 code="failed_precondition",
             )
@@ -392,13 +379,13 @@ class V4PoolKeyCache:
         try:
             rpc_url = self._rpc_url_resolver(chain, network=self._network)
         except Exception as exc:  # noqa: BLE001
-            raise V4PoolKeyLookupError(
+            raise PoolKeyCacheError(
                 f"RPC URL resolver failed for chain={chain} network={self._network}: {exc}",
                 code="failed_precondition",
             ) from exc
 
         if not rpc_url:
-            raise V4PoolKeyLookupError(
+            raise PoolKeyCacheError(
                 f"no RPC URL configured for chain={chain} network={self._network}",
                 code="failed_precondition",
             )
@@ -407,7 +394,7 @@ class V4PoolKeyCache:
         try:
             head = await w3.eth.block_number
         except Exception as exc:  # noqa: BLE001
-            raise V4PoolKeyLookupError(
+            raise PoolKeyCacheError(
                 f"eth_blockNumber failed for chain={chain}: {exc}",
                 code="unavailable",
             ) from exc
@@ -433,7 +420,7 @@ class V4PoolKeyCache:
                 # retries this range rather than silently skipping it.
                 # VIB-4426 P1 #2 — surface as UNAVAILABLE so the servicer
                 # does not mask the upstream failure as NOT_FOUND.
-                raise V4PoolKeyLookupError(
+                raise PoolKeyCacheError(
                     f"eth_getLogs failed for chain={chain} range=[{from_block}..{head}]",
                     code="unavailable",
                 )
@@ -490,7 +477,7 @@ class V4PoolKeyCache:
         if added is None:
             # RPC failure — preserve earliest watermark so next lookup retries.
             # VIB-4426 P1 #2 — surface as UNAVAILABLE.
-            raise V4PoolKeyLookupError(
+            raise PoolKeyCacheError(
                 f"eth_getLogs failed for chain={chain} range=[{hist_from}..{hist_to}] (historical)",
                 code="unavailable",
             )
@@ -646,7 +633,6 @@ __all__ = [
     "CachedPoolKey",
     "V4CanonicalSeedCollisionError",
     "V4PoolKeyCache",
-    "V4PoolKeyLookupError",
     "_decode_initialize_log",
     "_normalize_pool_id",
 ]

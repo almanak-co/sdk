@@ -52,7 +52,7 @@ def _make_servicer_with_anvil(anvil: AnvilFixture, *, cache: V4PoolKeyCache) -> 
     settings.chains = ["base"]
     settings.coingecko_api_key = ""
     servicer = MarketServiceServicer(settings)
-    servicer._v4_pool_key_cache = cache
+    servicer._pool_key_cache = cache
     return servicer
 
 

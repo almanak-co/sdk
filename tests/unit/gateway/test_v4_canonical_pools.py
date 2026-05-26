@@ -9,9 +9,10 @@ Three concerns exercised here:
 3. ``seed_canonical_pool_keys`` orchestration — robust to token-resolver
    misses, refuses unknown chains, and crucially does NOT open any network
    connection on the boot path.
-4. Gateway wiring — :meth:`MarketService._get_v4_pool_key_cache` invokes
-   the seed BEFORE the first ``LookupV4PoolKey`` RPC is served, so the seed
-   is visible to the very first lookup.
+4. Gateway wiring — :meth:`MarketService._get_pool_key_cache` invokes
+   :meth:`UniswapV4GatewayConnector.build_cache` (which performs the seed)
+   BEFORE the first ``LookupV4PoolKey`` RPC is served, so the seed is
+   visible to the very first lookup.
 
 No network access is performed; the suite is fully offline.
 """
@@ -399,7 +400,7 @@ class TestSeedRobustness:
 
 
 class TestMarketServiceSeedWiring:
-    """The seed MUST be applied during the first ``_get_v4_pool_key_cache``
+    """The seed MUST be applied during the first ``_get_pool_key_cache``
     call, BEFORE the cache reference is published, so the first
     ``LookupV4PoolKey`` RPC sees the seed.
     """
@@ -415,14 +416,14 @@ class TestMarketServiceSeedWiring:
 
     @pytest.mark.asyncio
     async def test_market_service_seeds_cache_on_first_lookup(self) -> None:
-        """First call to ``_get_v4_pool_key_cache`` invokes the connector's
-        ``seed_pool_keys`` capability exactly once before returning. The
-        returned cache must contain the canonical Base WETH/USDC pool_id.
+        """First call to ``_get_pool_key_cache`` invokes the connector's
+        ``build_cache`` exactly once before returning. The returned cache
+        must contain the canonical Base WETH/USDC pool_id.
 
-        VIB-4817 — seeding dispatches via
-        ``GATEWAY_REGISTRY.capability_providers(GatewayPoolKeySeedCapability)``
-        so the spy patches the provider method, not the module-level
-        ``seed_canonical_pool_keys`` helper.
+        VIB-4818 — construction + seeding fold into one
+        ``GatewayPoolKeyCacheCapability.build_cache`` call, so the spy
+        patches the provider's ``build_cache`` (not a separate
+        ``seed_pool_keys`` step that no longer exists).
         """
         from almanak.connectors.uniswap_v4.gateway.provider import (
             UniswapV4GatewayConnector,
@@ -430,33 +431,38 @@ class TestMarketServiceSeedWiring:
 
         servicer = self._make_servicer()
 
-        observed_calls: list[V4PoolKeyCache] = []
-        original_seed = UniswapV4GatewayConnector.seed_pool_keys
+        observed_networks: list[str] = []
+        original_build = UniswapV4GatewayConnector.build_cache
 
-        def _tracking_seed(self_: UniswapV4GatewayConnector, cache: V4PoolKeyCache) -> None:
-            observed_calls.append(cache)
-            original_seed(self_, cache)
+        def _tracking_build(self_: UniswapV4GatewayConnector, *, network: str) -> V4PoolKeyCache:
+            observed_networks.append(network)
+            return original_build(self_, network=network)
 
         with patch.object(
             UniswapV4GatewayConnector,
-            "seed_pool_keys",
-            _tracking_seed,
+            "build_cache",
+            _tracking_build,
         ):
-            cache = await servicer._get_v4_pool_key_cache()
+            cache = await servicer._get_pool_key_cache()
 
-        assert len(observed_calls) == 1, (
-            f"UniswapV4GatewayConnector.seed_pool_keys should be invoked exactly once on first cache access; "
-            f"got {len(observed_calls)}"
+        # ``_get_pool_key_cache`` returns ``PoolKeyCacheProtocol``; the
+        # ``_index`` attribute access below requires the concrete V4
+        # type. Assert it so the test fails loudly if the registered
+        # provider ever swaps the impl class.
+        assert isinstance(cache, V4PoolKeyCache)
+        assert len(observed_networks) == 1, (
+            "UniswapV4GatewayConnector.build_cache should be invoked exactly once on "
+            f"first cache access; got {len(observed_networks)}"
         )
-        assert observed_calls[0] is cache
+        assert observed_networks[0] == "mainnet"
         # And the canonical Base WETH/USDC pool_id is present.
         assert _BASE_WETH_USDC_3000_POOL_ID in cache._index.get("base", {})
 
     @pytest.mark.asyncio
     async def test_market_service_does_not_reseed_on_subsequent_lookups(self) -> None:
         """The seed is a boot-time operation. Subsequent
-        ``_get_v4_pool_key_cache`` invocations must NOT re-invoke the seed;
-        the cache is already populated.
+        ``_get_pool_key_cache`` invocations must NOT re-invoke
+        ``build_cache``; the cache is already populated.
         """
         from almanak.connectors.uniswap_v4.gateway.provider import (
             UniswapV4GatewayConnector,
@@ -465,21 +471,21 @@ class TestMarketServiceSeedWiring:
         servicer = self._make_servicer()
 
         call_count = 0
-        original_seed = UniswapV4GatewayConnector.seed_pool_keys
+        original_build = UniswapV4GatewayConnector.build_cache
 
-        def _tracking_seed(self_: UniswapV4GatewayConnector, cache: V4PoolKeyCache) -> None:
+        def _tracking_build(self_: UniswapV4GatewayConnector, *, network: str) -> V4PoolKeyCache:
             nonlocal call_count
             call_count += 1
-            original_seed(self_, cache)
+            return original_build(self_, network=network)
 
         with patch.object(
             UniswapV4GatewayConnector,
-            "seed_pool_keys",
-            _tracking_seed,
+            "build_cache",
+            _tracking_build,
         ):
-            cache1 = await servicer._get_v4_pool_key_cache()
-            cache2 = await servicer._get_v4_pool_key_cache()
-            cache3 = await servicer._get_v4_pool_key_cache()
+            cache1 = await servicer._get_pool_key_cache()
+            cache2 = await servicer._get_pool_key_cache()
+            cache3 = await servicer._get_pool_key_cache()
 
         assert cache1 is cache2 is cache3
         assert call_count == 1
@@ -496,8 +502,12 @@ class TestMarketServiceSeedWiring:
         from almanak.gateway.proto import gateway_pb2
 
         servicer = self._make_servicer()
-        # Real seed; pre-warm the cache via _get_v4_pool_key_cache.
-        cache = await servicer._get_v4_pool_key_cache()
+        # Real seed; pre-warm the cache via _get_pool_key_cache.
+        cache = await servicer._get_pool_key_cache()
+        # ``_get_pool_key_cache`` returns ``PoolKeyCacheProtocol``; narrow
+        # to the concrete impl so the ``_index`` introspection below is
+        # well-typed and fails loudly on a swapped provider impl.
+        assert isinstance(cache, V4PoolKeyCache)
         # If the seed wired up correctly the canonical pool_id is in the cache.
         assert _BASE_WETH_USDC_3000_POOL_ID in cache._index.get("base", {})
 
