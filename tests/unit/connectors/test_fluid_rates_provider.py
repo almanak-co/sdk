@@ -11,12 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.fluid.rates_provider import (
+from almanak.connectors.fluid.rates_provider import (
     RATES_CACHE_TTL,
     FluidPoolRate,
     FluidRatesProvider,
 )
-from almanak.framework.connectors.fluid.sdk import DexPoolData, FluidSDKError
+from almanak.connectors.fluid.sdk import DexPoolData, FluidSDKError
 
 
 class TestFluidRatesProvider:
@@ -133,7 +133,7 @@ class TestFluidRatesProvider:
         gateway_client = MagicMock()
         provider = FluidRatesProvider(chain="arbitrum", rpc_url=None, gateway_client=gateway_client)
         with patch(
-            "almanak.framework.connectors.fluid.rates_provider.FluidSDK"
+            "almanak.connectors.fluid.rates_provider.FluidSDK"
         ) as mock_sdk_cls:
             mock_sdk_cls.return_value = MagicMock()
             sdk = provider._get_sdk()

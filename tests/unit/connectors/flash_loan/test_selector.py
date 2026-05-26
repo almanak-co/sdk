@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.flash_loan.selector import (
+from almanak.connectors.flash_loan.selector import (
     AAVE_SUPPORTED_TOKENS,
     BALANCER_SUPPORTED_TOKENS,
     PROVIDER_FEES_BPS,

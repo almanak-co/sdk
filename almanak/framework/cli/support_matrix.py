@@ -95,7 +95,7 @@ def _collect_registry_lending(all_chains: set[str]) -> dict[str, set[str]]:
 def _add_compound_v3(lending: dict[str, set[str]], all_chains: set[str]) -> None:
     """Compound V3 — derive chains from adapter's COMET_ADDRESSES (single source of truth)."""
     try:
-        from almanak.framework.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
 
         compound_chains = list(COMPOUND_V3_COMET_ADDRESSES.keys())
         lending.setdefault("compound_v3", set()).update(compound_chains)
@@ -107,7 +107,7 @@ def _add_compound_v3(lending: dict[str, set[str]], all_chains: set[str]) -> None
 def _add_euler_v2(lending: dict[str, set[str]], all_chains: set[str]) -> None:
     """Euler V2 — lending on Avalanche + Ethereum (derived from adapter's CHAIN_ADDRESSES)."""
     try:
-        from almanak.framework.connectors.euler_v2.adapter import CHAIN_ADDRESSES as EULER_V2_CHAINS
+        from almanak.connectors.euler_v2.adapter import CHAIN_ADDRESSES as EULER_V2_CHAINS
 
         euler_v2_chains = set(EULER_V2_CHAINS.keys())
         lending.setdefault("euler_v2", set()).update(euler_v2_chains)
@@ -119,7 +119,7 @@ def _add_euler_v2(lending: dict[str, set[str]], all_chains: set[str]) -> None:
 def _add_curvance(lending: dict[str, set[str]], all_chains: set[str]) -> None:
     """Curvance — Monad isolated leveraged lending markets (VIB-2861)."""
     try:
-        from almanak.framework.connectors.curvance.constants import SUPPORTED_CHAINS as CURVANCE_CHAINS
+        from almanak.connectors.curvance.constants import SUPPORTED_CHAINS as CURVANCE_CHAINS
 
         lending.setdefault("curvance", set()).update(CURVANCE_CHAINS)
         all_chains.update(CURVANCE_CHAINS)
@@ -149,16 +149,12 @@ def _collect_lending_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     lending = _collect_registry_lending(all_chains)
     _add_compound_v3(lending, all_chains)
     # BenQi — Avalanche lending
-    _add_singleton_lending(
-        lending, all_chains, "benqi", "avalanche", "almanak.framework.connectors.benqi", "BenqiAdapter"
-    )
+    _add_singleton_lending(lending, all_chains, "benqi", "avalanche", "almanak.connectors.benqi", "BenqiAdapter")
     # Spark — Ethereum lending
-    _add_singleton_lending(
-        lending, all_chains, "spark", "ethereum", "almanak.framework.connectors.spark", "SparkAdapter"
-    )
+    _add_singleton_lending(lending, all_chains, "spark", "ethereum", "almanak.connectors.spark", "SparkAdapter")
     # Silo V2 — Avalanche isolated lending (ERC-4626 vault pairs)
     _add_singleton_lending(
-        lending, all_chains, "silo_v2", "avalanche", "almanak.framework.connectors.silo_v2.adapter", "SiloV2Adapter"
+        lending, all_chains, "silo_v2", "avalanche", "almanak.connectors.silo_v2.adapter", "SiloV2Adapter"
     )
     _add_euler_v2(lending, all_chains)
     # Joe Lend (Banker Joe) — DORMANT (governance wound down the protocol; VIB-3960).
@@ -182,7 +178,7 @@ def _collect_perps_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # Drift — Solana perps
     try:
-        from almanak.framework.connectors.drift import DriftAdapter  # noqa: F401
+        from almanak.connectors.drift import DriftAdapter  # noqa: F401
 
         perps.setdefault("drift", set()).add("solana")
         all_chains.add("solana")
@@ -199,7 +195,7 @@ def _collect_perps_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     # PancakeSwap Perps is a shim over aster_perps (broker_id 2), so it ships
     # whenever the Aster adapter is importable.
     try:
-        from almanak.framework.connectors.aster_perps.adapter import AsterPerpsAdapter  # noqa: F401
+        from almanak.connectors.aster_perps.adapter import AsterPerpsAdapter  # noqa: F401
 
         perps.setdefault("aster_perps", set()).add("bsc")
         perps.setdefault("pancakeswap_perps", set()).add("bsc")
@@ -221,7 +217,7 @@ def _collect_yield_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # Ethena
     try:
-        from almanak.framework.connectors.ethena import EthenaAdapter  # noqa: F401
+        from almanak.connectors.ethena import EthenaAdapter  # noqa: F401
 
         yields.setdefault("ethena", set()).add("ethereum")
         all_chains.add("ethereum")
@@ -230,7 +226,7 @@ def _collect_yield_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # Lido staking
     try:
-        from almanak.framework.connectors.lido import LidoAdapter  # noqa: F401
+        from almanak.connectors.lido import LidoAdapter  # noqa: F401
 
         yields.setdefault("lido", set()).add("ethereum")
         all_chains.add("ethereum")
@@ -239,7 +235,7 @@ def _collect_yield_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # MetaMorpho vaults
     try:
-        from almanak.framework.connectors.morpho_vault import MetaMorphoAdapter  # noqa: F401
+        from almanak.connectors.morpho_vault import MetaMorphoAdapter  # noqa: F401
 
         morpho_vault_chains = ["ethereum", "base"]
         yields.setdefault("morpho_vault", set()).update(morpho_vault_chains)
@@ -249,7 +245,7 @@ def _collect_yield_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # Gimo — liquid staking on 0G Chain (StaFi EVM LSD Stack)
     try:
-        from almanak.framework.connectors.gimo import GimoAdapter  # noqa: F401
+        from almanak.connectors.gimo import GimoAdapter  # noqa: F401
 
         yields.setdefault("gimo", set()).add("zerog")
         all_chains.add("zerog")
@@ -269,7 +265,7 @@ def _collect_prediction_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     """
     prediction: dict[str, set[str]] = {}
     try:
-        from almanak.framework.connectors.polymarket.adapter import PolymarketAdapter  # noqa: F401
+        from almanak.connectors.polymarket.adapter import PolymarketAdapter  # noqa: F401
 
         prediction.setdefault("polymarket", set()).add("polygon")
         all_chains.add("polygon")
@@ -285,7 +281,7 @@ def _collect_bridge_protocols(all_chains: set[str]) -> dict[str, set[str]]:
     # Across — fast intent-based bridge (uses spoke pools, no slippage on supported tokens)
     # zksync is in Across's registry but not in the SDK's Chain enum — excluded.
     try:
-        from almanak.framework.connectors.across.adapter import ACROSS_CHAIN_IDS
+        from almanak.connectors.across.adapter import ACROSS_CHAIN_IDS
 
         across_sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "linea"}
         bridges.setdefault("across", set()).update(c for c in ACROSS_CHAIN_IDS if c in across_sdk_chains)
@@ -295,7 +291,7 @@ def _collect_bridge_protocols(all_chains: set[str]) -> dict[str, set[str]]:
 
     # Stargate — LayerZero-based bridge (native asset + stablecoin transfers)
     try:
-        from almanak.framework.connectors.stargate.adapter import STARGATE_CHAIN_IDS
+        from almanak.connectors.stargate.adapter import STARGATE_CHAIN_IDS
 
         stargate_sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche", "bsc"}
         bridges.setdefault("stargate", set()).update(c for c in STARGATE_CHAIN_IDS if c in stargate_sdk_chains)
@@ -321,7 +317,7 @@ def _collect_aggregator_protocols(all_chains: set[str], oneinch_chains: set[str]
     """Collect aggregator protocols (Enso, LiFi) and merge in 1inch chains tracked from PROTOCOL_ROUTERS."""
     aggs: dict[str, set[str]] = {}
     try:
-        from almanak.framework.connectors.enso.client import CHAIN_MAPPING as ENSO_CHAIN_MAPPING
+        from almanak.connectors.enso.client import CHAIN_MAPPING as ENSO_CHAIN_MAPPING
 
         enso_chains = set(ENSO_CHAIN_MAPPING.keys())
         aggs["enso"] = enso_chains
@@ -329,7 +325,7 @@ def _collect_aggregator_protocols(all_chains: set[str], oneinch_chains: set[str]
     except ImportError:
         pass
     try:
-        from almanak.framework.connectors.lifi.client import CHAIN_MAPPING as LIFI_CHAIN_MAPPING
+        from almanak.connectors.lifi.client import CHAIN_MAPPING as LIFI_CHAIN_MAPPING
 
         lifi_chains = set(LIFI_CHAIN_MAPPING.keys())
         aggs["lifi"] = lifi_chains
@@ -350,7 +346,7 @@ def _augment_with_curve(
 ) -> None:
     """Curve (from connector adapter, supports swap + LP)."""
     try:
-        from almanak.framework.connectors.curve.adapter import CURVE_ADDRESSES
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
 
         for chain in CURVE_ADDRESSES:
             all_chains.add(chain)
@@ -388,7 +384,7 @@ def _augment_with_dex_extras(
 
     # Fluid DEX — swap on Arbitrum (LP already populated via LP_POSITION_MANAGERS)
     try:
-        from almanak.framework.connectors.fluid.adapter import FluidAdapter  # noqa: F401
+        from almanak.connectors.fluid.adapter import FluidAdapter  # noqa: F401
 
         swap_protocols.setdefault("fluid", set()).add("arbitrum")
         all_chains.add("arbitrum")
@@ -422,15 +418,15 @@ def _augment_with_solana_protocols(
     solana_lp: list[str] = []
     solana_lending: list[str] = []
 
-    if _try_import_solana_proto("almanak.framework.connectors.jupiter", "JupiterAdapter"):
+    if _try_import_solana_proto("almanak.connectors.jupiter", "JupiterAdapter"):
         solana_swap.append("jupiter")
-    if _try_import_solana_proto("almanak.framework.connectors.raydium", "RaydiumAdapter"):
+    if _try_import_solana_proto("almanak.connectors.raydium", "RaydiumAdapter"):
         solana_lp.append("raydium")
-    if _try_import_solana_proto("almanak.framework.connectors.orca", "OrcaAdapter"):
+    if _try_import_solana_proto("almanak.connectors.orca", "OrcaAdapter"):
         solana_lp.append("orca")
-    if _try_import_solana_proto("almanak.framework.connectors.meteora", "MeteoraAdapter"):
+    if _try_import_solana_proto("almanak.connectors.meteora", "MeteoraAdapter"):
         solana_lp.append("meteora")
-    if _try_import_solana_proto("almanak.framework.connectors.kamino", "KaminoAdapter"):
+    if _try_import_solana_proto("almanak.connectors.kamino", "KaminoAdapter"):
         solana_lending.append("kamino")
 
     if solana_swap or solana_lp or solana_lending:

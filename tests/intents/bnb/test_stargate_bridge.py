@@ -16,7 +16,7 @@ USDT pool on a mainnet-forked Anvil and verify source-chain state changes.
 Critical constraint: USDT-only.
 
 Stargate on BSC has a **USDT-only pool** -- the router map at
-``STARGATE_ROUTER_ADDRESSES[56]`` (almanak/framework/connectors/stargate/adapter.py)
+``STARGATE_ROUTER_ADDRESSES[56]`` (almanak/connectors/stargate/adapter.py)
 contains only ``USDT``. There is no Stargate V2 USDC or ETH pool on BSC, so
 this test must bridge USDT specifically. Sibling-chain Stargate tests bridge
 USDC because the BSC USDT-only pool was the documented exception in the
@@ -59,8 +59,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
-from almanak.framework.connectors.stargate.receipt_parser import StargateReceiptParser
+from almanak.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
+from almanak.connectors.stargate.receipt_parser import StargateReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
@@ -131,7 +131,7 @@ class TestStargateBridgeIntent:
 
         USDT-only constraint: Stargate V2 on BSC has only a USDT pool (no
         USDC or ETH pools). The router map ``STARGATE_ROUTER_ADDRESSES[56]``
-        in ``almanak/framework/connectors/stargate/adapter.py`` is the
+        in ``almanak/connectors/stargate/adapter.py`` is the
         single source of truth. BSC USDT is 18 decimals (Binance-Peg USDT),
         not the 6 decimals other chains' USDT/USDC use -- the test asserts
         the decimals explicitly to catch a chain-mapping regression.

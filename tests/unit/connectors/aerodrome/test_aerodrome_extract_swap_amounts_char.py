@@ -22,7 +22,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
     AerodromeReceiptParser,
 )

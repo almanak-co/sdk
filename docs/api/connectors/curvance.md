@@ -9,7 +9,7 @@ Supported chains: **Monad**.
 
 Supported markets on Monad (as of 2026-04-18): `ezETH→WETH`, `WETH→USDC`,
 `WMON→USDC`, `WBTC→USDC`, `aprMON→WMON`, `shMON→WMON`. See
-[`CURVANCE_MARKETS`][almanak.framework.connectors.curvance.CURVANCE_MARKETS]
+[`CURVANCE_MARKETS`][almanak.connectors.curvance.CURVANCE_MARKETS]
 for the authoritative list.
 
 ## Quick example
@@ -43,7 +43,7 @@ intent = SupplyIntent(
 
 ## Module reference
 
-::: almanak.framework.connectors.curvance
+::: almanak.connectors.curvance
     options:
       show_root_heading: true
       members_order: source

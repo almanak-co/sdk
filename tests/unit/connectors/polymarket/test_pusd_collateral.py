@@ -25,13 +25,13 @@ from unittest.mock import MagicMock
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.polymarket.ctf_sdk import (
+from almanak.connectors.polymarket.ctf_sdk import (
     MAX_UINT256,
     AllowanceStatus,
     CollateralBreakdown,
     CtfSDK,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     PUSD,
     USDC_NATIVE_POLYGON,
     USDCE_POLYGON,

@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.lido.receipt_parser import (
+from almanak.connectors.lido.receipt_parser import (
     EVENT_TOPICS,
     TOPIC_TO_EVENT,
     LidoEventType,

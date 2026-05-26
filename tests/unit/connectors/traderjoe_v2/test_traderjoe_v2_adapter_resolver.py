@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.adapter import (
+from almanak.connectors.traderjoe_v2.adapter import (
     TraderJoeV2Adapter,
     TraderJoeV2Config,
 )
@@ -39,20 +39,20 @@ def mock_resolver():
 @pytest.fixture
 def adapter(config, mock_resolver):
     """Create a TraderJoeV2Adapter with mocked SDK and resolver."""
-    with patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK"):
+    with patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK"):
         return TraderJoeV2Adapter(config, token_resolver=mock_resolver)
 
 
 class TestTraderJoeAdapterResolverInit:
     """Test TraderJoeV2Adapter initializes with TokenResolver."""
 
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def test_custom_resolver_injected(self, mock_sdk_class, config, mock_resolver):
         """Test that a custom resolver is used when provided."""
         adapter = TraderJoeV2Adapter(config, token_resolver=mock_resolver)
         assert adapter._token_resolver is mock_resolver
 
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def test_default_resolver_initialized(self, mock_sdk_class, config):
         """Test that default singleton resolver is used when none provided."""
         mock_resolver_instance = MagicMock()
@@ -63,7 +63,7 @@ class TestTraderJoeAdapterResolverInit:
             adapter = TraderJoeV2Adapter(config)
             assert adapter._token_resolver is mock_resolver_instance
 
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def test_resolver_none_when_init_fails(self, mock_sdk_class, config):
         """Test that adapter construction fails when resolver init fails."""
         with patch(
@@ -207,7 +207,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.traderjoe_v2.adapter as adapter_module
+        import almanak.connectors.traderjoe_v2.adapter as adapter_module
 
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")
         assert not hasattr(adapter_module, "TRADERJOE_V2_TOKENS")

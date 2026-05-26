@@ -151,7 +151,7 @@ class TestLiFiSwap:
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                from almanak.framework.connectors.lifi.receipt_parser import LiFiReceiptParser
+                from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 
                 parser = LiFiReceiptParser()
                 parse_result = parser.parse_swap_receipt(

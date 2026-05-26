@@ -45,11 +45,11 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.traderjoe_v2 import (
+from almanak.connectors.traderjoe_v2 import (
     TraderJoeV2Adapter,
     TraderJoeV2Config,
 )
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     TraderJoeV2EventType,
     TraderJoeV2ReceiptParser,
 )

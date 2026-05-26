@@ -121,7 +121,7 @@ class TestResolveSyOracleKey:
         # but then make get_token_resolver raise to simulate a resolver failure.
         fake_mint_sy = {"arbitrum": {"0xmarket": "0xunderlying"}}
         with patch(
-            "almanak.framework.connectors.pendle.sdk.MARKET_TOKEN_MINT_SY",
+            "almanak.connectors.pendle.sdk.MARKET_TOKEN_MINT_SY",
             fake_mint_sy,
         ):
             with patch(

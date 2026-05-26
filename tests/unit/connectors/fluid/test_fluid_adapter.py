@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.fluid.adapter import FluidAdapter, FluidConfig, FluidPositionDetails, TransactionData
-from almanak.framework.connectors.fluid.sdk import FluidSDKError
+from almanak.connectors.fluid.adapter import FluidAdapter, FluidConfig, FluidPositionDetails, TransactionData
+from almanak.connectors.fluid.sdk import FluidSDKError
 
 
 class TestFluidPositionDetails:
@@ -35,7 +35,7 @@ class TestChainRestriction:
 class TestEncumbranceGuard:
     def _make_adapter(self):
         config = FluidConfig(chain="arbitrum", wallet_address="0x" + "a" * 40, rpc_url="https://fake")
-        with patch("almanak.framework.connectors.fluid.adapter.FluidSDK") as mock_cls:
+        with patch("almanak.connectors.fluid.adapter.FluidSDK") as mock_cls:
             mock_sdk = MagicMock()
             mock_cls.return_value = mock_sdk
             adapter = FluidAdapter(config)

@@ -23,11 +23,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.polymarket.exceptions import PolymarketAPIError
-from almanak.framework.connectors.polymarket.gateway_client import (
+from almanak.connectors.polymarket.exceptions import PolymarketAPIError
+from almanak.connectors.polymarket.gateway_client import (
     GatewayPolymarketClient,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     BalanceAllowance,
     OrderResponse,
     OrderStatus,

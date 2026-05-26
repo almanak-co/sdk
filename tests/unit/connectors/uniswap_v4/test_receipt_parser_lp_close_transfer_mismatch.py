@@ -19,11 +19,11 @@ import logging
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
+from almanak.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
 
 CHAIN = "arbitrum"
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
@@ -132,7 +132,7 @@ def test_wrong_token_observed_returns_none(caplog: pytest.LogCaptureFixture):
             _transfer_log(token=WETH, from_addr=POOL_MANAGER, to_addr=WALLET, amount=10**17),
         ],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)
@@ -151,7 +151,7 @@ def test_extra_token_in_set_returns_none(caplog: pytest.LogCaptureFixture):
             _transfer_log(token=UNRELATED, from_addr=POOL_MANAGER, to_addr=WALLET, amount=42),
         ],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)
@@ -165,7 +165,7 @@ def test_empty_transfer_set_returns_none(caplog: pytest.LogCaptureFixture):
         "transactionHash": "0xmismatch5",
         "logs": [_modify_liquidity_burn_log()],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)
@@ -213,7 +213,7 @@ def test_lookup_returning_none_drops_with_warning(caplog: pytest.LogCaptureFixtu
             _transfer_log(token=WETH, from_addr=POOL_MANAGER, to_addr=WALLET, amount=10**17),
         ],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)
@@ -236,7 +236,7 @@ def test_lookup_raising_drops_with_warning(caplog: pytest.LogCaptureFixture):
         "transactionHash": "0xraises",
         "logs": [_modify_liquidity_burn_log()],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)
@@ -255,7 +255,7 @@ def test_missing_pool_key_lookup_drops_with_warning(caplog: pytest.LogCaptureFix
         "transactionHash": "0xnolookup",
         "logs": [_modify_liquidity_burn_log()],
     }
-    with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
         result = parser.extract_lp_close_data(receipt)
     assert result is None
     joined = " ".join(rec.message for rec in caplog.records)

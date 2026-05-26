@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.curve.receipt_parser import (
+from almanak.connectors.curve.receipt_parser import (
     EVENT_TOPICS,
     CurveEventType,
     CurveReceiptParser,

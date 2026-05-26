@@ -1,6 +1,6 @@
 """Tests for FluidReceiptParser."""
 
-from almanak.framework.connectors.fluid.receipt_parser import (
+from almanak.connectors.fluid.receipt_parser import (
     ERC721_TRANSFER_TOPIC,
     LOG_OPERATE_TOPIC,
     ZERO_ADDRESS,

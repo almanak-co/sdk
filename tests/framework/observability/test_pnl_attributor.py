@@ -659,7 +659,7 @@ class TestGMXv2FundingFeeExtraction:
         full EventUtils decoder is prerequisite work. Until it lands, the method
         correctly returns None (unavailable) rather than 0 (measured zero).
         """
-        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+        from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
 
         parser = GMXv2ReceiptParser()
 
@@ -694,7 +694,7 @@ class TestGMXv2FundingFeeExtraction:
         ExtractMissing allows the enricher to continue without raising
         CriticalAccountingError in live mode.
         """
-        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+        from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
         from almanak.framework.execution.extract_result import ExtractMissing
 
         parser = GMXv2ReceiptParser()

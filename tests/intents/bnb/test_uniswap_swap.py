@@ -121,7 +121,7 @@ class TestUniswapV3SwapIntent:
         # Parse receipts
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+                from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 
                 parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
@@ -203,7 +203,7 @@ class TestUniswapV3SwapIntent:
         # Parse receipts
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+                from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 
                 parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())

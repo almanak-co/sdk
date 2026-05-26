@@ -3,7 +3,7 @@
 These tests verify backward compatibility and correctness of the refactored parser.
 """
 
-from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser, SwapResult
+from almanak.connectors.enso.receipt_parser import EnsoReceiptParser, SwapResult
 
 
 class TestEnsoReceiptParserBasic:

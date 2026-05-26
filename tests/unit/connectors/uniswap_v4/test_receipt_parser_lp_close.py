@@ -27,11 +27,11 @@ import re
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
+from almanak.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
 
 CHAIN = "arbitrum"
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"

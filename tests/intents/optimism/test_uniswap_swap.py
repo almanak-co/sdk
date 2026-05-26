@@ -134,7 +134,7 @@ class TestUniswapV3SwapIntent:
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
         # Parse receipts (Layer 3) - assert decoded swap amounts > 0
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+        from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
         decoded_amount_in = Decimal("0")
@@ -240,7 +240,7 @@ class TestUniswapV3SwapIntent:
         assert execution_result.success
 
         # Layer 3: parse receipts and assert decoded swap amounts > 0
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+        from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
         decoded_amount_in = Decimal("0")

@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.sushiswap_v3.sdk import (
+from almanak.connectors.sushiswap_v3.sdk import (
     FACTORY_ADDRESSES,
     MAX_TICK,
     MIN_TICK,

@@ -26,7 +26,7 @@ import pytest
 from web3 import Web3
 
 from almanak.core.contracts import SUSHISWAP_V3, get_address
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
+from almanak.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
 from almanak.framework.execution.extracted_data import LPCloseData
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,

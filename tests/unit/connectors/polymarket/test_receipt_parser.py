@@ -16,14 +16,14 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     CONDITIONAL_TOKENS,
     CTF_EXCHANGE_V2,
     NEG_RISK_ADAPTER,
     NEG_RISK_EXCHANGE_V2,
     PUSD,
 )
-from almanak.framework.connectors.polymarket.receipt_parser import (
+from almanak.connectors.polymarket.receipt_parser import (
     ERC20_TRANSFER_TOPIC,
     PAYOUT_REDEMPTION_TOPIC,
     POLYMARKET_CONTRACTS,
@@ -755,7 +755,7 @@ class TestContractAddressFiltering:
 
     def test_polymarket_contracts_contains_all_known_addresses(self) -> None:
         """Test that POLYMARKET_CONTRACTS contains all expected V2 addresses."""
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             COLLATERAL_OFFRAMP,
             COLLATERAL_ONRAMP,
             USDC_NATIVE_POLYGON,
@@ -1127,7 +1127,7 @@ class TestV2DualCollateralExtraction:
         keeps these tests green and a regression that drops direction has
         a real test surface to break.
         """
-        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+        from almanak.connectors.polymarket.models import USDCE_POLYGON
 
         receipt = {
             "transactionHash": "0xabc",
@@ -1154,7 +1154,7 @@ class TestV2DualCollateralExtraction:
 
     def test_cost_basis_usdce_only(self, parser: PolymarketReceiptParser) -> None:
         """Wrap-only receipt (no trade) — USDC.e leg counted."""
-        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+        from almanak.connectors.polymarket.models import USDCE_POLYGON
 
         receipt = {
             "transactionHash": "0xabc",
@@ -1169,7 +1169,7 @@ class TestV2DualCollateralExtraction:
 
         Proceeds transfers go protocol→user (the user is receiving).
         """
-        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+        from almanak.connectors.polymarket.models import USDCE_POLYGON
 
         receipt = {
             "transactionHash": "0xabc",
@@ -1217,17 +1217,17 @@ class TestV2PolymarketContractsSet:
         assert PUSD.lower() in POLYMARKET_CONTRACTS
 
     def test_v2_usdce_in_set(self) -> None:
-        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+        from almanak.connectors.polymarket.models import USDCE_POLYGON
 
         assert USDCE_POLYGON.lower() in POLYMARKET_CONTRACTS
 
     def test_v2_onramp_in_set(self) -> None:
-        from almanak.framework.connectors.polymarket.models import COLLATERAL_ONRAMP
+        from almanak.connectors.polymarket.models import COLLATERAL_ONRAMP
 
         assert COLLATERAL_ONRAMP.lower() in POLYMARKET_CONTRACTS
 
     def test_v2_offramp_in_set(self) -> None:
-        from almanak.framework.connectors.polymarket.models import COLLATERAL_OFFRAMP
+        from almanak.connectors.polymarket.models import COLLATERAL_OFFRAMP
 
         assert COLLATERAL_OFFRAMP.lower() in POLYMARKET_CONTRACTS
 

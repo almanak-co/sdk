@@ -27,11 +27,11 @@ from almanak.framework.accounting.models import (
     LPEventType,
 )
 from almanak.framework.accounting.writer import augment_accounting_payload
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
+from almanak.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
 
 POOL_ID_32_BYTE = "0x" + "ab" * 32
 POOL_ID_REGEX = re.compile(r"^0x[0-9a-f]{64}$")

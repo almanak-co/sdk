@@ -95,7 +95,7 @@ class TestLiFiSwap:
         # L3
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                from almanak.framework.connectors.lifi.receipt_parser import LiFiReceiptParser
+                from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 
                 parser = LiFiReceiptParser()
                 parse_result = parser.parse_swap_receipt(

@@ -24,7 +24,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
     EVENT_TOPICS,
     PancakeSwapV3ReceiptParser,
 )

@@ -81,7 +81,7 @@ class TestSwapDescriptions:
     def test_swap_uses_canonical_amount_in_key_from_compiler(self) -> None:
         """Pin that the compiler-shaped SWAP metadata (``amount_in``) is honoured.
 
-        ``almanak/framework/connectors/traderjoe_v2/compiler.py`` emits ``amount_in`` as the
+        ``almanak/connectors/traderjoe_v2/compiler.py`` emits ``amount_in`` as the
         canonical input-amount key; losing this lookup silently drops the
         amount and falls back to the token-only form.
         """

@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from web3 import Web3
 
 from almanak.core.contracts import PANCAKESWAP_PERPS
-from almanak.framework.connectors.pancakeswap_perps import (
+from almanak.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,

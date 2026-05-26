@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.ethena.receipt_parser import (
+from almanak.connectors.ethena.receipt_parser import (
     ETHENA_EVENT_SIGNATURES,
     EVENT_TOPICS,
     TOPIC_TO_EVENT,

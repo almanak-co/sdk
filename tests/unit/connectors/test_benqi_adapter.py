@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.benqi.adapter import (
+from almanak.connectors.benqi.adapter import (
     BENQI_BORROW_SELECTOR,
     BENQI_COMPTROLLER_ADDRESS,
     BENQI_ENTER_MARKETS_SELECTOR,

@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from solders.keypair import Keypair
 
-from almanak.framework.connectors.orca.adapter import OrcaAdapter, OrcaConfig
-from almanak.framework.connectors.orca.models import OrcaPool, OrcaPosition
+from almanak.connectors.orca.adapter import OrcaAdapter, OrcaConfig
+from almanak.connectors.orca.models import OrcaPool, OrcaPosition
 from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
@@ -54,7 +54,7 @@ class TestOrcaConfig:
 class TestLPOpenCompilation:
     """OrcaAdapter.compile_lp_open_intent tests."""
 
-    @patch("almanak.framework.connectors.orca.adapter.OrcaWhirlpoolSDK")
+    @patch("almanak.connectors.orca.adapter.OrcaWhirlpoolSDK")
     def test_compile_lp_open_success(self, MockSDK):
         """Successful LP open compilation returns valid ActionBundle."""
         nft_mint_kp = Keypair()
@@ -75,12 +75,12 @@ class TestLPOpenCompilation:
         )
 
         # Mock the MessageV0 compilation
-        with patch("almanak.framework.connectors.orca.adapter.MessageV0") as MockMsg:
+        with patch("almanak.connectors.orca.adapter.MessageV0") as MockMsg:
             mock_msg = MagicMock()
             mock_msg.header.num_required_signatures = 2
             MockMsg.try_compile.return_value = mock_msg
 
-            with patch("almanak.framework.connectors.orca.adapter.VersionedTransaction") as MockTx:
+            with patch("almanak.connectors.orca.adapter.VersionedTransaction") as MockTx:
                 mock_tx = MagicMock()
                 mock_tx.__bytes__ = MagicMock(return_value=b"\x00" * 200)
                 MockTx.populate.return_value = mock_tx
@@ -107,7 +107,7 @@ class TestLPOpenCompilation:
                 assert bundle.metadata["nft_mint"] == str(nft_mint_kp.pubkey())
                 assert bundle.transactions
 
-    @patch("almanak.framework.connectors.orca.adapter.OrcaWhirlpoolSDK")
+    @patch("almanak.connectors.orca.adapter.OrcaWhirlpoolSDK")
     def test_compile_lp_open_error_returns_error_bundle(self, MockSDK):
         """SDK error returns error ActionBundle."""
         mock_sdk = MockSDK.return_value
@@ -149,7 +149,7 @@ class TestLPCloseCompilation:
         assert "error" in bundle.metadata
         assert "pool" in bundle.metadata["error"].lower()
 
-    @patch("almanak.framework.connectors.orca.adapter.OrcaWhirlpoolSDK")
+    @patch("almanak.connectors.orca.adapter.OrcaWhirlpoolSDK")
     def test_compile_lp_close_success_no_rpc(self, MockSDK):
         """LP close without RPC URL uses zero-liquidity position."""
         mock_sdk = MockSDK.return_value
@@ -159,12 +159,12 @@ class TestLPCloseCompilation:
             {"nft_mint": "fake_nft", "pool": MOCK_POOL.address, "liquidity_removed": "0"},
         )
 
-        with patch("almanak.framework.connectors.orca.adapter.MessageV0") as MockMsg:
+        with patch("almanak.connectors.orca.adapter.MessageV0") as MockMsg:
             mock_msg = MagicMock()
             mock_msg.header.num_required_signatures = 1
             MockMsg.try_compile.return_value = mock_msg
 
-            with patch("almanak.framework.connectors.orca.adapter.VersionedTransaction") as MockTx:
+            with patch("almanak.connectors.orca.adapter.VersionedTransaction") as MockTx:
                 mock_tx = MagicMock()
                 mock_tx.__bytes__ = MagicMock(return_value=b"\x00" * 100)
                 MockTx.populate.return_value = mock_tx

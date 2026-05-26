@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.lending.aave_helpers import (
+from almanak.connectors._strategy_base.base.lending.aave_helpers import (
     _check_lending_borrow_capacity_aave_v3,
     _check_lending_borrow_capacity_benqi,
     _gateway_eth_call_raw,
@@ -199,7 +199,7 @@ class TestAaveV3BorrowCapacityCheck:
             return None
 
         return patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw",
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw",
             side_effect=fake_call,
         )
 
@@ -268,7 +268,7 @@ class TestAaveV3BorrowCapacityCheck:
     def test_unknown_chain_skips(self) -> None:
         compiler = _make_compiler(chain="solana")
         with patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw"
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw"
         ) as mock_call:
             reason, available = _check_lending_borrow_capacity_aave_v3(
                 compiler,
@@ -285,7 +285,7 @@ class TestAaveV3BorrowCapacityCheck:
     def test_rpc_failure_fails_open(self) -> None:
         compiler = _make_compiler()
         with patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw",
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw",
             return_value=None,
         ):
             reason, available = _check_lending_borrow_capacity_aave_v3(
@@ -359,7 +359,7 @@ class TestBorrowCapacityCacheBehavior:
             return None
 
         return patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw",
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw",
             side_effect=fake_call,
         )
 
@@ -500,7 +500,7 @@ class TestBenqiBorrowCapacityCheck:
     price scaled by 1e(36 - underlying_decimals))."""
 
     # BENQI Comptroller address from
-    # ``almanak/framework/connectors/benqi/adapter.py:BENQI_COMPTROLLER_ADDRESS``.
+    # ``almanak/connectors/benqi/adapter.py:BENQI_COMPTROLLER_ADDRESS``.
     _BENQI_COMPTROLLER = "0x486Af39519B4Dc9a7fCcd318217352830E8AD9b4".lower()
 
     def _patch_eth_call(
@@ -554,7 +554,7 @@ class TestBenqiBorrowCapacityCheck:
             return None
 
         return patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw",
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw",
             side_effect=fake_call,
         )
 
@@ -669,7 +669,7 @@ class TestBenqiBorrowCapacityCheck:
         """BENQI is Avalanche-only — other chains short-circuit."""
         compiler = _make_compiler(chain="arbitrum")
         with patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw"
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw"
         ) as mock_call:
             reason, available = _check_lending_borrow_capacity_benqi(
                 compiler,
@@ -686,7 +686,7 @@ class TestBenqiBorrowCapacityCheck:
     def test_rpc_failure_fails_open(self) -> None:
         compiler = _make_compiler(chain="avalanche")
         with patch(
-            "almanak.framework.connectors.base.lending.aave_helpers._gateway_eth_call_raw",
+            "almanak.connectors._strategy_base.base.lending.aave_helpers._gateway_eth_call_raw",
             return_value=None,
         ):
             reason, available = _check_lending_borrow_capacity_benqi(
@@ -807,7 +807,7 @@ class TestBorrowCapacityWiredIntoAaveCompiler:
         """Default is the borrow-against-existing-collateral path (the path
         that exercises the pre-flight). Pass ``collateral_amount > 0`` to
         exercise the supply+borrow bundle path."""
-        from almanak.framework.connectors.base.lending import aave_helpers as cl_mod
+        from almanak.connectors._strategy_base.base.lending import aave_helpers as cl_mod
         from almanak.framework.intents import BorrowIntent
 
         compiler = MagicMock()
@@ -936,7 +936,7 @@ class TestBorrowCapacityWiredIntoBenqiCompiler:
         """Default is the borrow-against-existing-collateral path. Pass
         ``collateral_amount > 0`` to exercise the supply+borrow bundle
         bypass (when scaled wei is non-zero)."""
-        from almanak.framework.connectors.base.lending import aave_helpers as cl_mod
+        from almanak.connectors._strategy_base.base.lending import aave_helpers as cl_mod
         from almanak.framework.intents import BorrowIntent
 
         compiler = MagicMock()
@@ -1003,7 +1003,7 @@ class TestBorrowCapacityWiredIntoBenqiCompiler:
             "_check_lending_borrow_capacity_benqi",
             return_value=("would-have-rejected if called", Decimal("0")),
         ) as cap_mock, patch(
-            "almanak.framework.connectors.benqi.adapter.BenqiAdapter",
+            "almanak.connectors.benqi.adapter.BenqiAdapter",
             return_value=adapter_inst,
         ):
             result = cl_mod._compile_borrow_benqi(
@@ -1079,7 +1079,7 @@ class TestBorrowCapacityWiredIntoBenqiCompiler:
                 Decimal("19.8"),
             ),
         ) as cap_mock, patch(
-            "almanak.framework.connectors.benqi.adapter.BenqiAdapter",
+            "almanak.connectors.benqi.adapter.BenqiAdapter",
             return_value=adapter_inst,
         ):
             with pytest.raises(LendingBorrowExceedsCapacityError):

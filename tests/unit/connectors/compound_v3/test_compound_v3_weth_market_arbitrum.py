@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.compound_v3.adapter import (
+from almanak.connectors.compound_v3.adapter import (
     COMPOUND_V3_COMET_ADDRESSES,
     COMPOUND_V3_MARKETS,
     CompoundV3Config,

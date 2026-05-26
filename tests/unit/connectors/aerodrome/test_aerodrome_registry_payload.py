@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
     AerodromeSlipstreamReceiptParser,
 )
@@ -661,7 +661,7 @@ class TestUv3HelperReuse:
     TOKEN_ID = 42
 
     def test_disagree_helper_handles_slipstream_payload(self) -> None:
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -674,7 +674,7 @@ class TestUv3HelperReuse:
         )
 
     def test_build_close_receipt_payload_with_slipstream_npm(self) -> None:
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 

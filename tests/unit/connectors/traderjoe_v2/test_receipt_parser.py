@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     DEPOSITED_TO_BINS_TOPIC,
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
@@ -28,7 +28,7 @@ from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
     TraderJoeV2ReceiptParser,
     TransferEventData,
 )
-from almanak.framework.connectors.traderjoe_v2.sdk import BIN_ID_OFFSET
+from almanak.connectors.traderjoe_v2.sdk import BIN_ID_OFFSET
 
 # =============================================================================
 # Test Constants
@@ -453,7 +453,7 @@ class TestExtractSwapAmountsDecimals:
         mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
         ):
             result = parser.extract_swap_amounts(receipt)
 
@@ -474,7 +474,7 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(WAVAX_ADDRESS, amount_in_raw, USDC_ADDRESS, amount_out_raw)
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
             side_effect=Exception("resolver unavailable"),
         ):
             result = parser.extract_swap_amounts(receipt)
@@ -507,7 +507,7 @@ class TestExtractSwapAmountsDecimals:
         mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
         ):
             result = parser.extract_swap_amounts(receipt)
 

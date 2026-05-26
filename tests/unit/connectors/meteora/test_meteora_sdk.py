@@ -15,7 +15,7 @@ import pytest
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from almanak.framework.connectors.meteora.constants import (
+from almanak.connectors.meteora.constants import (
     ADD_LIQUIDITY_BY_STRATEGY_DISCRIMINATOR,
     BIN_ID_OFFSET,
     CLOSE_POSITION_DISCRIMINATOR,
@@ -24,15 +24,15 @@ from almanak.framework.connectors.meteora.constants import (
     REMOVE_LIQUIDITY_BY_RANGE_DISCRIMINATOR,
     STRATEGY_TYPE_SPOT_BALANCED,
 )
-from almanak.framework.connectors.meteora.exceptions import MeteoraPoolError
-from almanak.framework.connectors.meteora.math import (
+from almanak.connectors.meteora.exceptions import MeteoraPoolError
+from almanak.connectors.meteora.math import (
     bin_id_to_price,
     get_bin_array_index,
     get_bin_array_pda,
     price_to_bin_id,
 )
-from almanak.framework.connectors.meteora.models import MeteoraPool, MeteoraPosition
-from almanak.framework.connectors.meteora.sdk import MeteoraSDK
+from almanak.connectors.meteora.models import MeteoraPool, MeteoraPosition
+from almanak.connectors.meteora.sdk import MeteoraSDK
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
 SOL_MINT = "So11111111111111111111111111111111111111112"

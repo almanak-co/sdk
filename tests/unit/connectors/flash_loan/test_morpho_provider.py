@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.flash_loan.selector import (
+from almanak.connectors.flash_loan.selector import (
     MORPHO_BLUE_ADDRESSES,
     MORPHO_SUPPORTED_CHAINS,
     MORPHO_SUPPORTED_TOKENS,

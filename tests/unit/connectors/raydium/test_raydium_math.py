@@ -12,9 +12,9 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.raydium.constants import MAX_TICK, MIN_TICK, Q64
-from almanak.framework.connectors.raydium.exceptions import RaydiumTickError
-from almanak.framework.connectors.raydium.math import (
+from almanak.connectors.raydium.constants import MAX_TICK, MIN_TICK, Q64
+from almanak.connectors.raydium.exceptions import RaydiumTickError
+from almanak.connectors.raydium.math import (
     align_tick_to_spacing,
     get_amounts_from_liquidity,
     get_liquidity_from_amounts,

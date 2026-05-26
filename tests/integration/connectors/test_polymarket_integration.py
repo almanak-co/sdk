@@ -45,7 +45,7 @@ TEST_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4
 
 # V2 contract addresses are sourced from connector models so a future bump
 # flows through. Imports inlined to keep the constants block self-contained.
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     COLLATERAL_ONRAMP,
     CONDITIONAL_TOKENS,
     CTF_EXCHANGE_V2,
@@ -178,7 +178,7 @@ def _send_signed(web3, tx_dict: dict, private_key: str) -> dict:
 @pytest.fixture(scope="module")
 def polymarket_config():
     """Config for unauthenticated read-only ops against the V2 CLOB."""
-    from almanak.framework.connectors.polymarket import PolymarketConfig
+    from almanak.connectors.polymarket import PolymarketConfig
 
     return PolymarketConfig(
         wallet_address=TEST_WALLET,
@@ -189,8 +189,8 @@ def polymarket_config():
 @pytest.fixture(scope="module")
 def clob_client(polymarket_config):
     """V2 CLOB client (defaults to clob.polymarket.com post-cutover)."""
-    from almanak.framework.connectors.polymarket import ClobClient
-    from almanak.framework.connectors.polymarket.signer import make_local_signer
+    from almanak.connectors.polymarket import ClobClient
+    from almanak.connectors.polymarket.signer import make_local_signer
 
     return ClobClient(polymarket_config, signer=make_local_signer(TEST_PRIVATE_KEY))
 
@@ -315,7 +315,7 @@ class TestPolymarketReadOnlyAPI:
 
     def test_fetch_markets(self, clob_client):
         """Active-market fetch returns at least one well-formed market."""
-        from almanak.framework.connectors.polymarket import MarketFilters
+        from almanak.connectors.polymarket import MarketFilters
 
         try:
             markets = clob_client.get_markets(MarketFilters(active=True, limit=5))
@@ -336,8 +336,8 @@ class TestPolymarketReadOnlyAPI:
         ahead of a connector bump. Skip on *any* API error rather than fail
         so a URL drift surfaces as a skipped suite, not a red CI.
         """
-        from almanak.framework.connectors.polymarket import MarketFilters
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketAPIError
+        from almanak.connectors.polymarket import MarketFilters
+        from almanak.connectors.polymarket.exceptions import PolymarketAPIError
 
         try:
             markets = clob_client.get_markets(
@@ -360,8 +360,8 @@ class TestPolymarketReadOnlyAPI:
 
     def test_fetch_price(self, clob_client):
         """Bid/ask/mid on a CLOB-enabled market are in [0, 1] when set."""
-        from almanak.framework.connectors.polymarket import MarketFilters
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketAPIError
+        from almanak.connectors.polymarket import MarketFilters
+        from almanak.connectors.polymarket.exceptions import PolymarketAPIError
 
         try:
             markets = clob_client.get_markets(
@@ -416,7 +416,7 @@ class TestPolymarketV2OnChain:
         matcher rejects fills with `the allowance is not enough`."""
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
 
         wallet = Web3.to_checksum_address(funded_wallet_polygon_no_pusd)
         before = pusd_contract.functions.allowance(wallet, Web3.to_checksum_address(CTF_EXCHANGE_V2)).call()
@@ -448,7 +448,7 @@ class TestPolymarketV2OnChain:
         """V2 neg-risk BUYs need pUSD → NegRisk Exchange V2 approval."""
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
 
         wallet = Web3.to_checksum_address(funded_wallet_polygon_no_pusd)
 
@@ -482,7 +482,7 @@ class TestPolymarketV2OnChain:
         is in place."""
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
 
         wallet = Web3.to_checksum_address(funded_wallet_polygon_no_pusd)
 
@@ -515,7 +515,7 @@ class TestPolymarketV2OnChain:
         cannot top up pUSD before a BUY."""
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import MAX_UINT256, CtfSDK
 
         wallet = Web3.to_checksum_address(funded_wallet_polygon_no_pusd)
 
@@ -547,7 +547,7 @@ class TestPolymarketV2OnChain:
         setApprovalForAll on the CTF token authorizes that pull."""
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import CtfSDK
 
         wallet = Web3.to_checksum_address(funded_wallet_polygon_no_pusd)
 
@@ -589,7 +589,7 @@ class TestPolymarketV2OnChain:
         from eth_account import Account
         from web3 import Web3
 
-        from almanak.framework.connectors.polymarket.ctf_sdk import CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import CtfSDK
 
         # Deterministic-but-distinct second account.
         fresh_pk = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
@@ -629,7 +629,7 @@ class TestPolymarketV2OnChain:
     ):
         """check_allowances surfaces both pUSD and source-asset balances —
         the gateway pre-flight reads both to decide whether to wrap."""
-        from almanak.framework.connectors.polymarket.ctf_sdk import CtfSDK
+        from almanak.connectors.polymarket.ctf_sdk import CtfSDK
 
         sdk = CtfSDK()
         status = sdk.check_allowances(funded_wallet_polygon, web3_polygon)

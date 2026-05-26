@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.hooks import HookFlags
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.hooks import HookFlags
+from almanak.connectors.uniswap_v4.sdk import (
     ACTION_CLEAR_OR_TAKE,
     ACTION_CLOSE_CURRENCY,
     ACTION_SETTLE,
@@ -50,7 +50,7 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
     UniswapV4SDK,
     _tick_to_sqrt_ratio_x96,
 )
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     ModifyLiquidityEventData,
     UniswapV4ReceiptParser,
@@ -495,7 +495,7 @@ class TestAdapterLPCompilation:
 
     @pytest.fixture()
     def adapter(self, mock_resolver):
-        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
 
         config = UniswapV4Config(
             chain="arbitrum",
@@ -525,7 +525,7 @@ class TestAdapterLPCompilation:
         assert bundle.metadata.get("position_manager") is not None
 
     def test_compile_lp_open_intent_no_wallet_raises(self, mock_resolver):
-        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
 
         config = UniswapV4Config(chain="arbitrum", wallet_address="")
         adapter = UniswapV4Adapter(config=config, token_resolver=mock_resolver)
@@ -560,7 +560,7 @@ class TestAdapterLPCompilation:
 
     def test_compile_lp_open_with_hooks_rejects(self, adapter):
         """VIB-4475: hooked pools are hard-rejected at V0 (was a soft warning pre-VIB-4475)."""
-        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         # Hook address with before_add_liquidity (bit 11 = 0x800)
@@ -659,7 +659,7 @@ class TestAdapterLPCompilation:
         """When on-chain sqrtPrice is available, the adapter uses a 5% slippage buffer."""
         from unittest.mock import patch
 
-        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         config = UniswapV4Config(
@@ -723,7 +723,7 @@ class TestReceiptParserLP:
     def _modify_liquidity_log(self, liquidity_delta: int, tick_lower: int = -60000, tick_upper: int = 60000) -> dict:
         """Build a mock ModifyLiquidity event log."""
         # Encode data: int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt
-        from almanak.framework.connectors.uniswap_v4.sdk import _pad_int24, _pad_uint
+        from almanak.connectors.uniswap_v4.sdk import _pad_int24, _pad_uint
 
         data_hex = (
             "0x"
@@ -745,7 +745,7 @@ class TestReceiptParserLP:
 
     def _erc20_transfer_log(self, token: str, from_addr: str, to_addr: str, amount: int) -> dict:
         """Build a mock ERC-20 Transfer log."""
-        from almanak.framework.connectors.uniswap_v4.sdk import _pad_address, _pad_uint
+        from almanak.connectors.uniswap_v4.sdk import _pad_address, _pad_uint
 
         return {
             "address": token,
@@ -804,7 +804,7 @@ class TestReceiptParserLP:
         ``amount0_collected`` / ``amount1_collected`` by ``currency0`` /
         ``currency1`` order (not by sorting observed Transfer addresses).
         """
-        from almanak.framework.connectors.uniswap_v4.sdk import PoolKey
+        from almanak.connectors.uniswap_v4.sdk import PoolKey
 
         token_a = "0x000000000000000000000000000000000000000a"  # sorted first
         token_b = "0x000000000000000000000000000000000000000b"
@@ -866,8 +866,8 @@ class TestCompilerV4LPRouting:
         """Verify _compile_lp_open dispatches to the V4 connector compiler."""
         from unittest.mock import patch
 
-        from almanak.framework.connectors.base.compiler import BaseCompilerContext
-        from almanak.framework.connectors.uniswap_v4.compiler import UniswapV4Compiler
+        from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+        from almanak.connectors.uniswap_v4.compiler import UniswapV4Compiler
         from almanak.framework.intents.compiler import IntentCompiler
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
@@ -898,8 +898,8 @@ class TestCompilerV4LPRouting:
         """Verify _compile_lp_close dispatches to the V4 connector compiler."""
         from unittest.mock import patch
 
-        from almanak.framework.connectors.base.compiler import BaseCompilerContext
-        from almanak.framework.connectors.uniswap_v4.compiler import UniswapV4Compiler
+        from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+        from almanak.connectors.uniswap_v4.compiler import UniswapV4Compiler
         from almanak.framework.intents.compiler import IntentCompiler
         from almanak.framework.intents.vocabulary import LPCloseIntent
 

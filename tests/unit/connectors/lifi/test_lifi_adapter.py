@@ -5,15 +5,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.lifi.adapter import (
+from almanak.connectors.lifi.adapter import (
     ERC20_APPROVE_SELECTOR,
     LIFI_GAS_ESTIMATES,
     LiFiAdapter,
     TransactionData,
 )
-from almanak.framework.connectors.lifi.client import LiFiClient, LiFiConfig
-from almanak.framework.connectors.lifi.exceptions import LiFiRouteNotFoundError
-from almanak.framework.connectors.lifi.models import (
+from almanak.connectors.lifi.client import LiFiClient, LiFiConfig
+from almanak.connectors.lifi.exceptions import LiFiRouteNotFoundError
+from almanak.connectors.lifi.models import (
     LiFiAction,
     LiFiEstimate,
     LiFiGasCost,

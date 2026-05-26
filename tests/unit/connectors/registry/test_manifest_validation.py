@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.connectors.registry import (
+from almanak.connectors._strategy_base.registry import (
     KNOWN_VENUES,
     ConnectorManifest,
     register_connector,

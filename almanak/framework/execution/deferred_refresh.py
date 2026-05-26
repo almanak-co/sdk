@@ -187,7 +187,7 @@ def _refresh_lifi(
     wallet_address: str,
 ) -> dict[str, Any]:
     """Fetch fresh LiFi route data."""
-    from ..connectors.lifi import LiFiAdapter, LiFiConfig
+    from almanak.connectors.lifi import LiFiAdapter, LiFiConfig
 
     route_params = metadata["route_params"]
     config = LiFiConfig(
@@ -203,7 +203,7 @@ def _refresh_enso(
     wallet_address: str,
 ) -> dict[str, Any]:
     """Fetch fresh Enso route data."""
-    from ..connectors.enso import EnsoAdapter, EnsoConfig
+    from almanak.connectors.enso import EnsoAdapter, EnsoConfig
 
     from_token = metadata.get("from_token")
     chain = metadata.get("chain", "")

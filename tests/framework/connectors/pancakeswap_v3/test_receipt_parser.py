@@ -1,6 +1,6 @@
 """Tests for PancakeSwap V3 receipt parser (refactored version)."""
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
     EVENT_TOPICS,
     PancakeSwapV3EventType,
     PancakeSwapV3ReceiptParser,

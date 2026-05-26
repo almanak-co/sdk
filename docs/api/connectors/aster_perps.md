@@ -168,7 +168,7 @@ impersonation.
 
 ## API Reference
 
-::: almanak.framework.connectors.aster_perps
+::: almanak.connectors.aster_perps
     options:
       show_root_heading: true
       members_order: source

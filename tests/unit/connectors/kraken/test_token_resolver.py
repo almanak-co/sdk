@@ -2,8 +2,8 @@
 
 import pytest
 
-from almanak.framework.connectors.kraken.exceptions import KrakenChainNotSupportedError
-from almanak.framework.connectors.kraken.token_resolver import KrakenChainMapper, KrakenTokenResolver
+from almanak.connectors.kraken.exceptions import KrakenChainNotSupportedError
+from almanak.connectors.kraken.token_resolver import KrakenChainMapper, KrakenTokenResolver
 
 
 class TestKrakenTokenResolver:

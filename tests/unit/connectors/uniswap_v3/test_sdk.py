@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.sdk import (
+from almanak.connectors.uniswap_v3.sdk import (
     EXACT_INPUT_SINGLE_SELECTOR,
     EXACT_OUTPUT_SINGLE_SELECTOR,
     FACTORY_ADDRESSES,

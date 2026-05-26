@@ -9,11 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.core.contracts import AERODROME
-from almanak.framework.connectors.aerodrome.adapter import (
+from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
     AerodromeConfig,
 )
-from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
+from almanak.connectors.aerodrome.sdk import AerodromeSDK
 from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
 
 

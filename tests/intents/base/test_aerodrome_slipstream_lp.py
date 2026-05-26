@@ -30,7 +30,7 @@ import pytest
 from web3 import Web3
 
 from almanak.core.contracts import AERODROME
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     AerodromeSlipstreamReceiptParser,
 )
 from almanak.framework.execution.orchestrator import (

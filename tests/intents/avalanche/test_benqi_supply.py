@@ -18,7 +18,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.benqi.receipt_parser import BenqiReceiptParser
+from almanak.connectors.benqi.receipt_parser import BenqiReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler

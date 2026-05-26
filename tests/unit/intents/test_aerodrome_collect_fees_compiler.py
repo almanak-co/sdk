@@ -110,7 +110,7 @@ def test_aerodrome_slipstream_collect_fees_compiles_success() -> None:
 
     with (
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.collect_cl_fees.return_value = collect_result
@@ -157,7 +157,7 @@ def test_aerodrome_slipstream_collect_fees_dispatch_is_case_and_separator_insens
 
     with (
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.collect_cl_fees.return_value = collect_result
@@ -245,7 +245,7 @@ def test_aerodrome_slipstream_collect_fees_accepts_clean_integer_inputs(
 
     with (
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.collect_cl_fees.return_value = collect_result
@@ -315,7 +315,7 @@ def test_aerodrome_slipstream_collect_fees_propagates_adapter_error() -> None:
 
     with (
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.collect_cl_fees.return_value = MagicMock(
@@ -357,7 +357,7 @@ def test_aerodrome_slipstream_collect_fees_permission_discovery_substitutes_toke
 
     with (
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.collect_cl_fees.return_value = collect_result
@@ -409,7 +409,7 @@ def _make_collect_log(amount0: int, amount1: int) -> dict[str, object]:
     Topic 1: tokenId (indexed)
     Data:   recipient(32b) + amount0(32b) + amount1(32b)
     """
-    from almanak.framework.connectors.aerodrome.receipt_parser import EVENT_TOPICS
+    from almanak.connectors.aerodrome.receipt_parser import EVENT_TOPICS
 
     recipient = "0x" + "11" * 20
     data = (
@@ -426,7 +426,7 @@ def _make_collect_log(amount0: int, amount1: int) -> dict[str, object]:
 
 
 def test_slipstream_parser_extract_fees0_reads_collect_event() -> None:
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         AerodromeSlipstreamReceiptParser,
     )
 
@@ -438,7 +438,7 @@ def test_slipstream_parser_extract_fees0_reads_collect_event() -> None:
 
 
 def test_slipstream_parser_extract_fees_returns_none_when_no_collect_event() -> None:
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         AerodromeSlipstreamReceiptParser,
     )
 
@@ -460,7 +460,7 @@ def test_slipstream_parser_extract_fees_returns_none_when_no_collect_event() -> 
 
 
 def test_slipstream_parser_extract_fees_sums_multiple_collect_events() -> None:
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         AerodromeSlipstreamReceiptParser,
     )
 
@@ -480,7 +480,7 @@ def _make_decrease_liquidity_log(token_id: int = 12345) -> dict[str, object]:
     """Build a Slipstream DecreaseLiquidity log so we can simulate an
     LP_CLOSE bundle's first receipt where the parser must NOT report
     fees0/fees1 (the paired Collect amounts include unlocked principal)."""
-    from almanak.framework.connectors.aerodrome.receipt_parser import EVENT_TOPICS
+    from almanak.connectors.aerodrome.receipt_parser import EVENT_TOPICS
 
     # data layout: liquidity(uint128) + amount0(uint256) + amount1(uint256)
     data = "0x" + format(1_000_000, "064x") + format(50_000, "064x") + format(75_000, "064x")
@@ -498,7 +498,7 @@ def test_slipstream_parser_fees_extraction_returns_none_on_lp_close_bundle() -> 
     Returning None preserves the LP_CLOSE typed data path (which reports the
     same numbers as principal via ``lp_close_data.amount0_collected``) without
     double-counting them as standalone fees."""
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         AerodromeSlipstreamReceiptParser,
     )
 
@@ -518,7 +518,7 @@ def test_slipstream_parser_fees_extraction_ignores_decrease_liquidity_only_recei
     """A receipt with DecreaseLiquidity but no Collect (e.g. the first
     Slipstream LP_CLOSE tx receipt before the collect leg) must report no
     fees rather than zeroing them out."""
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         AerodromeSlipstreamReceiptParser,
     )
 

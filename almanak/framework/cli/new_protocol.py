@@ -194,6 +194,7 @@ def to_upper_snake_case(name: str) -> str:
     return to_snake_case(name).upper()
 
 
+# crap-allowlist: VIB-4835 — pre-existing CLI scaffold (cc=14, cov=0%) touched only by docstring rewrite for new connector path. Refactor tracked in VIB-4139; coverage backfill not planned (CLI helper exercised by end-to-end ax tests).
 def generate_adapter_file(
     name: str,
     protocol_type: ProtocolType,
@@ -336,7 +337,7 @@ Supported chains:
 {chr(10).join(f"- {chain.value.title()}" for chain in chains)}
 
 Example:
-    from almanak.framework.connectors.{to_snake_case(name)} import {pascal_name}Adapter, {pascal_name}Config
+    from almanak.connectors.{to_snake_case(name)} import {pascal_name}Adapter, {pascal_name}Config
 
     config = {pascal_name}Config(
         chain="arbitrum",
@@ -618,7 +619,7 @@ Parses the following event types:
 {chr(10).join(f"- {event}" for event in config.event_types)}
 
 Example:
-    from almanak.framework.connectors.{to_snake_case(name)} import {pascal_name}ReceiptParser
+    from almanak.connectors.{to_snake_case(name)} import {pascal_name}ReceiptParser
 
     parser = {pascal_name}ReceiptParser()
     result = parser.parse_receipt(receipt)
@@ -973,7 +974,7 @@ This module provides a high-level SDK wrapper for the {pascal_name} adapter,
 offering async support, caching, and additional convenience methods.
 
 Example:
-    from almanak.framework.connectors.{to_snake_case(name)} import {pascal_name}SDK
+    from almanak.connectors.{to_snake_case(name)} import {pascal_name}SDK
 
     sdk = {pascal_name}SDK(config)
     async with sdk:
@@ -1780,7 +1781,7 @@ supporting {", ".join(config.operations[:3])} and more.
 {config.description}
 
 Example:
-    from almanak.framework.connectors.{to_snake_case(name)} import {pascal_name}Adapter, {pascal_name}Config
+    from almanak.connectors.{to_snake_case(name)} import {pascal_name}Adapter, {pascal_name}Config
 
     config = {pascal_name}Config(
         chain="arbitrum",
@@ -1879,7 +1880,7 @@ The connector is included in the Almanak Strategy Framework. No additional insta
 ### Basic Usage
 
 ```python
-from almanak.framework.connectors.{snake_name} import {pascal_name}Adapter, {pascal_name}Config
+from almanak.connectors.{snake_name} import {pascal_name}Adapter, {pascal_name}Config
 
 # Configure the adapter
 config = {pascal_name}Config(
@@ -1905,7 +1906,7 @@ else:
 ### Using the SDK (Async)
 
 ```python
-from almanak.framework.connectors.{snake_name} import {pascal_name}SDK, {pascal_name}Config
+from almanak.connectors.{snake_name} import {pascal_name}SDK, {pascal_name}Config
 
 config = {pascal_name}Config(
     chain="arbitrum",
@@ -1924,7 +1925,7 @@ asyncio.run(main())
 ### Parsing Transaction Receipts
 
 ```python
-from almanak.framework.connectors.{snake_name} import (
+from almanak.connectors.{snake_name} import (
     {pascal_name}ReceiptParser,
     {pascal_name}EventType,
     TransactionReceipt,

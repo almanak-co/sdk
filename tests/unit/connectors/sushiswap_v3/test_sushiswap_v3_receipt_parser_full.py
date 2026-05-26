@@ -34,7 +34,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+from almanak.connectors.sushiswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     SWAP_EVENT_TOPIC,
@@ -694,7 +694,7 @@ class TestExtractPositionId:
         receipt = _make_receipt([_make_erc721_mint_log(chain="arbitrum")])
         with caplog.at_level(
             logging.WARNING,
-            logger="almanak.framework.connectors.sushiswap_v3.receipt_parser",
+            logger="almanak.connectors.sushiswap_v3.receipt_parser",
         ):
             result = parser.extract_position_id(receipt)
         assert result is None

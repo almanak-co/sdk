@@ -1994,15 +1994,15 @@ def _extract_lp_position_identity(
         # Each protocol has its own receipt parser — pick dynamically so we
         # don't import three modules unconditionally.
         if protocol == "uniswap_v3":
-            from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            from almanak.connectors.uniswap_v3.receipt_parser import (
                 UniswapV3ReceiptParser as _Parser,
             )
         elif protocol == "pancakeswap_v3":
-            from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+            from almanak.connectors.pancakeswap_v3.receipt_parser import (
                 PancakeSwapV3ReceiptParser as _Parser,
             )
         else:
-            from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+            from almanak.connectors.sushiswap_v3.receipt_parser import (
                 SushiSwapV3ReceiptParser as _Parser,
             )
         parser = _Parser(chain=chain)
@@ -2018,7 +2018,7 @@ def _extract_lp_position_identity(
         )
 
     if protocol == "aerodrome":
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeReceiptParser,
         )
 
@@ -2039,7 +2039,7 @@ def _extract_lp_position_identity(
         # (pair, bin_id). The compiler reads protocol_params["bin_ids"] and
         # uses intent.pool for the pair. The case's LP_CLOSE config carries
         # pool already — we only need bin_ids from the mint receipt.
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             TraderJoeV2ReceiptParser,
         )
 

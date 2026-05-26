@@ -15,20 +15,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     GammaMarket,
     OpenOrder,
     OrderBook,
     Position,
     PriceLevel,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     HistoricalPrice as ClobHistoricalPrice,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     HistoricalTrade as ClobHistoricalTrade,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     PriceHistory as ClobPriceHistory,
 )
 from almanak.framework.data.prediction_provider import (

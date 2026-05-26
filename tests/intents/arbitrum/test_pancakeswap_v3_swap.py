@@ -146,7 +146,7 @@ class TestPancakeSwapV3SwapIntent:
 
             # Parse swap receipt
             if tx_result.receipt:
-                from almanak.framework.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+                from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
 
                 parser = PancakeSwapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
@@ -246,7 +246,7 @@ class TestPancakeSwapV3SwapIntent:
         # Parse receipts
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                from almanak.framework.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+                from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
 
                 parser = PancakeSwapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())

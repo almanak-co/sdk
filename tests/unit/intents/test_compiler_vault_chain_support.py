@@ -278,29 +278,29 @@ class TestVaultRedeemUnsupportedChain:
 
 class TestVaultRegistryChainHelpers:
     def test_is_vault_chain_supported_metamorpho_ethereum(self) -> None:
-        from almanak.framework.connectors.vaults import is_vault_chain_supported
+        from almanak.connectors._strategy_base.vaults import is_vault_chain_supported
 
         assert is_vault_chain_supported("metamorpho", "ethereum") is True
         assert is_vault_chain_supported("metamorpho", "base") is True
 
     def test_is_vault_chain_supported_metamorpho_sonic_false(self) -> None:
-        from almanak.framework.connectors.vaults import is_vault_chain_supported
+        from almanak.connectors._strategy_base.vaults import is_vault_chain_supported
 
         assert is_vault_chain_supported("metamorpho", "sonic") is False
 
     def test_is_vault_chain_supported_unknown_protocol_false(self) -> None:
-        from almanak.framework.connectors.vaults import is_vault_chain_supported
+        from almanak.connectors._strategy_base.vaults import is_vault_chain_supported
 
         assert is_vault_chain_supported("nonexistent", "ethereum") is False
 
     def test_is_vault_chain_supported_case_insensitive(self) -> None:
-        from almanak.framework.connectors.vaults import is_vault_chain_supported
+        from almanak.connectors._strategy_base.vaults import is_vault_chain_supported
 
         assert is_vault_chain_supported("MetaMorpho", "Ethereum") is True
         assert is_vault_chain_supported("METAMORPHO", "SONIC") is False
 
     def test_supported_vault_chains_metamorpho(self) -> None:
-        from almanak.framework.connectors.vaults import supported_vault_chains
+        from almanak.connectors._strategy_base.vaults import supported_vault_chains
 
         chains = supported_vault_chains("metamorpho")
         assert chains is not None
@@ -309,14 +309,14 @@ class TestVaultRegistryChainHelpers:
         assert "sonic" not in chains
 
     def test_supported_vault_chains_unknown_protocol_raises(self) -> None:
-        from almanak.framework.connectors.vaults import supported_vault_chains
+        from almanak.connectors._strategy_base.vaults import supported_vault_chains
 
         with pytest.raises(KeyError):
             supported_vault_chains("definitely_not_a_protocol")
 
     def test_register_with_supported_chains_then_query(self) -> None:
         """Adapters opting into the chain set must be queryable end-to-end."""
-        from almanak.framework.connectors.vaults import (
+        from almanak.connectors._strategy_base.vaults import (
             _REGISTRY,
             is_vault_chain_supported,
             register_vault_adapter,
@@ -347,7 +347,7 @@ class TestVaultRegistryChainHelpers:
         non-support); ``supported_vault_chains`` returns ``None``. This keeps
         third-party adapters that haven't been migrated yet working.
         """
-        from almanak.framework.connectors.vaults import (
+        from almanak.connectors._strategy_base.vaults import (
             _REGISTRY,
             is_vault_chain_supported,
             register_vault_adapter,

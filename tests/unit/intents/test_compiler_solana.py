@@ -11,9 +11,9 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from almanak.framework.chain_family import EvmFamily, SvmFamily, family_for
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
-from almanak.framework.connectors.compiler_registry import get_compiler
-from almanak.framework.connectors.jupiter.compiler import JupiterCompiler
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.compiler_registry import get_compiler
+from almanak.connectors.jupiter.compiler import JupiterCompiler
 from almanak.framework.intents.compiler import (
     CompilationResult,
     CompilationStatus,
@@ -89,9 +89,9 @@ class TestCompileSwapSolanaRouting:
 
 
 class TestJupiterConnectorCompiler:
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_successful_compilation(self, mock_client_cls):
-        from almanak.framework.connectors.jupiter.models import (
+        from almanak.connectors.jupiter.models import (
             JupiterQuote,
             JupiterSwapTransaction,
         )

@@ -13,9 +13,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.kamino.adapter import KaminoAdapter
-from almanak.framework.connectors.kamino.client import U64_MAX, KaminoConfig
-from almanak.framework.connectors.kamino.models import KaminoReserve, KaminoTransactionResponse
+from almanak.connectors.kamino.adapter import KaminoAdapter
+from almanak.connectors.kamino.client import U64_MAX, KaminoConfig
+from almanak.connectors.kamino.models import KaminoReserve, KaminoTransactionResponse
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
     IntentType,

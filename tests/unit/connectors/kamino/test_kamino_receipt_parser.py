@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.kamino.receipt_parser import KaminoReceiptParser
+from almanak.connectors.kamino.receipt_parser import KaminoReceiptParser
 
 
 def _make_receipt(pre_balances, post_balances):

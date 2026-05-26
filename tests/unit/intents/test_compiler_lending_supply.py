@@ -1,7 +1,7 @@
 """Unit tests targeting the per-protocol helpers extracted from ``compile_supply``.
 
 Phase 2c of the coverage-improvement plan. The helpers are private module-level
-functions in ``almanak.framework.connectors.base.lending.aave_helpers``:
+functions in ``almanak.connectors._strategy_base.base.lending.aave_helpers``:
 
 - ``compile_supply`` (thin dispatcher)
 - ``_compile_supply_jupiter_lend`` (Solana)
@@ -25,15 +25,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
+from almanak.connectors._strategy_base.base.lending import aave_helpers as cl
 from almanak.framework.intents import SupplyIntent
 from almanak.framework.intents.compiler_models import CompilationStatus
 
-MORPHO_ADAPTER = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueAdapter"
-MORPHO_CONFIG = "almanak.framework.connectors.morpho_blue.adapter.MorphoBlueConfig"
-COMPOUND_ADAPTER = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Adapter"
-COMPOUND_CONFIG = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Config"
-COMPOUND_MARKETS = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
+MORPHO_ADAPTER = "almanak.connectors.morpho_blue.adapter.MorphoBlueAdapter"
+MORPHO_CONFIG = "almanak.connectors.morpho_blue.adapter.MorphoBlueConfig"
+COMPOUND_ADAPTER = "almanak.connectors.compound_v3.adapter.CompoundV3Adapter"
+COMPOUND_CONFIG = "almanak.connectors.compound_v3.adapter.CompoundV3Config"
+COMPOUND_MARKETS = "almanak.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
 
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 TEST_POOL = "0xpooladdress000000000000000000000000000001"
@@ -223,8 +223,8 @@ class TestMorphoBlueHelper:
 # ---------------------------------------------------------------------------
 
 
-CURVANCE_ADAPTER = "almanak.framework.connectors.curvance.adapter.CurvanceAdapter"
-CURVANCE_CONFIG = "almanak.framework.connectors.curvance.adapter.CurvanceConfig"
+CURVANCE_ADAPTER = "almanak.connectors.curvance.adapter.CurvanceAdapter"
+CURVANCE_CONFIG = "almanak.connectors.curvance.adapter.CurvanceConfig"
 
 
 class TestCurvanceHelper:
@@ -445,9 +445,9 @@ class TestAaveCompatibleHelper:
 # ---------------------------------------------------------------------------
 
 
-SPARK_ADAPTER = "almanak.framework.connectors.spark.SparkAdapter"
-SPARK_CONFIG = "almanak.framework.connectors.spark.SparkConfig"
-SPARK_POOL_ADDRESSES = "almanak.framework.connectors.spark.SPARK_POOL_ADDRESSES"
+SPARK_ADAPTER = "almanak.connectors.spark.SparkAdapter"
+SPARK_CONFIG = "almanak.connectors.spark.SparkConfig"
+SPARK_POOL_ADDRESSES = "almanak.connectors.spark.SPARK_POOL_ADDRESSES"
 
 
 class TestSparkHelper:
@@ -535,9 +535,9 @@ class TestSparkHelper:
 # ---------------------------------------------------------------------------
 
 
-COMPOUND_ADAPTER = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Adapter"
-COMPOUND_CONFIG = "almanak.framework.connectors.compound_v3.adapter.CompoundV3Config"
-COMPOUND_MARKETS = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
+COMPOUND_ADAPTER = "almanak.connectors.compound_v3.adapter.CompoundV3Adapter"
+COMPOUND_CONFIG = "almanak.connectors.compound_v3.adapter.CompoundV3Config"
+COMPOUND_MARKETS = "almanak.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
 
 
 class TestCompoundV3Helper:
@@ -659,8 +659,8 @@ class TestCompoundV3Helper:
 # ---------------------------------------------------------------------------
 
 
-BENQI_ADAPTER = "almanak.framework.connectors.benqi.adapter.BenqiAdapter"
-BENQI_CONFIG = "almanak.framework.connectors.benqi.adapter.BenqiConfig"
+BENQI_ADAPTER = "almanak.connectors.benqi.adapter.BenqiAdapter"
+BENQI_CONFIG = "almanak.connectors.benqi.adapter.BenqiConfig"
 
 
 class TestBenqiHelper:
@@ -777,8 +777,8 @@ class TestBenqiHelper:
 
 
 
-EULER_ADAPTER = "almanak.framework.connectors.euler_v2.adapter.EulerV2Adapter"
-EULER_CONFIG = "almanak.framework.connectors.euler_v2.adapter.EulerV2Config"
+EULER_ADAPTER = "almanak.connectors.euler_v2.adapter.EulerV2Adapter"
+EULER_CONFIG = "almanak.connectors.euler_v2.adapter.EulerV2Config"
 
 
 class TestEulerV2Helper:
@@ -833,8 +833,8 @@ class TestEulerV2Helper:
 # ---------------------------------------------------------------------------
 
 
-SILO_ADAPTER = "almanak.framework.connectors.silo_v2.adapter.SiloV2Adapter"
-SILO_CONFIG = "almanak.framework.connectors.silo_v2.adapter.SiloV2Config"
+SILO_ADAPTER = "almanak.connectors.silo_v2.adapter.SiloV2Adapter"
+SILO_CONFIG = "almanak.connectors.silo_v2.adapter.SiloV2Config"
 
 
 class TestSiloV2Helper:
@@ -897,7 +897,7 @@ class TestJoeLendDormant:
     """JoeLend remains retired at the adapter boundary."""
 
     def test_adapter_constructor_raises_deprecated_error(self):
-        from almanak.framework.connectors.joelend.adapter import (
+        from almanak.connectors.joelend.adapter import (
             JoeLendAdapter,
             JoeLendConfig,
             JoeLendDeprecatedError,

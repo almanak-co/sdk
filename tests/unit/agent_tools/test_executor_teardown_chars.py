@@ -139,7 +139,7 @@ class TestHappyPath:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch.object(executor, "_execute_get_lp_position", return_value=lp_info) as get_lp_position,
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -183,7 +183,7 @@ class TestHappyPath:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -203,7 +203,7 @@ class TestAlreadyTornDown:
         # Any execute / SDK call would be a bug - assert they don't happen.
         with (
             patch.object(executor, "execute", side_effect=AssertionError("should not run")),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", side_effect=AssertionError("should not run")),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", side_effect=AssertionError("should not run")),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -217,7 +217,7 @@ class TestAlreadyTornDown:
 
         with (
             patch.object(executor, "execute", side_effect=AssertionError("should not run")),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", side_effect=AssertionError("should not run")),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", side_effect=AssertionError("should not run")),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -256,7 +256,7 @@ class TestResumeFromLpClosed:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -295,7 +295,7 @@ class TestResumeFromSettling:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -319,7 +319,7 @@ class TestLpCloseFailure:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch.object(executor, "_fire_alert") as fire_alert,
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -348,7 +348,7 @@ class TestLpCloseFailure:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch.object(executor, "_fire_alert"),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -378,7 +378,7 @@ class TestSwapFailureIsTolerated:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -403,7 +403,7 @@ class TestSwapFailureIsTolerated:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -426,7 +426,7 @@ class TestSettlementFailure:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch.object(executor, "_fire_alert") as fire_alert,
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -454,7 +454,7 @@ class TestSettlementFailure:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch.object(executor, "_fire_alert"),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -485,7 +485,7 @@ class TestDryRun:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args(dry_run=True))
 
@@ -510,7 +510,7 @@ class TestStateLoadResilience:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -531,7 +531,7 @@ class TestStateLoadResilience:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -561,7 +561,7 @@ class TestUnderlyingAndNavResilience:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
         ):
             result = await executor._execute_teardown_vault(_args())
 
@@ -581,7 +581,7 @@ class TestUnderlyingAndNavResilience:
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
             patch(
-                "almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK",
+                "almanak.connectors.lagoon.sdk.LagoonVaultSDK",
                 return_value=_make_sdk(raise_total_assets=True),
             ),
         ):
@@ -623,7 +623,7 @@ class TestUnderlyingTokenExclusion:
 
         with (
             patch.object(executor, "execute", side_effect=fake_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
         ):
             result = await executor._execute_teardown_vault(_args())
 

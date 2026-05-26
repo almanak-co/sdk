@@ -250,8 +250,8 @@ class TestSvmConnectorGatewayBoundary:
     @pytest.mark.parametrize(
         "connector_pkg",
         [
-            "almanak.framework.connectors.jupiter",
-            "almanak.framework.connectors.kamino",
+            "almanak.connectors.jupiter",
+            "almanak.connectors.kamino",
         ],
     )
     def test_connector_does_not_import_svm_signer(self, connector_pkg: str) -> None:
@@ -269,8 +269,8 @@ class TestSvmConnectorGatewayBoundary:
     @pytest.mark.parametrize(
         "connector_pkg",
         [
-            "almanak.framework.connectors.jupiter",
-            "almanak.framework.connectors.kamino",
+            "almanak.connectors.jupiter",
+            "almanak.connectors.kamino",
         ],
     )
     def test_connector_does_not_call_solana_signer_constructors(
@@ -359,7 +359,7 @@ class TestForbiddenImportMatcher:
         [
             # Adjacent-substring false-positive guard — these must NOT
             # match because the dot boundary is required.
-            "almanak.framework.connectors.kamino.my_signer",
+            "almanak.connectors.kamino.my_signer",
             "my_solana_signer",
             "package.solders_keypair",
             # Legitimate solders imports under connector code stay clean.
@@ -369,7 +369,7 @@ class TestForbiddenImportMatcher:
             "solders.transaction.VersionedTransaction",
             # Unrelated almanak modules.
             "almanak.framework.execution.signer.LocalKeySigner",
-            "almanak.framework.connectors.jupiter.adapter",
+            "almanak.connectors.jupiter.adapter",
         ],
     )
     def test_not_caught(self, dotted: str) -> None:

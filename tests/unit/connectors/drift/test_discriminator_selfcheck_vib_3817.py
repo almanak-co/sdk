@@ -23,14 +23,14 @@ import hashlib
 
 import pytest
 
-from almanak.framework.connectors.drift.constants import (
+from almanak.connectors.drift.constants import (
     DRIFT_INSTRUCTION_NAMES,
 )
-from almanak.framework.connectors.drift.exceptions import (
+from almanak.connectors.drift.exceptions import (
     DriftDiscriminatorMismatchError,
     DriftInstructionFallbackError,
 )
-from almanak.framework.connectors.drift.sdk import (
+from almanak.connectors.drift.sdk import (
     anchor_discriminator,
     verify_drift_discriminators,
 )
@@ -81,7 +81,7 @@ class TestVerifyDriftDiscriminators:
 
     def test_mismatched_constant_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Flip one constant to a wrong value and ensure the guard fires.
-        from almanak.framework.connectors.drift import constants
+        from almanak.connectors.drift import constants
 
         monkeypatch.setitem(
             constants.DRIFT_INSTRUCTION_NAMES,
@@ -97,8 +97,8 @@ class TestVerifyDriftDiscriminators:
 
 class TestDriftSdkConstructorRunsSelfCheck:
     def test_sdk_init_calls_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from almanak.framework.connectors.drift import constants
-        from almanak.framework.connectors.drift.sdk import DriftSDK
+        from almanak.connectors.drift import constants
+        from almanak.connectors.drift.sdk import DriftSDK
 
         monkeypatch.setitem(
             constants.DRIFT_INSTRUCTION_NAMES,

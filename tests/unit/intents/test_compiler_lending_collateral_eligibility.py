@@ -14,7 +14,7 @@ import json
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
+from almanak.connectors._strategy_base.base.lending import aave_helpers as cl
 from almanak.framework.intents import SupplyIntent
 from almanak.framework.intents.compiler_models import CompilationStatus
 

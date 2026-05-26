@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import (
+from almanak.connectors.aave_v3.receipt_parser import (
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
     TOPIC_TO_EVENT,

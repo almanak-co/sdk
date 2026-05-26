@@ -11,8 +11,8 @@ import pytest
 
 from almanak.core.contracts import UNISWAP_V4
 from almanak.core.enums import Protocol
-from almanak.framework.connectors.contract_registry import get_default_registry
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors._strategy_base.contract_registry import get_default_registry
+from almanak.connectors.uniswap_v4.sdk import (
     MODIFY_LIQUIDITIES_SELECTOR,
     MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR,
     POOL_MANAGER_ADDRESSES,

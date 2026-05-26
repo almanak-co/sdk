@@ -35,7 +35,7 @@ Key Features:
 
 Example:
     from almanak.framework.data.prediction_provider import PredictionMarketDataProvider
-    from almanak.framework.connectors.polymarket import ClobClient, PolymarketConfig
+    from almanak.connectors.polymarket import ClobClient, PolymarketConfig
 
     config = PolymarketConfig.from_env()
     client = ClobClient(config)
@@ -68,21 +68,21 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from ..connectors.polymarket.clob_client import ClobClient
-from ..connectors.polymarket.models import (
+from almanak.connectors.polymarket.clob_client import ClobClient
+from almanak.connectors.polymarket.models import (
     GammaMarket,
     MarketFilters,
     OrderBook,
     Position,
     PositionFilters,
 )
-from ..connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     HistoricalPrice as ClobHistoricalPrice,
 )
-from ..connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     HistoricalTrade as ClobHistoricalTrade,
 )
-from ..connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     PriceHistory as ClobPriceHistory,
 )
 

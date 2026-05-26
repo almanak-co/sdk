@@ -839,5 +839,5 @@ strategies/xlayer/xlayer-strategy-backup/xlayer_deterministic/aave_okb_clmm_loop
 - **Deterministic carry reference**: `almanak/demo_strategies/xlayer_aave_carry/`
 - **Deterministic LP reference**: `almanak/demo_strategies/xlayer_lp_rebalance/`
 - **Edge spec**: `playground/xlayer/aave-uniswap/specs.md` (ID cmnt8k6v2005saopppn2hx9bx)
-- **Aave V3 connector**: `almanak/framework/connectors/aave_v3/`
-- **Uniswap V3 connector**: `almanak/framework/connectors/uniswap_v3/`
+- **Aave V3 connector**: `almanak/connectors/aave_v3/`
+- **Uniswap V3 connector**: `almanak/connectors/uniswap_v3/`

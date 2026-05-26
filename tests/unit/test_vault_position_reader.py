@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.vaults import (
+from almanak.connectors._strategy_base.vaults import (
     register_vault_adapter,
 )
 from almanak.framework.teardown.models import PositionInfo, PositionType
@@ -71,7 +71,7 @@ def register_stub_adapter():
     register_vault_adapter(name, _factory)
     yield name, sdk_holder
 
-    from almanak.framework.connectors.vaults import _REGISTRY
+    from almanak.connectors._strategy_base.vaults import _REGISTRY
 
     _REGISTRY.pop(name, None)
 

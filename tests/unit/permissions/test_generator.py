@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
-from almanak.framework.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
+from almanak.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
+from almanak.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
 from almanak.framework.execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
     MULTISEND_SELECTOR,

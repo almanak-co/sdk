@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.uniswap_v3.slot0_fallback import (
+from almanak.connectors.uniswap_v3.slot0_fallback import (
     SLOT0_SELECTOR,
     _decode_slot0_tick,
     enrich_lp_open_with_slot0,

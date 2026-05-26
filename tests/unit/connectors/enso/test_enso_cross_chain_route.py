@@ -16,13 +16,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.client import (
+from almanak.connectors.enso.client import (
     CHAIN_MAPPING,
     EnsoClient,
     EnsoConfig,
 )
-from almanak.framework.connectors.enso.exceptions import EnsoValidationError
-from almanak.framework.connectors.enso.models import RouteTransaction
+from almanak.connectors.enso.exceptions import EnsoValidationError
+from almanak.connectors.enso.models import RouteTransaction
 
 
 # =============================================================================

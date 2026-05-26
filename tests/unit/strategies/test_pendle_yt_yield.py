@@ -193,7 +193,7 @@ class TestYTTokenConfig:
     """Tests verifying the Pendle SDK YT token config for Arbitrum."""
 
     def test_yt_token_info_has_arbitrum(self):
-        from almanak.framework.connectors.pendle.sdk import YT_TOKEN_INFO
+        from almanak.connectors.pendle.sdk import YT_TOKEN_INFO
 
         assert "arbitrum" in YT_TOKEN_INFO
         arb_yt = YT_TOKEN_INFO["arbitrum"]
@@ -203,7 +203,7 @@ class TestYTTokenConfig:
         assert decimals == 18
 
     def test_market_by_yt_token_has_arbitrum(self):
-        from almanak.framework.connectors.pendle.sdk import MARKET_BY_YT_TOKEN
+        from almanak.connectors.pendle.sdk import MARKET_BY_YT_TOKEN
 
         assert "arbitrum" in MARKET_BY_YT_TOKEN
         arb_markets = MARKET_BY_YT_TOKEN["arbitrum"]

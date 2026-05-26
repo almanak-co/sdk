@@ -31,7 +31,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.ethena.adapter import (
+from almanak.connectors.ethena.adapter import (
     ETHENA_ADDRESSES,
     ETHENA_COOLDOWN_ASSETS_SELECTOR,
     ETHENA_DEPOSIT_SELECTOR,
@@ -40,7 +40,7 @@ from almanak.framework.connectors.ethena.adapter import (
     EthenaAdapter,
     EthenaConfig,
 )
-from almanak.framework.connectors.ethena.receipt_parser import EthenaReceiptParser
+from almanak.connectors.ethena.receipt_parser import EthenaReceiptParser
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, UnstakeIntent
 

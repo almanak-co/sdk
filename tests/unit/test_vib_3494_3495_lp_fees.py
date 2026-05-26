@@ -15,7 +15,7 @@ class TestTraderJoeV2ParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_returns_protocol_fees_object(self):
         """Parser returns a ProtocolFees instance, not None."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+        from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
         from almanak.framework.execution.extracted_data import ProtocolFees
 
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
@@ -26,7 +26,7 @@ class TestTraderJoeV2ParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_has_unavailable_reason(self):
         """Parser emits explicit unavailable_reason (not just None)."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+        from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
         result = parser.extract_protocol_fees({})
@@ -36,7 +36,7 @@ class TestTraderJoeV2ParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_total_usd_is_none(self):
         """total_usd must be None when unavailable_reason is set."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+        from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
         result = parser.extract_protocol_fees({})
@@ -45,7 +45,7 @@ class TestTraderJoeV2ParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_is_unavailable_property(self):
         """is_unavailable property returns True."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+        from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
         result = parser.extract_protocol_fees({})
@@ -58,7 +58,7 @@ class TestAerodromeParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_returns_protocol_fees_object(self):
         """Parser returns a ProtocolFees instance, not None."""
-        from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+        from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
         from almanak.framework.execution.extracted_data import ProtocolFees
 
         parser = AerodromeReceiptParser(chain="base")
@@ -69,7 +69,7 @@ class TestAerodromeParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_has_unavailable_reason(self):
         """Parser emits explicit unavailable_reason."""
-        from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+        from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 
         parser = AerodromeReceiptParser(chain="base")
         result = parser.extract_protocol_fees({})
@@ -80,7 +80,7 @@ class TestAerodromeParserEmitsProtocolFeesUnavailable:
 
     def test_slipstream_parser_inherits_unavailable(self):
         """AerodromeSlipstreamReceiptParser inherits the same extract_protocol_fees."""
-        from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeSlipstreamReceiptParser
+        from almanak.connectors.aerodrome.receipt_parser import AerodromeSlipstreamReceiptParser
 
         parser = AerodromeSlipstreamReceiptParser(chain="base")
         result = parser.extract_protocol_fees({})
@@ -94,7 +94,7 @@ class TestCurveParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_returns_protocol_fees_object(self):
         """Parser returns a ProtocolFees instance, not None."""
-        from almanak.framework.connectors.curve.receipt_parser import CurveReceiptParser
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
         from almanak.framework.execution.extracted_data import ProtocolFees
 
         parser = CurveReceiptParser(chain="ethereum")
@@ -105,7 +105,7 @@ class TestCurveParserEmitsProtocolFeesUnavailable:
 
     def test_extract_protocol_fees_has_unavailable_reason(self):
         """Parser emits explicit unavailable_reason."""
-        from almanak.framework.connectors.curve.receipt_parser import CurveReceiptParser
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
 
         parser = CurveReceiptParser(chain="ethereum")
         result = parser.extract_protocol_fees({})

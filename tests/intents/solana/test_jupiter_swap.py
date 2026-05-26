@@ -250,7 +250,7 @@ class TestJupiterSwapExecution:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: Receipt parser integration
-        from almanak.framework.connectors.jupiter import JupiterReceiptParser
+        from almanak.connectors.jupiter import JupiterReceiptParser
 
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
@@ -315,7 +315,7 @@ class TestJupiterSwapExecution:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: Receipt parser
-        from almanak.framework.connectors.jupiter import JupiterReceiptParser
+        from almanak.connectors.jupiter import JupiterReceiptParser
 
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:

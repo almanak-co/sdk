@@ -182,7 +182,7 @@ class SolanaPerpFundingStrategy(IntentStrategy):
         # Funding rate data is not yet available via the gateway MarketSnapshot layer.
         # TODO: Add funding rate provider to gateway and use market.funding_rate() instead.
         try:
-            from almanak.framework.connectors.drift import DriftDataClient, PERP_MARKET_SYMBOL_TO_INDEX
+            from almanak.connectors.drift import DriftDataClient, PERP_MARKET_SYMBOL_TO_INDEX
 
             client = DriftDataClient()
             market_index = PERP_MARKET_SYMBOL_TO_INDEX.get(market.upper(), 0)

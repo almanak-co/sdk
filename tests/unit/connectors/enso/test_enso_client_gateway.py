@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.client import EnsoClient, EnsoConfig
-from almanak.framework.connectors.enso.exceptions import EnsoAPIError
-from almanak.framework.connectors.enso.models import BundleAction, RoutingStrategy
+from almanak.connectors.enso.client import EnsoClient, EnsoConfig
+from almanak.connectors.enso.exceptions import EnsoAPIError
+from almanak.connectors.enso.models import BundleAction, RoutingStrategy
 
 
 def _make_gateway_client() -> MagicMock:
@@ -81,7 +81,7 @@ class TestEnsoConfig:
 
     def test_direct_mode_still_requires_api_key(self, monkeypatch):
         monkeypatch.delenv("ENSO_API_KEY", raising=False)
-        from almanak.framework.connectors.enso.exceptions import EnsoConfigError
+        from almanak.connectors.enso.exceptions import EnsoConfigError
 
         with pytest.raises(EnsoConfigError):
             EnsoConfig(chain="arbitrum", wallet_address="0x" + "11" * 20)
@@ -163,7 +163,7 @@ class TestEnsoClientGatewayTransport:
         # Fence off the legacy direct-HTTP path — get_bundle() is the one
         # Enso method that reaches requests.post directly on fallback. If a
         # regression ever re-enables the fallback, the test must fail loudly.
-        with patch("almanak.framework.connectors.enso.client.requests.post") as mock_post:
+        with patch("almanak.connectors.enso.client.requests.post") as mock_post:
             result = client.get_bundle(actions, routing_strategy=RoutingStrategy.ROUTER)
         assert gateway.enso.GetBundle.called
         assert result["tx"]["to"] == "0xROUTER"
@@ -252,7 +252,7 @@ class TestEnsoClientGatewayTransport:
 class TestPriceImpactGuardInGatewayMode:
     def test_max_price_impact_still_enforced_via_gateway(self):
         """Client-side price-impact check runs independent of transport."""
-        from almanak.framework.connectors.enso.exceptions import PriceImpactExceedsThresholdError
+        from almanak.connectors.enso.exceptions import PriceImpactExceedsThresholdError
 
         gateway = _make_gateway_client()
         high_impact_resp = MagicMock(
@@ -293,5 +293,5 @@ def test_price_is_not_used_directly():
 
     # After this test file imports, enso.client must still be loadable without
     # a live Enso API or requests session — pure-import smoke.
-    assert "almanak.framework.connectors.enso.client" in sys.modules
+    assert "almanak.connectors.enso.client" in sys.modules
     _ = Decimal("1")  # silence unused-import warning

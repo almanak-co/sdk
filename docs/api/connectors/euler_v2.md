@@ -1,3 +1,3 @@
 # Euler V2
 
-::: almanak.framework.connectors.euler_v2
+::: almanak.connectors.euler_v2

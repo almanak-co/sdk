@@ -43,13 +43,13 @@ from dataclasses import dataclass
 # perform light import-time work — env-var lookups for things like
 # ``DRIFT_DATA_API_BASE_URL`` — but no network calls and no expensive
 # initialization.
-from almanak.framework.connectors.drift.constants import DRIFT_PROGRAM_ID
-from almanak.framework.connectors.meteora.constants import DLMM_PROGRAM_ID
-from almanak.framework.connectors.orca.constants import (
+from almanak.connectors.drift.constants import DRIFT_PROGRAM_ID
+from almanak.connectors.meteora.constants import DLMM_PROGRAM_ID
+from almanak.connectors.orca.constants import (
     METADATA_PROGRAM_ID as ORCA_METADATA_PROGRAM_ID,
 )
-from almanak.framework.connectors.orca.constants import WHIRLPOOL_PROGRAM_ID
-from almanak.framework.connectors.raydium.constants import CLMM_PROGRAM_ID
+from almanak.connectors.orca.constants import WHIRLPOOL_PROGRAM_ID
+from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
 
 # =============================================================================
 # Program IDs not currently exposed by their connector modules

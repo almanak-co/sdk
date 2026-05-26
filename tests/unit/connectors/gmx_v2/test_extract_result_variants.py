@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,

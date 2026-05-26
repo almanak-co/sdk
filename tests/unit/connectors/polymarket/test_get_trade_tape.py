@@ -19,11 +19,11 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
-from almanak.framework.connectors.polymarket.exceptions import PolymarketAPIError
-from almanak.framework.connectors.polymarket.gateway_client import (
+from almanak.connectors.polymarket.exceptions import PolymarketAPIError
+from almanak.connectors.polymarket.gateway_client import (
     GatewayPolymarketClient,
 )
-from almanak.framework.connectors.polymarket.models import HistoricalTrade
+from almanak.connectors.polymarket.models import HistoricalTrade
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.connectors.polymarket.proto import polymarket_pb2
 

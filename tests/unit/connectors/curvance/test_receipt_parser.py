@@ -9,11 +9,11 @@ oracle CAUTION fork artefact, but the decoding logic is fully testable here.
 
 from __future__ import annotations
 
-from almanak.framework.connectors.curvance.receipt_parser import (
+from almanak.connectors.curvance.receipt_parser import (
     CurvanceEventType,
     CurvanceReceiptParser,
 )
-from almanak.framework.connectors.curvance.sdk import (
+from almanak.connectors.curvance.sdk import (
     EVENT_TOPIC_BORROW,
     EVENT_TOPIC_DEPOSIT,
     EVENT_TOPIC_REPAY,

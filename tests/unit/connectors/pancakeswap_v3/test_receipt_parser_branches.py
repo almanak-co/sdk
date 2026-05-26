@@ -17,7 +17,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     ZERO_ADDRESS_PADDED,
@@ -818,7 +818,7 @@ class TestGetEventType:
 
 def test_permission_hints_module_loads():
     """Importing the module exercises the PERMISSION_HINTS constant assignment."""
-    from almanak.framework.connectors.pancakeswap_v3 import permission_hints
+    from almanak.connectors.pancakeswap_v3 import permission_hints
 
     assert permission_hints.PERMISSION_HINTS is not None
     assert "bsc" in permission_hints.PERMISSION_HINTS.synthetic_lp_pair

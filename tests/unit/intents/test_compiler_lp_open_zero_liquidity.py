@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.compiler import UniswapV3Compiler
+from almanak.connectors.uniswap_v3.compiler import UniswapV3Compiler
 from almanak.framework.intents import LpOpenZeroLiquidityError
 from almanak.framework.intents.compiler import (
     CompilationStatus,
@@ -38,7 +38,7 @@ from almanak.framework.intents.compiler import (
 )
 from almanak.framework.intents.vocabulary import Intent
 
-LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_POOL = "almanak.framework.intents.pool_validation.validate_v3_pool"
 FETCH_SQRT = "almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96"
 

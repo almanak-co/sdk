@@ -16,7 +16,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler

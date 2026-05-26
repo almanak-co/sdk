@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     BYTES32_ZERO,
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,

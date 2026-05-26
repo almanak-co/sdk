@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.adapter import (
+from almanak.connectors.uniswap_v3.adapter import (
     DEFAULT_DEADLINE_SECONDS,
     EXACT_INPUT_SINGLE_SELECTOR,
     EXACT_INPUT_SINGLE_V1_SELECTOR,

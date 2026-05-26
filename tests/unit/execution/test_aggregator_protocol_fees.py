@@ -25,8 +25,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
-from almanak.framework.connectors.lifi.receipt_parser import LiFiReceiptParser
+from almanak.connectors.enso.receipt_parser import EnsoReceiptParser
+from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 from almanak.framework.execution.extracted_data import ProtocolFees
 from almanak.framework.execution.result_enricher import ResultEnricher
 

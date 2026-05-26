@@ -33,7 +33,11 @@ _FORBIDDEN_PREFIXES: tuple[str, ...] = (
     "almanak.framework.intents",
     "almanak.framework.observability",
     "almanak.framework.runner",
+    # ``framework.connectors`` is the legacy path (VIB-4835 moved
+    # strategy-side code to ``almanak.connectors``). Keep both prefixes
+    # so a future regression to either path is caught.
     "almanak.framework.connectors",
+    "almanak.connectors",
     "almanak.framework.gateway_client",
     "almanak.framework.teardown",
     "almanak.gateway",

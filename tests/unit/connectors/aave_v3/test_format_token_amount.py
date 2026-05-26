@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import _format_token_amount
+from almanak.connectors.aave_v3.receipt_parser import _format_token_amount
 
 
 class TestFormatTokenAmount:

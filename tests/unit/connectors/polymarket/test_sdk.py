@@ -14,15 +14,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     ApiCredentials,
     GammaMarket,
     PolymarketConfig,
     PolymarketSDK,
     SignatureType,
 )
-from almanak.framework.connectors.polymarket.ctf_sdk import AllowanceStatus, TransactionData
-from almanak.framework.connectors.polymarket.exceptions import PolymarketMarketNotFoundError
+from almanak.connectors.polymarket.ctf_sdk import AllowanceStatus, TransactionData
+from almanak.connectors.polymarket.exceptions import PolymarketMarketNotFoundError
 
 # =============================================================================
 # Fixtures
@@ -354,7 +354,7 @@ class TestAllowanceConvenience:
         use MAX_UINT256 here to exercise the standard ``ensure_allowances``
         end-state.
         """
-        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256
+        from almanak.connectors.polymarket.ctf_sdk import MAX_UINT256
 
         sdk = PolymarketSDK(config, web3=mock_web3)
 

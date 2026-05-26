@@ -130,7 +130,7 @@ class TestInitPredictionProviderHappyPath:
         sentinel_provider = object()
 
         with (
-            patch("almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient") as mock_clob,
+            patch("almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient") as mock_clob,
             patch(
                 "almanak.framework.data.prediction_provider.PredictionMarketDataProvider"
             ) as mock_pmdp,

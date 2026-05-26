@@ -153,7 +153,7 @@ while handling the fundamental differences between on-chain and off-chain execut
 
 Example Usage:
     from almanak.framework.execution.clob_handler import ClobActionHandler
-    from almanak.framework.connectors.polymarket import ClobClient, PolymarketConfig
+    from almanak.connectors.polymarket import ClobClient, PolymarketConfig
 
     config = PolymarketConfig.from_env()
     clob_client = ClobClient(config)
@@ -183,7 +183,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.framework.connectors.polymarket import ClobClient
+    from almanak.connectors.polymarket import ClobClient
     from almanak.framework.execution.extracted_data import PredictionFill
     from almanak.framework.models.reproduction_bundle import ActionBundle
 
@@ -657,7 +657,7 @@ class ClobActionHandler:
             # and validate tick / min-size. Look it up from the token_id —
             # the gateway holds the keys and signs server-side, the framework
             # only assembles the request.
-            from almanak.framework.connectors.polymarket import MarketFilters
+            from almanak.connectors.polymarket import MarketFilters
 
             token_id = str(order_request.get("token_id", ""))
             markets = self._clob.get_markets(MarketFilters(clob_token_ids=[token_id], limit=1))

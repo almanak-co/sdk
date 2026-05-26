@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.pancakeswap_v3.adapter import (
+from almanak.connectors.pancakeswap_v3.adapter import (
     EXACT_INPUT_SINGLE_SELECTOR,
     EXACT_OUTPUT_SINGLE_SELECTOR,
     FEE_TIERS,

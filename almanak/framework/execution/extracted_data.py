@@ -462,7 +462,7 @@ class StakeData:
 class PredictionSetupTx:
     """Per-tx record of a Polymarket V2 on-chain setup transaction (VIB-3710).
 
-    Mirrors :class:`almanak.framework.connectors.polymarket.models.SetupTxInfo`
+    Mirrors :class:`almanak.connectors.polymarket.models.SetupTxInfo`
     but lives in the framework execution layer so consumers downstream of the
     enricher (strategy callbacks, accounting handler) do not need to import
     from the connector. The connector-side struct is the wire model; this

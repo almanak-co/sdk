@@ -10,7 +10,7 @@ Tests cover:
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.hooks import (
+from almanak.connectors.uniswap_v4.hooks import (
     AFTER_ADD_LIQUIDITY_FLAG,
     AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG,
     AFTER_DONATE_FLAG,
@@ -38,7 +38,7 @@ from almanak.framework.connectors.uniswap_v4.hooks import (
     discover_pool,
     warn_empty_hook_data,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
+from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
 
 
 # =============================================================================

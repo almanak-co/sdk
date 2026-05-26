@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.ethena.adapter import (
+from almanak.connectors.ethena.adapter import (
     EthenaAdapter,
     EthenaConfig,
 )

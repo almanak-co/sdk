@@ -205,7 +205,7 @@ class TestRaydiumMathIntegration:
     @pytest.mark.intent(IntentType.LP_OPEN)
     def test_price_to_tick_roundtrip(self):
         """Price -> tick -> price roundtrip is consistent."""
-        from almanak.framework.connectors.raydium.math import price_to_tick, tick_to_price
+        from almanak.connectors.raydium.math import price_to_tick, tick_to_price
 
         original = Decimal("150")  # SOL price
         tick = price_to_tick(original, decimals_a=9, decimals_b=6)
@@ -220,7 +220,7 @@ class TestRaydiumMathIntegration:
     @pytest.mark.intent(IntentType.LP_OPEN)
     def test_tick_alignment(self):
         """Ticks align correctly to spacing boundaries."""
-        from almanak.framework.connectors.raydium.math import align_tick_to_spacing
+        from almanak.connectors.raydium.math import align_tick_to_spacing
 
         # SOL/USDC pool uses tick_spacing=60
         aligned_down = align_tick_to_spacing(119145, 60, round_up=False)
@@ -234,7 +234,7 @@ class TestRaydiumMathIntegration:
     @pytest.mark.intent(IntentType.LP_OPEN)
     def test_liquidity_from_amounts(self):
         """Liquidity calculation produces reasonable values."""
-        from almanak.framework.connectors.raydium.math import (
+        from almanak.connectors.raydium.math import (
             get_liquidity_from_amounts,
             tick_to_sqrt_price_x64,
         )
@@ -304,7 +304,7 @@ class TestRaydiumLPExecution:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: Receipt parser — extract position ID
-        from almanak.framework.connectors.raydium import RaydiumReceiptParser
+        from almanak.connectors.raydium import RaydiumReceiptParser
 
         position_id = None
         for tx_result in execution_result.transaction_results:
@@ -363,7 +363,7 @@ class TestRaydiumLPExecution:
         assert open_exec.success, f"Open execution failed: {open_exec.error}"
 
         # Extract position ID for close
-        from almanak.framework.connectors.raydium import RaydiumReceiptParser
+        from almanak.connectors.raydium import RaydiumReceiptParser
 
         position_id = None
         for tx_result in open_exec.transaction_results:

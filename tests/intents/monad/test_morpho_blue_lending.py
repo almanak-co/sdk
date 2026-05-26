@@ -1,6 +1,6 @@
 """Production-grade Morpho Blue lending intent tests for Monad (VIB-4307).
 
-Markets (from ``almanak.framework.connectors.morpho_blue.adapter.MORPHO_MARKETS``):
+Markets (from ``almanak.connectors.morpho_blue.adapter.MORPHO_MARKETS``):
 
 - ``wstETH/WETH`` (94.5% LLTV) — largest Monad Morpho market (~$61.8M supply)
 - ``WBTC/AUSD`` (86% LLTV) — BTC-backed lending (~$13.2M supply)
@@ -50,13 +50,13 @@ from almanak.framework.accounting.lending_accounting import (
     capture_lending_pre_state,
     lending_state_to_dict,
 )
-from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
+from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueEvent,
     MorphoBlueEventType,
     MorphoBlueReceiptParser,
 )
-from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,

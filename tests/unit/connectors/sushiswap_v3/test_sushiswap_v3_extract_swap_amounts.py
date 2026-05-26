@@ -8,7 +8,7 @@ tests/framework/connectors/sushiswap_v3/test_receipt_parser.py.
 
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+from almanak.connectors.sushiswap_v3.receipt_parser import (
     SushiSwapV3ReceiptParser,
 )
 

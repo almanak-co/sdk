@@ -261,7 +261,7 @@ class TestCompilation:
         """
         from unittest.mock import patch
 
-        from almanak.framework.connectors.base.compiler import BaseCompilerContext
+        from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
         from almanak.framework.intents.compiler import CompilationResult, CompilationStatus, IntentCompiler, IntentCompilerConfig
         from almanak.framework.intents.vocabulary import LPCloseIntent
 

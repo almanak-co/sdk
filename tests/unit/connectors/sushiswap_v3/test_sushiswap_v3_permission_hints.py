@@ -5,7 +5,7 @@ permission discovery emits USDT + WBNB approves on bsc, not the framework
 default (USDC + bridged ETH).
 """
 
-from almanak.framework.connectors.sushiswap_v3.permission_hints import (
+from almanak.connectors.sushiswap_v3.permission_hints import (
     PERMISSION_HINTS,
 )
 

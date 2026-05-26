@@ -2,7 +2,7 @@
 
 VIB-4803. Owns the protocol-level routing for SWAP / LP_OPEN / LP_CLOSE
 intents on Solana chains. The actual per-protocol compilation lives in
-``almanak.framework.connectors.jupiter.compiler`` (Jupiter swap) and in
+``almanak.connectors.jupiter.compiler`` (Jupiter swap) and in
 the per-protocol connector compilers (Meteora, Orca,
 Raydium) — this module is the seam between :class:`SvmFamily.compile_intent`
 and those compilers.
@@ -32,8 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from almanak.framework.connectors.compiler_registry import get_compiler as get_connector_compiler
-from almanak.framework.connectors.protocol_aliases import normalize_protocol
+from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
+from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 
 if TYPE_CHECKING:

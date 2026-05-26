@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.aerodrome.compiler import compile_lp_close_aerodrome
+from almanak.connectors.aerodrome.compiler import compile_lp_close_aerodrome
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
 
@@ -53,7 +53,7 @@ def test_aerodrome_lp_close_zero_lp_balance_is_noop_success() -> None:
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
         patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=0),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         result = compile_lp_close_aerodrome(compiler, intent)
 
@@ -86,7 +86,7 @@ def test_aerodrome_lp_close_nonzero_lp_balance_builds_transactions() -> None:
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
         patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=123456789),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
@@ -112,7 +112,7 @@ def test_aerodrome_lp_close_propagates_remove_liquidity_build_error() -> None:
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
         patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=1000000000000000000),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = MagicMock(
@@ -159,7 +159,7 @@ def test_aerodrome_lp_close_permission_discovery_uses_synthetic_balance() -> Non
         patch.object(compiler, "_get_aerodrome_pool_address", return_value=pool_address),
         # Return 0 — permission_discovery should substitute a synthetic balance
         patch.object(compiler, "_query_erc20_balance", return_value=0),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
@@ -213,7 +213,7 @@ def test_aerodrome_lp_close_permission_discovery_none_balance() -> None:
         patch.object(compiler, "_get_aerodrome_pool_address", return_value=pool_address),
         # Return None (RPC unavailable) — permission_discovery should still work
         patch.object(compiler, "_query_erc20_balance", return_value=None),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
@@ -263,14 +263,14 @@ def test_aerodrome_lp_close_bare_pool_address_success() -> None:
 
     with (
         patch(
-            "almanak.framework.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
+            "almanak.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
             return_value=(token0_addr, token1_addr, False),
         ),
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
         patch.object(compiler, "_get_aerodrome_pool_address") as mock_factory_lookup,
         patch.object(compiler, "_query_erc20_balance", return_value=123456789),
-        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+        patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
         mock_adapter.remove_liquidity.return_value = liquidity_result
@@ -299,7 +299,7 @@ def test_aerodrome_lp_close_bare_pool_address_metadata_unresolvable() -> None:
 
     with (
         patch(
-            "almanak.framework.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
+            "almanak.connectors.aerodrome.compiler.get_aerodrome_pool_metadata",
             return_value=None,
         ),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),

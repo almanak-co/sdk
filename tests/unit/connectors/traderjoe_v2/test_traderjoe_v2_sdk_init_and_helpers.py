@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.sdk import (
+from almanak.connectors.traderjoe_v2.sdk import (
     BIN_ID_OFFSET,
     BIN_STEPS,
     DEFAULT_GAS_ESTIMATES,
@@ -50,7 +50,7 @@ class TestSDKConstructionErrors:
 
     def test_chain_lowercased(self) -> None:
         """Chain name normalization to lowercase."""
-        with patch("almanak.framework.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls:
             instance = MagicMock()
             instance.is_connected.return_value = True
             mock_web3_cls.return_value = instance
@@ -63,7 +63,7 @@ class TestSDKConstructionErrors:
         """When gateway_client is supplied, the RPC connectivity check is skipped
         and Web3 is constructed with GatewayWeb3Provider."""
         gateway_client = MagicMock()
-        with patch("almanak.framework.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls, patch(
+        with patch("almanak.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls, patch(
             "almanak.framework.web3.gateway_provider.GatewayWeb3Provider"
         ) as mock_gw_provider:
             instance = MagicMock()
@@ -76,7 +76,7 @@ class TestSDKConstructionErrors:
             assert sdk.web3 is instance
 
     def test_rpc_disconnected_raises(self) -> None:
-        with patch("almanak.framework.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.traderjoe_v2.sdk.Web3") as mock_web3_cls:
             instance = MagicMock()
             instance.is_connected.return_value = False
             mock_web3_cls.return_value = instance
@@ -544,7 +544,7 @@ class TestPositionBalancesPerBinFallback:
         )
         sdk.get_pair_contract = MagicMock(return_value=pair)
 
-        with caplog.at_level("ERROR", logger="almanak.framework.connectors.traderjoe_v2.sdk"):
+        with caplog.at_level("ERROR", logger="almanak.connectors.traderjoe_v2.sdk"):
             result = sdk.get_position_balances(POOL_ADDR, WALLET, bin_range=2)
         assert result == {}
         # ERROR log line was emitted.
@@ -568,7 +568,7 @@ class TestPositionBalancesPerBinFallback:
         )
         sdk.get_pair_contract = MagicMock(return_value=pair)
 
-        with caplog.at_level("ERROR", logger="almanak.framework.connectors.traderjoe_v2.sdk"):
+        with caplog.at_level("ERROR", logger="almanak.connectors.traderjoe_v2.sdk"):
             result = sdk.get_position_balances_for_ids(POOL_ADDR, WALLET, [42, 43, 44])
         assert result == {}
         assert any("All per-bin balanceOf calls failed" in r.getMessage() for r in caplog.records)

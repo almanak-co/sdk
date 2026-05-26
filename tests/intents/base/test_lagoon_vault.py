@@ -18,10 +18,10 @@ VAULT_REDEEM`` markers to credit coverage.
         Supported: ['metamorpho']
 
     The connector ``lagoon`` is registered in ConnectorRegistry (see
-    ``almanak/framework/connectors/lagoon/__init__.py``) for VAULT_DEPOSIT
+    ``almanak/connectors/lagoon/__init__.py``) for VAULT_DEPOSIT
     and VAULT_REDEEM, but the vault adapter is NOT registered via
     ``register_vault_adapter`` (see
-    ``almanak/framework/connectors/vaults/__init__.py``). The Lagoon
+    ``almanak/connectors/_strategy_base/vaults/__init__.py``). The Lagoon
     adapter currently ships only the OPERATOR-side surface (propose
     valuation, settle deposit/redeem) — it does NOT build user-side
     ``requestDeposit`` / ``requestRedeem`` ActionBundles. That work is

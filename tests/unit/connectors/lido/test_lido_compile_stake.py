@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.lido.adapter import (
+from almanak.connectors.lido.adapter import (
     DEFAULT_GAS_ESTIMATES,
     LIDO_ADDRESSES,
     LIDO_STAKE_SELECTOR,

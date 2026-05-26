@@ -257,7 +257,7 @@ class TestExecute:
         the signature path."""
         # Build the MarketFilters that the handler is expected to construct
         # from the bundle and use to look up the market via the SDK.
-        from almanak.framework.connectors.polymarket import MarketFilters
+        from almanak.connectors.polymarket import MarketFilters
 
         # Two distinct markets — the handler must pass the bundle's token_id
         # in the filter so the SDK returns the matching one.

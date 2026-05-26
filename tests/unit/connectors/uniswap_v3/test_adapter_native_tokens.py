@@ -6,7 +6,7 @@ Jaine swaps with native input take the wrap-via-msg.value code path.
 
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
+from almanak.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
 
 
 def _make_adapter(chain: str) -> UniswapV3Adapter:
@@ -54,7 +54,7 @@ def test_uses_v1_router_eth_family() -> None:
 
 def test_exact_input_selector_branches_on_v1_router() -> None:
     """zerog must encode the 8-param V1 struct (selector 0x414bf389)."""
-    from almanak.framework.connectors.uniswap_v3.adapter import EXACT_INPUT_SINGLE_SELECTOR, EXACT_INPUT_SINGLE_V1_SELECTOR
+    from almanak.connectors.uniswap_v3.adapter import EXACT_INPUT_SINGLE_SELECTOR, EXACT_INPUT_SINGLE_V1_SELECTOR
 
     zerog = _make_adapter("zerog")
     zerog._get_token_symbol = lambda a: "X"  # type: ignore[assignment]

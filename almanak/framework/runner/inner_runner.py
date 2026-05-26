@@ -509,7 +509,7 @@ class IntentExecutionService:
             # bridge bound to this runner's GatewayClient so V4 LP_CLOSE
             # receipts can resolve their canonical PoolKey via gateway RPC.
             try:
-                from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+                from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
                     make_sync_pool_key_lookup,
                 )
 

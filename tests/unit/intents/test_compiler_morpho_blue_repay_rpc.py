@@ -25,7 +25,7 @@ from almanak.framework.intents.compiler import (
 )
 
 # Lazy-import patch targets (how the compiler loads them)
-MORPHO_ADAPTER_MODULE = "almanak.framework.connectors.morpho_blue.adapter"
+MORPHO_ADAPTER_MODULE = "almanak.connectors.morpho_blue.adapter"
 MORPHO_ADAPTER_CLS = f"{MORPHO_ADAPTER_MODULE}.MorphoBlueAdapter"
 MORPHO_CONFIG_CLS = f"{MORPHO_ADAPTER_MODULE}.MorphoBlueConfig"
 

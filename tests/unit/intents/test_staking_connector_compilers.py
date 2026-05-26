@@ -8,11 +8,11 @@ from typing import Any, ClassVar
 
 import pytest
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext, BaseStakingCompiler
-from almanak.framework.connectors.compiler_registry import get_compiler
-from almanak.framework.connectors.ethena.compiler import EthenaCompiler
-from almanak.framework.connectors.gimo.compiler import GimoCompiler
-from almanak.framework.connectors.lido.compiler import LidoCompiler
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseStakingCompiler
+from almanak.connectors._strategy_base.compiler_registry import get_compiler
+from almanak.connectors.ethena.compiler import EthenaCompiler
+from almanak.connectors.gimo.compiler import GimoCompiler
+from almanak.connectors.lido.compiler import LidoCompiler
 from almanak.framework.intents.compiler import (
     CompilationResult,
     CompilationStatus,

@@ -279,7 +279,7 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
             return_value=object(),
         ),
         patch(
@@ -347,7 +347,7 @@ async def test_order_request_bundle_routes_to_clob_handler() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
             return_value=object(),
         ),
         patch(
@@ -429,7 +429,7 @@ async def test_clob_failure_propagates() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
             return_value=object(),
         ),
         patch(
@@ -481,7 +481,7 @@ async def test_no_clob_handler_when_non_polygon_chain() -> None:
     with (
         apply_patches(patches),
         patch(
-            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
         ) as mock_gateway_client,
     ):
         result = await runner._execute_single_chain(

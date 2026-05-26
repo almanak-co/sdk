@@ -4,7 +4,7 @@ Covers static permission generation for LBRouter + per-pair LBPair
 selectors (approveForAll for LP_CLOSE, collectFees for LP_COLLECT_FEES).
 """
 
-from almanak.framework.connectors.traderjoe_v2.permission_hints import (
+from almanak.connectors.traderjoe_v2.permission_hints import (
     PERMISSION_HINTS,
     _build_static_permissions,
 )

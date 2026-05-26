@@ -20,7 +20,7 @@ ProtocolName = NewType("ProtocolName", str)
 """Stable canonical protocol identifier (e.g. ``ProtocolName('aave_v3')``).
 
 Used as the registry key. Aliases (``aave`` → ``aave_v3``) are resolved
-to the canonical name by ``almanak.framework.connectors.protocol_aliases``
+to the canonical name by ``almanak.connectors._strategy_base.protocol_aliases``
 before reaching the registry.
 """
 

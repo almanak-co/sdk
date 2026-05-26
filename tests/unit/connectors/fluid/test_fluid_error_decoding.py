@@ -6,7 +6,7 @@ human-readable messages for better diagnostics.
 
 import pytest
 
-from almanak.framework.connectors.fluid.sdk import (
+from almanak.connectors.fluid.sdk import (
     FLUID_ERROR_SELECTORS,
     FluidMinAmountError,
     FluidSDKError,

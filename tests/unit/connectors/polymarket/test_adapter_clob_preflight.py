@@ -26,13 +26,13 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import SecretStr
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     GammaMarket,
     PolymarketAdapter,
     PolymarketConfig,
     SignatureType,
 )
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.exceptions import (
     PolymarketInvalidPrecisionError,
     PolymarketInvalidTickSizeError,
     PolymarketMinimumOrderError,

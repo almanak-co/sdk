@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.drift.constants import (
+from almanak.connectors.drift.constants import (
     BASE_PRECISION,
     DIRECTION_LONG,
     DIRECTION_SHORT,
@@ -15,7 +15,7 @@ from almanak.framework.connectors.drift.constants import (
     PRICE_PRECISION,
     QUOTE_PRECISION,
 )
-from almanak.framework.connectors.drift.exceptions import (
+from almanak.connectors.drift.exceptions import (
     DriftAccountNotFoundError,
     DriftAPIError,
     DriftConfigError,
@@ -23,7 +23,7 @@ from almanak.framework.connectors.drift.exceptions import (
     DriftMarketError,
     DriftValidationError,
 )
-from almanak.framework.connectors.drift.models import (
+from almanak.connectors.drift.models import (
     DriftConfig,
     DriftMarket,
     DriftPerpPosition,

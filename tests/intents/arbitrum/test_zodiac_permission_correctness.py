@@ -34,7 +34,7 @@ import pytest
 from eth_account import Account
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v3.sdk import EXACT_INPUT_SINGLE_SELECTOR
+from almanak.connectors.uniswap_v3.sdk import EXACT_INPUT_SINGLE_SELECTOR
 from almanak.framework.execution.signer.safe.constants import (
     ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
     SafeOperation,

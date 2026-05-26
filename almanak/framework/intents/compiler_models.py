@@ -11,7 +11,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from ..connectors.polymarket.models import PolymarketConfig
+    from almanak.connectors.polymarket.models import PolymarketConfig
+
     from ..models.reproduction_bundle import ActionBundle
 
 

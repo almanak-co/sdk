@@ -18,13 +18,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.adapter import (
+from almanak.connectors.traderjoe_v2.adapter import (
     LiquidityPosition,
     SwapQuote,
     TraderJoeV2Adapter,
     TraderJoeV2Config,
 )
-from almanak.framework.connectors.traderjoe_v2.sdk import (
+from almanak.connectors.traderjoe_v2.sdk import (
     BIN_ID_OFFSET,
     PoolNotFoundError,
     TraderJoeV2SDKError,
@@ -81,7 +81,7 @@ def config() -> TraderJoeV2Config:
 @pytest.fixture
 def adapter_with_mock_sdk(config: TraderJoeV2Config, mock_resolver: MagicMock) -> tuple[TraderJoeV2Adapter, MagicMock]:
     """Return adapter + the SDK mock for direct manipulation."""
-    with patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK") as mock_sdk_cls:
+    with patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK") as mock_sdk_cls:
         mock_sdk = MagicMock()
         mock_sdk.router_address = ROUTER
         mock_sdk_cls.return_value = mock_sdk
@@ -297,7 +297,7 @@ class TestSwapExactInput:
             rpc_url="http://anvil:8545",
             private_key="0x" + "11" * 32,
         )
-        with patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK") as mock_sdk_cls:
+        with patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK") as mock_sdk_cls:
             mock_sdk = MagicMock()
             mock_sdk.router_address = ROUTER
             mock_sdk_cls.return_value = mock_sdk

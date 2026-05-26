@@ -13,12 +13,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.adapter import (
+from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
     AerodromeConfig,
     CLLiquidityResult,
 )
-from almanak.framework.connectors.aerodrome.sdk import CLPositionInfo
+from almanak.connectors.aerodrome.sdk import CLPositionInfo
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.data.tokens.models import ResolvedToken
 

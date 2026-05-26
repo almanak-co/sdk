@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.morpho_vault.sdk import (
+from almanak.connectors.morpho_vault.sdk import (
     DEFAULT_GAS_ESTIMATES,
     DEPOSIT_SELECTOR,
     ERC20_APPROVE_SELECTOR,

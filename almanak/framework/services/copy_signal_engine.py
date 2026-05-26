@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
-from almanak.framework.connectors.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.services.copy_trading_models import (
     CopySignal,
     LeaderEvent,

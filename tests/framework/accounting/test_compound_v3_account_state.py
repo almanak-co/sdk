@@ -298,7 +298,7 @@ class TestCompoundV3AccountStateFailureCases:
         Now only an exact match is accepted, so 'usdc' → USDC Comet.
         """
         from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         # Assert test preconditions against the live registry
         arb_comets = COMPOUND_V3_COMET_ADDRESSES.get("arbitrum", {})
@@ -427,7 +427,7 @@ class TestCompoundV3AccountStateFailureCases:
         health_factor must be None rather than the misleadingly optimistic raw ratio.
         """
         from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_MARKETS
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_MARKETS
 
         # Assert test precondition: DAI must NOT be in the Ethereum USDC market collateral list
         eth_usdc_collaterals = COMPOUND_V3_MARKETS.get("ethereum", {}).get("usdc", {}).get("collaterals", {})
@@ -468,7 +468,7 @@ class TestCompoundV3MarketIdRouting:
         Without market_id, borrow_token fallback would use 'weth' → wrong Comet.
         """
         from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         arb_comets = COMPOUND_V3_COMET_ADDRESSES.get("arbitrum", {})
         usdc_comet = arb_comets.get("usdc", "")
@@ -509,7 +509,7 @@ class TestCompoundV3MarketIdRouting:
     def test_explicit_market_id_overrides_borrow_token_for_comet_lookup(self) -> None:
         """When market_id='weth' is passed, the WETH Comet is used even if borrow_token='USDC'."""
         from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         weth_comet = COMPOUND_V3_COMET_ADDRESSES.get("ethereum", {}).get("weth", "")
         assert weth_comet, "Precondition: ethereum/weth Comet must exist"

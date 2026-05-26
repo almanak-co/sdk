@@ -119,7 +119,7 @@ def __getattr__(name: str) -> Any:
     re-export sites have identical lookup cost.
     """
     if name == "PROTOCOL_CAPABILITIES":
-        from almanak.framework.connectors.capabilities_registry import (
+        from almanak.connectors._strategy_base.capabilities_registry import (
             all_protocol_capabilities,
         )
 

@@ -860,7 +860,7 @@ class TestBuildComponents:
 
         # Stub out VaultLifecycleManager + LagoonVaultSDK/Adapter so construction
         # does not require real gateway IO.
-        from almanak.framework.connectors import lagoon as lagoon_mod
+        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         monkeypatch.setattr(lagoon_mod, "LagoonVaultAdapter", MagicMock())

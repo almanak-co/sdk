@@ -1,6 +1,6 @@
 """Unit tests for DriftReceiptParser."""
 
-from almanak.framework.connectors.drift.receipt_parser import DriftReceiptParser
+from almanak.connectors.drift.receipt_parser import DriftReceiptParser
 
 
 class TestDriftReceiptParser:

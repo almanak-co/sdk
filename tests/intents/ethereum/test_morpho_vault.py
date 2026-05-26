@@ -1,9 +1,9 @@
 """Intent tests for MetaMorpho VAULT_DEPOSIT / VAULT_REDEEM on Ethereum (VIB-4307).
 
 MetaMorpho is the ERC-4626 vault layer over Morpho Blue. The vault
-registry (``almanak/framework/connectors/vaults/__init__.py``) registers
+registry (``almanak/connectors/_strategy_base/vaults/__init__.py``) registers
 it under the **protocol key ``"metamorpho"``**, while the connector
-registry (``almanak/framework/connectors/morpho_vault/__init__.py``)
+registry (``almanak/connectors/morpho_vault/__init__.py``)
 registers the *connector* under the name **``"morpho_vault"``**.
 
 This dual naming surfaces in two places:

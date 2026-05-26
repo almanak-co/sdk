@@ -18,7 +18,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.silo_v2.receipt_parser import SiloV2ReceiptParser
+from almanak.connectors.silo_v2.receipt_parser import SiloV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler

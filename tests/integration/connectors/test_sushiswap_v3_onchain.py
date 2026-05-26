@@ -223,11 +223,11 @@ class TestSushiSwapV3OnChain:
         5. USDC balance increases
         6. Swap event is emitted with correct data
         """
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
         )
-        from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+        from almanak.connectors.sushiswap_v3.receipt_parser import (
             SushiSwapV3ReceiptParser,
         )
 
@@ -383,7 +383,7 @@ class TestSushiSwapV3OnChain:
         1. swap_exact_input builds transaction with non-zero amount_out_min
         2. The calldata contains a reasonable minimum output value
         """
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
         )
@@ -483,11 +483,11 @@ class TestSushiSwapV3OnChain:
         2. Amount extraction works with real transaction data
         3. extract_swap_amounts returns valid SwapAmounts
         """
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
         )
-        from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+        from almanak.connectors.sushiswap_v3.receipt_parser import (
             SushiSwapV3ReceiptParser,
         )
 
@@ -620,7 +620,7 @@ class TestSushiSwapV3LPOnChain:
         2. Multiple transactions are created (approves + mint)
         3. Mint transaction has correct parameters
         """
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
         )
@@ -687,7 +687,7 @@ class TestSushiSwapV3LPOnChain:
         1. close_lp_position returns success
         2. Decrease liquidity and collect transactions are created
         """
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
         )

@@ -597,7 +597,7 @@ def _nft_manager_for_chain(chain: str) -> str | None:
        chains land.
 
     The canonical UniV3 NPM map lives in
-    ``almanak.framework.connectors.uniswap_v3.receipt_parser``. We
+    ``almanak.connectors.uniswap_v3.receipt_parser``. We
     import it here as the single source of truth — the backfill is
     explicitly scoped to UniV3 LP, so depending on the parser's map
     is appropriate. Returning ``None`` on an unrecognized chain keeps
@@ -608,7 +608,7 @@ def _nft_manager_for_chain(chain: str) -> str | None:
     their own NPM at a different address than canonical UniV3 on the
     same chain), use :func:`_nft_manager_for_protocol_chain` instead.
     """
-    from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+    from almanak.connectors.uniswap_v3.receipt_parser import (
         POSITION_MANAGER_ADDRESSES,
     )
 
@@ -648,13 +648,13 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
     protocol_norm = (protocol or "").strip().lower()
     chain_norm = (chain or "").strip().lower()
     if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             _SLIPSTREAM_NPM_ADDRESSES,
         )
 
         return _SLIPSTREAM_NPM_ADDRESSES.get(chain_norm) or None
     if protocol_norm == "pancakeswap_v3":
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+        from almanak.connectors.pancakeswap_v3.receipt_parser import (
             POSITION_MANAGER_ADDRESSES as PCS_POSITION_MANAGER_ADDRESSES,
         )
 

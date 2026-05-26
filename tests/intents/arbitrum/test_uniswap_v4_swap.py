@@ -133,7 +133,7 @@ class TestUniswapV4SwapIntent:
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
         # Layer 3: Receipt Parsing
-        from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
+        from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
@@ -226,7 +226,7 @@ class TestUniswapV4SwapIntent:
         assert execution_result.success
 
         # Receipt Parsing
-        from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
+        from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:

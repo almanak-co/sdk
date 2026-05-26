@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.connectors.ethena.receipt_parser import (
+from almanak.connectors.ethena.receipt_parser import (
     EVENT_TOPICS,
     EthenaEventType,
     EthenaReceiptParser,

@@ -8,14 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     GammaMarket,
     PolymarketAdapter,
     PolymarketConfig,
     SignatureType,
 )
-from almanak.framework.connectors.polymarket.ctf_sdk import ResolutionStatus
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.ctf_sdk import ResolutionStatus
+from almanak.connectors.polymarket.exceptions import (
     PolymarketMarketNotFoundError,
     PolymarketMarketNotResolvedError,
 )
@@ -772,7 +772,7 @@ class TestOrderCalculation:
 
     def test_map_time_in_force(self, adapter_with_mocks):
         """Test time-in-force mapping."""
-        from almanak.framework.connectors.polymarket import OrderType
+        from almanak.connectors.polymarket import OrderType
 
         assert adapter_with_mocks._map_time_in_force("GTC") == OrderType.GTC
         assert adapter_with_mocks._map_time_in_force("IOC") == OrderType.IOC

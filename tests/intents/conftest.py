@@ -30,7 +30,7 @@ from web3.providers.rpc.async_rpc import AsyncHTTPProvider
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.lp_accounting import _get_pool_address
 from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
-from almanak.framework.connectors.uniswap_v3.slot0_fallback import (
+from almanak.connectors.uniswap_v3.slot0_fallback import (
     enrich_lp_close_with_slot0,
     enrich_lp_open_with_slot0,
 )

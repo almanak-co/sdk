@@ -26,7 +26,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.aster_perps import (
+from almanak.connectors.aster_perps import (
     ASTER_BROKER_RAW,
     EVENT_MARKET_PENDING_TRADE,
     AsterPerpsReceiptParser,

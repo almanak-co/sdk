@@ -1,5 +1,5 @@
-"""Regression guard: every runtime module under ``almanak.framework`` and
-``almanak.gateway`` must import cleanly.
+"""Regression guard: every runtime module under ``almanak.framework``,
+``almanak.gateway``, and ``almanak.connectors`` must import cleanly.
 
 Background: the gateway sidecar's lazy ``__init__.py`` cascade (PR #1969)
 defers framework module loading until first access. That's a real
@@ -14,12 +14,16 @@ asserts *forbidden* heavy modules stay out of ``sys.modules`` after
 gateway boot. This one asserts *every* runtime module CAN be imported
 on demand. Run together they pin both halves of the lazy contract.
 
-Coverage: walks ``almanak.framework`` and ``almanak.gateway`` recursively
-and tries ``importlib.import_module`` on every discovered module. Skips:
+Coverage: walks ``almanak.framework``, ``almanak.gateway``, and
+``almanak.connectors`` recursively and tries ``importlib.import_module``
+on every discovered module. ``almanak.connectors`` is the post-VIB-4835
+home for both strategy-side connector code and the gateway-side
+``<protocol>/gateway/`` subtree, so it is on the runtime-import surface
+the same way ``almanak.framework`` is. Skips:
 - ``*.tests.*`` (defensive — connector unit tests have been consolidated
   into ``tests/unit/connectors/`` so no in-tree test packages should exist
-  under ``almanak.framework.connectors``; the filter is retained so a
-  stray re-introduction is silently tolerated rather than failing CI).
+  under any connector package; the filter is retained so a stray
+  re-introduction is silently tolerated rather than failing CI).
 - ``*.__main__`` (CLI entry points that ``sys.exit()`` on import — running
   them as modules is a separate concern).
 
@@ -45,7 +49,7 @@ import textwrap
 
 
 def _walk_and_import_in_subprocess() -> tuple[list[dict[str, str]], int, int]:
-    """Walk almanak.framework + almanak.gateway and import every module.
+    """Walk almanak.framework + almanak.gateway + almanak.connectors and import every module.
 
     Returns ``(failures, imported_count, skipped_count)``.
     """
@@ -70,10 +74,11 @@ def _walk_and_import_in_subprocess() -> tuple[list[dict[str, str]], int, int]:
         # CLI scripts that exit on import (those are filtered by the .__main__
         # name check anyway, but we belt-and-brace).
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            import almanak.connectors
             import almanak.framework
             import almanak.gateway
 
-            for pkg in (almanak.framework, almanak.gateway):
+            for pkg in (almanak.framework, almanak.gateway, almanak.connectors):
                 for mod_info in pkgutil.walk_packages(pkg.__path__, prefix=pkg.__name__ + "."):
                     name = mod_info.name
                     if ".tests." in name or name.endswith(".__main__") or name.endswith(".tests"):
@@ -108,11 +113,14 @@ def test_every_runtime_module_imports_cleanly() -> None:
     failures, imported, skipped = _walk_and_import_in_subprocess()
 
     # Sanity: the walk must actually find a meaningful number of modules.
-    # If this drops far below 800 it likely means the package layout
+    # If this drops far below 1000 it likely means the package layout
     # changed and walk_packages is no longer reaching subpackages.
-    assert imported >= 800, (
+    # Threshold bumped post-VIB-4835: ``almanak.connectors`` was added to
+    # the walk roots after the strategy-side connector home moved out of
+    # ``almanak.framework.connectors``; the resulting count is ~1100.
+    assert imported >= 1000, (
         f"runtime-import-coverage walk only reached {imported} modules "
-        f"(expected >= 800); package layout may have changed"
+        f"(expected >= 1000); package layout may have changed"
     )
 
     if failures:

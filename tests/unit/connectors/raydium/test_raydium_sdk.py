@@ -15,15 +15,15 @@ import pytest
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from almanak.framework.connectors.raydium.constants import (
+from almanak.connectors.raydium.constants import (
     CLMM_PROGRAM_ID,
     CLOSE_POSITION_DISCRIMINATOR,
     DECREASE_LIQUIDITY_V2_DISCRIMINATOR,
     OPEN_POSITION_V2_DISCRIMINATOR,
 )
-from almanak.framework.connectors.raydium.exceptions import RaydiumConfigError, RaydiumPoolError
-from almanak.framework.connectors.raydium.models import RaydiumPool, RaydiumPosition
-from almanak.framework.connectors.raydium.sdk import RaydiumCLMMSDK
+from almanak.connectors.raydium.exceptions import RaydiumConfigError, RaydiumPoolError
+from almanak.connectors.raydium.models import RaydiumPool, RaydiumPosition
+from almanak.connectors.raydium.sdk import RaydiumCLMMSDK
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
 SOL_MINT = "So11111111111111111111111111111111111111112"

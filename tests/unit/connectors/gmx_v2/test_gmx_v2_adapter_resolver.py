@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.adapter import (
+from almanak.connectors.gmx_v2.adapter import (
     GMXv2Adapter,
     GMXv2Config,
 )
@@ -144,6 +144,6 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.gmx_v2.adapter as adapter_module
+        import almanak.connectors.gmx_v2.adapter as adapter_module
 
         assert not hasattr(adapter_module, "GMX_V2_TOKENS")

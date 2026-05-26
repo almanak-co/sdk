@@ -36,7 +36,7 @@ def _patch_chain_pool_address(chain: str, address: str):
     about the real address, only that the lookup succeeds and the
     calldata is sent to ``address``.
     """
-    from almanak.framework.connectors.aave_v3 import adapter as aave_adapter
+    from almanak.connectors.aave_v3 import adapter as aave_adapter
 
     aave_adapter.AAVE_V3_POOL_ADDRESSES[chain] = address
 

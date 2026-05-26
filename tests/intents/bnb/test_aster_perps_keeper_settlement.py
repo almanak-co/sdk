@@ -35,7 +35,7 @@ import pytest
 from web3 import Web3
 
 from almanak.core.contracts import ASTER_PERPS
-from almanak.framework.connectors.aster_perps import (
+from almanak.connectors.aster_perps import (
     ASTER_BROKER_RAW,
     AsterPerpsReceiptParser,
     encode_get_pending_trade_calldata,

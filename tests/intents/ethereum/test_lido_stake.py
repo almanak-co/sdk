@@ -35,12 +35,12 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.lido.adapter import (
+from almanak.connectors.lido.adapter import (
     LIDO_ADDRESSES,
     LIDO_REQUEST_WITHDRAWALS_SELECTOR,
     LIDO_STAKE_SELECTOR,
 )
-from almanak.framework.connectors.lido.receipt_parser import LidoReceiptParser
+from almanak.connectors.lido.receipt_parser import LidoReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import (
     IntentCompiler,

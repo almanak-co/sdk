@@ -439,8 +439,8 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
         Returns:
             Fresh transaction data dict with serialized_transaction.
         """
-        from almanak.framework.connectors.jupiter.adapter import JupiterAdapter
-        from almanak.framework.connectors.jupiter.client import JupiterConfig
+        from almanak.connectors.jupiter.adapter import JupiterAdapter
+        from almanak.connectors.jupiter.client import JupiterConfig
 
         config = JupiterConfig(wallet_address=self.wallet_address)
         adapter = JupiterAdapter(

@@ -11,9 +11,10 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from ..connectors.aave_v3.flash_loan import build_aave_flash_loan
-from ..connectors.balancer.flash_loan import build_balancer_flash_loan
-from ..connectors.morpho_blue.flash_loan import build_morpho_flash_loan
+from almanak.connectors.aave_v3.flash_loan import build_aave_flash_loan
+from almanak.connectors.balancer_v2.flash_loan import build_balancer_flash_loan
+from almanak.connectors.morpho_blue.flash_loan import build_morpho_flash_loan
+
 from ..models.reproduction_bundle import ActionBundle
 from .compiler_models import CompilationResult, CompilationStatus, TransactionData
 from .vocabulary import AnyIntent, Intent, IntentType, SwapIntent
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
+# crap-allowlist: VIB-4835 — pre-existing complexity (cc=27, cov=73%) touched only by ``almanak.connectors.flash_loan`` import rewrite (the lazy ``from almanak.connectors.flash_loan import ...`` inside the function body); function logic unchanged. Refactor tracked in VIB-4139.
 def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:  # noqa: C901
     """Compile a FLASH_LOAN intent into an ActionBundle.
 
@@ -85,7 +87,7 @@ def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult: 
         if intent.provider == "auto":
             # Use FlashLoanSelector to find optimal provider
             # Lazy import to avoid circular dependency
-            from ..connectors.flash_loan import (
+            from almanak.connectors.flash_loan import (
                 FlashLoanSelector,
                 NoProviderAvailableError,
             )

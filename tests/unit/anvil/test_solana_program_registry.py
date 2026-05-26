@@ -100,7 +100,7 @@ class TestRequiredProtocols:
     def test_drift_uses_connector_constant(self) -> None:
         # Sourced from connectors/drift/constants.py — keeps the registry
         # in sync with the connector's runtime program_id.
-        from almanak.framework.connectors.drift.constants import (
+        from almanak.connectors.drift.constants import (
             DRIFT_PROGRAM_ID as CONNECTOR_DRIFT,
         )
 
@@ -108,21 +108,21 @@ class TestRequiredProtocols:
         assert get_protocol_for_program_id(CONNECTOR_DRIFT) == "drift"
 
     def test_orca_uses_connector_constant(self) -> None:
-        from almanak.framework.connectors.orca.constants import (
+        from almanak.connectors.orca.constants import (
             WHIRLPOOL_PROGRAM_ID,
         )
 
         assert get_protocol_for_program_id(WHIRLPOOL_PROGRAM_ID) == "orca"
 
     def test_raydium_uses_connector_constant(self) -> None:
-        from almanak.framework.connectors.raydium.constants import (
+        from almanak.connectors.raydium.constants import (
             CLMM_PROGRAM_ID,
         )
 
         assert get_protocol_for_program_id(CLMM_PROGRAM_ID) == "raydium"
 
     def test_meteora_uses_connector_constant(self) -> None:
-        from almanak.framework.connectors.meteora.constants import (
+        from almanak.connectors.meteora.constants import (
             DLMM_PROGRAM_ID,
         )
 

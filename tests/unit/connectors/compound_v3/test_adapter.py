@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.connectors.compound_v3.adapter import (
+from almanak.connectors.compound_v3.adapter import (
     COMPOUND_V3_COMET_ADDRESSES,
     DEFAULT_GAS_ESTIMATES,
     CompoundV3Adapter,

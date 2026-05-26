@@ -70,7 +70,7 @@ class TestPolymarketWarningDeferral:
             amount_usd=Decimal("10"),
         )
 
-        with patch("almanak.framework.connectors.polymarket.compiler.logger") as mock_logger:
+        with patch("almanak.connectors.polymarket.compiler.logger") as mock_logger:
             result = compiler.compile(intent)
 
         # Should fail compilation (no adapter)

@@ -25,8 +25,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.curve.adapter import CURVE_POOLS
-from almanak.framework.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
+from almanak.connectors.curve.adapter import CURVE_POOLS
+from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType

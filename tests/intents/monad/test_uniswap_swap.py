@@ -29,7 +29,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, SwapIntent
 from almanak.framework.intents.vocabulary import IntentType

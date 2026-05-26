@@ -21,7 +21,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptParser
+from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler

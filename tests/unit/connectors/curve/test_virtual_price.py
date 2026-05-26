@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.curve.adapter import (
+from almanak.connectors.curve.adapter import (
     CURVE_POOLS,
     CurveAdapter,
     CurveConfig,

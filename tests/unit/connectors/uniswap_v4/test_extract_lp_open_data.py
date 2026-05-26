@@ -25,8 +25,8 @@ import logging
 import pytest
 
 from almanak.core.contracts import UNISWAP_V4
-from almanak.framework.connectors.uniswap_v4.hooks import compute_position_hash
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.hooks import compute_position_hash
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
@@ -253,7 +253,7 @@ class TestNonAllowlistedSender:
         )
 
         parser = UniswapV4ReceiptParser(chain=CHAIN)
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+        with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
             result = parser.extract_lp_open_data(receipt)
 
         assert result is None
@@ -325,7 +325,7 @@ class TestSaltTokenIdConsistency:
         )
 
         parser = UniswapV4ReceiptParser(chain=CHAIN)
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+        with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
             result = parser.extract_lp_open_data(receipt)
 
         assert result is None
@@ -410,7 +410,7 @@ class TestMissingPositionId:
         receipt["logs"] = [receipt["logs"][0], receipt["logs"][2], receipt["logs"][3]]
 
         parser = UniswapV4ReceiptParser(chain=CHAIN)
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.uniswap_v4.receipt_parser"):
+        with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.receipt_parser"):
             result = parser.extract_lp_open_data(receipt)
 
         assert result is None

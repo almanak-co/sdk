@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.connectors.silo_v2.adapter import (
+from almanak.connectors.silo_v2.adapter import (
     MAX_UINT256,
     SILO_V2_FUNCTION_SELECTORS,
     SiloV2Adapter,

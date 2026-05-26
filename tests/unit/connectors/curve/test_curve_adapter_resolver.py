@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.curve.adapter import (
+from almanak.connectors.curve.adapter import (
     CurveAdapter,
     CurveConfig,
 )
@@ -209,7 +209,7 @@ class TestCryptoSwapEstimation:
 
     def test_stableswap_same_decimals(self, adapter, mock_resolver):
         """StableSwap with same decimals returns 1:1."""
-        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+        from almanak.connectors.curve.adapter import PoolInfo, PoolType
 
         mock_resolver.resolve.return_value = ResolvedToken(
             symbol="DAI", address="0x" + "0" * 40, decimals=18, chain="ethereum", chain_id=1
@@ -228,7 +228,7 @@ class TestCryptoSwapEstimation:
 
     def test_stableswap_cross_decimals(self, adapter, mock_resolver):
         """StableSwap adjusts for decimal differences (DAI 18 -> USDC 6)."""
-        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+        from almanak.connectors.curve.adapter import PoolInfo, PoolType
 
         # First call for coins[0] (DAI, 18 decimals)
         # Second call for coins[1] (USDC, 6 decimals)
@@ -256,7 +256,7 @@ class TestCryptoSwapEstimation:
         """
         import pytest
 
-        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+        from almanak.connectors.curve.adapter import PoolInfo, PoolType
 
         mock_resolver.resolve.side_effect = [
             ResolvedToken(symbol="USDT", address="0x" + "0" * 40, decimals=6, chain="ethereum", chain_id=1),
@@ -277,7 +277,7 @@ class TestCryptoSwapEstimation:
         """CryptoSwap raises even with same decimals — can't assume 1:1 price for volatile pairs."""
         import pytest
 
-        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+        from almanak.connectors.curve.adapter import PoolInfo, PoolType
 
         mock_resolver.resolve.side_effect = [
             ResolvedToken(symbol="WBTC", address="0x" + "0" * 40, decimals=8, chain="ethereum", chain_id=1),
@@ -300,7 +300,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.curve.adapter as adapter_module
+        import almanak.connectors.curve.adapter as adapter_module
 
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")
         assert not hasattr(adapter_module, "CURVE_TOKENS")

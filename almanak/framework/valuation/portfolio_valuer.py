@@ -2002,7 +2002,7 @@ class PortfolioValuer:
         Uses the market address tables from the GMX V2 adapter.
         """
         try:
-            from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_MARKETS
+            from almanak.connectors.gmx_v2.adapter import GMX_V2_MARKETS
 
             markets = GMX_V2_MARKETS.get(chain, {})
             addr_lower = market_address.lower()
@@ -2022,7 +2022,7 @@ class PortfolioValuer:
         Case-insensitive lookup to handle both checksummed and lowercased addresses.
         """
         try:
-            from almanak.framework.connectors.gmx_v2.adapter import _GMX_V2_INDEX_TOKEN_DECIMALS
+            from almanak.connectors.gmx_v2.adapter import _GMX_V2_INDEX_TOKEN_DECIMALS
 
             chain_decimals = _GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {})
             addr_lower = market_address.lower()

@@ -73,7 +73,7 @@ def _resolve_sy_underlying_symbol(chain: str, market_address: str) -> str | None
     Never raises.
     """
     try:
-        from almanak.framework.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
+        from almanak.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
 
         underlying_address = MARKET_TOKEN_MINT_SY.get(chain.lower(), {}).get(market_address.lower())
         if not underlying_address:
@@ -108,12 +108,12 @@ def _resolve_token_decimals_for_pendle(chain: str, market_address: str) -> tuple
 
     # PT decimals: check PT_TOKEN_INFO for any matching market on this chain
     try:
-        from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO
+        from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
 
         chain_pts = PT_TOKEN_INFO.get(chain.lower(), {})
         for _pt_name, (_pt_addr, _pt_dec) in chain_pts.items():
             # Match by looking up the market for this PT token and checking address
-            from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
+            from almanak.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
 
             chain_markets = MARKET_BY_PT_TOKEN.get(chain.lower(), {})
             for _tok_name, mkt_addr in chain_markets.items():

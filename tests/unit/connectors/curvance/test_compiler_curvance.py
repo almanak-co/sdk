@@ -21,7 +21,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.curvance import CURVANCE_MARKETS
+from almanak.connectors.curvance import CURVANCE_MARKETS
 from almanak.framework.intents import (
     BorrowIntent,
     RepayIntent,

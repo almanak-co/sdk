@@ -56,7 +56,7 @@ class MeteoraDLMMLPStrategy(IntentStrategy):
             pool = self.config.get("pool", "")
             if not pool:
                 # Auto-discover SOL/USDC DLMM pool
-                from almanak.framework.connectors.meteora.sdk import MeteoraSDK
+                from almanak.connectors.meteora.sdk import MeteoraSDK
 
                 sdk = MeteoraSDK(wallet_address=self.wallet_address)
                 found = sdk.find_pool(

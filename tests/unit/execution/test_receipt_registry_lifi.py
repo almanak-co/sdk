@@ -1,6 +1,6 @@
 """Unit tests for LiFi receipt parser registration in the receipt registry."""
 
-from almanak.framework.connectors.lifi.receipt_parser import LiFiReceiptParser
+from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 from almanak.framework.execution.receipt_registry import get_parser
 
 

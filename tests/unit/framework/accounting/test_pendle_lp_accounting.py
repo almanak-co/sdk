@@ -171,7 +171,7 @@ class TestPendleReceiptParserLPExtraction:
 
     def _make_receipt_with_mint(self, market: str = "0xabcdef0123456789abcdef0123456789abcdef01"):
         """Minimal receipt dict with a Pendle Mint log."""
-        from almanak.framework.connectors.pendle.receipt_parser import (
+        from almanak.connectors.pendle.receipt_parser import (
             EVENT_TOPICS,
             MintEventData,
             ParseResult,
@@ -206,14 +206,14 @@ class TestPendleReceiptParserLPExtraction:
         assert lp_open.position_id == 0
 
     def test_extract_lp_open_data_no_mint_returns_none(self):
-        from almanak.framework.connectors.pendle.receipt_parser import ParseResult, PendleReceiptParser
+        from almanak.connectors.pendle.receipt_parser import ParseResult, PendleReceiptParser
 
         parser = PendleReceiptParser(chain="arbitrum")
         parser.parse_receipt = lambda r: ParseResult(success=True)
         assert parser.extract_lp_open_data({}) is None
 
     def test_extract_lp_close_data_fields(self):
-        from almanak.framework.connectors.pendle.receipt_parser import BurnEventData, ParseResult, PendleReceiptParser
+        from almanak.connectors.pendle.receipt_parser import BurnEventData, ParseResult, PendleReceiptParser
 
         parser = PendleReceiptParser(chain="arbitrum")
         burn = BurnEventData(
@@ -232,14 +232,14 @@ class TestPendleReceiptParserLPExtraction:
         assert lp_close.liquidity_removed == 1_000_000_000_000_000_000
 
     def test_extract_lp_close_data_no_burn_returns_none(self):
-        from almanak.framework.connectors.pendle.receipt_parser import ParseResult, PendleReceiptParser
+        from almanak.connectors.pendle.receipt_parser import ParseResult, PendleReceiptParser
 
         parser = PendleReceiptParser(chain="arbitrum")
         parser.parse_receipt = lambda r: ParseResult(success=True)
         assert parser.extract_lp_close_data({}) is None
 
     def test_supported_extractions_declared(self):
-        from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptParser
+        from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
 
         assert "lp_open_data" in PendleReceiptParser.SUPPORTED_EXTRACTIONS
         assert "lp_close_data" in PendleReceiptParser.SUPPORTED_EXTRACTIONS

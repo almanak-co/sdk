@@ -77,7 +77,7 @@ Collateral token approvals are handled automatically by the intent compiler.
 
 ## API Reference
 
-::: almanak.framework.connectors.gmx_v2
+::: almanak.connectors.gmx_v2
     options:
       show_root_heading: true
       members_order: source

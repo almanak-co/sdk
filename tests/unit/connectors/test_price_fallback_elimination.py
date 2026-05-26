@@ -10,13 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.adapter import AaveV3Adapter, AaveV3Config
-from almanak.framework.connectors.aerodrome.adapter import AerodromeAdapter, AerodromeConfig
-from almanak.framework.connectors.enso.adapter import EnsoAdapter
-from almanak.framework.connectors.enso.client import EnsoConfig
-from almanak.framework.connectors.lifi.adapter import LiFiAdapter
-from almanak.framework.connectors.lifi.client import LiFiConfig
-from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
+from almanak.connectors.aave_v3.adapter import AaveV3Adapter, AaveV3Config
+from almanak.connectors.aerodrome.adapter import AerodromeAdapter, AerodromeConfig
+from almanak.connectors.enso.adapter import EnsoAdapter
+from almanak.connectors.enso.client import EnsoConfig
+from almanak.connectors.lifi.adapter import LiFiAdapter
+from almanak.connectors.lifi.client import LiFiConfig
+from almanak.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
 from almanak.framework.data import PriceUnavailableError
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import SwapIntent

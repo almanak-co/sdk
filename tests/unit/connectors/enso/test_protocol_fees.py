@@ -18,7 +18,7 @@ the receipt-shape paths and the SUPPORTED_EXTRACTIONS contract.
 
 from __future__ import annotations
 
-from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
+from almanak.connectors.enso.receipt_parser import EnsoReceiptParser
 from almanak.framework.execution.extracted_data import ProtocolFees
 
 _UNAVAILABLE_REASON = "enso_integrator_fee_quote_metadata_unavailable"

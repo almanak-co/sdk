@@ -2,7 +2,7 @@
 
 import pytest
 
-from almanak.framework.connectors.kraken.exceptions import (
+from almanak.connectors.kraken.exceptions import (
     KrakenAPIError,
     KrakenAuthenticationError,
     KrakenChainNotSupportedError,

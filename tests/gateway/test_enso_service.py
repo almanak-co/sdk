@@ -10,7 +10,7 @@ from almanak.connectors.enso.gateway.service import (
     EnsoServiceServicer,
     _decode_bundle_arg,
 )
-from almanak.framework.connectors.enso.client import (
+from almanak.connectors.enso.client import (
     CHAIN_MAPPING as SDK_CHAIN_MAPPING,
 )
 from almanak.gateway.core.settings import GatewaySettings

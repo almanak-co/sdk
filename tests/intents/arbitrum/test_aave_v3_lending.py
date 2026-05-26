@@ -36,10 +36,10 @@ from almanak.framework.accounting.lending_accounting import (
     capture_lending_pre_state,
     lending_state_to_dict,
 )
-from almanak.framework.connectors.aave_v3.adapter import (
+from almanak.connectors.aave_v3.adapter import (
     AAVE_V3_POOL_ADDRESSES,
 )
-from almanak.framework.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
+from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,

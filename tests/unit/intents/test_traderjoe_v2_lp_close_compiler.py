@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.traderjoe_v2.compiler import TraderJoeV2Compiler
+from almanak.connectors.traderjoe_v2.compiler import TraderJoeV2Compiler
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import Intent
 
@@ -62,7 +62,7 @@ def test_traderjoe_lp_close_uses_known_bin_ids_without_position_rediscovery() ->
         gas=54321,
     )
 
-    with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
         result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", result.error
@@ -149,7 +149,7 @@ def test_traderjoe_lp_close_falls_back_preserves_slippage_when_targeted_lookup_e
         gas=54321,
     )
 
-    with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
         result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", result.error
@@ -223,7 +223,7 @@ def test_traderjoe_lp_close_pool_info_failure_does_not_block_compilation() -> No
         gas=54321,
     )
 
-    with patch("almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
+    with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter", return_value=mock_adapter):
         result = _compile_lp_close_traderjoe_v2(compiler, intent)
 
     assert result.status.value == "SUCCESS", (

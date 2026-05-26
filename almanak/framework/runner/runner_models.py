@@ -50,6 +50,7 @@ def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
     return extract_token_symbols(intent)
 
 
+# crap-allowlist: VIB-4835 — pre-existing complexity (cc=38, cov=63%) touched only by ``almanak.connectors._strategy_base.protocol_aliases`` import rewrite (legacy ``almanak.framework.connectors.protocol_aliases`` → new ``_strategy_base`` path). Refactor tracked in VIB-4139.
 def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:  # noqa: C901
     """Format an intent for user-friendly logging.
 
@@ -60,7 +61,7 @@ def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:  # noqa
     Returns:
         Human-readable string describing the intent with amounts and tokens
     """
-    from almanak.framework.connectors.protocol_aliases import display_protocol
+    from almanak.connectors._strategy_base.protocol_aliases import display_protocol
 
     from ..utils.log_formatters import (
         format_intent_type_emoji,

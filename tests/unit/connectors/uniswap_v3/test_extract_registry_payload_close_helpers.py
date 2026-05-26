@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+from almanak.connectors.uniswap_v3.receipt_parser import (
     UniswapV3ReceiptParser,
 )
 

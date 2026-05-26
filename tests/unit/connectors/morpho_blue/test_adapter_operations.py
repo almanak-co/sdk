@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.morpho_blue.adapter import (
+from almanak.connectors.morpho_blue.adapter import (
     MORPHO_BORROW_SELECTOR,
     MORPHO_FLASH_LOAN_SELECTOR,
     MORPHO_LIQUIDATE_SELECTOR,

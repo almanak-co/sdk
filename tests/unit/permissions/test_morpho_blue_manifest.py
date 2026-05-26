@@ -181,7 +181,7 @@ class TestMorphoBlueManifestCoverage:
         call and every BORROW/REPAY/WITHDRAW-collateral test on those chains
         failed with AuthorizationFailed.
         """
-        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+        from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
 
         chain_markets = MORPHO_MARKETS.get(chain, {})
         if not chain_markets:

@@ -223,7 +223,7 @@ class TestCurveMatrixEntry:
 
     def test_curve_chains_match_addresses(self, matrix_data: dict) -> None:
         """Curve chains in matrix should match CURVE_ADDRESSES keys."""
-        from almanak.framework.connectors.curve.adapter import CURVE_ADDRESSES
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
 
         expected_chains = set(CURVE_ADDRESSES.keys())
         swap_protos = [p for p in matrix_data["protocols"] if p["name"] == "curve" and p["category"] == "swap"]
@@ -250,7 +250,7 @@ class TestCompoundV3MatrixEntry:
 
     def test_compound_v3_chains_match_comet_addresses(self, matrix_data: dict) -> None:
         """Compound V3 chains in matrix must match COMPOUND_V3_COMET_ADDRESSES keys."""
-        from almanak.framework.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
 
         expected_chains = set(COMPOUND_V3_COMET_ADDRESSES.keys())
         compound_protos = [p for p in matrix_data["protocols"] if p["name"] == "compound_v3"]
@@ -313,7 +313,7 @@ class TestPreviouslyMissingConnectors:
         assert entries == [], f"{name} ({category}) is deregistered; must not appear in matrix"
 
     def test_euler_v2_chains_match_adapter(self, matrix_data: dict) -> None:
-        from almanak.framework.connectors.euler_v2.adapter import CHAIN_ADDRESSES
+        from almanak.connectors.euler_v2.adapter import CHAIN_ADDRESSES
 
         entries = [p for p in matrix_data["protocols"] if p["name"] == "euler_v2" and p["category"] == "lending"]
         assert len(entries) == 1

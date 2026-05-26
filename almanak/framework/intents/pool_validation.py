@@ -43,7 +43,7 @@ _V3_PROTOCOL_REGISTRY: dict[str, dict[str, dict[str, str]]] = {
 }
 
 # Aerodrome Classic getPool(address,address,bool) selector
-# See `almanak/framework/connectors/aerodrome/abis/pool_factory.json`
+# See `almanak/connectors/aerodrome/abis/pool_factory.json`
 _AERODROME_GET_POOL_SELECTOR = "0x79bc57d5"
 
 
@@ -461,7 +461,7 @@ def validate_traderjoe_pool(
         )
 
     # getLBPairInformation(address,address,uint256) selector
-    # See `almanak/framework/connectors/traderjoe_v2/abis/LBFactory.json`
+    # See `almanak/connectors/traderjoe_v2/abis/LBFactory.json`
     selector = "0x704037bd"
     x = token_x.lower().replace("0x", "").zfill(64)
     y = token_y.lower().replace("0x", "").zfill(64)

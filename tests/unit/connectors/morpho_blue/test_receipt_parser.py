@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.receipt_parser import (
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
     TOPIC_TO_EVENT,

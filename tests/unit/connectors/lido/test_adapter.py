@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.lido.adapter import (
+from almanak.connectors.lido.adapter import (
     DEFAULT_GAS_ESTIMATES,
     LIDO_ADDRESSES,
     LIDO_CLAIM_WITHDRAWALS_SELECTOR,

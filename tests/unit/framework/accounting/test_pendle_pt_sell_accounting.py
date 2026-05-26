@@ -40,11 +40,11 @@ def fake_pt_token_info(monkeypatch):
     """Patch PT_TOKEN_INFO on its source module with a stable test fixture.
 
     The SUT imports PT_TOKEN_INFO inside the helper functions
-    (``from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO``),
+    (``from almanak.connectors.pendle.sdk import PT_TOKEN_INFO``),
     so patching the attribute on the source module is sufficient — no need to
     reach into the SUT module.
     """
-    import almanak.framework.connectors.pendle.sdk as _pendle_sdk
+    import almanak.connectors.pendle.sdk as _pendle_sdk
     monkeypatch.setattr(_pendle_sdk, "PT_TOKEN_INFO", _FAKE_PT_TOKEN_INFO)
     return _FAKE_PT_TOKEN_INFO
 
@@ -444,7 +444,7 @@ class TestIsPtSell:
         # Setting sys.modules[name] = None makes a subsequent
         # ``from name import attr`` raise ImportError without poisoning
         # builtins.__import__. Idiomatic pytest pattern.
-        monkeypatch.setitem(sys.modules, "almanak.framework.connectors.pendle.sdk", None)
+        monkeypatch.setitem(sys.modules, "almanak.connectors.pendle.sdk", None)
 
         intent = _make_sell_intent(from_token="0x" + "a" * 40)
         intent.chain = "plasma"
@@ -540,7 +540,7 @@ class TestResolvePtTokenSym:
 
         # Idiomatic pytest pattern for simulating a missing module — does not
         # touch builtins.__import__.
-        monkeypatch.setitem(sys.modules, "almanak.framework.connectors.pendle.sdk", None)
+        monkeypatch.setitem(sys.modules, "almanak.connectors.pendle.sdk", None)
 
         addr = "0x" + "a" * 40
         intent = _make_sell_intent(from_token=addr)

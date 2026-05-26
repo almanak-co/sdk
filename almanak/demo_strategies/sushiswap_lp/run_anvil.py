@@ -394,7 +394,7 @@ def test_swap() -> dict | None:
     try:
         from web3 import Web3
 
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
             SushiSwapV3ReceiptParser,
@@ -562,7 +562,7 @@ def test_lp_open() -> dict | None:
     try:
         from web3 import Web3
 
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
             SushiSwapV3ReceiptParser,
@@ -741,7 +741,7 @@ def test_lp_close(position_id: int, liquidity: int) -> dict | None:
     try:
         from web3 import Web3
 
-        from almanak.framework.connectors.sushiswap_v3 import (
+        from almanak.connectors.sushiswap_v3 import (
             SushiSwapV3Adapter,
             SushiSwapV3Config,
             SushiSwapV3ReceiptParser,

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.curve.adapter import (
+from almanak.connectors.curve.adapter import (
     ADD_LIQUIDITY_3_SELECTOR,
     CURVE_ADDRESSES,
     CURVE_GAS_ESTIMATES,

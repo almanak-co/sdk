@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
 from almanak.framework.intents.compiler import (
     CompilationStatus,
     IntentCompiler,
@@ -40,7 +40,7 @@ from almanak.framework.intents.vocabulary import Intent, LPCloseIntent
 # Module-level patch target for connector-owned Uniswap V3-family LP close.
 # ---------------------------------------------------------------------------
 
-LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 
 
 # ---------------------------------------------------------------------------

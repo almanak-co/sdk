@@ -228,7 +228,7 @@ def read_aave_account_state(
       uint256 category (0 = no e-mode; 1..255 = a configured category id).
     """
     try:
-        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 
         pool_address = AAVE_V3_POOL_ADDRESSES.get(chain.lower())
         if not pool_address:
@@ -333,7 +333,7 @@ def read_morpho_blue_account_state(
         MorphoBlueAccountState or None on failure.
     """
     try:
-        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
+        from almanak.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
 
         morpho_address = MORPHO_BLUE_ADDRESSES.get(chain.lower())
         if not morpho_address:
@@ -503,7 +503,7 @@ def read_compound_v3_account_state(  # noqa: C901
     Returns None on any failure (missing prices, gateway unavailable, etc.).
     """
     try:
-        from almanak.framework.connectors.compound_v3.adapter import (
+        from almanak.connectors.compound_v3.adapter import (
             COMPOUND_V3_COMET_ADDRESSES,
             COMPOUND_V3_MARKETS,
         )
@@ -761,7 +761,7 @@ def _resolve_morpho_market_params(
     lltv_raw: int | None = None
 
     try:
-        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+        from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
 
         markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
         # O(1) lookup using the same normalisation as _normalize_market_id_hex

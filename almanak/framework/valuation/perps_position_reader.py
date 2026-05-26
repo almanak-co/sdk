@@ -99,7 +99,7 @@ class PerpsPositionReader:
             return []
 
         try:
-            from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+            from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
             sdk = GMXV2SDK(rpc_url=self._rpc_url, chain=chain, gateway_client=self._gateway_client)
             raw_positions = sdk.get_account_positions(wallet_address)

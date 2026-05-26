@@ -1550,7 +1550,7 @@ class MyStrategy(IntentStrategy):
 | Euler V2 | `EULER_V2` | Lending | `euler_v2` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
-| Balancer | `BALANCER` | DEX / LP | `balancer` |
+| Balancer V2 | `BALANCER` | DEX / LP | `balancer_v2` |
 | Aave V3 | * | Lending | `aave_v3` |
 | Morpho Blue | * | Lending | `morpho_blue` |
 | Compound V3 | * | Lending | `compound_v3` |

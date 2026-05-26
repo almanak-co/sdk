@@ -13,7 +13,7 @@ Pure NPM.mint receipts without a Swap leg leave ``current_tick=None``;
 
 from __future__ import annotations
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+from almanak.connectors.uniswap_v3.receipt_parser import (
     EVENT_TOPICS,
     UniswapV3ReceiptParser,
 )

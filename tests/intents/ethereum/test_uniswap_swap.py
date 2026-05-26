@@ -141,7 +141,7 @@ class TestUniswapV3SwapIntent:
 
             # Parse swap receipt
             if tx_result.receipt:
-                from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+                from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 
                 parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())

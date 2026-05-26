@@ -382,7 +382,7 @@ class TestPerpsPositionReader:
             }
         ]
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK") as MockSDK:
+        with patch("almanak.connectors.gmx_v2.sdk.GMXV2SDK") as MockSDK:
             MockSDK.return_value.get_account_positions.return_value = mock_positions
             positions = reader.read_positions("arbitrum", "0xWallet")
 
@@ -394,7 +394,7 @@ class TestPerpsPositionReader:
         reader = PerpsPositionReader(rpc_url="http://localhost:8545")
 
         with patch(
-            "almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK",
+            "almanak.connectors.gmx_v2.sdk.GMXV2SDK",
             side_effect=Exception("connection refused"),
         ):
             positions = reader.read_positions("arbitrum", "0xWallet")

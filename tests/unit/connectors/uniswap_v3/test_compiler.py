@@ -3,8 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.base.compiler import CLCompilerContext
-from almanak.framework.connectors.uniswap_v3.compiler import MAX_UINT128, UniswapV3Compiler
+from almanak.connectors._strategy_base.base.compiler import CLCompilerContext
+from almanak.connectors.uniswap_v3.compiler import MAX_UINT128, UniswapV3Compiler
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.vocabulary import CollectFeesIntent
 

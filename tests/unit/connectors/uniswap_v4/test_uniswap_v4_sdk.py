@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.sdk import (
     FEE_TIERS,
     NATIVE_CURRENCY,
     PERMIT2_ADDRESS,

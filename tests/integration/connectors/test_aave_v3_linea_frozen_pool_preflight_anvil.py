@@ -62,8 +62,8 @@ from typing import Any
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
-from almanak.framework.connectors.base.lending.aave_helpers import (
+from almanak.connectors._strategy_base.base.lending import aave_helpers as cl
+from almanak.connectors._strategy_base.base.lending.aave_helpers import (
     PoolReserveFrozenError,
     assert_lending_reserve_active,
 )

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     EVENT_TOPICS,
     ParsedLiquidityResult,
     ParseResult,
@@ -435,7 +435,7 @@ class TestExtractSwapAmountsSlippage:
         mock_resolver = MagicMock()
         mock_resolver.get_decimals.return_value = 18
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
             return_value=mock_resolver,
         ):
             result = parser.extract_swap_amounts(receipt, expected_out=Decimal("100"))
@@ -483,7 +483,7 @@ class TestExtractSwapAmountsSlippage:
 
         mock_resolver.get_decimals.side_effect = get_decimals
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
             return_value=mock_resolver,
         ):
             result = parser.extract_swap_amounts(receipt, expected_out=Decimal("100"))
@@ -735,7 +735,7 @@ class TestParseReceiptSanity:
                 ),
             ],
         }
-        with caplog.at_level("INFO", logger="almanak.framework.connectors.traderjoe_v2.receipt_parser"):
+        with caplog.at_level("INFO", logger="almanak.connectors.traderjoe_v2.receipt_parser"):
             result = parser.parse_receipt(receipt)
         assert result.liquidity_result is not None
         assert isinstance(result.liquidity_result, ParsedLiquidityResult)

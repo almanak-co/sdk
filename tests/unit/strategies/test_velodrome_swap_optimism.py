@@ -216,7 +216,7 @@ class TestCompilation:
 
     def test_velodrome_protocol_alias_resolves(self):
         """Verify 'velodrome' protocol alias resolves to 'aerodrome' for Optimism."""
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         resolved = normalize_protocol("optimism", "velodrome")
         assert resolved == "aerodrome"

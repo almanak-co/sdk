@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
+from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,

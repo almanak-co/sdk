@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.compiler import EnsoCompiler
+from almanak.connectors.enso.compiler import EnsoCompiler
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.compiler_models import CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.vocabulary import SwapIntent

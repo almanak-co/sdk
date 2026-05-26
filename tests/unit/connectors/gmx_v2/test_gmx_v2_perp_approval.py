@@ -57,7 +57,7 @@ def _make_perp_open_intent(
 class TestPerpOpenApproval:
     """Tests that PERP_OPEN correctly prepends approval for ERC-20 collateral."""
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_usdc_collateral_gets_approval(self, mock_web3_cls):
         """SHORT with USDC collateral should prepend an approve TX."""
         # Setup mocks
@@ -118,13 +118,13 @@ class TestPerpOpenApproval:
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
         with (
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
                 "arbitrum": {"ETH/USD": "0xmarket"},
             }),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
+            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
             }),
         ):
@@ -148,7 +148,7 @@ class TestPerpOpenApproval:
         assert result.transactions[0].tx_type == "approve"
         assert result.transactions[1].tx_type == "perp_open"
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_weth_collateral_skips_approval(self, mock_web3_cls):
         """LONG with WETH collateral should NOT prepend an approve TX."""
         mock_web3 = MagicMock()
@@ -187,13 +187,13 @@ class TestPerpOpenApproval:
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
         with (
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
                 "arbitrum": {"ETH/USD": "0xmarket"},
             }),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
+            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
             }),
         ):

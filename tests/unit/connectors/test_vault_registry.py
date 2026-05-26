@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.vaults import (
+from almanak.connectors._strategy_base.vaults import (
     build_vault_adapter,
     register_vault_adapter,
     supported_vault_protocols,
@@ -43,7 +43,7 @@ def test_register_then_dispatch() -> None:
         assert adapter.kwargs["token_resolver"] is None
     finally:
         # Clean up — registry is module-level and shared across tests.
-        from almanak.framework.connectors.vaults import _REGISTRY
+        from almanak.connectors._strategy_base.vaults import _REGISTRY
 
         _REGISTRY.pop("test_proto_xyz", None)
 
@@ -59,7 +59,7 @@ def test_dispatch_is_case_insensitive() -> None:
         )
         assert isinstance(adapter, _StubAdapter)
     finally:
-        from almanak.framework.connectors.vaults import _REGISTRY
+        from almanak.connectors._strategy_base.vaults import _REGISTRY
 
         _REGISTRY.pop("caseinsens_xyz", None)
 

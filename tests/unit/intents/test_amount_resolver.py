@@ -335,7 +335,7 @@ class TestAaveV3BalanceReaderWithPosition:
 # =============================================================================
 
 
-_COMET_ADDRESSES_PATCH_TARGET = "almanak.framework.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
+_COMET_ADDRESSES_PATCH_TARGET = "almanak.connectors.compound_v3.adapter.COMPOUND_V3_COMET_ADDRESSES"
 
 _SINGLE = "0x" + "1" * 40
 _MULTI_A = "0x" + "a" * 40

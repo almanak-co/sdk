@@ -31,12 +31,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     GammaMarket,
     PolymarketAPIError,
     PolymarketMinimumOrderError,
 )
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.exceptions import (
     PolymarketInvalidTickSizeError,
 )
 from almanak.gateway.core.settings import GatewaySettings

@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from eth_account import Account
 
-from almanak.framework.connectors.polymarket.models import Position
+from almanak.connectors.polymarket.models import Position
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.connectors.polymarket.proto import polymarket_pb2
 from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer

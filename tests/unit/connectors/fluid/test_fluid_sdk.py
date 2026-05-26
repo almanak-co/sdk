@@ -3,7 +3,7 @@
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.fluid.sdk import (
+from almanak.connectors.fluid.sdk import (
     DEFAULT_GAS_ESTIMATES,
     FLUID_ADDRESSES,
     DexPoolData,
@@ -45,21 +45,21 @@ class TestGasEstimates:
 class TestChainValidation:
     def test_unsupported_chain(self):
         from unittest.mock import patch
-        with patch("almanak.framework.connectors.fluid.sdk.Web3"):
+        with patch("almanak.connectors.fluid.sdk.Web3"):
             with pytest.raises(FluidSDKError, match="not supported"):
-                from almanak.framework.connectors.fluid.sdk import FluidSDK
+                from almanak.connectors.fluid.sdk import FluidSDK
                 FluidSDK(chain="polygon", rpc_url="https://fake")
 
 
 class TestDebtGuard:
     def test_nonzero_debt_raises(self):
         from unittest.mock import MagicMock, patch
-        with patch("almanak.framework.connectors.fluid.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.fluid.sdk.Web3") as mock_web3_cls:
             mock_w3 = MagicMock()
             mock_web3_cls.return_value = mock_w3
             mock_web3_cls.HTTPProvider = MagicMock()
             mock_web3_cls.to_checksum_address = lambda x: x
-            from almanak.framework.connectors.fluid.sdk import FluidSDK
+            from almanak.connectors.fluid.sdk import FluidSDK
             with patch.dict(FLUID_ADDRESSES, {"testchain": FLUID_ADDRESSES["arbitrum"]}):
                 sdk = FluidSDK(chain="testchain", rpc_url="https://fake")
                 with pytest.raises(FluidSDKError, match="smart-debt"):
@@ -154,7 +154,7 @@ class TestGetSwapQuoteWithOverrides:
     def test_calls_with_state_override(self):
         from unittest.mock import MagicMock, patch
 
-        with patch("almanak.framework.connectors.fluid.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.fluid.sdk.Web3") as mock_web3_cls:
             mock_w3 = MagicMock()
             mock_web3_cls.return_value = mock_w3
             mock_web3_cls.HTTPProvider = MagicMock()
@@ -169,7 +169,7 @@ class TestGetSwapQuoteWithOverrides:
             mock_w3.eth.contract.return_value = mock_contract
 
             # Mock get_dex_data
-            from almanak.framework.connectors.fluid.sdk import FluidSDK
+            from almanak.connectors.fluid.sdk import FluidSDK
             with patch.dict(FLUID_ADDRESSES, {"testchain": FLUID_ADDRESSES["arbitrum"]}):
                 sdk = FluidSDK(chain="testchain", rpc_url="https://fake")
                 sdk.get_dex_data = MagicMock(return_value=DexPoolData(

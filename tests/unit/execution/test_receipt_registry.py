@@ -346,7 +346,7 @@ class TestParserIntegration:
 
     def test_radiant_v2_parser_is_standalone(self) -> None:
         """Test radiant_v2 uses its own RadiantV2ReceiptParser, not AaveV3ReceiptParser."""
-        from almanak.framework.connectors.radiant_v2.receipt_parser import RadiantV2ReceiptParser
+        from almanak.connectors.radiant_v2.receipt_parser import RadiantV2ReceiptParser
 
         parser = get_parser("radiant_v2")
         assert parser is not None

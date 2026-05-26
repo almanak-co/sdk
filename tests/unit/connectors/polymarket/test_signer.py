@@ -15,8 +15,8 @@ import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
-from almanak.framework.connectors.polymarket.exceptions import PolymarketSignatureError
-from almanak.framework.connectors.polymarket.signer import (
+from almanak.connectors.polymarket.exceptions import PolymarketSignatureError
+from almanak.connectors.polymarket.signer import (
     SIGN_HASH_PATH,
     Signer,
     build_clob_auth_typed_data,

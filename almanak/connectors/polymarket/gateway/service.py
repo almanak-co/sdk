@@ -35,8 +35,7 @@ if TYPE_CHECKING:
     from web3 import Web3
 
 from almanak.config.gateway_runtime import parse_gateway_wallets_json
-from almanak.connectors.polymarket.proto import polymarket_pb2, polymarket_pb2_grpc
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
     CtfSDK,
@@ -50,10 +49,11 @@ from almanak.framework.connectors.polymarket import (
     SignatureType,
     TransactionData,
 )
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.exceptions import (
     PolymarketInvalidTickSizeError,
 )
-from almanak.framework.connectors.polymarket.signer import (
+from almanak.connectors.polymarket.proto import polymarket_pb2, polymarket_pb2_grpc
+from almanak.connectors.polymarket.signer import (
     DEFAULT_SIGNER_TIMEOUT_SECONDS,
     Signer,
     build_clob_auth_typed_data,
@@ -118,7 +118,7 @@ POLYMARKET_MARKET_CACHE_MAX_ENTRIES = 512
 # Upstream order-rejection text patterns that indicate cached market metadata
 # may be stale. The pattern is intentionally tight: it matches the exact
 # CLOB phrasings the connector embeds into PolymarketInvalidTickSizeError /
-# PolymarketMinimumOrderError (see almanak/framework/connectors/polymarket/
+# PolymarketMinimumOrderError (see almanak/connectors/polymarket/
 # exceptions.py:99-124), not arbitrary substrings like "min order" that
 # could appear in unrelated PolymarketAPIError flavours and trigger
 # spurious cache eviction.
@@ -1910,7 +1910,7 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
 
         Cross-side pricing — Polymarket CLOB convention (verified against
         ``ClobClient.get_price`` and ``OrderBook.best_bid`` / ``best_ask`` in
-        ``almanak/framework/connectors/polymarket/{clob_client,models}.py``):
+        ``almanak/connectors/polymarket/{clob_client,models}.py``):
 
             ``GET /price?side=BUY``  -> best BID  (highest buyer's price)
             ``GET /price?side=SELL`` -> best ASK  (lowest seller's price)

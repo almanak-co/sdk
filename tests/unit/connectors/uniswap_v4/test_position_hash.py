@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v4.hooks import (
+from almanak.connectors.uniswap_v4.hooks import (
     _normalize_bytes32,
     _pack_int24,
     compute_position_hash,

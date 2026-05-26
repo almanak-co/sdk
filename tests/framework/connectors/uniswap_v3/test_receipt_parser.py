@@ -6,7 +6,7 @@ Tests for the refactored Uniswap V3 receipt parser using base infrastructure
 
 from decimal import Decimal
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+from almanak.connectors.uniswap_v3.receipt_parser import (
     UniswapV3EventType,
     UniswapV3ReceiptParser,
 )

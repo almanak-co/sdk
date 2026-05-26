@@ -22,8 +22,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.spark.adapter import SPARK_POOL_ADDRESSES
-from almanak.framework.connectors.spark.receipt_parser import SparkReceiptParser
+from almanak.connectors.spark.adapter import SPARK_POOL_ADDRESSES
+from almanak.connectors.spark.receipt_parser import SparkReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler

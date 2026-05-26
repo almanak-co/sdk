@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
+from almanak.connectors.uniswap_v4.sdk import UniswapV4SDK
 
 
 def _make_gateway(hex_result: str, success: bool = True, error: str = "") -> MagicMock:
@@ -92,7 +92,7 @@ class TestGetPoolSqrtPriceGateway:
 
         # A minimally-valid PoolKey - we don't care about pool semantics, the
         # test asserts the failure path short-circuits to None.
-        from almanak.framework.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
+        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
 
         key = PoolKey(
             currency0=NATIVE_CURRENCY,

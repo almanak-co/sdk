@@ -312,7 +312,7 @@ class TestLiquidityCheckFailsClosed:
     @pytest.mark.asyncio
     async def test_pending_redemptions_rpc_failure_blocks_settlement(self, executor, mock_gateway):
         """If get_pending_redemptions fails, _check_settlement_liquidity returns False."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_pending_redemptions.side_effect = Exception("RPC timeout")
 
@@ -327,7 +327,7 @@ class TestLiquidityCheckFailsClosed:
     @pytest.mark.asyncio
     async def test_balance_read_failure_blocks_settlement(self, executor, mock_gateway):
         """If Safe balance read fails, _check_settlement_liquidity returns False."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_pending_redemptions.return_value = 1_000_000_000_000_000_000  # 1 share
             sdk.convert_to_assets.return_value = 1_000_000  # 1 USDC in raw units
@@ -344,7 +344,7 @@ class TestLiquidityCheckFailsClosed:
     @pytest.mark.asyncio
     async def test_zero_pending_redemptions_always_passes(self, executor, mock_gateway):
         """No pending redemptions should always pass liquidity check."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_pending_redemptions.return_value = 0
 
@@ -547,7 +547,7 @@ class TestTeardownStateMachine:
         mock_gateway.state.LoadState.return_value = state_resp
 
         # Mock the SDK for underlying token
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk_instance = MockSDK.return_value
             sdk_instance.get_underlying_token_address.return_value = (
                 "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"

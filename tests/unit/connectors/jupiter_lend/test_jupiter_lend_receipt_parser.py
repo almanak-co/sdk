@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.connectors.jupiter_lend.receipt_parser import JupiterLendReceiptParser, LendingAmounts
+from almanak.connectors.jupiter_lend.receipt_parser import JupiterLendReceiptParser, LendingAmounts
 
 
 def _make_receipt(pre_balances, post_balances):

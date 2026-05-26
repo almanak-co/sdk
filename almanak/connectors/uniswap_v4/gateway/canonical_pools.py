@@ -57,15 +57,15 @@ from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     CachedPoolKey,
     V4CanonicalSeedCollisionError,
 )
-from almanak.core.contracts import UNISWAP_V4
-from almanak.framework.connectors.uniswap_v4.hooks import compute_pool_id
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.hooks import compute_pool_id
+from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     TICK_SPACING,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.sdk import (
     PoolKey as FrameworkPoolKey,
 )
+from almanak.core.contracts import UNISWAP_V4
 from almanak.framework.data.tokens import (
     TokenNotFoundError,
     TokenResolutionError,

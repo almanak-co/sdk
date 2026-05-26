@@ -15,16 +15,16 @@ Requirements:
 
 import pytest
 
-from almanak.framework.connectors.lifi.client import (
+from almanak.connectors.lifi.client import (
     CHAIN_MAPPING,
     LiFiClient,
     LiFiConfig,
 )
-from almanak.framework.connectors.lifi.exceptions import (
+from almanak.connectors.lifi.exceptions import (
     LiFiAPIError,
     LiFiRouteNotFoundError,
 )
-from almanak.framework.connectors.lifi.models import (
+from almanak.connectors.lifi.models import (
     LiFiOrderStrategy,
     LiFiStatusResponse,
     LiFiStep,

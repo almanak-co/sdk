@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from web3.exceptions import ContractLogicError
 
-from almanak.framework.connectors.morpho_blue.sdk import (
+from almanak.connectors.morpho_blue.sdk import (
     LLTV_SCALE,
     MORPHO_DEPLOYMENT_BLOCKS,
     SUPPORTED_CHAINS,
@@ -30,7 +30,7 @@ from almanak.framework.connectors.morpho_blue.sdk import (
 
 def _make_sdk(chain: str = "ethereum") -> MorphoBlueSDK:
     """Build an SDK with all Web3 layers stubbed."""
-    with patch("almanak.framework.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
+    with patch("almanak.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
         mock_w3 = MagicMock()
         mock_w3.is_connected.return_value = True
         # Web3() returns w3 instance; Web3.HTTPProvider is also looked up.
@@ -38,8 +38,8 @@ def _make_sdk(chain: str = "ethereum") -> MorphoBlueSDK:
         mock_web3_cls.return_value = mock_w3
         mock_web3_cls.to_checksum_address.side_effect = lambda x: x
         mock_web3_cls.HTTPProvider = MagicMock()
-        with patch("almanak.framework.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
-            with patch("almanak.framework.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
+        with patch("almanak.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
+            with patch("almanak.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
                 sdk = MorphoBlueSDK(chain=chain, rpc_url="http://test")
                 # Replace the w3 with our deterministic mock
                 sdk.w3 = mock_w3
@@ -66,36 +66,36 @@ class TestSDKInit:
         assert sdk.chain == "ethereum"
 
     def test_init_rpc_disconnected_raises(self) -> None:
-        with patch("almanak.framework.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
             mock_w3 = MagicMock()
             mock_w3.is_connected.return_value = False
             mock_web3_cls.return_value = mock_w3
             mock_web3_cls.to_checksum_address.side_effect = lambda x: x
-            with patch("almanak.framework.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
-                with patch("almanak.framework.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
+            with patch("almanak.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
+                with patch("almanak.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
                     with pytest.raises(RPCError):
                         MorphoBlueSDK(chain="ethereum", rpc_url="http://test")
 
     def test_init_poa_chain_injects_middleware(self) -> None:
-        with patch("almanak.framework.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
             mock_w3 = MagicMock()
             mock_w3.is_connected.return_value = True
             mock_web3_cls.return_value = mock_w3
             mock_web3_cls.to_checksum_address.side_effect = lambda x: x
-            with patch("almanak.framework.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
-                with patch("almanak.framework.connectors.morpho_blue.sdk.is_poa_chain", return_value=True):
+            with patch("almanak.connectors.morpho_blue.sdk.get_rpc_url", return_value="http://x"):
+                with patch("almanak.connectors.morpho_blue.sdk.is_poa_chain", return_value=True):
                     sdk = MorphoBlueSDK(chain="ethereum", rpc_url="http://test")
                     assert sdk is not None
                     mock_w3.middleware_onion.inject.assert_called_once()
 
     def test_init_with_gateway_client(self) -> None:
         gateway_client = MagicMock()
-        with patch("almanak.framework.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
             mock_w3 = MagicMock()
             mock_w3.is_connected.return_value = True
             mock_web3_cls.return_value = mock_w3
             mock_web3_cls.to_checksum_address.side_effect = lambda x: x
-            with patch("almanak.framework.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
+            with patch("almanak.connectors.morpho_blue.sdk.is_poa_chain", return_value=False):
                 with patch(
                     "almanak.framework.web3.gateway_provider.GatewayWeb3Provider",
                     return_value=MagicMock(),
@@ -247,7 +247,7 @@ class TestGetMarketParams:
         mock_result.hex.return_value = encoded
 
         # Mock to_checksum_address called inside _decode_address
-        with patch("almanak.framework.connectors.morpho_blue.sdk.Web3.to_checksum_address", side_effect=lambda x: x):
+        with patch("almanak.connectors.morpho_blue.sdk.Web3.to_checksum_address", side_effect=lambda x: x):
             sdk.w3.eth.call.return_value = mock_result
             p = sdk.get_market_params("0x" + "ab" * 32)
             assert p.lltv == lltv
@@ -259,7 +259,7 @@ class TestGetMarketParams:
         mock_result = MagicMock()
         mock_result.hex.return_value = encoded
         with patch(
-            "almanak.framework.connectors.morpho_blue.sdk.Web3.to_checksum_address",
+            "almanak.connectors.morpho_blue.sdk.Web3.to_checksum_address",
             return_value="0x0000000000000000000000000000000000000000",
         ):
             sdk.w3.eth.call.return_value = mock_result
@@ -466,7 +466,7 @@ class TestPrivateHelpers:
     def test_decode_address(self) -> None:
         sdk = _make_sdk()
         with patch(
-            "almanak.framework.connectors.morpho_blue.sdk.Web3.to_checksum_address",
+            "almanak.connectors.morpho_blue.sdk.Web3.to_checksum_address",
             return_value="0xchecksum",
         ):
             result = sdk._decode_address("0" * 24 + "11" * 20)

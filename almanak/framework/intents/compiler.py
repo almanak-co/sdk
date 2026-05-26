@@ -30,17 +30,17 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
-
-from ..chain_family import ChainFamilyAdapter, all_families, family_for
-from ..connectors.base.compiler import (
+from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
     BaseProtocolCompiler,
     CLCompilerContext,
     PerpCompilerContext,
     SwapCompilerContext,
 )
-from ..connectors.base.swap_adapter import DefaultSwapAdapter
-from ..connectors.compiler_registry import get_compiler as get_connector_compiler
+from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
+from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
+
+from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: MorphoBlueAdapter is imported lazily in _compile_* methods to avoid circular import
@@ -177,7 +177,7 @@ def _bridge_registry_protocol(intent: "BridgeIntent") -> str:
     preferred = getattr(intent, "preferred_bridge", None)
     if preferred and get_connector_compiler(preferred) is not None:
         return preferred
-    from ..connectors.compiler_registry import CompilerRegistry
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
     default = CompilerRegistry.default_protocol("BRIDGE")
     # The registry is the single source of truth for which bridge is the
@@ -497,7 +497,7 @@ class IntentCompiler:
         # pubkeys do not start with 0x and pass through unchanged.
         self.wallet_address = _normalize_wallet_address(wallet_address)
         # Normalize protocol alias (e.g., "agni" -> "agni_finance" on mantle)
-        from ..connectors.protocol_aliases import normalize_protocol
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         self.default_protocol = normalize_protocol(self.chain, default_protocol)
         self.default_deadline_seconds = default_deadline_seconds
@@ -584,7 +584,7 @@ class IntentCompiler:
         """
         if intent_protocol is None:
             return self.default_protocol
-        from ..connectors.protocol_aliases import normalize_protocol
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         return normalize_protocol(self.chain, intent_protocol)
 
@@ -680,7 +680,7 @@ class IntentCompiler:
             )
 
         def lp_adapter_factory(adapter_protocol: str) -> Any:
-            from ..connectors.uniswap_v3.adapter import UniswapV3LPAdapter
+            from almanak.connectors.uniswap_v3.adapter import UniswapV3LPAdapter
 
             return UniswapV3LPAdapter(self.chain, adapter_protocol)
 
@@ -1353,13 +1353,13 @@ class IntentCompiler:
         # other protocol names fall through to the default. The strings live
         # in ``CompilerRegistry`` so framework code stays connector-agnostic.
         if intent.is_cross_chain:
-            from ..connectors.compiler_registry import CompilerRegistry
+            from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
             aggregator_protocol = CompilerRegistry.default_protocol("SWAP_CROSS_CHAIN")
             if aggregator_protocol is None:
                 raise RuntimeError("CompilerRegistry missing SWAP_CROSS_CHAIN default")
             if intent.protocol is not None:
-                from ..connectors.protocol_aliases import normalize_protocol
+                from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
                 # Historical: only ``lifi`` overrides the default. Other
                 # protocol names on a cross-chain intent fall through to the
@@ -1943,7 +1943,7 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-        from ..connectors.compiler_registry import CompilerRegistry
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
         supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
@@ -1975,7 +1975,7 @@ class IntentCompiler:
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
-        from ..connectors.compiler_registry import CompilerRegistry
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
         primitive = intent.intent_type.value if hasattr(intent.intent_type, "value") else str(intent.intent_type)
         supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
@@ -1994,7 +1994,7 @@ class IntentCompiler:
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
-        from ..connectors.compiler_registry import CompilerRegistry
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
         supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
         return CompilationResult(
@@ -2012,7 +2012,7 @@ class IntentCompiler:
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
-        from ..connectors.compiler_registry import CompilerRegistry
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
         action = "staking" if primitive == "STAKE" else "unstaking"
         supported = CompilerRegistry.protocols_for_intent(intent.intent_type)

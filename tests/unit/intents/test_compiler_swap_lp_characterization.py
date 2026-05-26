@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
 from almanak.framework.intents import LPOpenIntent
 from almanak.framework.intents.compiler import CompilationStatus
 
@@ -31,7 +31,7 @@ from almanak.framework.intents.compiler import CompilationStatus
 # ---------------------------------------------------------------------------
 
 SWAP_ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
-LP_ADAPTER_CLS = "almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
+LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_V3_POOL = "almanak.framework.intents.pool_validation.validate_v3_pool"
 FETCH_SLOT0 = "almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96"
 
@@ -1239,7 +1239,7 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
     reverts whenever the oracle ratio diverged from the pool ratio.
     """
 
-    @patch("almanak.framework.connectors.aerodrome.AerodromeAdapter")
+    @patch("almanak.connectors.aerodrome.AerodromeAdapter")
     @patch("almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96")
     @patch("almanak.framework.intents.pool_validation.validate_aerodrome_cl_pool")
     def test_slot0_recompute_flows_into_adapter_and_metadata(

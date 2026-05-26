@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from pydantic import SecretStr
 
-from almanak.framework.connectors.kraken.models import (
+from almanak.connectors.kraken.models import (
     CEXIdempotencyKey,
     CEXOperationType,
     CEXRiskConfig,

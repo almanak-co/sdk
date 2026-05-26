@@ -69,7 +69,7 @@ class TestBerachainEnsoSwapCompilation:
     """Verify SwapIntent compilation routes to Enso on Berachain."""
 
     @patch.dict("os.environ", {"ENSO_API_KEY": "test-key"})
-    @patch("almanak.framework.connectors.enso.EnsoClient")
+    @patch("almanak.connectors.enso.EnsoClient")
     def test_enso_swap_compiles_with_mock_route(self, mock_enso_class: MagicMock) -> None:
         """SwapIntent with protocol=enso compiles successfully on Berachain when Enso returns a route."""
         # Mock the Enso route object with proper structure

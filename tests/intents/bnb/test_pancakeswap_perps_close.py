@@ -51,13 +51,13 @@ pytestmark = pytest.mark.no_zodiac(
 )
 
 from almanak.core.contracts import PANCAKESWAP_PERPS
-from almanak.framework.connectors.pancakeswap_perps import (
+from almanak.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
     build_close_transaction,
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,
 )
-from almanak.framework.connectors.pancakeswap_perps.sdk import (
+from almanak.connectors.pancakeswap_perps.sdk import (
     OpenTradeStruct,
     encode_open_market_trade_calldata,
     slippage_to_limit_price,

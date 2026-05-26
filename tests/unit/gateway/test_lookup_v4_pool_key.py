@@ -19,13 +19,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
     V4PoolKeyNotFound,
     _coerce_pool_id_bytes,
     lookup_v4_pool_key,
     make_sync_pool_key_lookup,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import PoolKey as FrameworkPoolKey
+from almanak.connectors.uniswap_v4.sdk import PoolKey as FrameworkPoolKey
 from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     INITIALIZE_EVENT_TOPIC,
     NO_HOOKS,

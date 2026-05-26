@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.compound_v3.receipt_parser import (
+from almanak.connectors.compound_v3.receipt_parser import (
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
     TOPIC_TO_EVENT,
@@ -562,7 +562,7 @@ class TestHelperMethods:
 
     Post-refactor: per-parser ``_topic_to_address`` / ``_decode_uint256`` /
     ``_hex_to_decimal`` private methods were consolidated into the shared
-    ``HexDecoder`` static helper (see ``almanak/framework/connectors/base/
+    ``HexDecoder`` static helper (see ``almanak/connectors/_strategy_base/base/
     hex_utils.py``) so every connector resolves event payloads identically.
     These tests now exercise the shared helper directly. ``HexDecoder.decode_uint256``
     returns ``int`` rather than ``Decimal``; the parser callers wrap the result
@@ -571,7 +571,7 @@ class TestHelperMethods:
 
     def test_topic_to_address(self, parser):
         """Test HexDecoder.topic_to_address helper."""
-        from almanak.framework.connectors.base import HexDecoder
+        from almanak.connectors._strategy_base.base import HexDecoder
 
         topic = "0x0000000000000000000000001234567890123456789012345678901234567890"
         address = HexDecoder.topic_to_address(topic)
@@ -580,7 +580,7 @@ class TestHelperMethods:
 
     def test_topic_to_address_without_prefix(self, parser):
         """Test HexDecoder.topic_to_address helper without 0x prefix."""
-        from almanak.framework.connectors.base import HexDecoder
+        from almanak.connectors._strategy_base.base import HexDecoder
 
         topic = "0000000000000000000000001234567890123456789012345678901234567890"
         address = HexDecoder.topic_to_address(topic)
@@ -589,7 +589,7 @@ class TestHelperMethods:
 
     def test_decode_uint256(self, parser):
         """Test HexDecoder.decode_uint256 helper."""
-        from almanak.framework.connectors.base import HexDecoder
+        from almanak.connectors._strategy_base.base import HexDecoder
 
         # 100 in hex (64 chars)
         data = "0x0000000000000000000000000000000000000000000000000000000000000064"
@@ -599,7 +599,7 @@ class TestHelperMethods:
 
     def test_decode_uint256_empty(self, parser):
         """Test HexDecoder.decode_uint256 with empty data."""
-        from almanak.framework.connectors.base import HexDecoder
+        from almanak.connectors._strategy_base.base import HexDecoder
 
         value = HexDecoder.decode_uint256("")
 
@@ -617,7 +617,7 @@ class TestHelperMethods:
 
     def test_hex_to_decimal_empty(self):
         """Test Decimal-wrapped empty/non-empty decode semantics via HexDecoder."""
-        from almanak.framework.connectors.base import HexDecoder
+        from almanak.connectors._strategy_base.base import HexDecoder
 
         # Non-empty hex decodes to expected integer value
         assert Decimal(HexDecoder.decode_uint256("0x" + "ff".rjust(64, "0"))) == Decimal("255")

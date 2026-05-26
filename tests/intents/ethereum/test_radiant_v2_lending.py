@@ -30,7 +30,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.radiant_v2.receipt_parser import RadiantV2ReceiptParser
+from almanak.connectors.radiant_v2.receipt_parser import RadiantV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler

@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.base.compiler import PerpCompilerContext
-from almanak.framework.connectors.gmx_v2.compiler import GMXV2Compiler
+from almanak.connectors._strategy_base.base.compiler import PerpCompilerContext
+from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ class TestGetGmxPositionSizeOnchain:
 
     def test_returns_none_when_position_query_fails(self, compiler_ctx):
         """Should return None (not raise) when position query fails."""
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         mock_sdk = MagicMock()
         mock_sdk.get_account_positions.side_effect = PositionQueryError("Reader reverted")

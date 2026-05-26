@@ -1,6 +1,6 @@
 """Tests for TraderJoeV2ReceiptParser fee collection extraction methods."""
 
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     EVENT_TOPICS,
     TraderJoeV2ReceiptParser,
 )

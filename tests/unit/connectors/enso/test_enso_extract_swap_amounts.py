@@ -7,7 +7,7 @@ parses ERC-20 Transfer events from Enso swap receipts.
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.enso.receipt_parser import (
+from almanak.connectors.enso.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     EnsoReceiptParser,
 )

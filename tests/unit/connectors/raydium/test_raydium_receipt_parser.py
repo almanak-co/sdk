@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.raydium.receipt_parser import RaydiumReceiptParser
+from almanak.connectors.raydium.receipt_parser import RaydiumReceiptParser
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"

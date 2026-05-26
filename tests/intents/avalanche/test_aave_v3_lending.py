@@ -18,10 +18,10 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.aave_v3.adapter import (
+from almanak.connectors.aave_v3.adapter import (
     AAVE_V3_POOL_ADDRESSES,
 )
-from almanak.framework.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
+from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.intents import (
     BorrowIntent,

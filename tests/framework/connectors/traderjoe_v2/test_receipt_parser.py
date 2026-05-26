@@ -4,7 +4,7 @@ import importlib.util
 
 # Load the v2 module for testing
 spec = importlib.util.spec_from_file_location(
-    "traderjoe_v2_parser_v2", "almanak/framework/connectors/traderjoe_v2/receipt_parser.py"
+    "traderjoe_v2_parser_v2", "almanak/connectors/traderjoe_v2/receipt_parser.py"
 )
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

@@ -66,11 +66,11 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
-from almanak.framework.connectors.traderjoe_v2.permission_hints import (
+from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
+from almanak.connectors.traderjoe_v2.permission_hints import (
     _TRADERJOE_COLLECT_FEES_SELECTOR,
 )
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     TraderJoeV2EventType,
     TraderJoeV2ReceiptParser,
 )

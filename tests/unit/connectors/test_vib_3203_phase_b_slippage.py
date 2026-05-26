@@ -31,7 +31,7 @@ class TestCurveExtractSwapAmountsAcceptsKwarg:
         the kwarg MUST appear by name for the forwarding path to engage."""
         import inspect
 
-        from almanak.framework.connectors.curve.receipt_parser import CurveReceiptParser
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
 
         sig = inspect.signature(CurveReceiptParser.extract_swap_amounts)
         assert "expected_out" in sig.parameters
@@ -41,14 +41,14 @@ class TestCurveExtractSwapAmountsAcceptsKwarg:
 
     def test_computes_slippage_when_expected_out_supplied(self) -> None:
         """A realized amount 1% below the quote should produce ~100 bps."""
-        from almanak.framework.connectors.curve.receipt_parser import CurveReceiptParser
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
 
         parser = CurveReceiptParser(chain="ethereum")
 
         # Fake a parse_receipt result with a single swap event — we stub the
         # Curve-specific parse + decimals plumbing so the test exercises
         # only the slippage math.
-        from almanak.framework.connectors.curve.receipt_parser import ParseResult, SwapEventData
+        from almanak.connectors.curve.receipt_parser import ParseResult, SwapEventData
 
         swap = SwapEventData(
             pool_address="0x" + "0" * 40,
@@ -89,7 +89,7 @@ class TestCurveExtractSwapAmountsAcceptsKwarg:
         would silently flip favourable slippage into a halt — this test
         locks in the signed-negative invariant for Phase B parsers.
         """
-        from almanak.framework.connectors.curve.receipt_parser import (
+        from almanak.connectors.curve.receipt_parser import (
             CurveReceiptParser,
             ParseResult,
             SwapEventData,
@@ -128,7 +128,7 @@ class TestCurveExtractSwapAmountsAcceptsKwarg:
 
     def test_slippage_none_without_expected_out(self) -> None:
         """Legacy call path (no kwarg) must keep slippage_bps at None."""
-        from almanak.framework.connectors.curve.receipt_parser import (
+        from almanak.connectors.curve.receipt_parser import (
             CurveReceiptParser,
             ParseResult,
             SwapEventData,
@@ -167,7 +167,7 @@ class TestPancakeSwapV3ExtractSwapAmountsAcceptsKwarg:
     def test_signature_declares_expected_out(self) -> None:
         import inspect
 
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+        from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
 
         sig = inspect.signature(PancakeSwapV3ReceiptParser.extract_swap_amounts)
         assert "expected_out" in sig.parameters
@@ -179,7 +179,7 @@ class TestTraderJoeV2ExtractSwapAmountsAcceptsKwarg:
     def test_signature_declares_expected_out(self) -> None:
         import inspect
 
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+        from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 
         sig = inspect.signature(TraderJoeV2ReceiptParser.extract_swap_amounts)
         assert "expected_out" in sig.parameters
@@ -190,7 +190,7 @@ class TestTraderJoeV2ExtractSwapAmountsAcceptsKwarg:
         """If the parser was constructed without a chain, decimal resolution
         falls back to 18 — so realized slippage is computed against
         potentially-mis-scaled amounts. Suppress slippage_bps in this case."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             ParsedSwapResult,
             ParseResult,
             TraderJoeV2ReceiptParser,
@@ -233,7 +233,7 @@ class TestGmxV2ExtractSwapAmountsAcceptsKwargButIgnoresIt:
     def test_signature_declares_expected_out(self) -> None:
         import inspect
 
-        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+        from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
 
         sig = inspect.signature(GMXv2ReceiptParser.extract_swap_amounts)
         assert "expected_out" in sig.parameters
@@ -243,7 +243,7 @@ class TestGmxV2ExtractSwapAmountsAcceptsKwargButIgnoresIt:
     def test_kwarg_is_accepted_but_ignored(self) -> None:
         """Passing expected_out to GMX V2 must not raise and must not alter
         slippage_bps — which for perp orders is always ``None``."""
-        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+        from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
 
         parser = GMXv2ReceiptParser(chain="arbitrum")
         # Empty receipt — no order events, returns None regardless of kwarg.
@@ -334,7 +334,7 @@ class TestPhaseBLocalGuardsExpectedOut:
 
     @pytest.mark.parametrize("bad_quote", [Decimal("0"), Decimal("-1.5")])
     def test_curve_returns_swap_amounts_with_null_slippage_for_bad_quote(self, bad_quote: Decimal) -> None:
-        from almanak.framework.connectors.curve.receipt_parser import (
+        from almanak.connectors.curve.receipt_parser import (
             CurveReceiptParser,
             ParseResult,
             SwapEventData,

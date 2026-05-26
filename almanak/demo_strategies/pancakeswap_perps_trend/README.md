@@ -25,7 +25,7 @@ holding a LONG, signal a close.
    SDK call required. Partial closes (`size_usd` set) are rejected by the
    compiler since ApolloX always flattens 100% of the position; the demo
    therefore omits `size_usd` on its close intent. The direct-SDK helper
-   `almanak.framework.connectors.pancakeswap_perps.build_close_transaction(trade_hash)`
+   `almanak.connectors.pancakeswap_perps.build_close_transaction(trade_hash)`
    is still available as an escape hatch.
 
 ## Files

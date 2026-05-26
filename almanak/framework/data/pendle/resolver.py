@@ -338,25 +338,25 @@ class PendleMarketResolver:
     # =========================================================================
 
     def _preprocess_static_pt_info(self) -> dict[str, tuple[str, int]]:
-        from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO
+        from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
 
         chain_info = PT_TOKEN_INFO.get(self._chain, {})
         return {name.lower(): info for name, info in chain_info.items()}
 
     def _preprocess_static_yt_info(self) -> dict[str, tuple[str, int]]:
-        from almanak.framework.connectors.pendle.sdk import YT_TOKEN_INFO
+        from almanak.connectors.pendle.sdk import YT_TOKEN_INFO
 
         chain_info = YT_TOKEN_INFO.get(self._chain, {})
         return {name.lower(): info for name, info in chain_info.items()}
 
     def _preprocess_static_market_by_pt(self) -> dict[str, str]:
-        from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
+        from almanak.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
 
         chain_markets = MARKET_BY_PT_TOKEN.get(self._chain, {})
         return {name.lower(): addr for name, addr in chain_markets.items()}
 
     def _preprocess_static_mint_sy(self) -> dict[str, str]:
-        from almanak.framework.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
+        from almanak.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
 
         chain_mints = MARKET_TOKEN_MINT_SY.get(self._chain, {})
         return {addr.lower(): mint_token for addr, mint_token in chain_mints.items()}

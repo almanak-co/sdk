@@ -1,6 +1,6 @@
 """Tests for Aerodrome Receipt Parser (Refactored)."""
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     AerodromeEventType,
     AerodromeReceiptParser,
 )

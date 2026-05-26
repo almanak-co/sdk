@@ -19,14 +19,14 @@ from eth_abi import encode
 from web3 import Web3
 
 from almanak.core.contracts import MORPHO_BLUE, MORPHO_BLUE_ADDRESS, MORPHO_BLUE_TOKENS
-from almanak.framework.connectors.morpho_blue.adapter import (
+from almanak.connectors.morpho_blue.adapter import (
     MORPHO_BLUE_ADDRESSES,
     MORPHO_BUNDLER_ADDRESSES,
     MORPHO_MARKETS,
     MorphoBlueAdapter,
     MorphoBlueConfig,
 )
-from almanak.framework.connectors.morpho_blue.sdk import (
+from almanak.connectors.morpho_blue.sdk import (
     MORPHO_DEPLOYMENT_BLOCKS,
     SUPPORTED_CHAINS,
     MorphoBlueSDK,
@@ -167,7 +167,7 @@ class TestArbitrumSdkWiring:
         regression that re-introduced the `MORPHO_BLUE_ADDRESS` singleton fallback
         would be caught here. Web3 connection is mocked to avoid network.
         """
-        with patch("almanak.framework.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
+        with patch("almanak.connectors.morpho_blue.sdk.Web3") as mock_web3_cls:
             from web3 import Web3 as RealWeb3
 
             mock_web3_cls.to_checksum_address.side_effect = RealWeb3.to_checksum_address

@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
+from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
 
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"

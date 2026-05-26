@@ -4,7 +4,7 @@ import importlib.util
 from decimal import Decimal
 
 # Load the v2 module for testing
-spec = importlib.util.spec_from_file_location("spark_parser_v2", "almanak/framework/connectors/spark/receipt_parser.py")
+spec = importlib.util.spec_from_file_location("spark_parser_v2", "almanak/connectors/spark/receipt_parser.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 

@@ -20,7 +20,7 @@ import pytest
 from eth_account import Account
 from pydantic import SecretStr
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
     GammaMarket,
@@ -29,18 +29,18 @@ from almanak.framework.connectors.polymarket import (
     SignatureType,
     TokenPrice,
 )
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.exceptions import (
     PolymarketAPIError,
     PolymarketAuthenticationError,
     PolymarketRateLimitError,
     PolymarketSignatureError,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,
     CLOB_AUTH_TYPES,
 )
-from almanak.framework.connectors.polymarket.signer import (
+from almanak.connectors.polymarket.signer import (
     make_local_signer,
     make_remote_signer,
 )
@@ -91,7 +91,7 @@ class TestReadOnlyMode:
             client._build_l1_headers()
 
     def test_sign_order_raises_without_signer(self, config_with_credentials):
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = ClobClient(config_with_credentials, signer=None)
         # build_limit_order is a pure helper that does not sign — it should
@@ -593,7 +593,7 @@ class TestOrderResponseFromApiResponse:
 
     def test_parses_matched_fill_with_avg_price(self):
         """POST /order response with matched status + fill amount + avg price."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+        from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 
         response = OrderResponse.from_api_response(
             {
@@ -615,7 +615,7 @@ class TestOrderResponseFromApiResponse:
 
     def test_preserves_unmatched_status_for_ioc_rejection(self):
         """`unmatched` (IOC that didn't fill) must not be silenced to LIVE."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+        from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 
         response = OrderResponse.from_api_response(
             {
@@ -628,14 +628,14 @@ class TestOrderResponseFromApiResponse:
 
     def test_preserves_delayed_status(self):
         """`delayed` (matching engine backlog) must stay distinct from LIVE."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+        from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 
         response = OrderResponse.from_api_response({"orderID": "0xd", "status": "delayed", "filledSize": "0"})
         assert response.status == OrderStatus.DELAYED
 
     def test_preserves_rejected_status(self):
         """`rejected` must never silently become LIVE."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+        from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 
         response = OrderResponse.from_api_response({"orderID": "0xr", "status": "rejected", "filledSize": "0"})
         assert response.status == OrderStatus.REJECTED
@@ -649,14 +649,14 @@ class TestOrderResponseFromApiResponse:
         the safest default because it forces caller attention via the new
         ``success = (status != FAILED)`` rule in the handler.
         """
-        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+        from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 
         response = OrderResponse.from_api_response({"orderID": "0xunk", "status": "fabulous", "filledSize": "0"})
         assert response.status == OrderStatus.FAILED
 
     def test_avg_fill_price_absent_when_zero_or_missing(self):
         """Zero / missing avgPrice should not pollute the typed field."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse
+        from almanak.connectors.polymarket.models import OrderResponse
 
         missing = OrderResponse.from_api_response({"orderID": "0x1", "status": "live", "filledSize": "0"})
         assert missing.avg_fill_price is None
@@ -666,7 +666,7 @@ class TestOrderResponseFromApiResponse:
 
     def test_avg_fill_price_accepts_string_and_number(self):
         """avgPrice can arrive as str or numeric; both should parse."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse
+        from almanak.connectors.polymarket.models import OrderResponse
 
         as_str = OrderResponse.from_api_response(
             {"orderID": "0x1", "status": "matched", "filledSize": "10", "avgPrice": "0.73"}
@@ -680,7 +680,7 @@ class TestOrderResponseFromApiResponse:
 
     def test_handles_both_orderid_spellings(self):
         """Gamma alternates between ``orderID`` and ``orderId``."""
-        from almanak.framework.connectors.polymarket.models import OrderResponse
+        from almanak.connectors.polymarket.models import OrderResponse
 
         camel = OrderResponse.from_api_response({"orderId": "0xcamel", "status": "live"})
         upper = OrderResponse.from_api_response({"orderID": "0xupper", "status": "live"})
@@ -856,7 +856,7 @@ class TestMarketData:
 
     def test_get_markets_with_filters(self, config_with_credentials):
         """Should apply filters to market query."""
-        from almanak.framework.connectors.polymarket.models import MarketFilters
+        from almanak.connectors.polymarket.models import MarketFilters
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1379,7 +1379,7 @@ class TestPositions:
 
     def test_get_positions_with_filters(self, config_with_credentials):
         """Should apply filters to position query."""
-        from almanak.framework.connectors.polymarket.models import PositionFilters
+        from almanak.connectors.polymarket.models import PositionFilters
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1512,7 +1512,7 @@ class TestTrades:
         """Should apply filters to trade query."""
         from datetime import datetime
 
-        from almanak.framework.connectors.polymarket.models import TradeFilters
+        from almanak.connectors.polymarket.models import TradeFilters
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1612,7 +1612,7 @@ class TestConfigurableUrls:
 
     def test_default_data_api_url(self, test_account):
         """Default data_api_base_url should be the standard endpoint."""
-        from almanak.framework.connectors.polymarket.models import DATA_API_BASE_URL
+        from almanak.connectors.polymarket.models import DATA_API_BASE_URL
 
         config = PolymarketConfig(
             wallet_address=test_account.address,
@@ -1645,7 +1645,7 @@ class TestConfigurableUrls:
 
     def test_from_env_without_data_api_url_uses_default(self, test_account, monkeypatch):
         """from_env() should use default when POLYMARKET_DATA_API_URL not set."""
-        from almanak.framework.connectors.polymarket.models import DATA_API_BASE_URL
+        from almanak.connectors.polymarket.models import DATA_API_BASE_URL
 
         monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", test_account.address)
         monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", test_account.key.hex())
@@ -1726,7 +1726,7 @@ class TestTokenBucketRateLimiter:
 
     def test_initial_state_full_bucket(self):
         """Rate limiter should start with a full bucket."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
         assert limiter.available_tokens == 10.0
@@ -1735,7 +1735,7 @@ class TestTokenBucketRateLimiter:
 
     def test_acquire_consumes_token(self):
         """acquire() should consume one token from the bucket."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
         initial_tokens = limiter.available_tokens
@@ -1747,7 +1747,7 @@ class TestTokenBucketRateLimiter:
 
     def test_acquire_multiple_times(self):
         """Multiple acquires should consume multiple tokens."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
@@ -1760,7 +1760,7 @@ class TestTokenBucketRateLimiter:
 
     def test_try_acquire_non_blocking(self):
         """try_acquire() should not block and return immediately."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
@@ -1778,7 +1778,7 @@ class TestTokenBucketRateLimiter:
 
     def test_disabled_limiter_always_succeeds(self):
         """Disabled rate limiter should always allow requests."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=1.0, enabled=False)
 
@@ -1789,7 +1789,7 @@ class TestTokenBucketRateLimiter:
 
     def test_enable_disable_toggle(self):
         """Should be able to enable/disable rate limiter at runtime."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=1.0, enabled=True)
         assert limiter.enabled is True
@@ -1806,7 +1806,7 @@ class TestTokenBucketRateLimiter:
 
     def test_refill_over_time(self):
         """Tokens should refill over time."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=100.0)
 
@@ -1823,7 +1823,7 @@ class TestTokenBucketRateLimiter:
 
     def test_bucket_caps_at_capacity(self):
         """Bucket should not exceed capacity even after long idle time."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
@@ -1835,7 +1835,7 @@ class TestTokenBucketRateLimiter:
 
     def test_reset_restores_full_capacity(self):
         """reset() should restore the bucket to full capacity."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=10.0)
 
@@ -1850,7 +1850,7 @@ class TestTokenBucketRateLimiter:
 
     def test_acquire_with_timeout_success(self):
         """acquire() with timeout should succeed when token becomes available."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=100.0)  # Fast refill
 
@@ -1864,7 +1864,7 @@ class TestTokenBucketRateLimiter:
 
     def test_acquire_with_timeout_failure(self):
         """acquire() should return False when timeout expires."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=1.0)  # Slow refill
 
@@ -1881,7 +1881,7 @@ class TestTokenBucketRateLimiter:
 
     def test_blocking_acquire_waits(self):
         """acquire() should block when bucket is empty."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate_per_second=50.0)
 
@@ -1931,7 +1931,7 @@ class TestClobClientRateLimiting:
 
     def test_client_accepts_custom_rate_limiter(self, test_account):
         """ClobClient should accept a custom rate limiter for testing."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         config = PolymarketConfig(
             wallet_address=test_account.address,
@@ -1947,7 +1947,7 @@ class TestClobClientRateLimiting:
 
     def test_request_acquires_token(self, config):
         """Each API request should acquire a rate limit token."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         # Use a mock rate limiter to track calls
         mock_limiter = MagicMock(spec=TokenBucketRateLimiter)
@@ -1971,7 +1971,7 @@ class TestClobClientRateLimiting:
 
     def test_multiple_requests_acquire_multiple_tokens(self, config):
         """Multiple requests should acquire multiple tokens."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         mock_limiter = MagicMock(spec=TokenBucketRateLimiter)
         mock_limiter.acquire.return_value = True
@@ -1995,7 +1995,7 @@ class TestClobClientRateLimiting:
 
     def test_rate_limiting_applies_to_all_request_types(self, config_with_credentials):
         """Rate limiting should apply to GET, POST, and DELETE requests."""
-        from almanak.framework.connectors.polymarket import TokenBucketRateLimiter
+        from almanak.connectors.polymarket import TokenBucketRateLimiter
 
         mock_limiter = MagicMock(spec=TokenBucketRateLimiter)
         mock_limiter.acquire.return_value = True
@@ -2110,7 +2110,7 @@ class TestClobClientRateLimiting:
 
 def _make_test_market(neg_risk: bool) -> "GammaMarket":
     """Build a minimal GammaMarket for signing tests."""
-    from almanak.framework.connectors.polymarket.models import GammaMarket
+    from almanak.connectors.polymarket.models import GammaMarket
 
     return GammaMarket(
         id="test-market",
@@ -2139,7 +2139,7 @@ class TestV2OrderSigning:
         """V2 BUY on a regular CTF market: signature recovers to EOA, domain == CTF V2."""
         from eth_account.messages import encode_typed_data as encode_typed_data_local
 
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             CTF_EXCHANGE_V2,
             ORDER_TYPES,
             LimitOrderParams,
@@ -2182,7 +2182,7 @@ class TestV2OrderSigning:
 
     def test_v2_limit_order_routes_to_neg_risk_exchange(self, config_with_credentials):
         """Neg-risk markets must sign with NegRisk Exchange V2 in the domain."""
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             NEG_RISK_EXCHANGE_V2,
             LimitOrderParams,
         )
@@ -2202,7 +2202,7 @@ class TestV2OrderSigning:
 
     def test_v2_unsigned_order_struct_has_v2_fields_only(self, config_with_credentials):
         """V2 signed struct: 11 fields, includes timestamp/metadata/builder, drops V1 fields."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="1", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2236,7 +2236,7 @@ class TestV2OrderSigning:
 
     def test_v2_api_payload_uses_v2_wire_shape(self, config_with_credentials):
         """SignedOrder.to_api_payload() must produce the V2 envelope shape."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="42", side="SELL", price=Decimal("0.75"), size=Decimal("100"))
@@ -2262,7 +2262,7 @@ class TestV2OrderSigning:
         """V2 limit-order builder must reject missing market — needed for
         tick/min-size validation AND neg-risk routing. A None market would
         silently route to CTFv2 in V1; V2 fails fast instead."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="1", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2273,7 +2273,7 @@ class TestV2OrderSigning:
     def test_v2_build_market_order_requires_market(self, config_with_credentials):
         """V2 market-order builder must reject missing market — same constraint
         as limit orders (validation + neg-risk routing)."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(token_id="1", side="BUY", amount=Decimal("100"))
@@ -2289,7 +2289,7 @@ class TestV2OrderSigning:
         future divergence (e.g. someone hardcoding CTFv2 in build_market_order)
         would only surface here.
         """
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             NEG_RISK_EXCHANGE_V2,
             MarketOrderParams,
         )
@@ -2307,7 +2307,7 @@ class TestV2OrderSigning:
         path works end-to-end for market orders, not just limit orders."""
         from eth_account.messages import encode_typed_data as encode_typed_data_local
 
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             ORDER_TYPES,
             MarketOrderParams,
             build_ctf_exchange_domain,
@@ -2381,7 +2381,7 @@ class TestV2OrderBuilding:
 
     def test_build_limit_order_buy(self, config_with_credentials):
         """V2 BUY limit: maker = pUSD-out, taker = shares-in, ratio == price."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2404,7 +2404,7 @@ class TestV2OrderBuilding:
 
     def test_build_limit_order_sell(self, config_with_credentials):
         """V2 SELL limit: maker = shares-out, taker = pUSD-in."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2425,7 +2425,7 @@ class TestV2OrderBuilding:
         """V2: LimitOrderParams.expiration routes to UnsignedOrder.api_expiration
         (wire-only GTD, NOT signed). The signed `timestamp` is the order
         creation time, not the expiry."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         expiration = int(time.time()) + 3600  # 1 hour out
@@ -2445,8 +2445,8 @@ class TestV2OrderBuilding:
 
     def test_build_limit_order_invalid_price_too_low(self, config_with_credentials):
         """Reject prices below MIN_PRICE (0.01)."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidPriceError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidPriceError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2463,8 +2463,8 @@ class TestV2OrderBuilding:
 
     def test_build_limit_order_invalid_price_too_high(self, config_with_credentials):
         """Reject prices above MAX_PRICE (0.99)."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidPriceError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidPriceError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2480,8 +2480,8 @@ class TestV2OrderBuilding:
 
     def test_build_limit_order_size_too_small(self, config_with_credentials):
         """Reject sizes below the per-market shares minimum."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2498,7 +2498,7 @@ class TestV2OrderBuilding:
 
     def test_build_market_order_buy(self, config_with_credentials):
         """V2 market BUY: maker pUSD snapped to keep ratio == worst_price."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
@@ -2520,7 +2520,7 @@ class TestV2OrderBuilding:
 
     def test_build_market_order_sell(self, config_with_credentials):
         """V2 market SELL: maker shares-out, taker pUSD-in at worst_price."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
@@ -2539,7 +2539,7 @@ class TestV2OrderBuilding:
 
     def test_build_market_order_default_worst_price_buy(self, config_with_credentials):
         """No worst_price on a BUY → use MAX_PRICE (0.99) as the implied price."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
@@ -2556,7 +2556,7 @@ class TestV2OrderBuilding:
 
     def test_build_market_order_default_worst_price_sell(self, config_with_credentials):
         """No worst_price on a SELL → use MIN_PRICE (0.01)."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
@@ -2573,7 +2573,7 @@ class TestV2OrderBuilding:
 
     def test_build_market_order_no_worst_price_uses_defaults(self, config_with_credentials):
         """Builder accepts a None worst_price by defaulting to MAX/MIN_PRICE."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
@@ -2583,7 +2583,7 @@ class TestV2OrderBuilding:
 
     def test_salt_is_random(self, config_with_credentials):
         """Salt must vary across orders to prevent replay collisions."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2601,7 +2601,7 @@ class TestV2OrderBuilding:
     def test_v2_timestamp_is_recent_milliseconds(self, config_with_credentials):
         """V2 introduces a `timestamp` (ms) on the signed struct in lieu of V1's
         nonce. Confirm it is set to *now* in milliseconds."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
@@ -2620,7 +2620,7 @@ class TestV2OrderBuilding:
 
     def test_v2_market_order_no_api_expiration(self, config_with_credentials):
         """Market orders should not carry GTD; api_expiration must be 0."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market()
@@ -2635,7 +2635,7 @@ class TestV2OrderBuilding:
 
     def test_v2_metadata_and_builder_set_correctly(self, config_with_credentials):
         """Metadata is BYTES32_ZERO; builder is the configured builder_code."""
-        from almanak.framework.connectors.polymarket.models import BYTES32_ZERO, LimitOrderParams
+        from almanak.connectors.polymarket.models import BYTES32_ZERO, LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market()
@@ -2651,7 +2651,7 @@ class TestV2OrderSigningAdditional:
 
     def test_sign_order_produces_valid_signature(self, config_with_credentials, test_account):
         """Signature must be `0x`-prefixed 65-byte hex (132 chars)."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2667,7 +2667,7 @@ class TestV2OrderSigningAdditional:
 
     def test_create_and_sign_limit_order(self, config_with_credentials):
         """Convenience helper builds + signs a limit order in one call."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2681,7 +2681,7 @@ class TestV2OrderSigningAdditional:
 
     def test_create_and_sign_market_order(self, config_with_credentials):
         """Convenience helper builds + signs a market order in one call."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
@@ -2705,7 +2705,7 @@ class TestV2OrderSubmission:
 
     def test_submit_limit_order_success(self, config_with_credentials):
         """submit_order parses the OrderResponse from the API JSON."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         api_response = {
             "orderID": "0x123abc",
@@ -2739,7 +2739,7 @@ class TestV2OrderSubmission:
 
     def test_submit_order_with_order_type(self, config_with_credentials):
         """orderType field on the submission body must match the requested OrderType."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams, OrderType
+        from almanak.connectors.polymarket.models import LimitOrderParams, OrderType
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -2858,7 +2858,7 @@ class TestV2OrderPayload:
 
     def test_unsigned_order_to_struct(self, config_with_credentials):
         """to_struct() produces the V2 EIP-712 11-field message."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2884,7 +2884,7 @@ class TestV2OrderPayload:
     def test_signed_order_to_api_payload_sell(self, config_with_credentials):
         """to_api_payload(): top-level {order, owner, orderType}; side as string;
         signature inside `order` with `0x` prefix; api_expiration as `expiration`."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="SELL", price=Decimal("0.75"), size=Decimal("100"))
@@ -2918,7 +2918,7 @@ class TestV2OrderPayload:
 
     def test_signed_order_to_api_payload_buy_side_is_string(self, config_with_credentials):
         """BUY intent must serialize to "side": "BUY" (string), not 0."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2932,7 +2932,7 @@ class TestV2OrderPayload:
 
     def test_signed_order_payload_repairs_missing_0x(self, config_with_credentials):
         """Defense in depth: signature without `0x` is auto-prefixed in payload."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams, SignedOrder
+        from almanak.connectors.polymarket.models import LimitOrderParams, SignedOrder
 
         client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2946,7 +2946,7 @@ class TestV2OrderPayload:
 
     def test_signed_order_api_expiration_carries_through(self, config_with_credentials):
         """api_expiration set on UnsignedOrder serializes to `expiration` on the wire."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         expiration = int(time.time()) + 7200
@@ -2970,7 +2970,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_validate_size_uses_default_when_no_market(self, config_with_credentials):
         """No market → DEFAULT_MIN_ORDER_SIZE (5)."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
         client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -2980,7 +2980,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_validate_size_uses_market_min_size(self, config_with_credentials):
         """market.order_min_size overrides the default."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="10")
@@ -2993,7 +2993,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_validate_size_explicit_min_overrides_market(self, config_with_credentials):
         """An explicit min_size beats the market value."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
@@ -3004,8 +3004,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_limit_order_with_market_min_size(self, config_with_credentials):
         """build_limit_order must validate size against market.order_min_size."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="15")
@@ -3017,7 +3017,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_limit_order_passes_with_market_min_size(self, config_with_credentials):
         """At-or-above the market minimum, build_limit_order succeeds."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="15")
@@ -3027,8 +3027,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_market_order_buy_with_market_min_size(self, config_with_credentials):
         """Market BUY: expected shares (= amount / worst_price) checked against min."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="20")
@@ -3044,8 +3044,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_market_order_sell_with_market_min_size(self, config_with_credentials):
         """Market SELL: amount IS shares; checked directly against min."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="25")
@@ -3061,8 +3061,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_create_and_sign_limit_order_passes_market(self, config_with_credentials):
         """create_and_sign forwards market metadata to the validator."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="50")
@@ -3073,8 +3073,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_create_and_sign_market_order_passes_market(self, config_with_credentials):
         """create_and_sign forwards market metadata to the validator (market order)."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="100")
@@ -3100,8 +3100,8 @@ class TestV2MarketSpecificMinimumOrderSize:
     )
     def test_various_market_minimums(self, config_with_credentials, min_size, invalid_size):
         """Common market minimums, all rejected when sub-min."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size=min_size)
@@ -3111,8 +3111,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_error_message_contains_actual_market_minimum(self, config_with_credentials):
         """Error message should reflect the *market's* minimum, not the default."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="42.5")
@@ -3124,7 +3124,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_validate_order_value_usd_below_floor(self, config_with_credentials):
         """The $1 USD floor on BUYs uses ``$``-prefixed values for clarity."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
         client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -3140,8 +3140,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_limit_order_buy_rejects_sub_dollar_notional(self, config_with_credentials):
         """5 shares × $0.06 = $0.30: passes share check but fails $1 floor."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
@@ -3152,7 +3152,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_limit_order_sell_not_subject_to_usd_floor(self, config_with_credentials):
         """SELL maker is shares; the $1 floor must NOT fire."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
@@ -3161,8 +3161,8 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_build_market_order_buy_rejects_sub_dollar_amount(self, config_with_credentials):
         """Market BUY < $1 fails locally before hitting the wire."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
@@ -3190,7 +3190,7 @@ class TestV2TickSizeValidation:
 
     def test_validate_tick_size_invalid_price(self, config_with_credentials):
         """Default tick: 0.505 fails."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
@@ -3201,7 +3201,7 @@ class TestV2TickSizeValidation:
 
     def test_validate_tick_size_with_market(self, config_with_credentials):
         """market.order_price_min_tick_size is used when provided."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
@@ -3212,7 +3212,7 @@ class TestV2TickSizeValidation:
 
     def test_validate_tick_size_explicit_overrides_market(self, config_with_credentials):
         """Explicit tick_size kwarg wins over market.order_price_min_tick_size."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
@@ -3253,8 +3253,8 @@ class TestV2TickSizeValidation:
 
     def test_build_limit_order_validates_tick_size(self, config_with_credentials):
         """build_limit_order rejects an off-tick price for the market's tick."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
@@ -3266,7 +3266,7 @@ class TestV2TickSizeValidation:
 
     def test_build_limit_order_passes_with_valid_tick(self, config_with_credentials):
         """On-tick price passes."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
@@ -3276,8 +3276,8 @@ class TestV2TickSizeValidation:
 
     def test_build_market_order_validates_worst_price_tick(self, config_with_credentials):
         """worst_price must conform to tick size."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
@@ -3304,7 +3304,7 @@ class TestV2TickSizeValidation:
     )
     def test_various_tick_sizes(self, config_with_credentials, tick_size, price, should_pass):
         """Tick sizes 0.1, 0.01, 0.001 — all enforced."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick_size)
@@ -3316,7 +3316,7 @@ class TestV2TickSizeValidation:
 
     def test_error_message_includes_nearest_valid(self, config_with_credentials):
         """Error carries the nearest valid price (helpful for callers)."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
@@ -3326,7 +3326,7 @@ class TestV2TickSizeValidation:
 
     def test_tiny_tick_size_precision(self, config_with_credentials):
         """0.0001 tick: 0.5001 valid, 0.50015 invalid."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
+        from almanak.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.0001")
@@ -3353,7 +3353,7 @@ class TestV2RatioPreservation:
     )
     def test_market_buy_ratio_equals_tick_aligned_price(self, config_with_credentials, price, tick):
         """Market BUY: maker/taker == price exactly, on the shares-step grid."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick)
@@ -3373,7 +3373,7 @@ class TestV2RatioPreservation:
 
     def test_market_buy_on_tick_0001_regression(self, config_with_credentials):
         """0.001 tick: 81.481 shares @ 0.99 — pre-fix ratio drifted off-tick."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
@@ -3395,7 +3395,7 @@ class TestV2RatioPreservation:
     )
     def test_limit_order_ratio_equals_price(self, config_with_credentials, price, tick):
         """Limit BUY/SELL: ratio == price for both sides."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick)
@@ -3416,7 +3416,7 @@ class TestV2RatioPreservation:
 
     def test_market_sell_ratio_equals_price(self, config_with_credentials):
         """Market SELL: taker/maker == worst_price exactly."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
@@ -3432,8 +3432,8 @@ class TestV2RatioPreservation:
 
     def test_post_snap_revalidation_rejects_sub_dollar_buy(self, config_with_credentials):
         """Pre-snap notional ≥ $1 but post-snap drops below — must reject locally."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
@@ -3453,8 +3453,8 @@ class TestV2RatioPreservation:
 
     def test_buy_at_dollar_floor_with_low_min_size_rejected_post_snap(self, config_with_credentials):
         """A low per-market shares minimum doesn't suppress the post-snap $1 floor."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+        from almanak.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.connectors.polymarket.models import MarketOrderParams
 
         client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01", order_min_size="0.1")
@@ -3543,7 +3543,7 @@ class TestV2OrderSigningRemote:
         assert headers["POLY_SIGNATURE"] == "0x" + "ab" * 32 + "cd" * 32 + "1b"
 
     def test_sign_order_uses_remote_signer(self, remote_config, test_account):
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+        from almanak.connectors.polymarket.models import LimitOrderParams
 
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.post.return_value = self._make_signer_response("11" * 32, "22" * 32, 28)

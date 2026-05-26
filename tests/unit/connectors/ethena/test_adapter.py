@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.ethena.adapter import (
+from almanak.connectors.ethena.adapter import (
     DEFAULT_GAS_ESTIMATES,
     ETHENA_ADDRESSES,
     ETHENA_COOLDOWN_ASSETS_SELECTOR,
@@ -1035,7 +1035,7 @@ class TestEthenaABISelectors:
         """ETHENA_UNSTAKE_SELECTOR must be keccak('unstake(address)')[:4]."""
         from web3 import Web3
 
-        from almanak.framework.connectors.ethena.adapter import ETHENA_UNSTAKE_SELECTOR
+        from almanak.connectors.ethena.adapter import ETHENA_UNSTAKE_SELECTOR
 
         expected = "0x" + Web3.keccak(text="unstake(address)").hex()[:8]  # 4 bytes = 8 hex chars
         assert ETHENA_UNSTAKE_SELECTOR == expected, (
@@ -1048,7 +1048,7 @@ class TestEthenaABISelectors:
         """ETHENA_COOLDOWN_ASSETS_SELECTOR must be keccak('cooldownAssets(uint256)')[:4]."""
         from web3 import Web3
 
-        from almanak.framework.connectors.ethena.adapter import ETHENA_COOLDOWN_ASSETS_SELECTOR
+        from almanak.connectors.ethena.adapter import ETHENA_COOLDOWN_ASSETS_SELECTOR
 
         expected = "0x" + Web3.keccak(text="cooldownAssets(uint256)").hex()[:8]
         assert ETHENA_COOLDOWN_ASSETS_SELECTOR == expected, (
@@ -1060,7 +1060,7 @@ class TestEthenaABISelectors:
         """ETHENA_COOLDOWN_SHARES_SELECTOR must be keccak('cooldownShares(uint256)')[:4]."""
         from web3 import Web3
 
-        from almanak.framework.connectors.ethena.adapter import ETHENA_COOLDOWN_SHARES_SELECTOR
+        from almanak.connectors.ethena.adapter import ETHENA_COOLDOWN_SHARES_SELECTOR
 
         expected = "0x" + Web3.keccak(text="cooldownShares(uint256)").hex()[:8]
         assert ETHENA_COOLDOWN_SHARES_SELECTOR == expected, (
@@ -1072,7 +1072,7 @@ class TestEthenaABISelectors:
         """ETHENA_DEPOSIT_SELECTOR must be keccak('deposit(uint256,address)')[:4]."""
         from web3 import Web3
 
-        from almanak.framework.connectors.ethena.adapter import ETHENA_DEPOSIT_SELECTOR
+        from almanak.connectors.ethena.adapter import ETHENA_DEPOSIT_SELECTOR
 
         expected = "0x" + Web3.keccak(text="deposit(uint256,address)").hex()[:8]
         assert ETHENA_DEPOSIT_SELECTOR == expected, (

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN, PT_TOKEN_INFO, PendleSDK
+from almanak.connectors.pendle.sdk import MARKET_BY_PT_TOKEN, PT_TOKEN_INFO, PendleSDK
 
 
 @pytest.fixture
@@ -22,19 +22,19 @@ def mock_resolver():
 class TestPendleSDKResolverInit:
     """Test PendleSDK initializes with TokenResolver."""
 
-    @patch("almanak.framework.connectors.pendle.sdk.Web3")
+    @patch("almanak.connectors.pendle.sdk.Web3")
     def test_custom_resolver_injected(self, mock_web3, mock_resolver):
         """Test custom resolver is used when provided."""
         sdk = PendleSDK(rpc_url="http://localhost:8545", chain="arbitrum", token_resolver=mock_resolver)
         assert sdk._token_resolver is mock_resolver
 
-    @patch("almanak.framework.connectors.pendle.sdk.Web3")
+    @patch("almanak.connectors.pendle.sdk.Web3")
     def test_default_resolver_initialized(self, mock_web3):
         """Test default resolver is initialized when not provided."""
         sdk = PendleSDK(rpc_url="http://localhost:8545", chain="arbitrum")
         assert sdk._token_resolver is not None
 
-    @patch("almanak.framework.connectors.pendle.sdk.Web3")
+    @patch("almanak.connectors.pendle.sdk.Web3")
     def test_resolver_init_failure_graceful(self, mock_web3, mock_resolver):
         """Test SDK works even if resolver init is set to None."""
         sdk = PendleSDK(rpc_url="http://localhost:8545", chain="arbitrum", token_resolver=mock_resolver)

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
+from almanak.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,

@@ -12,7 +12,7 @@ Usage:
 
 import pytest
 
-from almanak.framework.connectors.balancer.adapter import (
+from almanak.connectors.balancer_v2.adapter import (
     BALANCER_FLASH_LOAN_SELECTOR,
     BALANCER_VAULT_ADDRESSES,
     DEFAULT_GAS_ESTIMATES,

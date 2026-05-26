@@ -45,8 +45,8 @@ from typing import Any
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.base.lending import aave_helpers as cl
-from almanak.framework.connectors.base.lending.aave_helpers import assert_lending_reserve_active
+from almanak.connectors._strategy_base.base.lending import aave_helpers as cl
+from almanak.connectors._strategy_base.base.lending.aave_helpers import assert_lending_reserve_active
 
 # Token addresses (mainnet — same on the Anvil forks).
 WETH_ETHEREUM = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"

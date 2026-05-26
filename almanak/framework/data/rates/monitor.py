@@ -941,7 +941,7 @@ class RateMonitor:
         """
         import httpx
 
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         # Resolve Comet address for this token on this chain
         market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
@@ -1068,7 +1068,7 @@ class RateMonitor:
 
         # Verify this token's Comet market exists on the current chain to avoid
         # returning placeholder rates for markets that don't exist (e.g. USDC on Polygon).
-        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
         if market_key is None or market_key not in COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {}):

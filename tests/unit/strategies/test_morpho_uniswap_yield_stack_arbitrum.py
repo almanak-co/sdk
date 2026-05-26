@@ -413,6 +413,6 @@ class TestMorphoBlueArbitrumConfig:
         assert "USDC" in MORPHO_BLUE_TOKENS["arbitrum"]
 
     def test_adapter_accepts_arbitrum(self):
-        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
+        from almanak.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
 
         assert "arbitrum" in MORPHO_BLUE_ADDRESSES

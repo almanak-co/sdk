@@ -227,11 +227,11 @@ class TestPancakeSwapV3OnChain:
         5. USDT balance increases
         6. Swap event is emitted with correct data
         """
-        from almanak.framework.connectors.pancakeswap_v3 import (
+        from almanak.connectors.pancakeswap_v3 import (
             PancakeSwapV3Adapter,
             PancakeSwapV3Config,
         )
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+        from almanak.connectors.pancakeswap_v3.receipt_parser import (
             PancakeSwapV3ReceiptParser,
         )
 
@@ -375,7 +375,7 @@ class TestPancakeSwapV3OnChain:
         2. The calldata contains a reasonable minimum output value
         3. Using placeholder prices results in lower slippage tolerance
         """
-        from almanak.framework.connectors.pancakeswap_v3 import (
+        from almanak.connectors.pancakeswap_v3 import (
             PancakeSwapV3Adapter,
             PancakeSwapV3Config,
         )

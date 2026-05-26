@@ -37,12 +37,12 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.gimo.adapter import (
+from almanak.connectors.gimo.adapter import (
     GIMO_ADDRESSES,
     GIMO_STAKE_SELECTOR,
     GIMO_UNSTAKE_SELECTOR,
 )
-from almanak.framework.connectors.gimo.receipt_parser import GimoReceiptParser
+from almanak.connectors.gimo.receipt_parser import GimoReceiptParser
 
 # Pinned independently of DEFAULT_GAS_ESTIMATES so a regression in the adapter
 # constant surfaces here instead of silently passing.

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.stargate.adapter import StargateBridgeAdapter
+from almanak.connectors.stargate.adapter import StargateBridgeAdapter
 
 
 @pytest.fixture

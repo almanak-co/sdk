@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 
 

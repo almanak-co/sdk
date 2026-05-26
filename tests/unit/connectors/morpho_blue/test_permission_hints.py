@@ -6,7 +6,7 @@ exported PermissionHints object has the expected shape.
 
 from __future__ import annotations
 
-from almanak.framework.connectors.morpho_blue.permission_hints import (
+from almanak.connectors.morpho_blue.permission_hints import (
     _MORPHO_SELECTOR_LABELS,
     _SYNTHETIC_MARKET_ID,
     PERMISSION_HINTS,

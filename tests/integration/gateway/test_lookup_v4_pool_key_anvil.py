@@ -27,10 +27,10 @@ import grpc
 import pytest
 
 from almanak.core.contracts import UNISWAP_V4
-from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
     _coerce_pool_id_bytes,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import PoolKey
+from almanak.connectors.uniswap_v4.sdk import PoolKey
 from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     INITIALIZE_EVENT_TOPIC,
     V4PoolKeyCache,

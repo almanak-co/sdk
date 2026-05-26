@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from almanak.framework.connectors.drift.client import DriftDataClient
-from almanak.framework.connectors.drift.exceptions import DriftAPIError
+from almanak.connectors.drift.client import DriftDataClient
+from almanak.connectors.drift.exceptions import DriftAPIError
 
 
 class TestDriftDataClientInit:
@@ -120,7 +120,7 @@ class TestMakeRequest:
     def setup_method(self):
         self.client = DriftDataClient()
 
-    @patch("almanak.framework.connectors.drift.client.requests.Session")
+    @patch("almanak.connectors.drift.client.requests.Session")
     def test_http_error_raises_drift_api_error(self, mock_session_cls):
         mock_session = MagicMock()
         mock_response = MagicMock()

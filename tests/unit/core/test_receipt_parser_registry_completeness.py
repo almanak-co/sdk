@@ -21,7 +21,7 @@ from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
 # Discovery
 # ---------------------------------------------------------------------------
 
-CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "framework" / "connectors"
+CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # The base/ directory contains shared infrastructure (BaseReceiptParser),
 # not a protocol-specific parser.
@@ -74,7 +74,7 @@ def test_connector_parser_registered(connector_parts: tuple[str, ...]):
     """
     connector_id = "/".join(connector_parts)
     suffix = ".".join(connector_parts)
-    expected_module = f"almanak.framework.connectors.{suffix}.receipt_parser"
+    expected_module = f"almanak.connectors.{suffix}.receipt_parser"
     assert expected_module in _REGISTERED_MODULE_PATHS, (
         f"Connector '{connector_id}' has a receipt_parser.py but no entry in "
         f"ReceiptParserRegistry._BUILTIN_LOADERS points to "
@@ -99,17 +99,17 @@ def test_no_stale_registry_entries():
     Accepts two path shapes so nested connector families (if any remain) can
     register their receipt parsers:
 
-      1. ``almanak.framework.connectors.<connector>.receipt_parser`` (5 parts)
-      2. ``almanak.framework.connectors.<family>.<connector>.receipt_parser``
-         (6 parts, one level of nesting)
+      1. ``almanak.connectors.<connector>.receipt_parser`` (4 parts)
+      2. ``almanak.connectors.<family>.<connector>.receipt_parser``
+         (5 parts, one level of nesting)
     """
     stale = []
-    expected_prefix = ("almanak", "framework", "connectors")
+    expected_prefix = ("almanak", "connectors")
     for protocol, (module_path, class_name) in ReceiptParserRegistry._BUILTIN_LOADERS.items():
         parts = module_path.split(".")
         if (
-            len(parts) not in (5, 6)
-            or tuple(parts[:3]) != expected_prefix
+            len(parts) not in (4, 5)
+            or tuple(parts[:2]) != expected_prefix
             or parts[-1] != "receipt_parser"
         ):
             stale.append(
@@ -118,7 +118,7 @@ def test_no_stale_registry_entries():
             continue
 
         # Walk the intermediate dirs between ``connectors`` and ``receipt_parser``.
-        connector_dir = CONNECTORS_DIR.joinpath(*parts[3:-1])
+        connector_dir = CONNECTORS_DIR.joinpath(*parts[2:-1])
         parser_file = connector_dir / "receipt_parser.py"
         if not parser_file.is_file():
             stale.append(f"  {protocol} -> {module_path}::{class_name}")

@@ -133,97 +133,97 @@ class ReceiptParserRegistry:
         # Format: protocol_name -> (module_path, class_name)
         # DEX / AMM Protocols
         "uniswap_v3": (
-            "almanak.framework.connectors.uniswap_v3.receipt_parser",
+            "almanak.connectors.uniswap_v3.receipt_parser",
             "UniswapV3ReceiptParser",
         ),
         "agni_finance": (
-            "almanak.framework.connectors.uniswap_v3.receipt_parser",
+            "almanak.connectors.uniswap_v3.receipt_parser",
             "UniswapV3ReceiptParser",
         ),
         "uniswap_v4": (
-            "almanak.framework.connectors.uniswap_v4.receipt_parser",
+            "almanak.connectors.uniswap_v4.receipt_parser",
             "UniswapV4ReceiptParser",
         ),
         "pancakeswap_v3": (
-            "almanak.framework.connectors.pancakeswap_v3.receipt_parser",
+            "almanak.connectors.pancakeswap_v3.receipt_parser",
             "PancakeSwapV3ReceiptParser",
         ),
         "aerodrome": (
-            "almanak.framework.connectors.aerodrome.receipt_parser",
+            "almanak.connectors.aerodrome.receipt_parser",
             "AerodromeReceiptParser",
         ),
         "aerodrome_slipstream": (
-            "almanak.framework.connectors.aerodrome.receipt_parser",
+            "almanak.connectors.aerodrome.receipt_parser",
             "AerodromeSlipstreamReceiptParser",
         ),
         "traderjoe_v2": (
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser",
+            "almanak.connectors.traderjoe_v2.receipt_parser",
             "TraderJoeV2ReceiptParser",
         ),
         "fluid": (
-            "almanak.framework.connectors.fluid.receipt_parser",
+            "almanak.connectors.fluid.receipt_parser",
             "FluidReceiptParser",
         ),
         "sushiswap_v3": (
-            "almanak.framework.connectors.sushiswap_v3.receipt_parser",
+            "almanak.connectors.sushiswap_v3.receipt_parser",
             "SushiSwapV3ReceiptParser",
         ),
         "curve": (
-            "almanak.framework.connectors.curve.receipt_parser",
+            "almanak.connectors.curve.receipt_parser",
             "CurveReceiptParser",
         ),
         # Lending Protocols
         "aave_v3": (
-            "almanak.framework.connectors.aave_v3.receipt_parser",
+            "almanak.connectors.aave_v3.receipt_parser",
             "AaveV3ReceiptParser",
         ),
         "radiant_v2": (
-            "almanak.framework.connectors.radiant_v2.receipt_parser",
+            "almanak.connectors.radiant_v2.receipt_parser",
             "RadiantV2ReceiptParser",
         ),
         "spark": (
-            "almanak.framework.connectors.spark.receipt_parser",
+            "almanak.connectors.spark.receipt_parser",
             "SparkReceiptParser",
         ),
         "morpho_blue": (
-            "almanak.framework.connectors.morpho_blue.receipt_parser",
+            "almanak.connectors.morpho_blue.receipt_parser",
             "MorphoBlueReceiptParser",
         ),
         "morpho": (
-            "almanak.framework.connectors.morpho_blue.receipt_parser",
+            "almanak.connectors.morpho_blue.receipt_parser",
             "MorphoBlueReceiptParser",
         ),  # Alias for morpho_blue
         "curvance": (
-            "almanak.framework.connectors.curvance.receipt_parser",
+            "almanak.connectors.curvance.receipt_parser",
             "CurvanceReceiptParser",
         ),
         "compound_v3": (
-            "almanak.framework.connectors.compound_v3.receipt_parser",
+            "almanak.connectors.compound_v3.receipt_parser",
             "CompoundV3ReceiptParser",
         ),
         "benqi": (
-            "almanak.framework.connectors.benqi.receipt_parser",
+            "almanak.connectors.benqi.receipt_parser",
             "BenqiReceiptParser",
         ),
         "joelend": (
-            "almanak.framework.connectors.joelend.receipt_parser",
+            "almanak.connectors.joelend.receipt_parser",
             "JoeLendReceiptParser",
         ),
         "euler_v2": (
-            "almanak.framework.connectors.euler_v2.receipt_parser",
+            "almanak.connectors.euler_v2.receipt_parser",
             "EulerV2ReceiptParser",
         ),
         "silo_v2": (
-            "almanak.framework.connectors.silo_v2.receipt_parser",
+            "almanak.connectors.silo_v2.receipt_parser",
             "SiloV2ReceiptParser",
         ),
         # Perpetuals
         "drift": (
-            "almanak.framework.connectors.drift.receipt_parser",
+            "almanak.connectors.drift.receipt_parser",
             "DriftReceiptParser",
         ),
         "gmx_v2": (
-            "almanak.framework.connectors.gmx_v2.receipt_parser",
+            "almanak.connectors.gmx_v2.receipt_parser",
             "GMXv2ReceiptParser",
         ),
         # Aster Perps is canonical; pancakeswap_perps is a shim that routes to
@@ -234,106 +234,106 @@ class ReceiptParserRegistry:
         # the registry-completeness invariant — "every receipt_parser.py gets
         # a matching registry entry" — still holds after the extraction.
         "aster_perps": (
-            "almanak.framework.connectors.aster_perps.receipt_parser",
+            "almanak.connectors.aster_perps.receipt_parser",
             "AsterPerpsReceiptParser",
         ),
         "pancakeswap_perps": (
-            "almanak.framework.connectors.pancakeswap_perps.receipt_parser",
+            "almanak.connectors.pancakeswap_perps.receipt_parser",
             "PancakeSwapPerpsReceiptParser",
         ),
         # Staking Protocols
         "lido": (
-            "almanak.framework.connectors.lido.receipt_parser",
+            "almanak.connectors.lido.receipt_parser",
             "LidoReceiptParser",
         ),
         "ethena": (
-            "almanak.framework.connectors.ethena.receipt_parser",
+            "almanak.connectors.ethena.receipt_parser",
             "EthenaReceiptParser",
         ),
         "gimo": (
-            "almanak.framework.connectors.gimo.receipt_parser",
+            "almanak.connectors.gimo.receipt_parser",
             "GimoReceiptParser",
         ),
         # Aggregators
         "enso": (
-            "almanak.framework.connectors.enso.receipt_parser",
+            "almanak.connectors.enso.receipt_parser",
             "EnsoReceiptParser",
         ),
         "lifi": (
-            "almanak.framework.connectors.lifi.receipt_parser",
+            "almanak.connectors.lifi.receipt_parser",
             "LiFiReceiptParser",
         ),
         # Cross-Chain Bridges (VIB-3226)
         "across": (
-            "almanak.framework.connectors.across.receipt_parser",
+            "almanak.connectors.across.receipt_parser",
             "AcrossReceiptParser",
         ),
         "stargate": (
-            "almanak.framework.connectors.stargate.receipt_parser",
+            "almanak.connectors.stargate.receipt_parser",
             "StargateReceiptParser",
         ),
         # Yield / Structured Products
         "pendle": (
-            "almanak.framework.connectors.pendle.receipt_parser",
+            "almanak.connectors.pendle.receipt_parser",
             "PendleReceiptParser",
         ),
         # Prediction Markets
         "polymarket": (
-            "almanak.framework.connectors.polymarket.receipt_parser",
+            "almanak.connectors.polymarket.receipt_parser",
             "PolymarketReceiptParser",
         ),
         # Vault Protocols
         "lagoon": (
-            "almanak.framework.connectors.lagoon.receipt_parser",
+            "almanak.connectors.lagoon.receipt_parser",
             "LagoonReceiptParser",
         ),
         "metamorpho": (
-            "almanak.framework.connectors.morpho_vault.receipt_parser",
+            "almanak.connectors.morpho_vault.receipt_parser",
             "MetaMorphoReceiptParser",
         ),
         # Solana Aggregators
         "jupiter": (
-            "almanak.framework.connectors.jupiter.receipt_parser",
+            "almanak.connectors.jupiter.receipt_parser",
             "JupiterReceiptParser",
         ),
         # Solana Lending
         "kamino": (
-            "almanak.framework.connectors.kamino.receipt_parser",
+            "almanak.connectors.kamino.receipt_parser",
             "KaminoReceiptParser",
         ),
         "kamino_klend": (
-            "almanak.framework.connectors.kamino.receipt_parser",
+            "almanak.connectors.kamino.receipt_parser",
             "KaminoReceiptParser",
         ),  # Alias for kamino
         "jupiter_lend": (
-            "almanak.framework.connectors.jupiter_lend.receipt_parser",
+            "almanak.connectors.jupiter_lend.receipt_parser",
             "JupiterLendReceiptParser",
         ),
         # Solana LP
         "raydium_clmm": (
-            "almanak.framework.connectors.raydium.receipt_parser",
+            "almanak.connectors.raydium.receipt_parser",
             "RaydiumReceiptParser",
         ),
         "raydium": (
-            "almanak.framework.connectors.raydium.receipt_parser",
+            "almanak.connectors.raydium.receipt_parser",
             "RaydiumReceiptParser",
         ),  # Alias for raydium_clmm
         # Solana DLMM LP
         "meteora_dlmm": (
-            "almanak.framework.connectors.meteora.receipt_parser",
+            "almanak.connectors.meteora.receipt_parser",
             "MeteoraReceiptParser",
         ),
         "meteora": (
-            "almanak.framework.connectors.meteora.receipt_parser",
+            "almanak.connectors.meteora.receipt_parser",
             "MeteoraReceiptParser",
         ),  # Alias for meteora_dlmm
         # Solana CLMM LP (Orca Whirlpools)
         "orca_whirlpools": (
-            "almanak.framework.connectors.orca.receipt_parser",
+            "almanak.connectors.orca.receipt_parser",
             "OrcaReceiptParser",
         ),
         "orca": (
-            "almanak.framework.connectors.orca.receipt_parser",
+            "almanak.connectors.orca.receipt_parser",
             "OrcaReceiptParser",
         ),  # Alias for orca_whirlpools
     }
@@ -363,7 +363,7 @@ class ReceiptParserRegistry:
             ValueError: If protocol is not registered
         """
         # Normalize protocol name (resolve aliases like "agni" -> "uniswap_v3")
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         protocol_lower = normalize_protocol(kwargs.get("chain", ""), protocol)
 

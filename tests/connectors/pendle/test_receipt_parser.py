@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.pendle import (
+from almanak.connectors.pendle import (
     EVENT_TOPICS,
     PendleEventType,
     PendleReceiptParser,

@@ -228,7 +228,7 @@ class TestRadiantV2ReceiptParser:
         }
 
     def test_decode_deposit_with_indexed_referral(self):
-        from almanak.framework.connectors.radiant_v2.receipt_parser import (
+        from almanak.connectors.radiant_v2.receipt_parser import (
             EVENT_TOPICS,
             RadiantV2ReceiptParser,
         )
@@ -262,7 +262,7 @@ class TestRadiantV2ReceiptParser:
         assert int(result.supplies[0].amount) == amount
 
     def test_decode_borrow_with_indexed_referral(self):
-        from almanak.framework.connectors.radiant_v2.receipt_parser import (
+        from almanak.connectors.radiant_v2.receipt_parser import (
             EVENT_TOPICS,
             RadiantV2ReceiptParser,
         )

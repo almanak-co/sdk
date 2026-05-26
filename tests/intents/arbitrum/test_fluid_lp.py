@@ -11,8 +11,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.fluid.receipt_parser import FluidReceiptParser
-from almanak.framework.connectors.fluid.sdk import FluidSDK, FluidSDKError
+from almanak.connectors.fluid.receipt_parser import FluidReceiptParser
+from almanak.connectors.fluid.sdk import FluidSDK, FluidSDKError
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 

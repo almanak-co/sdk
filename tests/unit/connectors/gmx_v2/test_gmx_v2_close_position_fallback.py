@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config
+from almanak.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ class TestClosePositionFullClose:
 
     def test_close_with_cached_position_uses_position_size(self, adapter):
         """When a cached position exists, close_position should use its size."""
-        from almanak.framework.connectors.gmx_v2.adapter import GMXv2Position
+        from almanak.connectors.gmx_v2.adapter import GMXv2Position
 
         # Simulate a cached position
         market_address = adapter._resolve_market("ETH/USD")

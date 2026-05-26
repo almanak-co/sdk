@@ -10,7 +10,7 @@ import time
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.contract_registry import ContractInfo, ContractRegistry
+from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.data.wallet_activity import WalletActivityProvider
 from almanak.framework.services.copy_signal_engine import CopySignalEngine
 from almanak.framework.services.copy_sizer import CopySizer, CopySizingConfig
@@ -140,7 +140,7 @@ def _make_registry():
         ContractInfo(
             protocol="uniswap_v3",
             contract_type="swap_router",
-            parser_module="almanak.framework.connectors.uniswap_v3.receipt_parser",
+            parser_module="almanak.connectors.uniswap_v3.receipt_parser",
             parser_class_name="UniswapV3ReceiptParser",
         ),
     )
@@ -151,7 +151,7 @@ def _make_engine(registry, mock_parser):
     """Create a CopySignalEngine with a mock parser pre-cached."""
     engine = CopySignalEngine(registry=registry, max_age_seconds=300, retention_days=7)
     cache_key = (
-        "almanak.framework.connectors.uniswap_v3.receipt_parser"
+        "almanak.connectors.uniswap_v3.receipt_parser"
         f".UniswapV3ReceiptParser:{CHAIN}"
     )
     engine._parser_cache[cache_key] = mock_parser

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.adapter import (
+from almanak.connectors.aave_v3.adapter import (
     AaveV3Adapter,
     AaveV3Config,
 )
@@ -206,7 +206,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.aave_v3.adapter as adapter_module
+        import almanak.connectors.aave_v3.adapter as adapter_module
 
         assert not hasattr(adapter_module, "AAVE_V3_TOKEN_ADDRESSES")
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")

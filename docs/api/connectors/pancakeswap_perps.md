@@ -135,7 +135,7 @@ gateway-side equity-oracle support; see the design doc follow-ups.
 
 ## API Reference
 
-::: almanak.framework.connectors.pancakeswap_perps
+::: almanak.connectors.pancakeswap_perps
     options:
       show_root_heading: true
       members_order: source

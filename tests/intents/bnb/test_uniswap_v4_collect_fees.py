@@ -96,8 +96,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
-from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
+from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
+from almanak.connectors.uniswap_v4.sdk import UniswapV4SDK
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,

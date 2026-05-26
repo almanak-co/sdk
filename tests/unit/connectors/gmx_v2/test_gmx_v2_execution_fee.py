@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.sdk import (
+from almanak.connectors.gmx_v2.sdk import (
     DECREASE_ORDER_GAS_LIMIT,
     GMX_GAS_BASE_AMOUNT,
     GMX_GAS_MULTIPLIER,
@@ -37,7 +37,7 @@ class TestAdjustedGasLimitFormula:
 class TestGetExecutionFee:
     """Test get_execution_fee uses the adjusted formula."""
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_execution_fee_uses_adjusted_gas_limit(self, mock_web3_cls):
         """Execution fee = adjustedGasLimit * gasPrice * multiplier."""
         mock_web3 = MagicMock()
@@ -58,7 +58,7 @@ class TestGetExecutionFee:
         old_formula_fee = int(3_000_000 * 1_000_000_000 * 1.0)
         assert fee > old_formula_fee * 2
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_execution_fee_with_safety_multiplier(self, mock_web3_cls):
         """Default 1.5x multiplier applied on top of adjusted gas limit."""
         mock_web3 = MagicMock()
@@ -73,7 +73,7 @@ class TestGetExecutionFee:
         expected = int(7_570_000 * 1_000_000_000 * 1.5)
         assert fee == expected
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_execution_fee_respects_minimum(self, mock_web3_cls):
         """Fee should be at least MIN_EXECUTION_FEE_FALLBACK."""
         mock_web3 = MagicMock()
@@ -86,7 +86,7 @@ class TestGetExecutionFee:
         fee = sdk.get_execution_fee(order_type="increase", multiplier=1.0)
         assert fee == MIN_EXECUTION_FEE_FALLBACK
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_execution_fee_fallback_on_rpc_error(self, mock_web3_cls):
         """On RPC failure, returns 2x minimum fallback."""
         mock_web3 = MagicMock()

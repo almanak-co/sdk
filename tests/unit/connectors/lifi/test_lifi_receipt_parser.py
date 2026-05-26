@@ -2,7 +2,7 @@
 
 import pytest
 
-from almanak.framework.connectors.lifi.receipt_parser import (
+from almanak.connectors.lifi.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     LiFiReceiptParser,
     LiFiSwapResult,

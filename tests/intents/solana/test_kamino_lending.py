@@ -285,7 +285,7 @@ class TestKaminoSupplyExecution:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Layer 3: Receipt parser
-        from almanak.framework.connectors.kamino import KaminoReceiptParser
+        from almanak.connectors.kamino import KaminoReceiptParser
 
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:

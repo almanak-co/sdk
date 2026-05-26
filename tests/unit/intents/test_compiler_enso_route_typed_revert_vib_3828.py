@@ -32,12 +32,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.enso.exceptions import (
+from almanak.connectors.enso.exceptions import (
     EnsoAPIError,
     EnsoRouterRevertError,
 )
-from almanak.framework.connectors.enso.compiler import EnsoCompiler
-from almanak.framework.connectors.base.compiler import SwapCompilerContext
+from almanak.connectors.enso.compiler import EnsoCompiler
+from almanak.connectors._strategy_base.base.compiler import SwapCompilerContext
 from almanak.framework.intents.state_machine import IntentStateMachine
 
 
@@ -169,7 +169,7 @@ class TestEnsoClientGatewayRouteTypedRevert:
     """Pin the typed-revert behavior at the EnsoClient's gateway boundary."""
 
     def _make_client(self) -> object:
-        from almanak.framework.connectors.enso.client import EnsoClient
+        from almanak.connectors.enso.client import EnsoClient
 
         client = EnsoClient.__new__(EnsoClient)
         client.config = MagicMock()
@@ -180,7 +180,7 @@ class TestEnsoClientGatewayRouteTypedRevert:
         return client
 
     def test_known_selector_raises_typed_revert(self) -> None:
-        from almanak.framework.connectors.enso.models import RoutingStrategy
+        from almanak.connectors.enso.models import RoutingStrategy
 
         client = self._make_client()
         client.config.gateway_client.enso.GetRoute.return_value = _make_route_response(
@@ -204,7 +204,7 @@ class TestEnsoClientGatewayRouteTypedRevert:
     def test_typed_revert_message_state_machine_classifies_permanent(
         self,
     ) -> None:
-        from almanak.framework.connectors.enso.models import RoutingStrategy
+        from almanak.connectors.enso.models import RoutingStrategy
 
         client = self._make_client()
         client.config.gateway_client.enso.GetRoute.return_value = _make_route_response(
@@ -227,7 +227,7 @@ class TestEnsoClientGatewayRouteTypedRevert:
         assert sm._categorize_error(str(excinfo.value)) == "COMPILATION_PERMANENT"
 
     def test_unknown_selector_falls_through_to_enso_api_error(self) -> None:
-        from almanak.framework.connectors.enso.models import RoutingStrategy
+        from almanak.connectors.enso.models import RoutingStrategy
 
         client = self._make_client()
         client.config.gateway_client.enso.GetRoute.return_value = _make_route_response(

@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # SushiSwap V3 utilities
-from almanak.framework.connectors.sushiswap_v3 import (
+from almanak.connectors.sushiswap_v3 import (
     get_max_tick,
     get_min_tick,
     get_nearest_tick,

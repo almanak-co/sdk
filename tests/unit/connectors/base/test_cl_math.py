@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
-from almanak.framework.connectors.base.cl_math import compute_lp_slippage_mins
+from almanak.connectors._strategy_base.base.cl_math import compute_lp_slippage_mins
 
 _DESIRED0 = 1_000_000
 _DESIRED1 = 2_000_000

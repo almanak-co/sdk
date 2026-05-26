@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.pendle import compiler as cp
+from almanak.connectors.pendle import compiler as cp
 from almanak.framework.intents.compiler_models import CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.lending_intents import WithdrawIntent
 from almanak.framework.intents.vocabulary import Intent, LPCloseIntent, LPOpenIntent
@@ -28,7 +28,7 @@ from almanak.framework.intents.vocabulary import Intent, LPCloseIntent, LPOpenIn
 
 TEST_WALLET = "0x1111111111111111111111111111111111111111"
 TEST_ROUTER = "0x888888888d058D2D7e1f86b3eB1ce82d8d0F88a9"
-PENDLE_ADAPTER_CLS = "almanak.framework.connectors.pendle.PendleAdapter"
+PENDLE_ADAPTER_CLS = "almanak.connectors.pendle.PendleAdapter"
 # A real arbitrum PT-wstETH market from the static SDK config (no expiry caveat
 # for the unit-test scope: we mock the adapter so on-chain expiry checks never
 # fire). The address is intentionally checksummed as it appears in sdk.py.

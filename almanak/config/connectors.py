@@ -30,7 +30,7 @@ Two surfaces consolidated here:
 Import direction
 ----------------
 Strict (mirrors :mod:`almanak.config.runtime`): this module MUST NOT
-import from ``almanak.framework.connectors.*``. The connectors import
+import from ``almanak.connectors.*``. The connectors import
 :class:`ConnectorsConfig` from here at construction time; reverse
 imports would create a cycle and make the typed-config service depend
 on the connector layer it is meant to feed.

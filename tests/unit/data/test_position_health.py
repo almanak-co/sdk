@@ -457,7 +457,7 @@ class TestMorphoHealthFactorProvider:
             "_get_morpho_health",
             new=None,  # no-op; we're patching the SDK import inside the method
         ) if False else patch(
-            "almanak.framework.connectors.morpho_blue.sdk.MorphoBlueSDK",
+            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
             return_value=fake_sdk,
         ):
             provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
@@ -488,7 +488,7 @@ class TestMorphoHealthFactorProvider:
         )
 
         with patch(
-            "almanak.framework.connectors.morpho_blue.sdk.MorphoBlueSDK",
+            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
             return_value=fake_sdk,
         ):
             provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
@@ -513,7 +513,7 @@ class TestMorphoHealthFactorProvider:
         )
 
         with patch(
-            "almanak.framework.connectors.morpho_blue.sdk.MorphoBlueSDK",
+            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
             return_value=fake_sdk,
         ):
             hf = get_health_factor(

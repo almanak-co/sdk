@@ -256,7 +256,7 @@ class TestWithdrawAmountAllSpark:
         Spark is an Aave V3 fork — the AaveV3BalanceReader should work
         for it via the shared LendingPositionReader infrastructure.
         """
-        from almanak.framework.connectors.spark import SPARK_POOL_ADDRESSES
+        from almanak.connectors.spark import SPARK_POOL_ADDRESSES
 
         if CHAIN_NAME not in SPARK_POOL_ADDRESSES:
             pytest.skip(f"Spark not available on {CHAIN_NAME}")

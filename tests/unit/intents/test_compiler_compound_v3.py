@@ -17,7 +17,7 @@ from almanak.framework.intents.compiler import (
 )
 
 # Patch targets - these are lazy-imported inside compile methods
-ADAPTER_MODULE = "almanak.framework.connectors.compound_v3.adapter"
+ADAPTER_MODULE = "almanak.connectors.compound_v3.adapter"
 ADAPTER_CLS = f"{ADAPTER_MODULE}.CompoundV3Adapter"
 CONFIG_CLS = f"{ADAPTER_MODULE}.CompoundV3Config"
 COMET_ADDRESSES = f"{ADAPTER_MODULE}.COMPOUND_V3_COMET_ADDRESSES"

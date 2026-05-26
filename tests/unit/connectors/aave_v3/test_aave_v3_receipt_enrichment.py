@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import (
+from almanak.connectors.aave_v3.receipt_parser import (
     EVENT_TOPICS,
     AaveV3ReceiptParser,
     BorrowAmountsResult,

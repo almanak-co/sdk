@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     PancakeSwapV3ReceiptParser,
@@ -358,7 +358,7 @@ class TestPancakeSwapV3ExtractLpOpenData:
         ]
         with caplog.at_level(
             logging.WARNING,
-            logger="almanak.framework.connectors.pancakeswap_v3.receipt_parser",
+            logger="almanak.connectors.pancakeswap_v3.receipt_parser",
         ):
             result = parser.extract_lp_open_data(_receipt(logs))
         # Behavioural contract: no silent default to a known-chain NPM.

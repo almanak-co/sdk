@@ -104,7 +104,7 @@ class LendingProtocolAdapter(Protocol):
 # Connector-owned swap adapters
 # =============================================================================
 
-from almanak.framework.connectors.base.swap_adapter import (  # noqa: E402,F401
+from almanak.connectors._strategy_base.base.swap_adapter import (  # noqa: E402,F401
     _BRIDGED_USDC_PROBE_CHAINS,
     _CHAIN_WRAPPED_NATIVE,
     DefaultSwapAdapter,

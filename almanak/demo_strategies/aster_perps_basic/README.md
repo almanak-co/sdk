@@ -80,7 +80,7 @@ almanak strat run -d almanak/demo_strategies/aster_perps_basic --once
 
 ## Related
 
-- Canonical connector: `almanak/framework/connectors/aster_perps/`
-- Compatibility shim: `almanak/framework/connectors/pancakeswap_perps/`
+- Canonical connector: `almanak/connectors/aster_perps/`
+- Compatibility shim: `almanak/connectors/pancakeswap_perps/`
 - PRD: `docs/internal/discussions/aster-dex-integration-20260418.md`
 - Epic: VIB-3044

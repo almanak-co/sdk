@@ -1,6 +1,6 @@
 """Unit tests for LiFi Exceptions."""
 
-from almanak.framework.connectors.lifi.exceptions import (
+from almanak.connectors.lifi.exceptions import (
     LiFiAPIError,
     LiFiConfigError,
     LiFiError,

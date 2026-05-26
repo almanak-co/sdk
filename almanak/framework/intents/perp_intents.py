@@ -34,7 +34,7 @@ def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     Function-local import: see ``lending_intents._capabilities_for`` for the
     full rationale. Same cold-boot circular-import constraint applies here.
     """
-    from almanak.framework.connectors.capabilities_registry import get_protocol_capabilities
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 
     return get_protocol_capabilities(protocol_lower)
 

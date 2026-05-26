@@ -18,7 +18,7 @@ from almanak.framework.intents.compiler import (
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 # Adapter module path for patching lazy imports inside the compiler
-ADAPTER_MODULE = "almanak.framework.connectors.uniswap_v4.adapter"
+ADAPTER_MODULE = "almanak.connectors.uniswap_v4.adapter"
 
 
 def _make_mock_action_bundle(

@@ -162,28 +162,28 @@ class TestEulerV2AdapterMultiChain:
 
     def test_ethereum_config_accepted(self):
         """EulerV2Config accepts 'ethereum' chain."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Config
 
         config = EulerV2Config(chain="ethereum", wallet_address="0x" + "1" * 40)
         assert config.chain == "ethereum"
 
     def test_avalanche_config_accepted(self):
         """EulerV2Config still accepts 'avalanche' chain."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Config
 
         config = EulerV2Config(chain="avalanche", wallet_address="0x" + "1" * 40)
         assert config.chain == "avalanche"
 
     def test_unsupported_chain_rejected(self):
         """EulerV2Config rejects unsupported chains."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Config
 
         with pytest.raises(ValueError, match="supports"):
             EulerV2Config(chain="polygon", wallet_address="0x" + "1" * 40)
 
     def test_ethereum_adapter_finds_usdc_vault(self):
         """Ethereum adapter resolves USDC to the eUSDC-2 vault."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
 
         config = EulerV2Config(chain="ethereum", wallet_address="0x" + "1" * 40)
         adapter = EulerV2Adapter(config)
@@ -195,7 +195,7 @@ class TestEulerV2AdapterMultiChain:
 
     def test_ethereum_adapter_uses_correct_evc(self):
         """Ethereum adapter uses the Ethereum EVC address."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
 
         config = EulerV2Config(chain="ethereum", wallet_address="0x" + "1" * 40)
         adapter = EulerV2Adapter(config)
@@ -203,7 +203,7 @@ class TestEulerV2AdapterMultiChain:
 
     def test_avalanche_adapter_uses_correct_evc(self):
         """Avalanche adapter still uses the Avalanche EVC address."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
 
         config = EulerV2Config(chain="avalanche", wallet_address="0x" + "1" * 40)
         adapter = EulerV2Adapter(config)
@@ -211,7 +211,7 @@ class TestEulerV2AdapterMultiChain:
 
     def test_ethereum_supply_builds_correct_tx(self):
         """Supply on Ethereum targets the correct vault address."""
-        from almanak.framework.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
+        from almanak.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
 
         config = EulerV2Config(chain="ethereum", wallet_address="0x" + "1" * 40)
         adapter = EulerV2Adapter(config)

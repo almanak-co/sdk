@@ -10,7 +10,7 @@ from decimal import Decimal
 import pytest
 
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
-from almanak.framework.connectors.protocol_aliases import (
+from almanak.connectors._strategy_base.protocol_aliases import (
     PROTOCOL_ALIASES,
     PROTOCOL_DISPLAY_NAMES,
     UNISWAP_V3_FORKS,

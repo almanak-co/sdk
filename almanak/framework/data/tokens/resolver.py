@@ -501,7 +501,7 @@ class TokenResolver:
         by symbol (uppercased) and address so both resolve paths work.
         """
         try:
-            from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
+            from almanak.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
         except ImportError:
             return  # Pendle connector not installed — nothing to register
 

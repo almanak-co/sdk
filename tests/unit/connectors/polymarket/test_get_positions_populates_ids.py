@@ -19,7 +19,7 @@ import pytest
 from eth_account import Account
 from pydantic import SecretStr
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
     PolymarketConfig,

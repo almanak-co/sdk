@@ -19,12 +19,12 @@ import logging
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,
 )
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     POSITION_MANAGER_ADDRESS_SET,
     PoolKey,
@@ -37,7 +37,7 @@ from almanak.framework.observability.metrics import (
     V4LPDropReason,
 )
 
-PARSER_LOGGER = "almanak.framework.connectors.uniswap_v4.receipt_parser"
+PARSER_LOGGER = "almanak.connectors.uniswap_v4.receipt_parser"
 
 CHAIN = "arbitrum"
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"

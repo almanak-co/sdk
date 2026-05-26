@@ -5,17 +5,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from almanak.framework.connectors.lifi.client import (
+from almanak.connectors.lifi.client import (
     CHAIN_MAPPING,
     LiFiClient,
     LiFiConfig,
 )
-from almanak.framework.connectors.lifi.exceptions import (
+from almanak.connectors.lifi.exceptions import (
     LiFiAPIError,
     LiFiConfigError,
     LiFiRouteNotFoundError,
 )
-from almanak.framework.connectors.lifi.models import (
+from almanak.connectors.lifi.models import (
     LiFiOrderStrategy,
     LiFiStep,
     LiFiStatusResponse,

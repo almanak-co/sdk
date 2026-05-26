@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.lido.adapter import (
+from almanak.connectors.lido.adapter import (
     LidoAdapter,
     LidoConfig,
 )

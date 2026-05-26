@@ -1,4 +1,4 @@
-"""Tests for ``almanak.framework.connectors.uniswap_v3.slot0_fallback``.
+"""Tests for ``almanak.connectors.uniswap_v3.slot0_fallback``.
 
 VIB-3893 / VIB-3940: when an LP_OPEN or LP_CLOSE receipt has no Swap event
 on the pool, the receipt parser leaves ``current_tick=None``. The runner
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.slot0_fallback import (
+from almanak.connectors.uniswap_v3.slot0_fallback import (
     SLOT0_SELECTOR,
     _decode_slot0_tick,
     enrich_lp_close_with_slot0,

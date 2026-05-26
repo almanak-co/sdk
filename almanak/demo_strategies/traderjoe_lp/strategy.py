@@ -137,7 +137,7 @@ class TraderJoeLPConfig:
 
 
 # TraderJoe V2 constants
-from almanak.framework.connectors.traderjoe_v2 import BIN_ID_OFFSET
+from almanak.connectors.traderjoe_v2 import BIN_ID_OFFSET
 
 # Logging utilities for user-friendly output
 from almanak.framework.utils.log_formatters import format_token_amount_human

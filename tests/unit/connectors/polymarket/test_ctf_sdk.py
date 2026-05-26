@@ -13,7 +13,7 @@ import pytest
 from eth_abi import decode as abi_decode
 from web3 import Web3
 
-from almanak.framework.connectors.polymarket.ctf_sdk import (
+from almanak.connectors.polymarket.ctf_sdk import (
     BINARY_PARTITION,
     GAS_ESTIMATES,
     INDEX_SET_NO,
@@ -25,7 +25,7 @@ from almanak.framework.connectors.polymarket.ctf_sdk import (
     ResolutionStatus,
     TransactionData,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     CONDITIONAL_TOKENS,
     CTF_EXCHANGE_V2,
     NEG_RISK_ADAPTER,

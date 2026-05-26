@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from eth_abi import decode as abi_decode
 
-from almanak.framework.connectors.lagoon.deployer import (
+from almanak.connectors.lagoon.deployer import (
     APPROVE_GAS_ESTIMATE,
     CREATE_VAULT_PROXY_SELECTOR,
     DEFAULT_LOGIC_SELECTOR,
@@ -22,7 +22,7 @@ from almanak.framework.connectors.lagoon.deployer import (
     VaultDeployParams,
     VaultDeployResult,
 )
-from almanak.framework.connectors.lagoon.sdk import _encode_address, _encode_uint256
+from almanak.connectors.lagoon.sdk import _encode_address, _encode_uint256
 
 # --- Test Fixtures ---
 

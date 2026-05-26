@@ -43,7 +43,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
 
-from almanak.framework.connectors.polymarket.receipt_parser import (
+from almanak.connectors.polymarket.receipt_parser import (
     PolymarketReceiptParser,
     TradeResult,
 )
@@ -538,7 +538,7 @@ class TestParserMethodsImportable:
     """Catches accidental rename / removal that would break the lazy import."""
 
     def test_parse_order_response_importable(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import (
+        from almanak.connectors.polymarket.receipt_parser import (
             PolymarketReceiptParser as _ImportedParser,
         )
 
@@ -546,7 +546,7 @@ class TestParserMethodsImportable:
         assert callable(_ImportedParser.parse_order_response)
 
     def test_parse_fill_notification_importable(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import (
+        from almanak.connectors.polymarket.receipt_parser import (
             PolymarketReceiptParser as _ImportedParser,
         )
 
@@ -554,7 +554,7 @@ class TestParserMethodsImportable:
         assert callable(_ImportedParser.parse_fill_notification)
 
     def test_parse_order_status_importable(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import (
+        from almanak.connectors.polymarket.receipt_parser import (
             PolymarketReceiptParser as _ImportedParser,
         )
 
@@ -563,7 +563,7 @@ class TestParserMethodsImportable:
 
     def test_trade_result_importable(self):
         """``TradeResult`` is the parser's return type — must stay importable."""
-        from almanak.framework.connectors.polymarket.receipt_parser import (
+        from almanak.connectors.polymarket.receipt_parser import (
             TradeResult as _ImportedTradeResult,
         )
 

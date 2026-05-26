@@ -11,7 +11,7 @@ Using the wrong selector causes a silent no-op or revert on CryptoSwap/Tricrypto
 
 import pytest
 
-from almanak.framework.connectors.curve.adapter import (
+from almanak.connectors.curve.adapter import (
     EXCHANGE_SELECTOR,
     EXCHANGE_UINT256_SELECTOR,
     CurveAdapter,

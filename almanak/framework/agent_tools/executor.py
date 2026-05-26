@@ -1729,7 +1729,7 @@ class ToolExecutor:
         Includes idempotency check: if agent state already has a vault_address,
         verifies it on-chain and returns it rather than deploying a duplicate.
         """
-        from almanak.framework.connectors.lagoon.deployer import (
+        from almanak.connectors.lagoon.deployer import (
             LagoonVaultDeployer,
             VaultDeployParams,
         )
@@ -1745,7 +1745,7 @@ class ToolExecutor:
             existing_vault = saved_state.get("vault_address")
             if existing_vault:
                 # Verify it exists on-chain
-                from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+                from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 
                 sdk = LagoonVaultSDK(self._client, chain=chain)
                 try:
@@ -1876,8 +1876,8 @@ class ToolExecutor:
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
         from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
 
@@ -2050,9 +2050,9 @@ class ToolExecutor:
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901
         """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+        from almanak.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
         from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -2435,7 +2435,7 @@ class ToolExecutor:
         threshold, LTV, and health factor (1e18-scaled; MAX_UINT256 when the
         account has no debt).
         """
-        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 
         chain = args.get("chain", self._default_chain)
         network = args.get("network", "")
@@ -2542,7 +2542,7 @@ class ToolExecutor:
         failures indistinguishable from "no positions" on a $10M treasury
         query.
         """
-        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
         from almanak.framework.teardown.discovery import _npms_for_chain
         from almanak.gateway.proto import gateway_pb2
 
@@ -3381,7 +3381,7 @@ class ToolExecutor:
 
     async def _execute_get_vault_state(self, args: dict) -> ToolResponse:
         """Read current state of a Lagoon vault."""
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 
         chain = args.get("chain", self._default_chain)
         vault_address = args["vault_address"]
@@ -3424,7 +3424,7 @@ class ToolExecutor:
 
         Returns total in raw underlying token units.
         """
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.gateway.proto import gateway_pb2
 
         sdk = LagoonVaultSDK(self._client, chain=chain)
@@ -3605,7 +3605,7 @@ class ToolExecutor:
         Returns:
             Tuple of (sufficient, liquid_balance, needed_amount).
         """
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.gateway.proto import gateway_pb2
 
         sdk = LagoonVaultSDK(self._client, chain=chain)
@@ -3753,9 +3753,9 @@ class ToolExecutor:
         interrupted point. This prevents orphaned vault state if the process
         crashes between propose and settle.
         """
+        from almanak.connectors.lagoon.adapter import LagoonVaultAdapter
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.core.models.params import UpdateTotalAssetsParams
-        from almanak.framework.connectors.lagoon.adapter import LagoonVaultAdapter
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -4474,7 +4474,7 @@ class ToolExecutor:
         Progress is persisted after each phase so partial failures resume
         from the interrupted step instead of retrying from scratch.
         """
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 
         # Phase 0: policy preflight.
         preflight = self._teardown_check_sub_tool_policy()
@@ -4538,7 +4538,7 @@ class ToolExecutor:
 
     async def _execute_approve_vault_underlying(self, args: dict) -> ToolResponse:
         """Approve the vault to pull underlying tokens from the Safe."""
-        from almanak.framework.connectors.lagoon.deployer import LagoonVaultDeployer
+        from almanak.connectors.lagoon.deployer import LagoonVaultDeployer
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -4592,7 +4592,7 @@ class ToolExecutor:
         Split into two Execute calls because requestDeposit depends on
         the approve being committed first (simulation would fail otherwise).
         """
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.framework.models.reproduction_bundle import ActionBundle
         from almanak.gateway.proto import gateway_pb2
 

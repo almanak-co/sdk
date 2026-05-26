@@ -34,12 +34,12 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.ethena.adapter import (
+from almanak.connectors.ethena.adapter import (
     ERC20_APPROVE_SELECTOR,
     ETHENA_ADDRESSES,
     ETHENA_DEPOSIT_SELECTOR,
 )
-from almanak.framework.connectors.ethena.receipt_parser import EthenaReceiptParser
+from almanak.connectors.ethena.receipt_parser import EthenaReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import (
     IntentCompiler,

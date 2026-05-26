@@ -38,7 +38,7 @@ def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     (built on first call, cached for the life of the process).
     """
     # Local import: see docstring.
-    from almanak.framework.connectors.capabilities_registry import get_protocol_capabilities
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 
     return get_protocol_capabilities(protocol_lower)
 

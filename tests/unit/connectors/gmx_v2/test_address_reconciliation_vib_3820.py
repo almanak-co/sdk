@@ -7,7 +7,7 @@ Two GMX V2 contract registries existed in the codebase and silently drifted:
   comment at construction declares this is verified against
   ``github.com/gmx-io/gmx-synthetics/deployments/<chain>`` and the live GMX
   REST markets endpoint.
-* ``almanak/framework/connectors/gmx_v2/adapter.py:GMX_V2_ADDRESSES`` — a
+* ``almanak/connectors/gmx_v2/adapter.py:GMX_V2_ADDRESSES`` — a
   parallel registry used by the adapter for bookkeeping. Audit revealed the
   Avalanche ``order_vault`` had drifted (``0xee7d43517A62Fa0ac642E22Eb93A93f82D0d3dF6``)
   while ``core/contracts.py`` carried the real one
@@ -28,7 +28,7 @@ from __future__ import annotations
 import pytest
 
 from almanak.core.contracts import GMX_V2
-from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
+from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
 
 # Canonical-to-adapter key aliases for semantically equivalent fields whose
 # names differ between the two registries. ``core/contracts.py`` uses the

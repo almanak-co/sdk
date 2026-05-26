@@ -41,7 +41,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
+from almanak.connectors.traderjoe_v2.receipt_parser import TraderJoeV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.adapter import (
+from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
     UniswapV4UnsupportedPoolError,
@@ -203,7 +203,7 @@ class TestSaltNotRejected:
 
     def test_guard_helper_does_not_inspect_salt(self):
         """If a 'salt' field ever appears on PoolKey, the guard must not read it."""
-        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter
+        from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter
 
         # A duck-typed PoolKey stand-in WITHOUT a salt attribute. If the guard
         # tries to read salt, it would AttributeError. Hookless ERC20-ERC20

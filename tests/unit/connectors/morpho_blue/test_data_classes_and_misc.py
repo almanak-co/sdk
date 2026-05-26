@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.morpho_blue.adapter import (
+from almanak.connectors.morpho_blue.adapter import (
     MorphoBlueAdapter,
     MorphoBlueConfig,
     MorphoBlueMarketParams,
@@ -21,7 +21,7 @@ from almanak.framework.connectors.morpho_blue.adapter import (
     MorphoBluePosition,
     TransactionResult,
 )
-from almanak.framework.connectors.morpho_blue.sdk import (
+from almanak.connectors.morpho_blue.sdk import (
     MorphoBlueSDKError,
     PositionNotFoundError,
 )
@@ -104,7 +104,7 @@ class TestSDKLazyInitSuccess:
         adapter = MorphoBlueAdapter(config, token_resolver=MagicMock())
         # Patch MorphoBlueSDK so we don't actually create a Web3 connection
         with patch(
-            "almanak.framework.connectors.morpho_blue.sdk.MorphoBlueSDK"
+            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK"
         ) as mock_sdk_cls:
             mock_sdk_cls.return_value = MagicMock()
             sdk = adapter.sdk
@@ -132,7 +132,7 @@ class TestSDKChainRegistryMismatch:
     we monkey-patch the registry in-memory."""
 
     def test_missing_registry_raises_sdk_error(self) -> None:
-        from almanak.framework.connectors.morpho_blue import sdk as sdk_module
+        from almanak.connectors.morpho_blue import sdk as sdk_module
 
         # Add a fake chain that's "supported" but missing from the registry.
         # Stub get_rpc_url so the SDK can get past the RPC URL resolution and
@@ -141,7 +141,7 @@ class TestSDKChainRegistryMismatch:
         sdk_module.SUPPORTED_CHAINS = original_supported | {"phantom"}
         try:
             with patch(
-                "almanak.framework.connectors.morpho_blue.sdk.get_rpc_url",
+                "almanak.connectors.morpho_blue.sdk.get_rpc_url",
                 return_value="http://x",
             ):
                 with pytest.raises(MorphoBlueSDKError, match="address registry"):
@@ -154,7 +154,7 @@ class TestReceiptParserStrictParseError:
     """Exercise the strict-parse failure-injected branch (VIB-3159)."""
 
     def test_strict_parse_propagates_exception(self) -> None:
-        from almanak.framework.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
+        from almanak.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
         from almanak.framework.execution.extract_result import ExtractError
 
         parser = MorphoBlueReceiptParser()
@@ -167,7 +167,7 @@ class TestReceiptParserStrictParseError:
         assert isinstance(out, ExtractError)
 
     def test_strict_parse_returns_failed_parse(self) -> None:
-        from almanak.framework.connectors.morpho_blue.receipt_parser import (
+        from almanak.connectors.morpho_blue.receipt_parser import (
             MorphoBlueReceiptParser,
             ParseResult,
         )
@@ -183,7 +183,7 @@ class TestExtractWarnings:
     """Cover the warning branches in extract_*_amount when parse_receipt fails internally."""
 
     def test_extract_supply_amount_returns_none_on_parse_exception(self) -> None:
-        from almanak.framework.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
+        from almanak.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
 
         parser = MorphoBlueReceiptParser()
 

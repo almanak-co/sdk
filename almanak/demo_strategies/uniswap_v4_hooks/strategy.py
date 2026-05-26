@@ -32,7 +32,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
-from almanak.framework.connectors.uniswap_v4.hooks import (
+from almanak.connectors.uniswap_v4.hooks import (
     DynamicFeeHookEncoder,
     EmptyHookDataEncoder,
     HookFlags,

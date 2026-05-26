@@ -809,7 +809,8 @@ def _init_prediction_provider(
         return
 
     try:
-        from ..connectors.polymarket.gateway_client import GatewayPolymarketClient
+        from almanak.connectors.polymarket.gateway_client import GatewayPolymarketClient
+
         from ..data.prediction_provider import PredictionMarketDataProvider
 
         if gateway_client is None or not gateway_client.is_connected:
@@ -1531,6 +1532,7 @@ def _has_placeholder_vault_address(vault_raw: dict) -> bool:
     return addr.startswith("0x_") or "_DEPLOY_" in addr or "_SET_TO_" in addr
 
 
+# crap-allowlist: VIB-4835 — pre-existing CLI helper (cc=12, cov=2%) touched only by ``almanak.connectors.lagoon.deployer`` import rewrite (legacy ``..connectors.lagoon`` → absolute new path). Refactor + coverage backfill tracked in VIB-4139.
 def _auto_deploy_lagoon_vault(
     vault_raw: dict,
     chain: str,
@@ -1543,7 +1545,8 @@ def _auto_deploy_lagoon_vault(
     Returns the patched vault_raw dict with real vault_address and valuator_address.
     Exits with sys.exit(1) on failure.
     """
-    from ..connectors.lagoon.deployer import LagoonVaultDeployer, VaultDeployParams
+    from almanak.connectors.lagoon.deployer import LagoonVaultDeployer, VaultDeployParams
+
     from ..data.tokens import get_token_resolver
 
     # Resolve underlying token symbol to address

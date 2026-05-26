@@ -131,7 +131,7 @@ _PROTOCOL_CONNECTOR_MAP: dict[str, str | tuple[str, str]] = {
 def get_permission_hints(protocol: str) -> PermissionHints:
     """Load PermissionHints for a protocol via convention-based import.
 
-    Tries ``almanak.framework.connectors.{protocol}.permission_hints.PERMISSION_HINTS``.
+    Tries ``almanak.connectors.{protocol}.permission_hints.PERMISSION_HINTS``.
     If ``_PROTOCOL_CONNECTOR_MAP`` maps ``protocol`` to a
     ``(connector_name, attribute_name)`` tuple, loads
     ``connectors.{connector_name}.permission_hints.{attribute_name}`` instead.
@@ -144,7 +144,7 @@ def get_permission_hints(protocol: str) -> PermissionHints:
         connector_name = mapping
         attribute_name = "PERMISSION_HINTS"
     try:
-        mod = importlib.import_module(f"almanak.framework.connectors.{connector_name}.permission_hints")
+        mod = importlib.import_module(f"almanak.connectors.{connector_name}.permission_hints")
         hints = getattr(mod, attribute_name, None)
         if isinstance(hints, PermissionHints):
             return hints
@@ -189,7 +189,7 @@ def get_discovery_vectors_override(
         connector_name, _ = mapping
     else:
         connector_name = mapping
-    module_path = f"almanak.framework.connectors.{connector_name}.permission_hints"
+    module_path = f"almanak.connectors.{connector_name}.permission_hints"
     try:
         mod = importlib.import_module(module_path)
     except ModuleNotFoundError as exc:

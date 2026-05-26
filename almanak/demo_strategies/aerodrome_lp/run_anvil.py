@@ -528,7 +528,7 @@ def run_direct_test() -> bool:
     print(f"{'=' * 60}")
 
     try:
-        from almanak.framework.connectors.aerodrome import (
+        from almanak.connectors.aerodrome import (
             AerodromeAdapter,
             AerodromeConfig,
         )

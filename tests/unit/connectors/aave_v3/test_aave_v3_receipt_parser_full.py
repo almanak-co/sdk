@@ -38,7 +38,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import (
+from almanak.connectors.aave_v3.receipt_parser import (
     EVENT_TOPICS,
     AaveV3Event,
     AaveV3EventType,
@@ -1330,7 +1330,7 @@ class TestStrictParseWrappers:
 
 class TestPermissionHints:
     def test_permission_hints_module_loads_and_is_empty(self) -> None:
-        from almanak.framework.connectors.aave_v3.permission_hints import (
+        from almanak.connectors.aave_v3.permission_hints import (
             PERMISSION_HINTS,
         )
         from almanak.framework.permissions.hints import PermissionHints

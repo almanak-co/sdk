@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.sushiswap_v3.adapter import (
+from almanak.connectors.sushiswap_v3.adapter import (
     SushiSwapV3Adapter,
     SushiSwapV3Config,
 )
@@ -171,7 +171,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.sushiswap_v3.adapter as adapter_module
+        import almanak.connectors.sushiswap_v3.adapter as adapter_module
 
         assert not hasattr(adapter_module, "SUSHISWAP_V3_TOKENS")
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")

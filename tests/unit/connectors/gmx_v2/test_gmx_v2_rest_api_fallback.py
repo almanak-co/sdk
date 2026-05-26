@@ -21,7 +21,7 @@ class TestGMXV2RestApiFallback:
 
     def _make_sdk(self):
         """Create a GMXV2SDK with mocked internals."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         sdk = GMXV2SDK.__new__(GMXV2SDK)
         sdk.web3 = MagicMock()
@@ -79,7 +79,7 @@ class TestGMXV2GetPositionsViaApi:
     """Tests for GMXV2SDK._get_positions_via_api."""
 
     def _make_sdk(self, chain="arbitrum"):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         sdk = GMXV2SDK.__new__(GMXV2SDK)
         sdk.web3 = MagicMock()
@@ -139,7 +139,7 @@ class TestGMXV2GetPositionsViaApi:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
+        with patch("almanak.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
             positions = sdk._get_positions_via_api("0xabcd1234")
 
         assert len(positions) == 1
@@ -160,7 +160,7 @@ class TestGMXV2GetPositionsViaApi:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
+        with patch("almanak.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
             positions = sdk._get_positions_via_api("0xabcd1234")
 
         assert len(positions) == 1
@@ -176,19 +176,19 @@ class TestGMXV2GetPositionsViaApi:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
+        with patch("almanak.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
             positions = sdk._get_positions_via_api("0xNonExistent")
 
         assert positions == []
 
     def test_api_request_timeout(self):
         """REST API timeout raises PositionQueryError."""
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         sdk = self._make_sdk()
 
         with patch(
-            "almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen",
+            "almanak.connectors.gmx_v2.sdk.urllib.request.urlopen",
             side_effect=TimeoutError("timed out"),
         ):
             with pytest.raises(PositionQueryError, match="failed"):
@@ -198,12 +198,12 @@ class TestGMXV2GetPositionsViaApi:
         """REST API HTTP error raises PositionQueryError."""
         import urllib.error
 
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         sdk = self._make_sdk()
 
         with patch(
-            "almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen",
+            "almanak.connectors.gmx_v2.sdk.urllib.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(PositionQueryError, match="failed"):
@@ -211,7 +211,7 @@ class TestGMXV2GetPositionsViaApi:
 
     def test_api_invalid_json(self):
         """REST API returns invalid JSON — raises PositionQueryError."""
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         sdk = self._make_sdk()
 
@@ -220,13 +220,13 @@ class TestGMXV2GetPositionsViaApi:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
+        with patch("almanak.connectors.gmx_v2.sdk.urllib.request.urlopen", return_value=mock_resp):
             with pytest.raises(PositionQueryError, match="failed"):
                 sdk._get_positions_via_api("0x1234")
 
     def test_api_unsupported_chain(self):
         """Unsupported chain raises PositionQueryError."""
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         sdk = self._make_sdk(chain="base")
 
@@ -239,7 +239,7 @@ class TestGMXV2ParseApiPositions:
 
     def test_parse_full_position(self):
         """Parse a complete API position with all fields."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         api_pos = {
             "account": "0xWallet",
@@ -272,7 +272,7 @@ class TestGMXV2ParseApiPositions:
 
     def test_parse_missing_fields_default_zero(self):
         """Missing numeric fields default to 0."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         api_pos = {"account": "0xWallet", "market": "0xMarket", "isLong": False}
 
@@ -286,7 +286,7 @@ class TestGMXV2ParseApiPositions:
 
     def test_parse_multiple_positions(self):
         """Parse multiple positions."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         api_positions = [
             {"account": "0xA", "market": "0xM1", "sizeInUsd": "1000", "isLong": True},
@@ -303,33 +303,33 @@ class TestGMXV2SafeInt:
     """Tests for GMXV2SDK._safe_int robustness."""
 
     def test_safe_int_string(self):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         assert GMXV2SDK._safe_int("12345", "test") == 12345
 
     def test_safe_int_scientific_notation(self):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         assert GMXV2SDK._safe_int("1.5e10", "test") == 15000000000
 
     def test_safe_int_none(self):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         assert GMXV2SDK._safe_int(None, "test") == 0
 
     def test_safe_int_invalid_string(self):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         assert GMXV2SDK._safe_int("not_a_number", "test") == 0
 
     def test_safe_int_integer_passthrough(self):
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         assert GMXV2SDK._safe_int(42, "test") == 42
 
     def test_parse_skips_malformed_position(self):
         """Malformed position is skipped, valid ones still parsed."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         api_positions = [
             {"account": "0xA", "market": "0xM1", "sizeInUsd": "1000", "isLong": True},

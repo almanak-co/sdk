@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.jupiter_lend.client import JupiterLendClient, JupiterLendConfig, U64_MAX
-from almanak.framework.connectors.jupiter_lend.exceptions import JupiterLendAPIError, JupiterLendConfigError
-from almanak.framework.connectors.jupiter_lend.models import JupiterLendTransactionResponse, JupiterLendVault
+from almanak.connectors.jupiter_lend.client import JupiterLendClient, JupiterLendConfig, U64_MAX
+from almanak.connectors.jupiter_lend.exceptions import JupiterLendAPIError, JupiterLendConfigError
+from almanak.connectors.jupiter_lend.models import JupiterLendTransactionResponse, JupiterLendVault
 
 WALLET = "7nYBm5mW5Xr4iDxF8XfE3gVgCELphJ3TypDwQUmFjWLu"
 

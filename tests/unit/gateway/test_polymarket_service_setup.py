@@ -21,7 +21,7 @@ import grpc
 import pytest
 from eth_account import Account
 
-from almanak.framework.connectors.polymarket import SignatureType, TransactionData
+from almanak.connectors.polymarket import SignatureType, TransactionData
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
@@ -138,7 +138,7 @@ class _FakeCtfSDK:
         return self._source_balance
 
     def check_allowances(self, wallet: str, web3):  # noqa: ARG002, ANN201
-        from almanak.framework.connectors.polymarket.ctf_sdk import (
+        from almanak.connectors.polymarket.ctf_sdk import (
             MAX_UINT256,
             AllowanceStatus,
         )
@@ -293,7 +293,7 @@ class TestEnsureWalletReady:
             native_usdc_balance=11_000_000,
         )
         # Override to return zero approval for native USDC.
-        from almanak.framework.connectors.polymarket.ctf_sdk import (
+        from almanak.connectors.polymarket.ctf_sdk import (
             MAX_UINT256,
             AllowanceStatus,
         )
@@ -410,7 +410,7 @@ class TestL1SignatureZeroXPrefix:
         """Force eth_account to return an unprefixed hex string and assert the
         gateway repairs it. Without the repair, /auth/derive-api-key returns
         HTTP 401 and the strategy can't trade."""
-        with patch("almanak.framework.connectors.polymarket.signer.Account") as mock_account:
+        with patch("almanak.connectors.polymarket.signer.Account") as mock_account:
             signed = MagicMock()
             signed.signature.hex.return_value = "ab" * 65  # 130 hex chars, no 0x
             mock_account.sign_message.return_value = signed
@@ -895,7 +895,7 @@ class TestGetPriceHistoryHandler:
         from datetime import UTC, datetime
         from decimal import Decimal
 
-        from almanak.framework.connectors.polymarket.models import (
+        from almanak.connectors.polymarket.models import (
             HistoricalPrice,
             PriceHistory,
         )
@@ -948,7 +948,7 @@ class TestGetPriceHistoryHandler:
         treat unset fields as ``None`` so the SDK's mutual-exclusion logic
         (``interval`` vs ``start_ts``+``end_ts``) doesn't trip on a phantom
         ``start_ts=0`` that the caller never set."""
-        from almanak.framework.connectors.polymarket.models import PriceHistory
+        from almanak.connectors.polymarket.models import PriceHistory
         from almanak.connectors.polymarket.proto import polymarket_pb2
 
         empty_history = PriceHistory(token_id="111", interval="1h", prices=[])
@@ -1017,7 +1017,7 @@ class TestGetTradeTapeHandler:
         from decimal import Decimal
         from unittest.mock import AsyncMock
 
-        from almanak.framework.connectors.polymarket.models import HistoricalTrade
+        from almanak.connectors.polymarket.models import HistoricalTrade
         from almanak.connectors.polymarket.proto import polymarket_pb2
 
         trades = [
@@ -1526,7 +1526,7 @@ class TestCredentialDerivationDiagnostics:
         """When ``_build_l1_headers`` raises (signer-service down, JWT expired,
         etc.), the strategy must see the signer error — not a generic
         "could not be derived" with no breadcrumb."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketSignatureError
+        from almanak.connectors.polymarket.exceptions import PolymarketSignatureError
 
         servicer = _credentialless_legacy_servicer(monkeypatch)
         fake_session = _AuthFakeSession({})

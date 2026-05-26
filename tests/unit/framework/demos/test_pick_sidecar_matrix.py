@@ -36,10 +36,10 @@ def repo(tmp_path: Path) -> Path:
     _git(repo_dir, "config", "user.name", "ci")
 
     for path in (
-        "almanak/framework/connectors/aerodrome/adapter.py",
-        "almanak/framework/connectors/uniswap_v3/adapter.py",
-        "almanak/framework/connectors/morpho_blue/adapter.py",
-        "almanak/framework/connectors/aave_v3/adapter.py",
+        "almanak/connectors/aerodrome/adapter.py",
+        "almanak/connectors/uniswap_v3/adapter.py",
+        "almanak/connectors/morpho_blue/adapter.py",
+        "almanak/connectors/aave_v3/adapter.py",
         "almanak/gateway/server.py",
         "docs/readme.md",
     ):
@@ -146,7 +146,7 @@ class TestPicker:
         self, repo: Path, base_sha: str
     ):
         _checkout_branch(repo, "case_aerodrome")
-        (repo / "almanak/framework/connectors/aerodrome/adapter.py").write_text("change")
+        (repo / "almanak/connectors/aerodrome/adapter.py").write_text("change")
         _commit(repo, "aerodrome only")
         matrix = _run_picker(repo, base_sha)
         assert _connectors(matrix) == {"aerodrome"}

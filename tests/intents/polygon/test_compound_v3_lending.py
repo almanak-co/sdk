@@ -76,10 +76,10 @@ from almanak.framework.accounting.lending_accounting import (
     capture_lending_pre_state,
     lending_state_to_dict,
 )
-from almanak.framework.connectors.compound_v3.adapter import (
+from almanak.connectors.compound_v3.adapter import (
     COMPOUND_V3_COMET_ADDRESSES,
 )
-from almanak.framework.connectors.compound_v3.receipt_parser import CompoundV3ReceiptParser
+from almanak.connectors.compound_v3.receipt_parser import CompoundV3ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,

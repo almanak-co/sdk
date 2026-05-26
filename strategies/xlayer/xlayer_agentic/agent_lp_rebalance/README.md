@@ -294,4 +294,4 @@ is no duplicated LLM plumbing.
   -- Aave + Uniswap V3 CLMM loop (same protocol surface, no LLM)
 - **Shared agent utilities**: `examples/agentic/shared/` (agent loop, LLM client)
 - **Agent tools framework**: `almanak/framework/agent_tools/`
-- **Uniswap V3 connector**: `almanak/framework/connectors/uniswap_v3/`
+- **Uniswap V3 connector**: `almanak/connectors/uniswap_v3/`

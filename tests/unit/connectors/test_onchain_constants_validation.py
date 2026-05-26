@@ -60,19 +60,19 @@ class TestStandardERC20Events:
     @pytest.mark.parametrize(
         "module_path",
         [
-            "almanak.framework.connectors.uniswap_v3.receipt_parser",
-            "almanak.framework.connectors.sushiswap_v3.receipt_parser",
-            "almanak.framework.connectors.pancakeswap_v3.receipt_parser",
-            "almanak.framework.connectors.aerodrome.receipt_parser",
-            "almanak.framework.connectors.aave_v3.receipt_parser",
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser",
-            "almanak.framework.connectors.morpho_blue.receipt_parser",
-            "almanak.framework.connectors.morpho_vault.receipt_parser",
-            "almanak.framework.connectors.compound_v3.receipt_parser",
-            "almanak.framework.connectors.curve.receipt_parser",
-            "almanak.framework.connectors.lido.receipt_parser",
-            "almanak.framework.connectors.pendle.receipt_parser",
-            "almanak.framework.connectors.spark.receipt_parser",
+            "almanak.connectors.uniswap_v3.receipt_parser",
+            "almanak.connectors.sushiswap_v3.receipt_parser",
+            "almanak.connectors.pancakeswap_v3.receipt_parser",
+            "almanak.connectors.aerodrome.receipt_parser",
+            "almanak.connectors.aave_v3.receipt_parser",
+            "almanak.connectors.traderjoe_v2.receipt_parser",
+            "almanak.connectors.morpho_blue.receipt_parser",
+            "almanak.connectors.morpho_vault.receipt_parser",
+            "almanak.connectors.compound_v3.receipt_parser",
+            "almanak.connectors.curve.receipt_parser",
+            "almanak.connectors.lido.receipt_parser",
+            "almanak.connectors.pendle.receipt_parser",
+            "almanak.connectors.spark.receipt_parser",
         ],
     )
     def test_transfer_topic(self, module_path):
@@ -89,15 +89,15 @@ class TestStandardERC20Events:
     @pytest.mark.parametrize(
         "module_path",
         [
-            "almanak.framework.connectors.uniswap_v3.receipt_parser",
-            "almanak.framework.connectors.sushiswap_v3.receipt_parser",
-            "almanak.framework.connectors.aerodrome.receipt_parser",
-            "almanak.framework.connectors.aave_v3.receipt_parser",
-            "almanak.framework.connectors.traderjoe_v2.receipt_parser",
-            "almanak.framework.connectors.morpho_blue.receipt_parser",
-            "almanak.framework.connectors.morpho_vault.receipt_parser",
-            "almanak.framework.connectors.compound_v3.receipt_parser",
-            "almanak.framework.connectors.pendle.receipt_parser",
+            "almanak.connectors.uniswap_v3.receipt_parser",
+            "almanak.connectors.sushiswap_v3.receipt_parser",
+            "almanak.connectors.aerodrome.receipt_parser",
+            "almanak.connectors.aave_v3.receipt_parser",
+            "almanak.connectors.traderjoe_v2.receipt_parser",
+            "almanak.connectors.morpho_blue.receipt_parser",
+            "almanak.connectors.morpho_vault.receipt_parser",
+            "almanak.connectors.compound_v3.receipt_parser",
+            "almanak.connectors.pendle.receipt_parser",
         ],
     )
     def test_approval_topic(self, module_path):
@@ -112,22 +112,22 @@ class TestStandardERC20Events:
             )
 
     def test_enso_transfer_signature(self):
-        from almanak.framework.connectors.enso.receipt_parser import TRANSFER_EVENT_SIGNATURE
+        from almanak.connectors.enso.receipt_parser import TRANSFER_EVENT_SIGNATURE
 
         assert TRANSFER_EVENT_SIGNATURE == _topic(STANDARD_EVENTS["Transfer"])
 
     def test_lifi_transfer_signature(self):
-        from almanak.framework.connectors.lifi.receipt_parser import TRANSFER_EVENT_SIGNATURE
+        from almanak.connectors.lifi.receipt_parser import TRANSFER_EVENT_SIGNATURE
 
         assert TRANSFER_EVENT_SIGNATURE == _topic(STANDARD_EVENTS["Transfer"])
 
     def test_polymarket_erc20_transfer(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import ERC20_TRANSFER_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import ERC20_TRANSFER_TOPIC
 
         assert ERC20_TRANSFER_TOPIC == _topic(STANDARD_EVENTS["Transfer"])
 
     def test_polymarket_erc20_approval(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import ERC20_APPROVAL_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import ERC20_APPROVAL_TOPIC
 
         assert ERC20_APPROVAL_TOPIC == _topic(STANDARD_EVENTS["Approval"])
 
@@ -136,22 +136,22 @@ class TestERC1155Events:
     """Validate ERC-1155 event topics."""
 
     def test_polymarket_transfer_single(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import TRANSFER_SINGLE_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import TRANSFER_SINGLE_TOPIC
 
         assert TRANSFER_SINGLE_TOPIC == _topic(ERC1155_EVENTS["TransferSingle"])
 
     def test_polymarket_transfer_batch(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import TRANSFER_BATCH_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import TRANSFER_BATCH_TOPIC
 
         assert TRANSFER_BATCH_TOPIC == _topic(ERC1155_EVENTS["TransferBatch"])
 
     def test_polymarket_approval_for_all(self):
-        from almanak.framework.connectors.polymarket.receipt_parser import APPROVAL_FOR_ALL_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import APPROVAL_FOR_ALL_TOPIC
 
         assert APPROVAL_FOR_ALL_TOPIC == _topic(ERC1155_EVENTS["ApprovalForAll"])
 
     def test_traderjoe_transfer_batch(self):
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["TransferBatch"] == _topic(ERC1155_EVENTS["TransferBatch"])
 
@@ -160,12 +160,12 @@ class TestWETHEvents:
     """Validate WETH Deposit/Withdrawal topics."""
 
     def test_traderjoe_deposit(self):
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Deposit"] == _topic(WETH_EVENTS["Deposit"])
 
     def test_traderjoe_withdrawal(self):
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Withdrawal"] == _topic(WETH_EVENTS["Withdrawal"])
 
@@ -218,7 +218,7 @@ class TestUniswapV3Events:
 
     @pytest.mark.parametrize("event_name,signature", list(UNISWAP_V3_SIGNATURES.items()))
     def test_uniswap_v3(self, event_name, signature):
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.uniswap_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Uniswap V3 {event_name} mismatch"
 
@@ -228,7 +228,7 @@ class TestSushiSwapV3Events:
 
     @pytest.mark.parametrize("event_name,signature", list(UNISWAP_V3_SIGNATURES.items()))
     def test_sushiswap_v3(self, event_name, signature):
-        from almanak.framework.connectors.sushiswap_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.sushiswap_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"SushiSwap V3 {event_name} mismatch"
 
@@ -252,12 +252,12 @@ class TestPancakeSwapV3Events:
         ],
     )
     def test_shared_with_uniswap(self, event_name, signature):
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.pancakeswap_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"PancakeSwap V3 {event_name} mismatch"
 
     def test_swap(self):
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.pancakeswap_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Swap"] == _topic(self.PANCAKESWAP_SWAP_SIG)
 
@@ -286,7 +286,7 @@ class TestAerodromeEvents:
 
     @pytest.mark.parametrize("event_name,signature", list(AERODROME_SIGNATURES.items()))
     def test_aerodrome(self, event_name, signature):
-        from almanak.framework.connectors.aerodrome.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.aerodrome.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Aerodrome {event_name} mismatch"
 
@@ -310,7 +310,7 @@ class TestTraderJoeV2Events:
 
     @pytest.mark.parametrize("event_name,signature", list(TRADERJOE_SIGNATURES.items()))
     def test_traderjoe_v2(self, event_name, signature):
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.traderjoe_v2.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"TraderJoe V2 {event_name} mismatch"
 
@@ -342,7 +342,7 @@ class TestAaveV3Events:
 
     @pytest.mark.parametrize("event_name,signature", list(AAVE_V3_SIGNATURES.items()))
     def test_aave_v3(self, event_name, signature):
-        from almanak.framework.connectors.aave_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Aave V3 {event_name} mismatch"
 
@@ -360,7 +360,7 @@ class TestSparkEvents:
         ],
     )
     def test_spark(self, event_name, signature):
-        from almanak.framework.connectors.spark.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.spark.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Spark {event_name} mismatch"
 
@@ -393,7 +393,7 @@ class TestMorphoBlueEvents:
 
     @pytest.mark.parametrize("event_name,signature", list(MORPHO_BLUE_VERIFIED.items()))
     def test_morpho_blue(self, event_name, signature):
-        from almanak.framework.connectors.morpho_blue.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.morpho_blue.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Morpho Blue {event_name} mismatch"
 
@@ -413,13 +413,13 @@ class TestERC4626Events:
 
     @pytest.mark.parametrize("event_name,signature", list(ERC4626_SIGNATURES.items()))
     def test_ethena(self, event_name, signature):
-        from almanak.framework.connectors.ethena.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.ethena.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Ethena {event_name} mismatch"
 
     @pytest.mark.parametrize("event_name,signature", list(ERC4626_SIGNATURES.items()))
     def test_morpho_vault(self, event_name, signature):
-        from almanak.framework.connectors.morpho_vault.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.morpho_vault.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Morpho Vault {event_name} mismatch"
 
@@ -443,7 +443,7 @@ class TestCompoundV3Events:
 
     @pytest.mark.parametrize("event_name,signature", list(COMPOUND_V3_VERIFIED.items()))
     def test_compound_v3(self, event_name, signature):
-        from almanak.framework.connectors.compound_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.compound_v3.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Compound V3 {event_name} mismatch"
 
@@ -467,7 +467,7 @@ class TestLidoEvents:
 
     @pytest.mark.parametrize("event_name,signature", list(LIDO_SIGNATURES.items()))
     def test_lido(self, event_name, signature):
-        from almanak.framework.connectors.lido.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.lido.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Lido {event_name} mismatch"
 
@@ -482,7 +482,7 @@ class TestPolymarketEvents:
 
     def test_payout_redemption(self):
         """PayoutRedemption from CTF contract (signature from comment in receipt_parser.py)."""
-        from almanak.framework.connectors.polymarket.receipt_parser import PAYOUT_REDEMPTION_TOPIC
+        from almanak.connectors.polymarket.receipt_parser import PAYOUT_REDEMPTION_TOPIC
 
         assert PAYOUT_REDEMPTION_TOPIC == _topic(
             "PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)"
@@ -502,19 +502,19 @@ class TestPendleReceiptParserEvents:
 
     def test_pendle_swap(self):
         """PendleMarket.Swap(address,address,int256,int256,uint256,uint256)."""
-        from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Swap"] == _topic("Swap(address,address,int256,int256,uint256,uint256)")
 
     def test_pendle_mint(self):
         """PendleMarketV3.Mint(address,uint256,uint256,uint256) — receiver(indexed),netLpToAccount,netSyUsed,netPtUsed."""
-        from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Mint"] == _topic("Mint(address,uint256,uint256,uint256)")
 
     def test_pendle_burn(self):
         """PendleMarketV3.Burn(address,address,uint256,uint256,uint256) — receiverSy(indexed),receiverPt(indexed),netLpToBurn,netSyOut,netPtOut."""
-        from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS["Burn"] == _topic("Burn(address,address,uint256,uint256,uint256)")
 
@@ -534,7 +534,7 @@ class TestCurveEvents:
 
     @pytest.mark.parametrize("event_name,signature", list(CURVE_SIGNATURES.items()))
     def test_curve(self, event_name, signature):
-        from almanak.framework.connectors.curve.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.curve.receipt_parser import EVENT_TOPICS
 
         assert EVENT_TOPICS[event_name] == _topic(signature), f"Curve {event_name} mismatch"
 
@@ -556,7 +556,7 @@ class TestGMXV2EventTopicHashes:
 
     def test_order_events_are_valid_hashes(self):
         """GMX V2 Order events should be valid 66-char hex topic hashes."""
-        from almanak.framework.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
 
         order_events = ["OrderCreated", "OrderExecuted", "OrderCancelled", "OrderFrozen", "OrderUpdated"]
         seen = set()
@@ -569,7 +569,7 @@ class TestGMXV2EventTopicHashes:
 
     def test_position_events_are_valid_hashes(self):
         """PositionDecrease and related events should be valid unique hashes."""
-        from almanak.framework.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
 
         seen = set()
         for event in ["PositionDecrease", "PositionFeesInfo", "PositionFeesCollected"]:
@@ -597,7 +597,7 @@ class TestAaveV3ConfigPlaceholderDetection:
 
     def test_config_events_do_not_look_like_real_keccak(self):
         """Flag config events with suspiciously patterned hashes."""
-        from almanak.framework.connectors.aave_v3.receipt_parser import EVENT_TOPICS
+        from almanak.connectors.aave_v3.receipt_parser import EVENT_TOPICS
 
         for event in self.SUSPECT_EVENTS:
             topic = EVENT_TOPICS[event]

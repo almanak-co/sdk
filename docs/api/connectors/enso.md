@@ -2,7 +2,7 @@
 
 Connector for Enso Finance DEX aggregator.
 
-::: almanak.framework.connectors.enso
+::: almanak.connectors.enso
     options:
       show_root_heading: true
       members_order: source

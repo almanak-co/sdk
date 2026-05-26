@@ -29,8 +29,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
-from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
+from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+from almanak.connectors.aerodrome.sdk import AerodromeSDK
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -593,7 +593,7 @@ class TestAerodromeLPClose:
         # Aerodrome's volatile pool variant doesn't always emit a standard
         # ``Burn`` event on remove — the parser has a documented Transfer-
         # event fallback (see ``AerodromeReceiptParser.extract_lp_close_data``
-        # in ``almanak/framework/connectors/aerodrome/receipt_parser.py``).
+        # in ``almanak/connectors/aerodrome/receipt_parser.py``).
         # Asserting on ``parse_result.burn_events`` directly fails on those
         # variants. Use the high-level ``LPCloseData`` extractor that
         # composes both paths, so the test stays robust to per-pool
@@ -692,7 +692,7 @@ class TestAerodromeLPCollectFees:
     The Solidly-fork volatile/stable AMM does NOT support standalone
     LP_COLLECT_FEES — fees auto-compound into pool reserves and are realized
     only when liquidity is removed (see
-    ``almanak/framework/connectors/aerodrome/permission_hints.py`` —
+    ``almanak/connectors/aerodrome/permission_hints.py`` —
     ``supports_standalone_fee_collection`` is unset / False, and the compiler
     explicitly rejects ``protocol="aerodrome"`` in
     ``compiler._compile_collect_fees``).

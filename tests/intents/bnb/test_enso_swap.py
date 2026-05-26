@@ -100,7 +100,7 @@ class TestEnsoSwapIntent:
         l3_verified = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
+                from almanak.connectors.enso.receipt_parser import EnsoReceiptParser
 
                 parser = EnsoReceiptParser(chain=CHAIN_NAME)
                 swap_amounts = parser.extract_swap_amounts(tx_result.receipt.to_dict())

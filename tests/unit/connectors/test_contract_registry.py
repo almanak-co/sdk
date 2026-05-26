@@ -1,6 +1,6 @@
 """Tests for the contract address registry."""
 
-from almanak.framework.connectors.contract_registry import (
+from almanak.connectors._strategy_base.contract_registry import (
     ContractInfo,
     ContractRegistry,
     get_default_registry,

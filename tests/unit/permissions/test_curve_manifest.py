@@ -10,7 +10,7 @@ The cryptoswap intent test on ethereum routes through tricrypto2
 
 The fix replaces the single-pair source with iteration over
 ``CURVE_POOLS[chain]`` in
-``almanak.framework.connectors.curve.permission_hints.build_discovery_vectors``
+``almanak.connectors.curve.permission_hints.build_discovery_vectors``
 (the connector self-contains its discovery vectors — dispatched via
 ``almanak.framework.permissions.hints.get_discovery_vectors_override``).
 These tests pin the expected per-chain pool surface so the regression
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.connectors.curve.adapter import CURVE_POOLS
+from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.permissions.generator import generate_manifest
 
 

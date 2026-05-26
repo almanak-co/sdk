@@ -21,11 +21,11 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
-from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
-from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
-from almanak.framework.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.aave_v3.receipt_parser import AaveV3ReceiptParser
+from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+from almanak.connectors.morpho_blue.receipt_parser import MorphoBlueReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.extract_result import (
     CriticalAccountingError,
     ExtractError,
@@ -458,19 +458,19 @@ def test_all_connectors_parse_reports_failure_is_error() -> None:
     "graceful failure" path — parser caught the crash internally and reported
     it via ``ParseResult.success=False, error=...``. We MUST NOT downgrade to
     ``ExtractMissing`` (VIB-3159)."""
-    from almanak.framework.connectors.aave_v3.receipt_parser import (
+    from almanak.connectors.aave_v3.receipt_parser import (
         ParseResult as AaveParseResult,
     )
-    from almanak.framework.connectors.aerodrome.receipt_parser import (
+    from almanak.connectors.aerodrome.receipt_parser import (
         ParseResult as AeroParseResult,
     )
-    from almanak.framework.connectors.gmx_v2.receipt_parser import (
+    from almanak.connectors.gmx_v2.receipt_parser import (
         ParseResult as GmxParseResult,
     )
-    from almanak.framework.connectors.morpho_blue.receipt_parser import (
+    from almanak.connectors.morpho_blue.receipt_parser import (
         ParseResult as MorphoParseResult,
     )
-    from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+    from almanak.connectors.uniswap_v3.receipt_parser import (
         ParseResult as UniParseResult,
     )
 

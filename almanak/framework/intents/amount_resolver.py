@@ -163,7 +163,7 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
         return ["compound_v3"]
 
     def _get_comet_address(self, chain: str, market_id: str | None) -> str | None:
-        from ..connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         markets = COMPOUND_V3_COMET_ADDRESSES.get(chain, {})
         if not market_id:

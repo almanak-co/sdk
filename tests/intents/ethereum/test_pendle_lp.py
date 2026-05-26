@@ -7,7 +7,7 @@ Pendle's WITHDRAW intent path is **PT/YT redemption at maturity** (NOT
 Aave-style lending withdraw). The compiler routes ``WithdrawIntent`` with
 ``protocol="pendle"`` to ``compile_pendle_redeem``, which builds a
 PT-to-token redemption via the Pendle Router. See
-``almanak/framework/connectors/pendle/compiler.py::compile_pendle_redeem``.
+``almanak/connectors/pendle/compiler.py::compile_pendle_redeem``.
 
 Active Ethereum market (as of 2026-05-12):
 
@@ -29,7 +29,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptParser
+from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     LPCloseIntent,
@@ -64,7 +64,7 @@ CHAIN_NAME = "ethereum"
 # The market (LP token) and PT token are distinct addresses in Pendle V2:
 # market = the AMM pool (also the LP token minted on add-liquidity).
 # PT = the principal token minted from SY (separate ERC20).
-# See almanak/framework/connectors/pendle/sdk.py: PENDLE_MARKETS vs PT_TOKENS.
+# See almanak/connectors/pendle/sdk.py: PENDLE_MARKETS vs PT_TOKENS.
 PENDLE_SUSDE_MARKET = "0x177768caf9d0e036725a51d3f60d7e20f2d4d194"
 PT_SUSDE_ADDRESS = "0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb"
 # YT pair (required for WithdrawIntent PT/YT redemption pre-maturity).

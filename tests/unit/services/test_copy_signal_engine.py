@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.contract_registry import ContractInfo, ContractRegistry
+from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.services.copy_signal_engine import CopySignalEngine
 from almanak.framework.services.copy_trading_models import CopySignal, LeaderEvent
 
@@ -21,7 +21,7 @@ def registry():
         ContractInfo(
             protocol="uniswap_v3",
             contract_type="swap_router",
-            parser_module="almanak.framework.connectors.uniswap_v3.receipt_parser",
+            parser_module="almanak.connectors.uniswap_v3.receipt_parser",
             parser_class_name="UniswapV3ReceiptParser",
             supported_actions=["SWAP"],
         ),
@@ -69,7 +69,7 @@ def _make_engine(registry, mock_parser, price_fn=None):
     """Create a CopySignalEngine with mock parser injected."""
     engine = CopySignalEngine(registry=registry, max_age_seconds=300, retention_days=7, price_fn=price_fn)
     # Pre-populate the parser cache to avoid real imports
-    engine._parser_cache["almanak.framework.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"] = (
+    engine._parser_cache["almanak.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"] = (
         mock_parser
     )
     return engine
@@ -341,7 +341,7 @@ class TestMultiActionExtraction:
             ContractInfo(
                 protocol="uniswap_v3",
                 contract_type="position_manager",
-                parser_module="almanak.framework.connectors.uniswap_v3.receipt_parser",
+                parser_module="almanak.connectors.uniswap_v3.receipt_parser",
                 parser_class_name="UniswapV3ReceiptParser",
                 supported_actions=["LP_OPEN", "LP_CLOSE"],
             ),
@@ -356,7 +356,7 @@ class TestMultiActionExtraction:
             ContractInfo(
                 protocol="aave_v3",
                 contract_type="pool",
-                parser_module="almanak.framework.connectors.aave_v3.receipt_parser",
+                parser_module="almanak.connectors.aave_v3.receipt_parser",
                 parser_class_name="AaveV3ReceiptParser",
                 supported_actions=["SUPPLY", "WITHDRAW", "BORROW", "REPAY"],
             ),
@@ -371,7 +371,7 @@ class TestMultiActionExtraction:
             ContractInfo(
                 protocol="gmx_v2",
                 contract_type="exchange_router",
-                parser_module="almanak.framework.connectors.gmx_v2.receipt_parser",
+                parser_module="almanak.connectors.gmx_v2.receipt_parser",
                 parser_class_name="GMXv2ReceiptParser",
                 supported_actions=["PERP_OPEN", "PERP_CLOSE"],
             ),
@@ -398,7 +398,7 @@ class TestMultiActionExtraction:
         parser.extract_liquidity.return_value = 999
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xPosManager")])
@@ -416,7 +416,7 @@ class TestMultiActionExtraction:
         parser.extract_lp_close_data.return_value = {"amount0": 100, "amount1": 200}
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.uniswap_v3.receipt_parser.UniswapV3ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xPosManager")])
@@ -432,7 +432,7 @@ class TestMultiActionExtraction:
         parser.extract_borrow_amount.return_value = None
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xAavePool")])
@@ -449,7 +449,7 @@ class TestMultiActionExtraction:
         parser.extract_borrow_amount.return_value = 500000
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xAavePool")])
@@ -463,7 +463,7 @@ class TestMultiActionExtraction:
         parser.extract_perp_open.return_value = {"size": 1000, "leverage": 5}
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.gmx_v2.receipt_parser.GMXv2ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.gmx_v2.receipt_parser.GMXv2ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xGmxRouter")])
@@ -481,7 +481,7 @@ class TestMultiActionExtraction:
         parser.extract_repay_amount.return_value = None
 
         engine = CopySignalEngine(registry=registry)
-        cache_key = "almanak.framework.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
+        cache_key = "almanak.connectors.aave_v3.receipt_parser.AaveV3ReceiptParser:arbitrum"
         engine._parser_cache[cache_key] = parser
 
         signals = engine.process_events([self._make_event("0xAavePool")])

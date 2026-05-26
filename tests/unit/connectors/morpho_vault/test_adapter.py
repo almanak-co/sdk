@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.morpho_vault.adapter import (
+from almanak.connectors.morpho_vault.adapter import (
     MetaMorphoAdapter,
     MetaMorphoConfig,
     TransactionResult,
     create_test_adapter,
 )
-from almanak.framework.connectors.morpho_vault.sdk import (
+from almanak.connectors.morpho_vault.sdk import (
     DepositExceedsCapError,
     InsufficientSharesError,
     VaultInfo,

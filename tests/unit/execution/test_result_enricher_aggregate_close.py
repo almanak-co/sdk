@@ -509,7 +509,7 @@ class TestAerodromeSlipstreamSourceTagging:
     """Pin the parser-side contract — the enricher relies on these tags."""
 
     def _build_collect_receipt(self) -> dict[str, Any]:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             _COLLECT_CL_TOPIC,
         )
 
@@ -529,7 +529,7 @@ class TestAerodromeSlipstreamSourceTagging:
         }
 
     def _build_decrease_receipt(self) -> dict[str, Any]:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             _DECREASE_LIQUIDITY_TOPIC,
         )
 
@@ -549,7 +549,7 @@ class TestAerodromeSlipstreamSourceTagging:
         }
 
     def test_collect_event_emits_source_collect(self) -> None:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeSlipstreamReceiptParser,
         )
 
@@ -561,7 +561,7 @@ class TestAerodromeSlipstreamSourceTagging:
         assert out.source == "collect"
 
     def test_decrease_only_emits_source_decrease_liquidity(self) -> None:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeSlipstreamReceiptParser,
         )
 

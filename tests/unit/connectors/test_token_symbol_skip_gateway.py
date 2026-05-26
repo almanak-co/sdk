@@ -19,7 +19,7 @@ from almanak.framework.data.tokens.models import ResolvedToken
 
 
 def _make_aerodrome_adapter(mock_resolver):
-    from almanak.framework.connectors.aerodrome.adapter import AerodromeAdapter
+    from almanak.connectors.aerodrome.adapter import AerodromeAdapter
 
     with patch.object(AerodromeAdapter, "__init__", lambda self, *a, **kw: None):
         adapter = AerodromeAdapter.__new__(AerodromeAdapter)
@@ -29,7 +29,7 @@ def _make_aerodrome_adapter(mock_resolver):
 
 
 def _make_uniswap_v3_adapter(mock_resolver):
-    from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter
+    from almanak.connectors.uniswap_v3.adapter import UniswapV3Adapter
 
     with patch.object(UniswapV3Adapter, "__init__", lambda self, *a, **kw: None):
         adapter = UniswapV3Adapter.__new__(UniswapV3Adapter)
@@ -39,7 +39,7 @@ def _make_uniswap_v3_adapter(mock_resolver):
 
 
 def _make_sushiswap_v3_adapter(mock_resolver):
-    from almanak.framework.connectors.sushiswap_v3.adapter import SushiSwapV3Adapter
+    from almanak.connectors.sushiswap_v3.adapter import SushiSwapV3Adapter
 
     with patch.object(SushiSwapV3Adapter, "__init__", lambda self, *a, **kw: None):
         adapter = SushiSwapV3Adapter.__new__(SushiSwapV3Adapter)
@@ -49,7 +49,7 @@ def _make_sushiswap_v3_adapter(mock_resolver):
 
 
 def _make_enso_adapter(mock_resolver):
-    from almanak.framework.connectors.enso.adapter import EnsoAdapter
+    from almanak.connectors.enso.adapter import EnsoAdapter
 
     with patch.object(EnsoAdapter, "__init__", lambda self, *a, **kw: None):
         adapter = EnsoAdapter.__new__(EnsoAdapter)
@@ -59,7 +59,7 @@ def _make_enso_adapter(mock_resolver):
 
 
 def _make_curve_adapter(mock_resolver):
-    from almanak.framework.connectors.curve.adapter import CurveAdapter
+    from almanak.connectors.curve.adapter import CurveAdapter
 
     with patch.object(CurveAdapter, "__init__", lambda self, *a, **kw: None):
         adapter = CurveAdapter.__new__(CurveAdapter)

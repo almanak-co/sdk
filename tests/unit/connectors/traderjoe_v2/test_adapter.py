@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.adapter import (
+from almanak.connectors.traderjoe_v2.adapter import (
     LiquidityPosition,
     SwapQuote,
     SwapResult,
@@ -20,7 +20,7 @@ from almanak.framework.connectors.traderjoe_v2.adapter import (
     TraderJoeV2Config,
     TransactionData,
 )
-from almanak.framework.connectors.traderjoe_v2.sdk import BIN_ID_OFFSET, DEFAULT_GAS_ESTIMATES
+from almanak.connectors.traderjoe_v2.sdk import BIN_ID_OFFSET, DEFAULT_GAS_ESTIMATES
 
 # =============================================================================
 # Test Constants
@@ -227,10 +227,10 @@ class TestSwapType:
 class TestTraderJoeV2AdapterInit:
     """Tests for TraderJoeV2Adapter initialization."""
 
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def test_adapter_creation(self, mock_sdk_class: Mock) -> None:
         """Test adapter creation."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
+        from almanak.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
 
         mock_sdk_instance = MagicMock()
         mock_sdk_class.return_value = mock_sdk_instance
@@ -245,10 +245,10 @@ class TestTraderJoeV2AdapterInit:
         assert adapter.config == config
         mock_sdk_class.assert_called_once()
 
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def test_adapter_has_sdk(self, mock_sdk_class: Mock) -> None:
         """Test adapter initializes SDK."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
+        from almanak.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
 
         mock_sdk_instance = MagicMock()
         mock_sdk_class.return_value = mock_sdk_instance
@@ -272,10 +272,10 @@ class TestAdapterMethods:
     """Tests for adapter methods with mocked SDK."""
 
     @pytest.fixture
-    @patch("almanak.framework.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
+    @patch("almanak.connectors.traderjoe_v2.adapter.TraderJoeV2SDK")
     def adapter(self, mock_sdk_class: Mock):
         """Create adapter for testing."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
+        from almanak.connectors.traderjoe_v2.adapter import TraderJoeV2Adapter
 
         mock_sdk_instance = MagicMock()
         mock_sdk_instance.router_address = "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30"

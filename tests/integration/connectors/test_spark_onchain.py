@@ -257,8 +257,8 @@ class TestSparkOnChain:
         4. spDAI balance increases
         5. Supply event is emitted with correct data
         """
-        from almanak.framework.connectors.spark import SparkAdapter, SparkConfig
-        from almanak.framework.connectors.spark.receipt_parser import SparkReceiptParser
+        from almanak.connectors.spark import SparkAdapter, SparkConfig
+        from almanak.connectors.spark.receipt_parser import SparkReceiptParser
 
         # Get initial balances
         dai_before = dai_contract.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()
@@ -358,8 +358,8 @@ class TestSparkOnChain:
         3. spDAI balance decreases
         4. Withdraw event is emitted with correct data
         """
-        from almanak.framework.connectors.spark import SparkAdapter, SparkConfig
-        from almanak.framework.connectors.spark.receipt_parser import SparkReceiptParser
+        from almanak.connectors.spark import SparkAdapter, SparkConfig
+        from almanak.connectors.spark.receipt_parser import SparkReceiptParser
 
         # Get initial balances
         dai_before = dai_contract.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()

@@ -46,7 +46,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
+from almanak.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler

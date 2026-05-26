@@ -4,13 +4,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.jupiter.client import JupiterClient, JupiterConfig
-from almanak.framework.connectors.jupiter.exceptions import (
+from almanak.connectors.jupiter.client import JupiterClient, JupiterConfig
+from almanak.connectors.jupiter.exceptions import (
     JupiterAPIError,
     JupiterConfigError,
     JupiterPriceImpactError,
 )
-from almanak.framework.connectors.jupiter.models import JupiterQuote, JupiterSwapTransaction
+from almanak.connectors.jupiter.models import JupiterQuote, JupiterSwapTransaction
 
 
 # ---------------------------------------------------------------------------

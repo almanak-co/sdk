@@ -40,13 +40,13 @@ from almanak.framework.accounting.lending_accounting import (
     capture_lending_pre_state,
     lending_state_to_dict,
 )
-from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
+from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueEvent,
     MorphoBlueEventType,
     MorphoBlueReceiptParser,
 )
-from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,

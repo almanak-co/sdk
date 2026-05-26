@@ -19,7 +19,7 @@ import importlib
 from typing import Any
 from unittest.mock import patch
 
-from almanak.framework.connectors.capabilities_registry import (
+from almanak.connectors._strategy_base.capabilities_registry import (
     CapabilitiesRegistry,
     get_protocol_capabilities,
 )
@@ -63,7 +63,7 @@ class TestPerProtocolLazyLoad:
                 }
             )
             assert imported_capability_modules == [
-                "almanak.framework.connectors.aave_v3.capabilities"
+                "almanak.connectors.aave_v3.capabilities"
             ], (
                 "Expected only aave_v3.capabilities to be imported, "
                 f"got {imported_capability_modules}"
@@ -77,7 +77,7 @@ class TestPerProtocolLazyLoad:
         original_import_module = importlib.import_module
 
         def selective_import(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "almanak.framework.connectors.polymarket.capabilities":
+            if name == "almanak.connectors.polymarket.capabilities":
                 raise ImportError("simulated broken sibling connector")
             return original_import_module(name, *args, **kwargs)
 
@@ -128,7 +128,7 @@ class TestPerProtocolLazyLoad:
                 call
                 for call in spy.call_args_list
                 if call.args
-                and call.args[0] == "almanak.framework.connectors.aave_v3.capabilities"
+                and call.args[0] == "almanak.connectors.aave_v3.capabilities"
             ]
             assert len(aave_imports) == 1
         finally:
@@ -160,7 +160,7 @@ class TestMutationContract:
     monkey-patch test pattern in ``test_vocabulary.py`` keeps working."""
 
     def test_value_dict_identity_matches_connector_module(self) -> None:
-        from almanak.framework.connectors.aave_v3 import capabilities as aave_caps_module
+        from almanak.connectors.aave_v3 import capabilities as aave_caps_module
 
         caps = CapabilitiesRegistry.get("aave_v3")
         assert caps is aave_caps_module.PROTOCOL_CAPABILITIES["aave_v3"]

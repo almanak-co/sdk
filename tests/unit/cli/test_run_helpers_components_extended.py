@@ -1258,7 +1258,7 @@ class TestVaultLifecycleExtras:
 
         # Capture VaultLifecycleManager kwargs to assert initial_vault_state was passed.
         captured: dict[str, Any] = {}
-        from almanak.framework.connectors import lagoon as lagoon_mod
+        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:
@@ -1318,7 +1318,7 @@ class TestVaultLifecycleExtras:
         mocks["GatewayStateManager"].return_value = _FakeStateMgr()
 
         captured_callback: list[Any] = []
-        from almanak.framework.connectors import lagoon as lagoon_mod
+        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:
@@ -1382,7 +1382,7 @@ class TestVaultLifecycleExtras:
         mocks["GatewayStateManager"].return_value = _FailingStateMgr()
 
         captured: dict[str, Any] = {}
-        from almanak.framework.connectors import lagoon as lagoon_mod
+        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:

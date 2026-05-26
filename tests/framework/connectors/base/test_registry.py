@@ -2,7 +2,7 @@
 
 from enum import Enum
 
-from almanak.framework.connectors.base.registry import EventRegistry
+from almanak.connectors._strategy_base.base.registry import EventRegistry
 
 
 class MockEventType(Enum):

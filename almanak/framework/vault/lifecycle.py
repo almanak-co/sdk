@@ -10,10 +10,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors.lagoon.adapter import LagoonVaultAdapter
+from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 from almanak.core.models.config import VaultVersion
 from almanak.core.models.params import SettleDepositParams, SettleRedeemParams, UpdateTotalAssetsParams
-from almanak.framework.connectors.lagoon.adapter import LagoonVaultAdapter
-from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.vault.config import SettlementPhase, SettlementResult, VaultAction, VaultConfig, VaultState
 
@@ -389,7 +389,7 @@ class VaultLifecycleManager:
         deposits_received = 0
         shares_minted = 0
         try:
-            from almanak.framework.connectors.lagoon.receipt_parser import LagoonReceiptParser
+            from almanak.connectors.lagoon.receipt_parser import LagoonReceiptParser
 
             parser = LagoonReceiptParser()
             if hasattr(settle_deposit_result, "receipt") and settle_deposit_result.receipt:

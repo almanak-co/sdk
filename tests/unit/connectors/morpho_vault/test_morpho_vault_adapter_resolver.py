@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.morpho_vault.adapter import (
+from almanak.connectors.morpho_vault.adapter import (
     MetaMorphoAdapter,
     MetaMorphoConfig,
 )

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
+from almanak.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
 
 
 @pytest.fixture()

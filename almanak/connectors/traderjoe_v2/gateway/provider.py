@@ -1,7 +1,7 @@
 """Gateway-side connector binding for Trader Joe V2 (VIB-4811).
 
 Phase 3 scaffolding — Trader Joe V2 has strategy-side intent code
-under ``almanak/framework/connectors/traderjoe_v2/`` (pre-migration
+under ``almanak/connectors/traderjoe_v2/`` (pre-migration
 layout) but no gateway-side connector class. This scaffold exists so
 the protocol can publish its CoinGecko slug through
 ``GatewayPriceIdCapability``.

@@ -14,8 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
-from ..connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
+from almanak.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
+from almanak.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
+
 from ..execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
     MULTISEND_SELECTOR,

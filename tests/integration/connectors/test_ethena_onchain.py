@@ -297,8 +297,8 @@ class TestEthenaOnChain:
         4. sUSDe balance increases
         5. Deposit event is emitted with correct data
         """
-        from almanak.framework.connectors.ethena import EthenaAdapter, EthenaConfig
-        from almanak.framework.connectors.ethena.receipt_parser import (
+        from almanak.connectors.ethena import EthenaAdapter, EthenaConfig
+        from almanak.connectors.ethena.receipt_parser import (
             EthenaReceiptParser,
         )
 
@@ -407,8 +407,8 @@ class TestEthenaOnChain:
         3. sUSDe balance decreases
         4. Cooldown state is tracked on-chain via cooldowns mapping
         """
-        from almanak.framework.connectors.ethena import EthenaAdapter, EthenaConfig
-        from almanak.framework.connectors.ethena.receipt_parser import EthenaReceiptParser
+        from almanak.connectors.ethena import EthenaAdapter, EthenaConfig
+        from almanak.connectors.ethena.receipt_parser import EthenaReceiptParser
 
         # Get initial balances
         usde_before = usde_contract.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()

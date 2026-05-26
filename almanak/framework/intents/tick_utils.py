@@ -31,13 +31,13 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 
-# Lazy-loaded reference to ``almanak.framework.connectors.uniswap_v3.sdk``.
+# Lazy-loaded reference to ``almanak.connectors.uniswap_v3.sdk``.
 # Importing the uniswap_v3 connector at module level pulls in the connector's
 # receipt parser, which transitively loads ``framework.execution.orchestrator``
 # and ``framework.strategies.base``, defeating the lazy-init memory work in
 # the gateway sidecar. Each call site grabs the symbol it needs on demand.
 def _uniswap_sdk():
-    from almanak.framework.connectors.uniswap_v3 import sdk as _sdk
+    from almanak.connectors.uniswap_v3 import sdk as _sdk
 
     return _sdk
 

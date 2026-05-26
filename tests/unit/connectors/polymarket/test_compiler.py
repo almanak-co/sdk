@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
-from almanak.framework.connectors.polymarket.compiler import PolymarketCompiler
-from almanak.framework.connectors.polymarket.exceptions import PolymarketMarketNotResolvedError
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors.polymarket.compiler import PolymarketCompiler
+from almanak.connectors.polymarket.exceptions import PolymarketMarketNotResolvedError
 from almanak.framework.intents.compiler import CompilationStatus
 from almanak.framework.intents.vocabulary import IntentType, PredictionRedeemIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle

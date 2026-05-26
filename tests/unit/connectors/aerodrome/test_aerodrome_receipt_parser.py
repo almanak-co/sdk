@@ -3,7 +3,7 @@
 import logging
 from decimal import Decimal
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
     AerodromeReceiptParser,
 )
@@ -458,7 +458,7 @@ class TestEnrichmentPathSwapAmounts:
             amount0_in=1000, amount1_in=0, amount0_out=0, amount1_out=2000,
         )
 
-        logger = logging.getLogger("almanak.framework.connectors.aerodrome.receipt_parser")
+        logger = logging.getLogger("almanak.connectors.aerodrome.receipt_parser")
         with CaptureHandler(logger) as captured:
             parser.parse_receipt(receipt)
 

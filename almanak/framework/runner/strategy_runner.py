@@ -757,7 +757,7 @@ class StrategyRunner:
         if client is None:
             return None
         try:
-            from almanak.framework.connectors.uniswap_v4.gateway_pool_key_client import (
+            from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
                 make_sync_pool_key_lookup,
             )
         except Exception as exc:
@@ -2245,7 +2245,7 @@ class StrategyRunner:
             lp_open = extracted.get("lp_open_data")
             if lp_open is None:
                 return
-            from ..connectors.uniswap_v3.slot0_fallback import enrich_lp_open_with_slot0
+            from almanak.connectors.uniswap_v3.slot0_fallback import enrich_lp_open_with_slot0
 
             gateway = self._get_gateway_client()
             if gateway is None:
@@ -2277,7 +2277,7 @@ class StrategyRunner:
             lp_close = extracted.get("lp_close_data")
             if lp_close is None:
                 return
-            from ..connectors.uniswap_v3.slot0_fallback import enrich_lp_close_with_slot0
+            from almanak.connectors.uniswap_v3.slot0_fallback import enrich_lp_close_with_slot0
 
             gateway = self._get_gateway_client()
             if gateway is None:
@@ -2533,7 +2533,7 @@ class StrategyRunner:
         protocol_norm = (protocol or "").lower()
         try:
             if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
-                from almanak.framework.connectors.aerodrome.receipt_parser import (
+                from almanak.connectors.aerodrome.receipt_parser import (
                     AerodromeSlipstreamReceiptParser,
                 )
 
@@ -2545,7 +2545,7 @@ class StrategyRunner:
                 # DecreaseLiquidity log out by NPM-address and silently emit
                 # "no payload extractable" — same mode-skip pattern VIB-4305
                 # caught for Slipstream. Route to the Sushi-specific parser.
-                from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+                from almanak.connectors.sushiswap_v3.receipt_parser import (
                     SushiSwapV3ReceiptParser,
                 )
 
@@ -2558,12 +2558,12 @@ class StrategyRunner:
                 # (different emitter) and silently returns None — the same
                 # ghost-position class the Aerodrome / Sushi branches above
                 # fix.
-                from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+                from almanak.connectors.pancakeswap_v3.receipt_parser import (
                     PancakeSwapV3ReceiptParser,
                 )
 
                 return receipt, PancakeSwapV3ReceiptParser(chain=chain)
-            from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            from almanak.connectors.uniswap_v3.receipt_parser import (
                 UniswapV3ReceiptParser,
             )
         except Exception:  # noqa: BLE001 — defensive
@@ -3038,7 +3038,7 @@ class StrategyRunner:
         Pulled out so :meth:`_extract_receipt_from_result` can ask the
         question without inlining the topic-extraction loop.
         """
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             EVENT_TOPICS,
         )
 
@@ -3850,7 +3850,8 @@ class StrategyRunner:
 
         # Build gateway-backed Polymarket execution handles for Polygon.
         if strategy.chain.lower() == "polygon" and state.gateway_client is not None:
-            from ..connectors.polymarket.gateway_client import GatewayPolymarketClient
+            from almanak.connectors.polymarket.gateway_client import GatewayPolymarketClient
+
             from ..execution.clob_handler import ClobActionHandler
 
             state.clob_client = GatewayPolymarketClient(state.gateway_client)

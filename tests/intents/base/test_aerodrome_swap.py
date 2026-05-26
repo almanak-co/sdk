@@ -145,7 +145,7 @@ class TestAerodromeSwapIntent:
 
             # Parse swap receipt
             if tx_result.receipt:
-                from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+                from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 
                 parser = AerodromeReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())

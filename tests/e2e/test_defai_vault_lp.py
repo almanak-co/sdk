@@ -403,7 +403,7 @@ class TestDeFAIVaultLP:
         )
 
         # Mock the vault SDK call path (imported locally inside executor method)
-        with patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK") as mock_sdk_cls:
+        with patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK") as mock_sdk_cls:
             mock_sdk = MagicMock()
             mock_sdk.get_total_assets.return_value = 1000000
             mock_sdk.get_pending_deposits.return_value = 0
@@ -421,7 +421,7 @@ class TestDeFAIVaultLP:
 
     def test_deployer_builds_valid_tx(self):
         """Verify LagoonVaultDeployer produces valid transaction data."""
-        from almanak.framework.connectors.lagoon.deployer import (
+        from almanak.connectors.lagoon.deployer import (
             LagoonVaultDeployer,
             VaultDeployParams,
         )

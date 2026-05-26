@@ -55,7 +55,7 @@ def _resolve_sy_oracle_key(chain: str, market_address: str) -> str:
     if not chain or not market_address:
         return "SY"
     try:
-        from almanak.framework.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
+        from almanak.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
 
         underlying_address = MARKET_TOKEN_MINT_SY.get(chain.lower(), {}).get(market_address.lower())
         if not underlying_address:

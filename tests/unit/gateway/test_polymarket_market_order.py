@@ -4,7 +4,7 @@ Pin the cross-side price-sampling convention and the worst_price guard. The
 prior version sampled the SAME side as the trade (``side=BUY`` for a market
 BUY), which on Polymarket's CLOB returns the BID — not the ASK that a buyer
 would actually cross. Verified convention from
-``almanak/framework/connectors/polymarket/clob_client.py:879-881`` and
+``almanak/connectors/polymarket/clob_client.py:879-881`` and
 ``models.py:653,664``:
 
     GET /price?side=BUY  -> best BID  (highest buyer's price)

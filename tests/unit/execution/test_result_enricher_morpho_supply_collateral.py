@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.receipt_parser import (
     EVENT_TOPICS,
     MorphoBlueReceiptParser,
 )

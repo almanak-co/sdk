@@ -10,7 +10,7 @@ This module provides comprehensive tests for all HexDecoder methods including:
 
 import pytest
 
-from almanak.framework.connectors.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
 
 
 class TestHexDecoderNormalization:

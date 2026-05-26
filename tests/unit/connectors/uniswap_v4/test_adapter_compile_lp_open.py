@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.adapter import (
+from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
     UniswapV4UnsupportedPoolError,

@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.adapter import (
+from almanak.connectors.aave_v3.adapter import (
     AAVE_BORROW_SELECTOR,
     AAVE_FLASH_LOAN_SELECTOR,
     AAVE_FLASH_LOAN_SIMPLE_SELECTOR,

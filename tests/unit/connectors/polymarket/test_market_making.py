@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.polymarket.market_making import (
+from almanak.connectors.polymarket.market_making import (
     MAX_PRICE,
     MIN_PRICE,
     Quote,
@@ -14,7 +14,7 @@ from almanak.framework.connectors.polymarket.market_making import (
     generate_quote_ladder,
     should_requote,
 )
-from almanak.framework.connectors.polymarket.models import OrderBook, PriceLevel
+from almanak.connectors.polymarket.models import OrderBook, PriceLevel
 
 
 class TestQuote:
@@ -649,7 +649,7 @@ class TestModuleExports:
 
     def test_all_functions_exported(self) -> None:
         """Test that all expected functions are exported."""
-        from almanak.framework.connectors.polymarket import market_making
+        from almanak.connectors.polymarket import market_making
 
         assert hasattr(market_making, "Quote")
         assert hasattr(market_making, "RiskParameters")
@@ -660,7 +660,7 @@ class TestModuleExports:
 
     def test_imports_from_package(self) -> None:
         """Test that functions can be imported from main package."""
-        from almanak.framework.connectors.polymarket import (
+        from almanak.connectors.polymarket import (
             Quote,
             RiskParameters,
             calculate_inventory_skew,

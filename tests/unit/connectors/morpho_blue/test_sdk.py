@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.morpho_blue.sdk import (
+from almanak.connectors.morpho_blue.sdk import (
     LLTV_SCALE,
     MORPHO_BLUE_ADDRESS,
     MORPHO_DEPLOYMENT_BLOCKS,

@@ -27,10 +27,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.polymarket.gateway_client import (
+from almanak.connectors.polymarket.gateway_client import (
     GatewayPolymarketClient,
 )
-from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+from almanak.connectors.polymarket.models import OrderResponse, OrderStatus
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.connectors.polymarket.proto import polymarket_pb2
 

@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aave_v3.adapter import (
+from almanak.connectors.aave_v3.adapter import (
     AaveV3Adapter,
     AaveV3Config,
     AaveV3FlashLoanParams,

@@ -160,7 +160,7 @@ class TestEnsoSwapIntent:
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
+                from almanak.connectors.enso.receipt_parser import EnsoReceiptParser
 
                 parser = EnsoReceiptParser(chain=CHAIN_NAME)
                 swap_result = parser.parse_swap_receipt(
@@ -300,7 +300,7 @@ class TestEnsoSwapIntent:
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
 
             if tx_result.receipt:
-                from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
+                from almanak.connectors.enso.receipt_parser import EnsoReceiptParser
 
                 parser = EnsoReceiptParser(chain=CHAIN_NAME)
                 swap_result = parser.parse_swap_receipt(

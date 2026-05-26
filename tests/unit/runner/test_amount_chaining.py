@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.receipt_parser import (
+from almanak.connectors.enso.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
     EnsoReceiptParser,
 )

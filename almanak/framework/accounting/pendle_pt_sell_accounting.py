@@ -56,7 +56,7 @@ def _is_pt_sell(intent: Any, result: Any) -> bool:
     # Check against registered PT addresses
     if from_token.startswith("0x") or from_token.startswith("0X"):
         try:
-            from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO
+            from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
 
             chain = str(getattr(intent, "chain", "") or "")
             if not chain:
@@ -100,7 +100,7 @@ def _resolve_pt_token_sym(intent: Any, result: Any) -> str:
     # Resolve address → symbol so lot key matches the PT_BUY recording convention
     if from_token.startswith("0x") or from_token.startswith("0X"):
         try:
-            from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO
+            from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
 
             chain = str(getattr(intent, "chain", "") or "").lower()
             if chain:

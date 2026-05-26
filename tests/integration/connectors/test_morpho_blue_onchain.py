@@ -241,7 +241,7 @@ class TestMorphoBlueSDKOnChain:
 
     def test_sdk_connection(self, web3: Web3, anvil_rpc_url: str) -> None:
         """Test SDK can connect to the chain."""
-        from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+        from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
         sdk = MorphoBlueSDK(chain="ethereum", rpc_url=anvil_rpc_url)
         assert sdk.is_connected()
@@ -249,7 +249,7 @@ class TestMorphoBlueSDKOnChain:
 
     def test_get_market_params(self, web3: Web3, anvil_rpc_url: str) -> None:
         """Test getting market parameters from on-chain."""
-        from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+        from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
         sdk = MorphoBlueSDK(chain="ethereum", rpc_url=anvil_rpc_url)
         params = sdk.get_market_params(WSTETH_USDC_MARKET_ID)
@@ -260,7 +260,7 @@ class TestMorphoBlueSDKOnChain:
 
     def test_get_market_state(self, web3: Web3, anvil_rpc_url: str) -> None:
         """Test getting market state from on-chain."""
-        from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+        from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
         sdk = MorphoBlueSDK(chain="ethereum", rpc_url=anvil_rpc_url)
         state = sdk.get_market_state(WSTETH_USDC_MARKET_ID)
@@ -271,7 +271,7 @@ class TestMorphoBlueSDKOnChain:
 
     def test_get_position_empty(self, web3: Web3, anvil_rpc_url: str) -> None:
         """Test getting position for user with no position."""
-        from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+        from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
         sdk = MorphoBlueSDK(chain="ethereum", rpc_url=anvil_rpc_url)
         position = sdk.get_position(WSTETH_USDC_MARKET_ID, TEST_WALLET)
@@ -284,7 +284,7 @@ class TestMorphoBlueSDKOnChain:
 
     def test_discover_markets(self, web3: Web3, anvil_rpc_url: str) -> None:
         """Test discovering markets from on-chain events."""
-        from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+        from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
         sdk = MorphoBlueSDK(chain="ethereum", rpc_url=anvil_rpc_url)
         markets = sdk.discover_markets()
@@ -307,11 +307,11 @@ class TestMorphoBlueAdapterOnChain:
 
     def test_supply_collateral(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test supplying collateral to Morpho Blue."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )
-        from almanak.framework.connectors.morpho_blue.receipt_parser import (
+        from almanak.connectors.morpho_blue.receipt_parser import (
             MorphoBlueReceiptParser,
         )
 
@@ -374,7 +374,7 @@ class TestMorphoBlueAdapterOnChain:
 
     def test_borrow_after_collateral(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test borrowing USDC after supplying collateral."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )
@@ -426,7 +426,7 @@ class TestMorphoBlueAdapterOnChain:
 
     def test_repay_debt(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test repaying all borrowed USDC using shares-based repay."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )
@@ -475,7 +475,7 @@ class TestMorphoBlueAdapterOnChain:
 
     def test_withdraw_collateral(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test withdrawing collateral (if no remaining debt)."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )
@@ -534,7 +534,7 @@ class TestMorphoBlueSupplyOnChain:
 
     def test_supply_lending(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test supplying USDC for lending yield."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )
@@ -577,7 +577,7 @@ class TestMorphoBlueSupplyOnChain:
 
     def test_withdraw_lending(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test withdrawing supplied USDC."""
-        from almanak.framework.connectors.morpho_blue import (
+        from almanak.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
         )

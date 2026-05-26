@@ -7,7 +7,7 @@ Tests for the refactored Compound V3 receipt parser using base infrastructure
 import logging
 from decimal import Decimal
 
-from almanak.framework.connectors.compound_v3.receipt_parser import (
+from almanak.connectors.compound_v3.receipt_parser import (
     CompoundV3EventType,
     CompoundV3ReceiptParser,
 )

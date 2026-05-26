@@ -7,7 +7,7 @@ Solidity event signatures. Regression test for VIB-357.
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import EVENT_TOPICS
+from almanak.connectors.morpho_blue.receipt_parser import EVENT_TOPICS
 
 # Canonical Morpho Blue event signatures from IMorpho.sol
 # https://github.com/morpho-org/morpho-blue/blob/main/src/interfaces/IMorpho.sol

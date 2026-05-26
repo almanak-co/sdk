@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.spark.adapter import (
+from almanak.connectors.spark.adapter import (
     SparkAdapter,
     SparkConfig,
 )
@@ -217,7 +217,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.spark.adapter as adapter_module
+        import almanak.connectors.spark.adapter as adapter_module
 
         assert not hasattr(adapter_module, "SPARK_TOKEN_ADDRESSES")
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")

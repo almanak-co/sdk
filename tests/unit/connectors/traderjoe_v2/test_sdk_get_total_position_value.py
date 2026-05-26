@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.traderjoe_v2.sdk import TraderJoeV2SDK
+from almanak.connectors.traderjoe_v2.sdk import TraderJoeV2SDK
 
 
 @pytest.fixture
@@ -187,7 +187,7 @@ class TestLBPairABISelector:
     def _load_lbpair_abi(self) -> list[dict]:
         from importlib.resources import files
 
-        abi_path = files("almanak.framework.connectors.traderjoe_v2.abis").joinpath("LBPair.json")
+        abi_path = files("almanak.connectors.traderjoe_v2.abis").joinpath("LBPair.json")
         import json
 
         return json.loads(abi_path.read_text())

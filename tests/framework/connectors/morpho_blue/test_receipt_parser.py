@@ -1,6 +1,6 @@
 """Tests for Morpho Blue Receipt Parser (Refactored)."""
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueEventType,
     MorphoBlueReceiptParser,
 )

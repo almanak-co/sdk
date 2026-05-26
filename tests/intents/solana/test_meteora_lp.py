@@ -47,7 +47,7 @@ def _find_sol_usdc_pool():
         return SOL_USDC_DLMM_POOL
 
     try:
-        from almanak.framework.connectors.meteora.sdk import MeteoraSDK
+        from almanak.connectors.meteora.sdk import MeteoraSDK
 
         sdk = MeteoraSDK(wallet_address="KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9")
         pool = sdk.find_pool(

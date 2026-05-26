@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.connectors.enso.exceptions import (
+from almanak.connectors.enso.exceptions import (
     EnsoRouterRevertError,
     check_known_router_revert,
 )
@@ -341,7 +341,7 @@ class TestCheckKnownRouterRevertHelper:
         import logging
 
         gateway_error = "HTTP 400: execution reverted: 0xef3dcb2f"
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.connectors.enso.exceptions"):
+        with caplog.at_level(logging.WARNING, logger="almanak.connectors.enso.exceptions"):
             with pytest.raises(EnsoRouterRevertError):
                 check_known_router_revert(gateway_error, chain="base")
         assert any(gateway_error in rec.getMessage() for rec in caplog.records)

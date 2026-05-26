@@ -877,7 +877,7 @@ class TestExtractionSpecPerProtocolOverlay:
     # ----- 1. Uniswap V3 LP_OPEN no longer emits the bin_ids capability warning.
 
     def test_uniswap_v3_lp_open_no_bin_ids_warning(self) -> None:
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -897,7 +897,7 @@ class TestExtractionSpecPerProtocolOverlay:
     # ----- 2. PancakeSwap V3 LP_OPEN no longer emits the bin_ids warning.
 
     def test_pancakeswap_v3_lp_open_no_bin_ids_warning(self) -> None:
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+        from almanak.connectors.pancakeswap_v3.receipt_parser import (
             PancakeSwapV3ReceiptParser,
         )
 
@@ -918,7 +918,7 @@ class TestExtractionSpecPerProtocolOverlay:
     #         fees0/fees1 warnings still fire (VIB-4344 follow-up).
 
     def test_uniswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -949,7 +949,7 @@ class TestExtractionSpecPerProtocolOverlay:
     # ----- 4. PancakeSwap V3 LP_COLLECT_FEES: no bin_ids warning.
 
     def test_pancakeswap_v3_lp_collect_fees_no_bin_ids_warning(self) -> None:
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+        from almanak.connectors.pancakeswap_v3.receipt_parser import (
             PancakeSwapV3ReceiptParser,
         )
 
@@ -972,7 +972,7 @@ class TestExtractionSpecPerProtocolOverlay:
     #         the parser omits the declaration).
 
     def test_traderjoe_v2_lp_open_still_extracts_bin_ids_into_extracted_data(self) -> None:
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             EVENT_TOPICS,
             TraderJoeV2ReceiptParser,
         )
@@ -1030,7 +1030,7 @@ class TestExtractionSpecPerProtocolOverlay:
     # ----- 6. LPPositionTracker._extract_bin_ids reads the enriched result.
 
     def test_lp_position_tracker_captures_bin_ids_after_enrichment(self) -> None:
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             EVENT_TOPICS,
             TraderJoeV2ReceiptParser,
         )
@@ -1089,7 +1089,7 @@ class TestExtractionSpecPerProtocolOverlay:
         """LP_COLLECT_FEES emits ``WithdrawnFromBins`` (fees are withdrawn from
         bins), so the overlay must keep ``bin_ids`` extraction wired for this
         intent type the same way LP_OPEN does."""
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             EVENT_TOPICS,
             TraderJoeV2ReceiptParser,
         )
@@ -1150,7 +1150,7 @@ class TestExtractionSpecPerProtocolOverlay:
         is never invoked, and downstream LP close/fee collection cannot reuse
         the captured bins. Regression guard for the Codex P2 finding on PR #2269.
         """
-        from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+        from almanak.connectors.traderjoe_v2.receipt_parser import (
             EVENT_TOPICS,
             TraderJoeV2ReceiptParser,
         )
@@ -1321,7 +1321,7 @@ class TestExtractionSpecRemoveOverlay:
     # ----- 1. Aerodrome V1 narrowing fires (no false noise).
 
     def test_aerodrome_v1_lp_open_no_v3_field_warnings(self) -> None:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeReceiptParser,
         )
 
@@ -1343,7 +1343,7 @@ class TestExtractionSpecRemoveOverlay:
     # ----- 2a. Aerodrome Slipstream narrowing fires (no false noise on ticks).
 
     def test_aerodrome_slipstream_lp_open_no_tick_warnings(self) -> None:
-        from almanak.framework.connectors.aerodrome.receipt_parser import (
+        from almanak.connectors.aerodrome.receipt_parser import (
             AerodromeSlipstreamReceiptParser,
         )
 

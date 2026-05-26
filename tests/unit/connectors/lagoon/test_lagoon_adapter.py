@@ -9,8 +9,8 @@ from almanak.core.models.params import (
     SettleRedeemParams,
     UpdateTotalAssetsParams,
 )
-from almanak.framework.connectors.lagoon.adapter import LagoonVaultAdapter
-from almanak.framework.connectors.lagoon.sdk import (
+from almanak.connectors.lagoon.adapter import LagoonVaultAdapter
+from almanak.connectors.lagoon.sdk import (
     SETTLE_DEPOSIT_SELECTOR,
     SETTLE_REDEEM_SELECTOR,
     UPDATE_NEW_TOTAL_ASSETS_SELECTOR,

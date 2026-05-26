@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.jupiter.adapter import JupiterAdapter, SolanaTransactionData
-from almanak.framework.connectors.jupiter.client import JupiterConfig
-from almanak.framework.connectors.jupiter.models import JupiterQuote, JupiterSwapTransaction
+from almanak.connectors.jupiter.adapter import JupiterAdapter, SolanaTransactionData
+from almanak.connectors.jupiter.client import JupiterConfig
+from almanak.connectors.jupiter.models import JupiterQuote, JupiterSwapTransaction
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import SwapIntent
 
@@ -174,7 +174,7 @@ class TestJupiterAdapterResolveToken:
 
 
 class TestJupiterAdapterCompileSwap:
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_compile_swap_with_amount(
         self,
         mock_client_cls,
@@ -218,7 +218,7 @@ class TestJupiterAdapterCompileSwap:
         assert bundle.metadata["output_mint"] == WSOL_MINT
         assert bundle.metadata["deferred_swap"] is True
 
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_compile_swap_with_amount_usd(
         self,
         mock_client_cls,
@@ -331,7 +331,7 @@ class TestJupiterAdapterCompileSwap:
 
 
 class TestJupiterAdapterGetFreshSwapTransaction:
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_get_fresh_swap_transaction(
         self,
         mock_client_cls,
@@ -384,7 +384,7 @@ class TestJupiterAdapterGetFreshSwapTransaction:
         with pytest.raises(ValueError, match="route_params"):
             adapter.get_fresh_swap_transaction({})
 
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_get_fresh_swap_transaction_passes_priority_fee(
         self,
         mock_client_cls,
@@ -427,7 +427,7 @@ class TestJupiterAdapterGetFreshSwapTransaction:
 
 
 class TestJupiterAdapterPriorityFeeThreading:
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_compile_swap_threads_priority_fee(
         self,
         mock_client_cls,
@@ -470,7 +470,7 @@ class TestJupiterAdapterPriorityFeeThreading:
         assert route_params["priority_fee_level"] == "medium"
         assert route_params["priority_fee_max_lamports"] == 500_000
 
-    @patch("almanak.framework.connectors.jupiter.adapter.JupiterClient")
+    @patch("almanak.connectors.jupiter.adapter.JupiterClient")
     def test_compile_swap_default_priority_fee(
         self,
         mock_client_cls,

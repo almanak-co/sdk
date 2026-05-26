@@ -34,7 +34,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptParser
+from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.result_enricher import ResultEnricher
 from almanak.framework.intents import SwapIntent
@@ -71,7 +71,7 @@ SUSDE_BALANCE_SLOT = 4
 # within 30 days of expiry — scripts/ci/check_pendle_expiry.py will flag
 # it. The VIB-3751 bug this test guards is decimals + swap-type
 # classification; it does not depend on the specific YT identity. From
-# almanak/framework/connectors/pendle/sdk.py YT_TOKEN_INFO["ethereum"].
+# almanak/connectors/pendle/sdk.py YT_TOKEN_INFO["ethereum"].
 YT_SUSDE_ADDRESS = "0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2"
 YT_SUSDE_DECIMALS = 18
 

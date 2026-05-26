@@ -11,8 +11,8 @@ Selection Criteria:
 
 Example:
     from almanak.framework.intents.bridge_selector import BridgeSelector
-    from almanak.framework.connectors.across import AcrossBridgeAdapter
-    from almanak.framework.connectors.stargate import StargateBridgeAdapter
+    from almanak.connectors.across import AcrossBridgeAdapter
+    from almanak.connectors.stargate import StargateBridgeAdapter
 
     selector = BridgeSelector([AcrossBridgeAdapter(), StargateBridgeAdapter()])
 
@@ -35,7 +35,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from ..connectors.bridge_base import (
+from almanak.connectors._strategy_base.bridge_base import (
     BridgeAdapter,
     BridgeError,
     BridgeQuote,

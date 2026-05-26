@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from almanak.framework.connectors.pendle import compiler as cp
+from almanak.connectors.pendle import compiler as cp
 from almanak.framework.intents.compiler_models import TokenInfo
 from almanak.framework.intents.vocabulary import SwapIntent
 

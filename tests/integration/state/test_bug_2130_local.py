@@ -977,7 +977,11 @@ def test_d5_2_test_module_does_not_import_strategy_or_gateway_code():
     forbidden_prefixes = (
         "almanak.framework.strategies",
         "almanak.gateway",
+        # Pre-VIB-4835 the strategy-side connectors lived under
+        # ``almanak.framework.connectors`` — kept here as a forward
+        # guard in case the legacy path is ever reintroduced.
         "almanak.framework.connectors",
+        "almanak.connectors",
         "web3",
         "solana",
     )

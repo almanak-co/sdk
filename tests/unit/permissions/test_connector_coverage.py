@@ -8,7 +8,7 @@ means manifests can omit targets/selectors the connector actually emits
 at runtime — causing production reverts under a Zodiac Roles Modifier.
 
 This meta-test is a coverage gate: every connector directory under
-``almanak/framework/connectors/`` must define a ``permission_hints.py``
+``almanak/connectors/`` must define a ``permission_hints.py``
 that exports ``PERMISSION_HINTS: PermissionHints``. An empty
 ``PermissionHints()`` is valid — presence of the file is the signal
 that the connector author has considered permission discovery.
@@ -30,12 +30,17 @@ import pytest
 
 from almanak.framework.permissions.hints import PermissionHints
 
-CONNECTORS_ROOT = Path(__file__).resolve().parents[3] / "almanak" / "framework" / "connectors"
+CONNECTORS_ROOT = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # Directories under connectors/ that are NOT protocol connectors — shared
 # infrastructure (base types, routing selectors, registries). They have no
 # adapter.py and don't participate in Zodiac permission discovery.
-_NON_CONNECTOR_DIRS: frozenset[str] = frozenset({"base", "flash_loan", "vaults"})
+# ``base`` / ``vaults`` foundation moved to ``_strategy_base/`` (VIB-4835)
+# and is filtered out by the leading-underscore rule in
+# ``_discover_connector_dirs``. ``flash_loan`` is a protocol-agnostic
+# selector and stays under its own name. ``beefy`` / ``yearn`` are
+# gateway-side stubs with no strategy adapter yet.
+_NON_CONNECTOR_DIRS: frozenset[str] = frozenset({"flash_loan", "beefy", "yearn"})
 
 _EXEMPT_SENTINEL = ".permissions_exempt"
 
@@ -79,7 +84,7 @@ def test_connector_declares_permission_hints(connector_dir: Path) -> None:
         f"non-empty hints (market IDs, fee-tier overrides, static permissions)."
     )
 
-    module_path = f"almanak.framework.connectors.{connector_dir.name}.permission_hints"
+    module_path = f"almanak.connectors.{connector_dir.name}.permission_hints"
     module = importlib.import_module(module_path)
 
     assert hasattr(module, "PERMISSION_HINTS"), (

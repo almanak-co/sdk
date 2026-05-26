@@ -1,7 +1,7 @@
 """Gateway-side connector binding for PancakeSwap V3 (VIB-4811 / VIB-4817).
 
 PancakeSwap V3 has strategy-side intent code under
-``almanak/framework/connectors/pancakeswap_v3/`` (pre-migration layout)
+``almanak/connectors/pancakeswap_v3/`` (pre-migration layout)
 and a gateway-side connector class that publishes its DefiLlama slug,
 CoinGecko slug, and DexScreener identifiers.
 

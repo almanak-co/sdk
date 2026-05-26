@@ -118,7 +118,7 @@ class TestTeardownSubToolValidation:
                     data={"tx_hash": "0x1", "balance": "0", "balance_usd": "0", "new_total_assets": "0"},
                 ),
             ),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
         ):
             result = await exec_._execute_teardown_vault({
                 "vault_address": "0x" + "a" * 40,
@@ -147,7 +147,7 @@ class TestTeardownSubToolValidation:
                     data={"tx_hash": "0x1", "balance": "0", "balance_usd": "0", "new_total_assets": "0"},
                 ),
             ),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
         ):
             result = await executor._execute_teardown_vault({
                 "vault_address": "0x" + "a" * 40,
@@ -211,7 +211,7 @@ class TestTeardownVault:
         # Mock SDK for underlying token
         with (
             patch.object(executor, "execute", side_effect=mock_execute),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
         ):
             result = await executor._execute_teardown_vault({
                 "vault_address": "0x" + "a" * 40,
@@ -240,7 +240,7 @@ class TestTeardownVault:
                     data={"tx_hash": "0x1", "balance": "0", "balance_usd": "0", "new_total_assets": "0"},
                 ),
             ),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
         ):
             await executor._execute_teardown_vault({
                 "vault_address": "0x" + "a" * 40,
@@ -272,7 +272,7 @@ class TestTeardownVault:
                     status="simulated", data={"tx_hash": None, "balance": "0", "balance_usd": "0"}
                 ),
             ),
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_mock_lagoon_sdk()),
         ):
             result = await executor._execute_teardown_vault({
                 "vault_address": "0x" + "a" * 40,

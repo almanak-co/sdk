@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+from almanak.connectors.uniswap_v3.receipt_parser import (
     EVENT_NAME_TO_TYPE,
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,

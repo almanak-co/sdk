@@ -117,11 +117,11 @@ cast rpc anvil_setStorageAt "$TOKEN" "$SLOT" "0x$(printf '%064x' $AMOUNT)" --rpc
    - Added USDT0/FUSDT0 to decimals map
    - Added `token_mint_sy` lookup for Pendle markets
 
-2. **`almanak/framework/connectors/pendle/sdk.py`**
+2. **`almanak/connectors/pendle/sdk.py`**
    - Added `MARKET_TOKEN_MINT_SY` mapping
    - Added `token_mint_sy` parameter to `build_swap_exact_token_for_pt()`
 
-3. **`almanak/framework/connectors/pendle/adapter.py`**
+3. **`almanak/connectors/pendle/adapter.py`**
    - Added `token_mint_sy` to `PendleSwapParams`
    - Pass through to SDK
 

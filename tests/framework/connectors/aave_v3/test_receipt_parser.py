@@ -1,6 +1,6 @@
 """Tests for Aave V3 Receipt Parser (Refactored)."""
 
-from almanak.framework.connectors.aave_v3.receipt_parser import (
+from almanak.connectors.aave_v3.receipt_parser import (
     AaveV3EventType,
     AaveV3ReceiptParser,
 )

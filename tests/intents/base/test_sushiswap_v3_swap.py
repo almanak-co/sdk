@@ -22,7 +22,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
+from almanak.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler

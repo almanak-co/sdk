@@ -6,7 +6,7 @@ covering event parsing and contract address filtering functionality.
 
 import pytest
 
-from almanak.framework.connectors.spark.receipt_parser import (
+from almanak.connectors.spark.receipt_parser import (
     EVENT_TOPICS,
     SPARK_POOL_ADDRESSES,
     SparkEventType,

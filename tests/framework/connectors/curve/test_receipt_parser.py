@@ -1,6 +1,6 @@
 """Tests for Curve Receipt Parser (Refactored)."""
 
-from almanak.framework.connectors.curve.receipt_parser import (
+from almanak.connectors.curve.receipt_parser import (
     CurveEventType,
     CurveReceiptParser,
 )

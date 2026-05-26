@@ -61,7 +61,7 @@ def test_contracts_py_all_addresses_are_eip55():
 
 def test_gmx_v2_adapter_addresses_are_eip55():
     """GMX V2 adapter hardcoded addresses must be valid EIP-55 checksums."""
-    from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES, GMX_V2_MARKETS
+    from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES, GMX_V2_MARKETS
 
     failures = []
     for dict_name, addr_dict in [("GMX_V2_ADDRESSES", GMX_V2_ADDRESSES), ("GMX_V2_MARKETS", GMX_V2_MARKETS)]:

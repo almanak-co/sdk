@@ -202,7 +202,7 @@ class TestCompileLPOpenInversion:
         return intent
 
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
-    @patch("almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
+    @patch("almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
     def test_ticks_use_inverted_prices(self, MockAdapter, mock_validate, compiler):
         """_price_to_tick receives inverted prices when tokens were swapped."""
         mock_adapter = MockAdapter.return_value
@@ -241,7 +241,7 @@ class TestCompileLPOpenInversion:
         assert tick_calls[1] == expected_upper
 
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
-    @patch("almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
+    @patch("almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
     def test_amounts_swapped_when_tokens_swapped(self, MockAdapter, mock_validate, compiler):
         """amount0 and amount1 are swapped when tokens are reordered."""
         mock_adapter = MockAdapter.return_value
@@ -280,7 +280,7 @@ class TestCompileLPOpenInversion:
         assert approve_amounts[WBNB.address] == int(Decimal("0.165") * Decimal(10**18))
 
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
-    @patch("almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
+    @patch("almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
     def test_no_inversion_when_not_swapped(self, MockAdapter, mock_validate, compiler):
         """When tokens are NOT swapped, range and amounts stay as-is."""
         mock_adapter = MockAdapter.return_value
@@ -320,7 +320,7 @@ class TestCompileLPOpenInversion:
     @patch("almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96")
     @patch("almanak.framework.intents.lp_math.recompute_lp_amounts")
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
-    @patch("almanak.framework.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
+    @patch("almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")
     def test_slot0_recompute_runs_in_gateway_only_mode(
         self,
         MockAdapter,

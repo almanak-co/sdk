@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+from almanak.connectors.sushiswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     SushiSwapV3ReceiptParser,
@@ -386,7 +386,7 @@ class TestExtractLpOpenData:
         ]
         with caplog.at_level(
             logging.WARNING,
-            logger="almanak.framework.connectors.sushiswap_v3.receipt_parser",
+            logger="almanak.connectors.sushiswap_v3.receipt_parser",
         ):
             result = parser.extract_lp_open_data(_receipt(logs))
         # Behavioural contract: no silent default to any specific chain.

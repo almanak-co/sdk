@@ -6,7 +6,7 @@ which would silently cascade to zero slippage protection.
 
 from web3 import Web3
 
-from almanak.framework.connectors.aerodrome.sdk import SwapRoute
+from almanak.connectors.aerodrome.sdk import SwapRoute
 
 
 class TestSwapRouteChecksum:

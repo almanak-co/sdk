@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from web3 import Web3
 
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     COLLATERAL_OFFRAMP,
     COLLATERAL_ONRAMP,
     CONDITIONAL_TOKENS,
@@ -22,7 +22,7 @@ from almanak.framework.connectors.polymarket.models import (
     USDC_NATIVE_POLYGON,
     USDCE_POLYGON,
 )
-from almanak.framework.connectors.polymarket.permission_hints import PERMISSION_HINTS
+from almanak.connectors.polymarket.permission_hints import PERMISSION_HINTS
 
 
 def _by_target(targets: list, address: str):

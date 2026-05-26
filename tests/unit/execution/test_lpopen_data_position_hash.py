@@ -123,9 +123,7 @@ class TestV3ReceiptParserKeepsPositionHashNone:
         """
         import pathlib
 
-        path = pathlib.Path(
-            __file__
-        ).parents[3] / "almanak" / "framework" / "connectors" / "uniswap_v3" / "receipt_parser.py"
+        path = pathlib.Path(__file__).parents[3] / "almanak" / "connectors" / "uniswap_v3" / "receipt_parser.py"
         src = path.read_text(encoding="utf-8")
         assert "position_hash=None" in src, (
             "V3 receipt_parser.py must construct LPOpenData with explicit "

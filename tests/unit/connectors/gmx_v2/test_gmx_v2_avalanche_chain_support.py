@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.sdk import (
+from almanak.connectors.gmx_v2.sdk import (
     GMX_V2_SDK_ADDRESSES,
     GMXV2SDK,
 )
@@ -143,11 +143,11 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     mock_adapter_result.acceptable_price_30dec = 1_000_000_000_000_000_000_000_000_000_000_000
 
     with (
-        patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-        patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-        patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+        patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+        patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+        patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
         patch(
-            "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
+            "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
             {"avalanche": {"ETH/USD": "0xmarket"}},
         ),
     ):
@@ -173,7 +173,7 @@ def test_native_wrapped_decimals_documented_for_avalanche() -> None:
     # The connector-owned perp compiler's native-wrapped set must include all
     # of these; if someone removes WAVAX/AVAX, a real WAVAX long would
     # underfund collateral by 1e12 and be picked up by this test.
-    from almanak.framework.connectors.gmx_v2 import compiler as compiler_mod
+    from almanak.connectors.gmx_v2 import compiler as compiler_mod
 
     src = compiler_mod.__file__
     with open(src) as f:

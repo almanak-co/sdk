@@ -15,7 +15,7 @@ import pytest
 
 from almanak.core.contracts import GMX_V2_TOKENS
 
-from almanak.framework.connectors.gmx_v2.adapter import (
+from almanak.connectors.gmx_v2.adapter import (
     DEFAULT_EXECUTION_FEE,
     GMX_V2_ADDRESSES,
     GMX_V2_MARKETS,
@@ -1130,7 +1130,7 @@ class TestGMXv2OnchainPositionParsing:
 
     def test_get_index_token_decimals(self, adapter: GMXv2Adapter) -> None:
         """Test index token decimal lookup by market address."""
-        from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_MARKETS
+        from almanak.connectors.gmx_v2.adapter import GMX_V2_MARKETS
 
         # ETH/USD market -> WETH -> 18 decimals
         assert adapter._get_index_token_decimals(GMX_V2_MARKETS["arbitrum"]["ETH/USD"]) == 18

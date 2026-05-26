@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.polymarket.signals import (
+from almanak.connectors.polymarket.signals import (
     ModelPredictionProvider,
     NewsAPISignalProvider,
     PredictionSignal,
@@ -787,14 +787,14 @@ class TestModuleExports:
 
     def test_all_exports_importable(self) -> None:
         """Test that all __all__ exports are importable."""
-        from almanak.framework.connectors.polymarket import signals
+        from almanak.connectors.polymarket import signals
 
         for name in signals.__all__:
             assert hasattr(signals, name), f"Missing export: {name}"
 
     def test_key_classes_available(self) -> None:
         """Test that key classes are available at module level."""
-        from almanak.framework.connectors.polymarket.signals import (
+        from almanak.connectors.polymarket.signals import (
             ModelPredictionProvider,
             NewsAPISignalProvider,
             PredictionSignal,

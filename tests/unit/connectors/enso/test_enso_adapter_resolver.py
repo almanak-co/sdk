@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.adapter import (
+from almanak.connectors.enso.adapter import (
     EnsoAdapter,
 )
-from almanak.framework.connectors.enso.client import EnsoConfig
+from almanak.connectors.enso.client import EnsoConfig
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.data.tokens.models import ResolvedToken
 
@@ -65,7 +65,7 @@ class TestEnsoAdapterResolverInit:
         """Test that default singleton resolver is used when none provided."""
         mock_resolver_instance = MagicMock()
         with patch(
-            "almanak.framework.connectors.enso.adapter.EnsoAdapter.__init__",
+            "almanak.connectors.enso.adapter.EnsoAdapter.__init__",
             lambda self, *a, **kw: None,
         ):
             # Simulate what __init__ does for default resolver
@@ -258,7 +258,7 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.enso.adapter as adapter_module
+        import almanak.connectors.enso.adapter as adapter_module
 
         assert not hasattr(adapter_module, "TOKEN_ADDRESSES")
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")

@@ -29,7 +29,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pancakeswap_perps import (
+from almanak.connectors.pancakeswap_perps import (
     EVENT_MARKET_PENDING_TRADE,
     PancakeSwapPerpsReceiptParser,
     encode_get_pending_trade_calldata,

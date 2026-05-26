@@ -151,7 +151,7 @@ class LendingBorrowNotEnabledError(ValueError):
     Aave V3 (and V2-fork) reserves can be flagged supply-only by governance —
     every BORROW against such an asset reverts on-chain with short-string code
     ``11`` (``BORROWING_NOT_ENABLED``). The compile-time pre-flight in
-    :func:`almanak.framework.connectors.base.lending.aave_helpers._check_lending_reserve_borrowable`
+    :func:`almanak.connectors._strategy_base.base.lending.aave_helpers._check_lending_reserve_borrowable`
     fires this typed error so strategies can match on the stable error-message
     prefix and emit ``Intent.hold(...)`` instead of burning gas on the
     on-chain revert.
@@ -202,7 +202,7 @@ class LendingBorrowExceedsCapacityError(ValueError):
     Compound V2 / BENQI Comptroller error code ``4`` ``INSUFFICIENT_LIQUIDITY``)
     after burning gas + retry iterations.
     The compile-time pre-flight in
-    :func:`almanak.framework.connectors.base.lending.aave_helpers._check_lending_borrow_capacity`
+    :func:`almanak.connectors._strategy_base.base.lending.aave_helpers._check_lending_borrow_capacity`
     fires this typed error so strategies can match on the stable error-message
     prefix and emit ``Intent.hold(...)`` instead of looping on the on-chain
     revert.

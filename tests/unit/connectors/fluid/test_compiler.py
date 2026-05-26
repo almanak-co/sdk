@@ -4,8 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
-from almanak.framework.connectors.fluid.compiler import FluidCompiler
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors.fluid.compiler import FluidCompiler
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
 
@@ -93,8 +93,8 @@ def test_compile_lp_close_builds_action_bundle_with_rpc_url() -> None:
     )
 
     with (
-        patch("almanak.framework.connectors.fluid.FluidAdapter", return_value=adapter) as adapter_cls,
-        patch("almanak.framework.connectors.fluid.FluidConfig") as config_cls,
+        patch("almanak.connectors.fluid.FluidAdapter", return_value=adapter) as adapter_cls,
+        patch("almanak.connectors.fluid.FluidConfig") as config_cls,
     ):
         result = FluidCompiler().compile_lp_close(_ctx(), intent)
 
@@ -137,8 +137,8 @@ def test_compile_lp_close_prefers_connected_gateway_client_over_rpc_url() -> Non
     )
 
     with (
-        patch("almanak.framework.connectors.fluid.FluidAdapter", return_value=adapter),
-        patch("almanak.framework.connectors.fluid.FluidConfig") as config_cls,
+        patch("almanak.connectors.fluid.FluidAdapter", return_value=adapter),
+        patch("almanak.connectors.fluid.FluidConfig") as config_cls,
     ):
         result = FluidCompiler().compile_lp_close(_ctx(gateway_client=gateway_client), intent)
 
@@ -168,8 +168,8 @@ def test_compile_lp_close_falls_back_to_rpc_when_gateway_disconnected() -> None:
     )
 
     with (
-        patch("almanak.framework.connectors.fluid.FluidAdapter", return_value=adapter),
-        patch("almanak.framework.connectors.fluid.FluidConfig") as config_cls,
+        patch("almanak.connectors.fluid.FluidAdapter", return_value=adapter),
+        patch("almanak.connectors.fluid.FluidConfig") as config_cls,
     ):
         result = FluidCompiler().compile_lp_close(
             _ctx(rpc_url="http://localhost:8545", gateway_client=gateway_client), intent
@@ -210,8 +210,8 @@ def test_compile_lp_close_surfaces_adapter_exception() -> None:
     )
 
     with (
-        patch("almanak.framework.connectors.fluid.FluidAdapter", return_value=adapter),
-        patch("almanak.framework.connectors.fluid.FluidConfig"),
+        patch("almanak.connectors.fluid.FluidAdapter", return_value=adapter),
+        patch("almanak.connectors.fluid.FluidConfig"),
     ):
         result = FluidCompiler().compile_lp_close(_ctx(), intent)
 

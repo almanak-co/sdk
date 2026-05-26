@@ -2500,7 +2500,8 @@ def _init_copy_trading(  # noqa: C901
 
     from decimal import Decimal
 
-    from ..connectors.contract_registry import get_default_registry
+    from almanak.connectors._strategy_base.contract_registry import get_default_registry
+
     from ..data.wallet_activity import WalletActivityProvider
     from ..services.copy_circuit_breaker import CopyCircuitBreaker
     from ..services.copy_intent_builder import CopyIntentBuilder
@@ -2668,7 +2669,8 @@ def _maybe_auto_deploy_vault(
     if not strategy_config.get("vault"):
         return None
 
-    from ..connectors.lagoon import LagoonVaultAdapter, LagoonVaultSDK
+    from almanak.connectors.lagoon import LagoonVaultAdapter, LagoonVaultSDK
+
     from ..vault.config import VaultConfig
     from ..vault.lifecycle import VAULT_STATE_KEY, VaultLifecycleManager
     from .run import _auto_deploy_lagoon_vault, _has_placeholder_vault_address

@@ -28,7 +28,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler

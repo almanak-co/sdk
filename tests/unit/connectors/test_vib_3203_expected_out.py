@@ -14,14 +14,14 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS as AERODROME_EVENT_TOPICS,
     AerodromeReceiptParser,
 )
-from almanak.framework.connectors.pendle.receipt_parser import PendleReceiptParser
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
-from almanak.framework.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
+from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
+from almanak.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 
 
 def _pad32(val: int, signed: bool = False) -> str:

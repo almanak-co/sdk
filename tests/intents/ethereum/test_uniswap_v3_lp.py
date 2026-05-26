@@ -21,8 +21,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.extracted_data import LPCloseData
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,

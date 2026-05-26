@@ -306,7 +306,7 @@ class PositionHealthProvider:
     ) -> PositionHealth:
         """Compute health factor from Morpho Blue on-chain data."""
         try:
-            from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
+            from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
             if self._gateway_client is not None and not self._gateway_client.is_connected:
                 raise ValueError(
@@ -575,7 +575,7 @@ class PositionHealthProvider:
         try:
             from web3 import Web3
 
-            from almanak.framework.connectors.compound_v3.adapter import (
+            from almanak.connectors.compound_v3.adapter import (
                 COMPOUND_V3_COMET_ADDRESSES,
                 COMPOUND_V3_MARKETS,
             )

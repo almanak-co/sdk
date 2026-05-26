@@ -13,7 +13,7 @@ import pytest
 
 from almanak.core.contracts import AERODROME_TOKENS as TOKEN_ADDRESSES
 
-from almanak.framework.connectors.aerodrome.receipt_parser import (
+from almanak.connectors.aerodrome.receipt_parser import (
     BURN_EVENT_TOPIC,
     MINT_EVENT_TOPIC,
     SWAP_EVENT_TOPIC,

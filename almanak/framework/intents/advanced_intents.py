@@ -54,7 +54,7 @@ def _validate_vault_protocol(protocol: str) -> None:
     Lazy import keeps the intents module free of compile-time dependencies on
     connector packages.
     """
-    from ..connectors.vaults import supported_vault_protocols
+    from almanak.connectors._strategy_base.vaults import supported_vault_protocols
 
     supported = supported_vault_protocols()
     if protocol.lower() not in supported:
@@ -387,7 +387,7 @@ class VaultDepositIntent(BaseIntent):
     """Intent to deposit assets into an ERC-4626 vault.
 
     Supports any vault protocol registered with
-    :mod:`almanak.framework.connectors.vaults` (e.g. ``metamorpho``; future:
+    :mod:`almanak.connectors._strategy_base.vaults` (e.g. ``metamorpho``; future:
     ``beefy``, ``yearn_v3``). The ``protocol`` field is the dispatch key.
 
     Attributes:
@@ -458,7 +458,7 @@ class VaultRedeemIntent(BaseIntent):
     """Intent to redeem shares from an ERC-4626 vault.
 
     Supports any vault protocol registered with
-    :mod:`almanak.framework.connectors.vaults`.
+    :mod:`almanak.connectors._strategy_base.vaults`.
 
     Attributes:
         protocol: Registered vault protocol name (case-insensitive)

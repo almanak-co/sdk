@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.benqi.receipt_parser import (
+from almanak.connectors.benqi.receipt_parser import (
     EVENT_TOPICS,
     BenqiEventType,
     BenqiReceiptParser,
@@ -191,7 +191,7 @@ class TestBenqiReceiptParserSerialization:
 
     def test_event_to_dict_roundtrip(self, parser):
         """Test BenqiEvent serialization and deserialization."""
-        from almanak.framework.connectors.benqi.receipt_parser import BenqiEvent
+        from almanak.connectors.benqi.receipt_parser import BenqiEvent
 
         minter = "0000000000000000000000001234567890123456789012345678901234567890"
         data = "0x" + minter + f"{1000:064x}" + f"{500:064x}"

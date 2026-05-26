@@ -17,9 +17,9 @@ from almanak.framework.intents.compiler import (
 )
 
 # Patch targets — lazy-imported from the source module inside compile methods.
-# When compiler does `from almanak.framework.connectors.curve.adapter import CurveAdapter`,
+# When compiler does `from almanak.connectors.curve.adapter import CurveAdapter`,
 # it fetches the object from the source module, so we patch there.
-ADAPTER_MODULE = "almanak.framework.connectors.curve.adapter"
+ADAPTER_MODULE = "almanak.connectors.curve.adapter"
 CURVE_ADAPTER_CLS = f"{ADAPTER_MODULE}.CurveAdapter"
 CURVE_CONFIG_CLS = f"{ADAPTER_MODULE}.CurveConfig"
 CURVE_POOLS_PATH = f"{ADAPTER_MODULE}.CURVE_POOLS"

@@ -7,7 +7,7 @@ Updated to use GMX V2 EventEmitter pattern:
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.receipt_parser import (
+from almanak.connectors.gmx_v2.receipt_parser import (
     EVENT_TOPICS,
     GMXv2EventType,
     GMXv2ReceiptParser,

@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from eth_account import Account
 
-from almanak.framework.connectors.polymarket import TransactionData
+from almanak.connectors.polymarket import TransactionData
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.connectors.polymarket.gateway.service import (
     POLYGON_MAINNET_CHAIN_ID,
@@ -110,7 +110,7 @@ class _CtfStub:
         return self._source_balance
 
     def check_allowances(self, _wallet: str, _web3):  # noqa: ANN201
-        from almanak.framework.connectors.polymarket.ctf_sdk import (
+        from almanak.connectors.polymarket.ctf_sdk import (
             MAX_UINT256,
             AllowanceStatus,
         )

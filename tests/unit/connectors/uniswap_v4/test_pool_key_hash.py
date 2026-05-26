@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v4.hooks import compute_pool_id
-from almanak.framework.connectors.uniswap_v4.sdk import (
+from almanak.connectors.uniswap_v4.hooks import compute_pool_id
+from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     PoolKey,
     _pad_address,

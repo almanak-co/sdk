@@ -297,7 +297,7 @@ class TestPredictionBuyCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -332,7 +332,7 @@ class TestPredictionBuyCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -366,7 +366,7 @@ class TestPredictionSellCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -397,7 +397,7 @@ class TestPredictionSellCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -431,7 +431,7 @@ class TestPredictionRedeemCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -463,7 +463,7 @@ class TestPredictionRedeemCompilation:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -498,7 +498,7 @@ class TestPredictionCompilationErrors:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.return_value = mock_error_bundle
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -526,7 +526,7 @@ class TestPredictionCompilationErrors:
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.side_effect = RuntimeError("Connection failed")
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(
@@ -551,14 +551,14 @@ class TestPredictionCompilationErrors:
 
     def test_compile_prediction_redeem_market_not_resolved(self, test_wallet, mock_polymarket_config):
         """Test redeem compilation handles unresolved market."""
-        from almanak.framework.connectors.polymarket.exceptions import (
+        from almanak.connectors.polymarket.exceptions import (
             PolymarketMarketNotResolvedError,
         )
 
         mock_adapter = MagicMock()
         mock_adapter.compile_intent.side_effect = PolymarketMarketNotResolvedError("test-market")
         with patch(
-            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            "almanak.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
             return_value=mock_adapter,
         ):
             compiler = IntentCompiler(

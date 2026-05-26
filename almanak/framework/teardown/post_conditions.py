@@ -219,7 +219,7 @@ def _traderjoe_v2_post_condition(
         )
 
     try:
-        from almanak.framework.connectors.traderjoe_v2 import (
+        from almanak.connectors.traderjoe_v2 import (
             TraderJoeV2Adapter,
             TraderJoeV2Config,
         )

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,

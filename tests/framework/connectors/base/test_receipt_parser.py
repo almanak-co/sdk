@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from almanak.framework.connectors.base.hex_utils import HexDecoder
-from almanak.framework.connectors.base.receipt_parser import BaseReceiptParser
-from almanak.framework.connectors.base.registry import EventRegistry
+from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.receipt_parser import BaseReceiptParser
+from almanak.connectors._strategy_base.base.registry import EventRegistry
 
 # ============================================================================
 # Mock Protocol Implementation for Testing

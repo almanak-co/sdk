@@ -1,6 +1,6 @@
 """Deep-branch coverage for ``ClobClient``.
 
-Targets uncovered paths in ``almanak/framework/connectors/polymarket/clob_client.py``:
+Targets uncovered paths in ``almanak/connectors/polymarket/clob_client.py``:
 
 * HTTP context-manager + ``close()``.
 * ``_calculate_backoff_delay`` exponential branch (no ``Retry-After``).
@@ -40,19 +40,19 @@ import pytest
 from eth_account import Account
 from pydantic import SecretStr
 
-from almanak.framework.connectors.polymarket import (
+from almanak.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
     PolymarketConfig,
     SignatureType,
 )
-from almanak.framework.connectors.polymarket.clob_client import TokenBucketRateLimiter
-from almanak.framework.connectors.polymarket.exceptions import (
+from almanak.connectors.polymarket.clob_client import TokenBucketRateLimiter
+from almanak.connectors.polymarket.exceptions import (
     PolymarketAPIError,
     PolymarketAuthenticationError,
     PolymarketInvalidTickSizeError,
 )
-from almanak.framework.connectors.polymarket.models import (
+from almanak.connectors.polymarket.models import (
     GammaMarket,
     LimitOrderParams,
     MarketFilters,
@@ -65,7 +65,7 @@ from almanak.framework.connectors.polymarket.models import (
     TradeFilters,
     UnsignedOrder,
 )
-from almanak.framework.connectors.polymarket.signer import make_local_signer
+from almanak.connectors.polymarket.signer import make_local_signer
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ class TestCredentialsFallbackPaths:
 class TestCalculateBackoffDelay:
     def test_exponential_backoff_grows_with_retry_count(self, config_with_credentials):
         client = _make_clob_client(config_with_credentials)
-        with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
+        with patch("almanak.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d0 = client._calculate_backoff_delay(retry_count=0)
             d1 = client._calculate_backoff_delay(retry_count=1)
             d2 = client._calculate_backoff_delay(retry_count=2)
@@ -307,13 +307,13 @@ class TestCalculateBackoffDelay:
 
     def test_exponential_backoff_caps_at_max(self, config_with_credentials):
         client = _make_clob_client(config_with_credentials)
-        with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
+        with patch("almanak.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d = client._calculate_backoff_delay(retry_count=20)
         assert d == client.config.max_retry_delay
 
     def test_retry_after_path_clamps_to_max(self, config_with_credentials):
         client = _make_clob_client(config_with_credentials)
-        with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
+        with patch("almanak.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d = client._calculate_backoff_delay(retry_count=0, retry_after=999_999)
         assert d == client.config.max_retry_delay
 

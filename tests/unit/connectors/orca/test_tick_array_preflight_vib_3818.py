@@ -30,11 +30,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.orca.exceptions import (
+from almanak.connectors.orca.exceptions import (
     OrcaTickArrayUninitializedError,
 )
-from almanak.framework.connectors.orca.models import OrcaPool
-from almanak.framework.connectors.orca.sdk import OrcaWhirlpoolSDK
+from almanak.connectors.orca.models import OrcaPool
+from almanak.connectors.orca.sdk import OrcaWhirlpoolSDK
 from almanak.framework.intents.state_machine import IntentStateMachine
 
 WALLET = "BWv2BZTNAQjLkS5K17W3oVZqYxKLT7uNGoiEpxoBRvbm"

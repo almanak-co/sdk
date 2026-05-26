@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 from web3 import Web3
 
-from almanak.framework.connectors.aerodrome.sdk import AerodromeSDK
+from almanak.connectors.aerodrome.sdk import AerodromeSDK
 
 # Real Base wallet from the 2026-05-04 prod crash. Lowercase form is NOT
 # EIP-55 valid, so it triggers web3.py's strict checksum guard.

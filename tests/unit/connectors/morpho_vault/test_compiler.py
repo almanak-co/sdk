@@ -3,8 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from almanak.framework.connectors.base.compiler import BaseCompilerContext
-from almanak.framework.connectors.morpho_vault.compiler import MorphoVaultCompiler
+from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors.morpho_vault.compiler import MorphoVaultCompiler
 from almanak.framework.intents.compiler import CompilationStatus
 from almanak.framework.intents.vocabulary import IntentType, VaultRedeemIntent
 
@@ -56,7 +56,7 @@ def test_compile_redeem_specific_shares_builds_action_bundle() -> None:
     compiler = MorphoVaultCompiler()
     adapter = _adapter()
 
-    with patch("almanak.framework.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
         result = compiler.compile_redeem(_ctx(), _redeem_intent(shares=Decimal("1.5")))
 
     assert result.status == CompilationStatus.SUCCESS
@@ -77,7 +77,7 @@ def test_compile_redeem_all_uses_max_redeem() -> None:
     compiler = MorphoVaultCompiler()
     adapter = _adapter(max_redeem=42)
 
-    with patch("almanak.framework.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
         result = compiler.compile_redeem(_ctx(), _redeem_intent(shares="all"))
 
     assert result.status == CompilationStatus.SUCCESS
@@ -97,7 +97,7 @@ def test_compile_redeem_all_fails_when_wallet_has_no_shares() -> None:
     compiler = MorphoVaultCompiler()
     adapter = _adapter(max_redeem=0)
 
-    with patch("almanak.framework.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
         result = compiler.compile_redeem(_ctx(), _redeem_intent(shares="all"))
 
     assert result.status == CompilationStatus.FAILED
@@ -124,7 +124,7 @@ def test_compile_redeem_returns_failed_result_on_adapter_exception() -> None:
     adapter = _adapter()
     adapter.sdk.get_decimals.side_effect = RuntimeError("vault decimals unavailable")
 
-    with patch("almanak.framework.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
+    with patch("almanak.connectors.morpho_vault.compiler._build_adapter", return_value=adapter):
         result = compiler.compile_redeem(_ctx(), _redeem_intent())
 
     assert result.status == CompilationStatus.FAILED

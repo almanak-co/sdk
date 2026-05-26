@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 
-from almanak.framework.connectors.base.event import BaseEvent
+from almanak.connectors._strategy_base.base.event import BaseEvent
 
 
 class MockEventType(Enum):

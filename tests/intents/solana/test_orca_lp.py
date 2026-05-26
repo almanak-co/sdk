@@ -47,7 +47,7 @@ def _find_sol_usdc_pool():
         return SOL_USDC_WHIRLPOOL
 
     try:
-        from almanak.framework.connectors.orca.sdk import OrcaWhirlpoolSDK
+        from almanak.connectors.orca.sdk import OrcaWhirlpoolSDK
 
         sdk = OrcaWhirlpoolSDK(wallet_address="KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9")
         pool = sdk.find_pool_by_tokens(

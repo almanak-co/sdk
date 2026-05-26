@@ -33,8 +33,8 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
-from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
+from almanak.connectors.traderjoe_v2.receipt_parser import (
     TraderJoeV2EventType,
     TraderJoeV2ReceiptParser,
 )
@@ -733,7 +733,7 @@ class TestTraderJoeV2LPCloseIntent:
 
         # Should have a warning — the LP_CLOSE compile path appends
         # "No LP position found to close" to result.warnings in this branch
-        # (see ``_compile_lp_close_traderjoe_v2`` in ``almanak/framework/connectors/traderjoe_v2/compiler.py``).
+        # (see ``_compile_lp_close_traderjoe_v2`` in ``almanak/connectors/traderjoe_v2/compiler.py``).
         assert compilation_result.warnings, "Expected warning when no LP position exists"
         print(f"Warnings: {compilation_result.warnings}")
 

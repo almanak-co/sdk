@@ -14,9 +14,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from solders.keypair import Keypair
 
-from almanak.framework.connectors.meteora.adapter import MeteoraAdapter, MeteoraConfig
-from almanak.framework.connectors.meteora.constants import BIN_ID_OFFSET, STRATEGY_TYPE_SPOT_BALANCED
-from almanak.framework.connectors.meteora.models import MeteoraPool, MeteoraPosition
+from almanak.connectors.meteora.adapter import MeteoraAdapter, MeteoraConfig
+from almanak.connectors.meteora.constants import BIN_ID_OFFSET, STRATEGY_TYPE_SPOT_BALANCED
+from almanak.connectors.meteora.models import MeteoraPool, MeteoraPosition
 from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
@@ -61,7 +61,7 @@ class TestMeteoraConfig:
 class TestLPOpenCompilation:
     """MeteoraAdapter.compile_lp_open_intent tests."""
 
-    @patch("almanak.framework.connectors.meteora.adapter.MeteoraSDK")
+    @patch("almanak.connectors.meteora.adapter.MeteoraSDK")
     def test_compile_lp_open_success(self, MockSDK):
         """Successful LP open compilation returns valid ActionBundle."""
         # Mock SDK
@@ -111,7 +111,7 @@ class TestLPOpenCompilation:
         assert bundle.sensitive_data is not None
         assert "additional_signers" in bundle.sensitive_data
 
-    @patch("almanak.framework.connectors.meteora.adapter.MeteoraSDK")
+    @patch("almanak.connectors.meteora.adapter.MeteoraSDK")
     def test_compile_lp_open_error_returns_error_bundle(self, MockSDK):
         """Failed compilation returns error bundle."""
         mock_sdk = MockSDK.return_value
@@ -137,7 +137,7 @@ class TestLPOpenCompilation:
 class TestLPCloseCompilation:
     """MeteoraAdapter.compile_lp_close_intent tests."""
 
-    @patch("almanak.framework.connectors.meteora.adapter.MeteoraSDK")
+    @patch("almanak.connectors.meteora.adapter.MeteoraSDK")
     def test_compile_lp_close_no_pool_returns_error(self, MockSDK):
         """LP close without pool returns error."""
         config = MeteoraConfig(wallet_address=WALLET)
@@ -153,7 +153,7 @@ class TestLPCloseCompilation:
         assert bundle.metadata.get("error")
         assert "pool address is required" in bundle.metadata["error"]
 
-    @patch("almanak.framework.connectors.meteora.adapter.MeteoraSDK")
+    @patch("almanak.connectors.meteora.adapter.MeteoraSDK")
     def test_compile_lp_close_success(self, MockSDK):
         """Successful LP close compilation."""
         mock_sdk = MockSDK.return_value
@@ -199,7 +199,7 @@ class TestLPCloseCompilation:
 class TestPoolResolution:
     """Pool resolution logic."""
 
-    @patch("almanak.framework.connectors.meteora.adapter.MeteoraSDK")
+    @patch("almanak.connectors.meteora.adapter.MeteoraSDK")
     def test_pool_cache(self, MockSDK):
         """Pool lookups should be cached."""
         mock_sdk = MockSDK.return_value

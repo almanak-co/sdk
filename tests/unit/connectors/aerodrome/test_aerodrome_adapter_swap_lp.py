@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.adapter import (
+from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
     AerodromeConfig,
     LiquidityResult,

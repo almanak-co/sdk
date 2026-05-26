@@ -3,7 +3,7 @@
 Restores intent-coverage for ``(camelot, SWAP, arbitrum)`` after the
 Phase-2 connector fold promoted ``protocol="camelot"`` from the monolithic
 ``_compile_default_router_swap_body`` into a dedicated
-``CamelotCompiler`` (``almanak/framework/connectors/camelot/compiler.py``).
+``CamelotCompiler`` (``almanak/connectors/camelot/compiler.py``).
 
 Camelot is the Arbitrum-native Algebra V1.9 fork: the SwapRouter exposes
 ``exactInputSingle`` without the Uniswap V3 ``fee`` parameter (fees are set
@@ -40,7 +40,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler

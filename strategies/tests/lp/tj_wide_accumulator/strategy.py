@@ -29,7 +29,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
-from almanak.framework.connectors.traderjoe_v2 import BIN_ID_OFFSET
+from almanak.connectors.traderjoe_v2 import BIN_ID_OFFSET
 from almanak.framework.intents import Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy

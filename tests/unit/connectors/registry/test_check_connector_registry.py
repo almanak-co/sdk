@@ -28,7 +28,7 @@ import scripts.ci.check_connector_registry as gate  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_registry() -> None:
-    from almanak.framework.connectors.registry import ConnectorRegistry
+    from almanak.connectors._strategy_base.registry import ConnectorRegistry
 
     ConnectorRegistry._clear()
     yield
@@ -55,7 +55,7 @@ def test_counter_counts_one_module_level_call(tmp_path: Path) -> None:
     init = _write(
         tmp_path,
         """
-        from almanak.framework.connectors.registry import register_connector
+        from almanak.connectors._strategy_base.registry import register_connector
         from almanak.framework.intents.vocabulary import IntentType
 
         register_connector(
@@ -106,7 +106,7 @@ def test_counter_ignores_attribute_call(tmp_path: Path) -> None:
     init = _write(
         tmp_path,
         """
-        import almanak.framework.connectors.registry as r
+        import almanak.connectors._strategy_base.registry as r
         r.register_connector(name="foo", intents=(), chains=None)
         """,
     )
@@ -315,6 +315,7 @@ def test_main_skips_loose_files(
 def test_excluded_names_helper_returns_frozen_set() -> None:
     s = gate._excluded_names()
     assert isinstance(s, frozenset)
-    assert "base" in s
+    # ``base`` / ``vaults`` foundation moved to ``_strategy_base/`` in
+    # VIB-4835 Phase 2 and is excluded by the leading-underscore rule
+    # in ``_enumerate_connector_dirs``, so no entry is needed here.
     assert "flash_loan" in s
-    assert "vaults" in s

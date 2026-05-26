@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.aster_perps import (
+from almanak.connectors.aster_perps import (
     ASTER_BROKER_RAW,
     PCS_BROKER_ID,
     AsterPerpsAdapter,

@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 from web3 import Web3
 
-from almanak.framework.connectors.traderjoe_v2.sdk import TraderJoeV2SDK
+from almanak.connectors.traderjoe_v2.sdk import TraderJoeV2SDK
 
 WALLET = "0x1234567890123456789012345678901234567890"
 POOL = "0x2222222222222222222222222222222222222222"

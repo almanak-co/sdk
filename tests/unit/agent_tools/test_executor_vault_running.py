@@ -130,7 +130,7 @@ class TestSettleWithPendingDeposits:
     @pytest.mark.asyncio
     async def test_settle_with_pending_redeems_checks_liquidity(self, executor, mock_gateway):
         """settle_vault blocks when Safe doesn't have enough for pending redeems."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_underlying_token_address.return_value = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
             sdk.get_pending_redemptions.return_value = 50_000_000_000_000_000_000  # 50 shares
@@ -156,7 +156,7 @@ class TestGetVaultState:
     @pytest.mark.asyncio
     async def test_get_vault_state_returns_all_fields(self, executor, mock_gateway):
         """get_vault_state returns total_assets, pending_deposits, pending_redeems, share_price."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_total_assets.return_value = 100_000_000  # 100 USDC
             sdk.get_pending_deposits.return_value = 5_000_000  # 5 USDC pending
@@ -177,7 +177,7 @@ class TestGetVaultState:
     @pytest.mark.asyncio
     async def test_get_vault_state_handles_rpc_failure(self, executor, mock_gateway):
         """get_vault_state returns error when RPC fails."""
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_total_assets.side_effect = Exception("RPC timeout")
 
@@ -267,7 +267,7 @@ class TestTeardownHappyPath:
         save_resp.checksum = "abc"
         mock_gateway.state.SaveState.return_value = save_resp
 
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk_instance = MockSDK.return_value
             sdk_instance.get_underlying_token_address.return_value = usdc
             sdk_instance.get_total_assets.return_value = 15_000_000  # 15 USDC
@@ -351,7 +351,7 @@ class TestTeardownHappyPath:
         save_resp.checksum = "def"
         mock_gateway.state.SaveState.return_value = save_resp
 
-        with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
+        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk_instance = MockSDK.return_value
             sdk_instance.get_underlying_token_address.return_value = usdc
             sdk_instance.get_total_assets.return_value = 20_000_000

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.sdk import (
+from almanak.connectors.aerodrome.sdk import (
     MAX_UINT256,
     AerodromeSDK,
     CLPositionInfo,

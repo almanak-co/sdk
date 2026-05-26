@@ -20,7 +20,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
+from almanak.connectors.pancakeswap_v3.receipt_parser import PancakeSwapV3ReceiptParser
 from almanak.framework.execution.extracted_data import LPCloseData
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,

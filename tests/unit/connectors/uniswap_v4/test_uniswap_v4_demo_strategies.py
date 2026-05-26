@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.hooks import (
+from almanak.connectors.uniswap_v4.hooks import (
     BEFORE_SWAP_FLAG,
     DynamicFeeHookEncoder,
     EmptyHookDataEncoder,

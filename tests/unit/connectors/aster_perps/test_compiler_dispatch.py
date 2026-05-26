@@ -114,7 +114,7 @@ class TestPerpClosePrecondition:
 
 class TestReceiptRegistry:
     def test_both_keys_resolve_to_aster_parser(self) -> None:
-        from almanak.framework.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
+        from almanak.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
         from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
 
         registry = ReceiptParserRegistry()

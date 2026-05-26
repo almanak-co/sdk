@@ -1,7 +1,7 @@
 """On-chain ERC-4626 vault position reader via the vault adapter registry.
 
 Reads share balance + converts to underlying asset amount for any vault
-protocol registered with :mod:`almanak.framework.connectors.vaults`. Used by
+protocol registered with :mod:`almanak.connectors._strategy_base.vaults`. Used by
 :class:`PortfolioValuer` to value VAULT positions from live on-chain state
 instead of relying on stale strategy-reported values.
 """
@@ -61,7 +61,7 @@ class VaultPositionReader:
             return None
 
         try:
-            from ..connectors.vaults import build_vault_adapter
+            from almanak.connectors._strategy_base.vaults import build_vault_adapter
 
             adapter = build_vault_adapter(
                 protocol,

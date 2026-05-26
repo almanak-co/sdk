@@ -309,7 +309,7 @@ class ResultEnricher:
         """
         if not protocol:
             return protocol
-        from almanak.framework.connectors.protocol_aliases import normalize_protocol
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 
         return normalize_protocol(str(getattr(context, "chain", "") or ""), protocol)
 
@@ -378,7 +378,7 @@ class ResultEnricher:
                 blueprint 27, the parser fails loud rather than misattribute).
                 The strategy runner builds this from its
                 ``GatewayClient`` via
-                :func:`almanak.framework.connectors.uniswap_v4.gateway_pool_key_client.make_sync_pool_key_lookup`.
+                :func:`almanak.connectors.uniswap_v4.gateway_pool_key_client.make_sync_pool_key_lookup`.
         """
         self.parser_registry = parser_registry or ReceiptParserRegistry()
         self.live_mode = live_mode
@@ -718,7 +718,7 @@ class ResultEnricher:
         # survive a parser bug.
         trade_result = None
         try:
-            from almanak.framework.connectors.polymarket.receipt_parser import (
+            from almanak.connectors.polymarket.receipt_parser import (
                 PolymarketReceiptParser,
             )
 

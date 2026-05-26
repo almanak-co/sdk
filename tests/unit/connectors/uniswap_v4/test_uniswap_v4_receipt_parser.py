@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v4.receipt_parser import (
+from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     ParseResult,
     SwapEventData,

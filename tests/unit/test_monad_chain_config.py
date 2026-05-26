@@ -157,6 +157,6 @@ class TestMonadPositionManager:
     """Monad position manager in Uniswap V3 receipt parser."""
 
     def test_position_manager_address(self):
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
+        from almanak.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
 
         assert "monad" in POSITION_MANAGER_ADDRESSES

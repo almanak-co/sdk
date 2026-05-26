@@ -1,0 +1,5288 @@
+"""Lending compilation helpers for connector-owned lending compilers.
+
+These standalone functions receive the compiler instance as their first
+parameter and implement all lending-related compilation logic (borrow,
+repay, supply, withdraw).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
+
+from almanak.core.contracts import AAVE_V3
+from almanak.framework.intents import compiler_constants
+from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
+from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.models.reproduction_bundle import ActionBundle
+from almanak.framework.utils.log_formatters import format_token_amount
+
+if TYPE_CHECKING:
+    from almanak.framework.intents.vocabulary import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
+
+logger = logging.getLogger("almanak.framework.intents.compiler")
+
+# Re-export constants used throughout this module via compiler_constants module
+# reference so that mock patching works correctly.
+AAVE_COMPATIBLE_PROTOCOLS = compiler_constants.AAVE_COMPATIBLE_PROTOCOLS
+AAVE_VARIABLE_RATE_MODE = compiler_constants.AAVE_VARIABLE_RATE_MODE
+MAX_UINT256 = compiler_constants.MAX_UINT256
+
+# Aave V3 PoolDataProvider.getReserveConfigurationData(address) selector.
+# keccak256("getReserveConfigurationData(address)")[:4]
+_AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
+
+
+class AssetNotCollateralEligibleError(ValueError):
+    """An asset cannot be enabled as collateral on the target Aave V3 market.
+
+    Raised at intent compile time when a pre-flight reserve-config query shows
+    `usageAsCollateralEnabled == false` or `ltv == 0`. Surfacing this as a
+    typed error spares strategy authors from learning the on-chain
+    `0x0cafc072 UnderlyingCannotBeUsedAsCollateral` revert through trial-and-error.
+    """
+
+
+class PoolReserveFrozenError(ValueError):
+    """The reserve for an asset is frozen or inactive on the target lending pool.
+
+    Raised at intent compile time when a pre-flight reserve-config query shows
+    `isActive == false` or `isFrozen == true`. Surfacing this as a typed error
+    lets strategies emit a clean ``Intent.hold(...)`` instead of submitting a
+    SUPPLY/BORROW that will revert on-chain (e.g. Radiant V2 Arbitrum after the
+    October 2024 attack — VIB-2445 / VIB-3749).
+
+    Reusable for any Aave V2 fork or Aave V3 market whose governance has
+    paused / frozen a reserve.
+    """
+
+
+# Decoded reserve configuration as returned by `getReserveConfigurationData`.
+# Used by the collateral-eligibility check, the frozen-reserve check, and the
+# VIB-3825 borrowable check.
+class _DecodedReserveConfig:
+    __slots__ = (
+        "ltv",
+        "usage_as_collateral_enabled",
+        "borrowing_enabled",
+        "is_active",
+        "is_frozen",
+    )
+
+    def __init__(
+        self,
+        *,
+        ltv: int,
+        usage_as_collateral_enabled: bool,
+        borrowing_enabled: bool,
+        is_active: bool,
+        is_frozen: bool,
+    ) -> None:
+        self.ltv = ltv
+        self.usage_as_collateral_enabled = usage_as_collateral_enabled
+        self.borrowing_enabled = borrowing_enabled
+        self.is_active = is_active
+        self.is_frozen = is_frozen
+
+
+def _resolve_pool_data_provider(chain: str, protocol: str) -> str | None:
+    """Look up the PoolDataProvider address for (chain, protocol).
+
+    Returns ``None`` when no PoolDataProvider is registered — caller fails-open.
+    Aave V3 still falls back to ``AAVE_V3[chain]["pool_data_provider"]`` so the
+    chain table remains the single source of truth for that protocol.
+    """
+    chain_map = compiler_constants.LENDING_POOL_DATA_PROVIDERS.get(chain, {})
+    addr = chain_map.get(protocol)
+    if addr:
+        return addr
+    if protocol == "aave_v3" and chain in AAVE_V3:
+        return AAVE_V3[chain].get("pool_data_provider")
+    return None
+
+
+def _fetch_reserve_config(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    *,
+    protocol: str,
+    pre_flight_label: str,
+) -> _DecodedReserveConfig | None:
+    """Call `getReserveConfigurationData(asset)` and decode the result.
+
+    Shared low-level helper used by both the Aave V3 collateral-eligibility
+    pre-flight (VIB-3701) and the Aave V2-fork frozen-reserve pre-flight
+    (VIB-3749). Both pre-flights consume the same ABI — the underlying
+    `getReserveConfigurationData(address)` selector and 10-word return layout
+    are identical between Aave V2 and Aave V3.
+
+    Returns ``None`` when the check could not be performed (no gateway, RPC
+    error, malformed response) — callers fail-open in that case so an offline
+    / placeholder-mode compile still yields calldata.
+    """
+    pool_data_provider = _resolve_pool_data_provider(compiler.chain, protocol)
+    if not pool_data_provider:
+        return None
+
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        return None
+
+    selector_no_prefix = _AAVE_GET_RESERVE_CONFIG_SELECTOR[2:]
+    asset_padded = asset_address.lower().replace("0x", "").zfill(64)
+    call_data = "0x" + selector_no_prefix + asset_padded
+
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=compiler.chain,
+                method="eth_call",
+                params=json.dumps([{"to": pool_data_provider, "data": call_data}, "latest"]),
+                id=f"{pre_flight_label}:{compiler.chain}:{asset_address.lower()}",
+            ),
+            timeout=getattr(compiler, "rpc_timeout", 5.0),
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s pre-flight skipped for %s on %s: gateway call failed (%s)",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+            exc,
+        )
+        return None
+
+    if not response.success or not response.result:
+        # When the PoolDataProvider call reverts (as happens on Radiant V2
+        # Arbitrum after the October 2024 attack — every method on the proxy
+        # returns 0x), treat that as a strong "pool is broken / shut down"
+        # signal and surface it as a frozen reserve. A healthy data provider
+        # never reverts on `getReserveConfigurationData`; only network errors
+        # or an RPC-level fault would otherwise reach this branch, and those
+        # already log a warning above.
+        error_text = (response.error or "").lower()
+        revert_signal = "revert" in error_text or "reverted" in error_text
+        if revert_signal:
+            return _DecodedReserveConfig(
+                ltv=0,
+                usage_as_collateral_enabled=False,
+                borrowing_enabled=False,
+                is_active=False,
+                is_frozen=True,
+            )
+        logger.warning(
+            "%s pre-flight: PoolDataProvider returned empty for asset=%s chain=%s "
+            "— assuming eligible (will revert on-chain if not)",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    # gateway.rpc.Call wraps eth_call's hex result in json.dumps (see
+    # almanak/gateway/services/rpc_service.py), so response.result arrives as a
+    # JSON-encoded string like '"0x..."'. Decode before slicing or the ABI
+    # word offsets are off-by-one and the pre-flight silently fails-open.
+    try:
+        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
+    except (ValueError, json.JSONDecodeError):
+        logger.warning(
+            "%s pre-flight: cannot JSON-decode RPC result for asset=%s chain=%s",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+    if not isinstance(decoded, str):
+        return None
+    # Empty `0x` payload from a successful eth_call is a strong "broken
+    # contract" signal — a healthy PoolDataProvider always returns a
+    # 320-byte ABI-encoded tuple. Treat the same as an explicit revert.
+    # Without this branch a shut-down proxy that returns success=True with
+    # empty data falls through to the short-response warning and the
+    # pre-flight silently fails open. CodeRabbit follow-up.
+    if decoded.lower() == "0x" or decoded == "":
+        return _DecodedReserveConfig(
+            ltv=0,
+            usage_as_collateral_enabled=False,
+            borrowing_enabled=False,
+            is_active=False,
+            is_frozen=True,
+        )
+    raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
+
+    # getReserveConfigurationData returns 10 uint256/bool words, ABI-encoded
+    # as 10 * 32 bytes = 640 hex chars. Word layout:
+    # 0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
+    # 4: reserveFactor, 5: usageAsCollateralEnabled (bool),
+    # 6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
+    # 8: isActive (bool), 9: isFrozen (bool).
+    if len(raw) < 640:
+        logger.warning(
+            "%s pre-flight: unexpected response length %d for asset=%s chain=%s",
+            pre_flight_label,
+            len(raw),
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    try:
+        ltv = int(raw[64:128], 16)
+        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
+        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
+        is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
+        is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
+    except ValueError:
+        return None
+
+    return _DecodedReserveConfig(
+        ltv=ltv,
+        usage_as_collateral_enabled=usage_as_collateral_enabled,
+        borrowing_enabled=borrowing_enabled,
+        is_active=is_active,
+        is_frozen=is_frozen,
+    )
+
+
+def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, asset_symbol: str) -> str | None:
+    """Verify an asset is collateral-eligible on the compiler's Aave V3 market.
+
+    Calls `getReserveConfigurationData(asset)` on the chain's PoolDataProvider
+    via the compiler's gateway client. Caches results on the compiler so a
+    multi-iteration strategy doesn't re-query the same reserve config.
+
+    Returns:
+        None when the asset is eligible (or the check could not be performed —
+        we fail-open here so an offline / placeholder-mode compile still yields
+        calldata; the on-chain revert remains the final guard).
+        A human-readable error string when the asset is conclusively
+        ineligible (`usageAsCollateralEnabled == false` or `ltv == 0`).
+    """
+    if compiler.chain not in AAVE_V3:
+        return None
+
+    # Use isinstance(dict) rather than `is None` so MagicMock-based test
+    # compilers (which return MagicMock for any attr access) re-init cleanly.
+    cache = getattr(compiler, "_aave_collateral_eligibility_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._aave_collateral_eligibility_cache = cache
+
+    cache_key = (compiler.chain, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol="aave_v3",
+        pre_flight_label="Aave V3 collateral",
+    )
+    if config is None:
+        # Fail-open: do NOT cache the miss. A transient gateway failure on
+        # iteration N must not permanently disable the pre-flight on iter N+1.
+        return None
+
+    if not config.usage_as_collateral_enabled or config.ltv == 0:
+        reason = (
+            f"Asset {asset_symbol} on Aave V3 {compiler.chain} is not collateral-eligible "
+            f"(usageAsCollateralEnabled={config.usage_as_collateral_enabled}, ltv={config.ltv}). "
+            "Use as supply-only (omit use_as_collateral) or pick a different asset."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
+
+
+def _check_lending_reserve_borrowable(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> str | None:
+    """VIB-3825 pre-flight: verify the asset has ``borrowingEnabled=true``.
+
+    Aave V3 (and Aave V2 forks) expose a per-reserve ``borrowingEnabled`` bit in
+    ``getReserveConfigurationData`` (word 6). When it is false, every BORROW
+    against the asset reverts on-chain with short-string code ``11`` (Aave V3:
+    ``BORROWING_NOT_ENABLED``) — burning gas + iterations of the strategy's
+    retry loop. Concrete trigger seen on Base in the Apr-31 harness:
+    ``aave_v3_aerodrome_leveraged_lp_base`` (USDC borrow).
+
+    Returns:
+        None when the reserve is borrowable (or the check could not be
+        performed). A human-readable error string when borrowing is
+        disabled. Caller should raise the typed
+        :class:`LendingBorrowNotEnabledError` so strategies can catch and
+        emit ``Intent.hold(...)`` instead of submitting a BORROW that
+        on-chain will revert.
+    """
+    if not _resolve_pool_data_provider(compiler.chain, protocol):
+        return None
+
+    cache = getattr(compiler, "_lending_borrowable_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrowable_cache = cache
+
+    cache_key = (compiler.chain, protocol, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol=protocol,
+        pre_flight_label=f"{protocol} reserve-borrowable",
+    )
+    if config is None:
+        # Fail-open on transient gateway errors — do not cache the miss.
+        return None
+
+    if not config.borrowing_enabled:
+        reason = (
+            f"Reserve {asset_symbol} on {protocol} {compiler.chain} is not "
+            f"borrowable (borrowingEnabled=False). The reserve is "
+            f"supply-only — strategy must HOLD until governance enables "
+            f"borrowing or pick a different borrow asset."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
+
+
+def _check_lending_reserve_active(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> str | None:
+    """Verify the reserve for an asset is not frozen / inactive on the target pool.
+
+    Reusable across any Aave-compatible lending pool that exposes
+    ``getReserveConfigurationData(address)`` on its PoolDataProvider — covers
+    Aave V3 markets and Aave V2 forks (Radiant V2 today, others if added).
+
+    Returns:
+        None when the reserve is active and unfrozen, or when the check could
+        not be performed (fail-open — same offline / placeholder-mode contract
+        as ``_check_aave_v3_collateral_eligibility``).
+        A human-readable error string when the reserve is conclusively
+        frozen or inactive. Strategies should catch the typed
+        :class:`PoolReserveFrozenError` raised by the caller and emit
+        ``Intent.hold(...)`` instead of submitting a SUPPLY that will revert
+        on-chain. VIB-3749.
+    """
+    if not _resolve_pool_data_provider(compiler.chain, protocol):
+        return None
+
+    cache = getattr(compiler, "_lending_reserve_active_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_reserve_active_cache = cache
+
+    cache_key = (compiler.chain, protocol, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol=protocol,
+        pre_flight_label=f"{protocol} reserve-active",
+    )
+    if config is None:
+        # Fail-open: do not cache transient failures.
+        return None
+
+    if not config.is_active or config.is_frozen:
+        reason = (
+            f"Reserve {asset_symbol} on {protocol} {compiler.chain} is not active "
+            f"(isActive={config.is_active}, isFrozen={config.is_frozen}). "
+            "The pool / asset is paused — strategy should HOLD until governance reactivates."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
+
+
+# ─── Borrow capacity pre-flight (defense-in-depth) ────────────────────────────
+# Mainnet protocol enforcement is the primary safety net, but the on-chain
+# revert costs gas + a strategy iteration. The compile-time pre-flight here
+# catches over-borrows before tx submission so the runner's permanent-error
+# classifier can prevent a retry storm. Fail-open on RPC errors mirrors the
+# VIB-3825 borrowable check.
+
+# Selectors for the borrow-capacity pre-flight reads.
+# keccak256("getUserAccountData(address)")[:4] — Aave V3 Pool.
+_AAVE_GET_USER_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
+# keccak256("getAssetPrice(address)")[:4] — Aave V3 IAaveOracle.
+_AAVE_GET_ASSET_PRICE_SELECTOR = "0xb3596f07"
+# keccak256("getAccountLiquidity(address)")[:4] — Compound V2 Comptroller.
+_COMPV2_GET_ACCOUNT_LIQUIDITY_SELECTOR = "0x5ec88c79"
+# keccak256("oracle()")[:4] — Compound V2 Comptroller.
+_COMPV2_ORACLE_SELECTOR = "0x7dc0d1d0"
+# keccak256("getUnderlyingPrice(address)")[:4] — Compound V2 PriceOracle.
+_COMPV2_GET_UNDERLYING_PRICE_SELECTOR = "0xfc57d4df"
+
+# Default safety margin applied to the computed capacity ceiling.
+# A 1% headroom matches what VIB-3825 uses for governance-bit checks and
+# absorbs minor oracle drift between the pre-flight read and the on-chain
+# borrow execution. Applied as `available * (1 - margin)`.
+_BORROW_CAPACITY_SAFETY_MARGIN = Decimal("0.01")
+
+
+def _gateway_eth_call_raw(compiler: Any, to: str, data: str, label: str) -> str | None:
+    """Issue an ``eth_call`` via the compiler's gateway client and return the hex payload.
+
+    Mirrors the call shape used by ``_fetch_reserve_config`` so the borrow-capacity
+    pre-flight rides the same gateway-bounded RPC plumbing. Returns ``None`` on
+    any error (no gateway, RPC failure, revert, malformed response) so callers
+    can fail-open — the on-chain protocol check remains the final guard.
+    """
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        return None
+
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=compiler.chain,
+                method="eth_call",
+                params=json.dumps([{"to": to, "data": data}, "latest"]),
+                id=f"{label}:{compiler.chain}:{to.lower()}",
+            ),
+            timeout=getattr(compiler, "rpc_timeout", 5.0),
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s pre-flight skipped on %s: gateway call failed (%s)",
+            label,
+            compiler.chain,
+            exc,
+        )
+        return None
+
+    if not response.success or not response.result:
+        return None
+
+    try:
+        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, str):
+        return None
+    if decoded.lower() == "0x" or decoded == "":
+        return None
+    return decoded
+
+
+def _decode_uint_word(hex_data: str, word_index: int) -> int | None:
+    """Decode word ``word_index`` of an ABI-encoded uint256 response.
+
+    ``hex_data`` may include the ``0x`` prefix. Returns ``None`` if the payload
+    is too short to contain the requested word.
+    """
+    raw = hex_data.removeprefix("0x") if hex_data.startswith("0x") else hex_data
+    start = word_index * 64
+    if len(raw) < start + 64:
+        return None
+    try:
+        return int(raw[start : start + 64], 16)
+    except ValueError:
+        return None
+
+
+def _check_lending_borrow_capacity_aave_v3(
+    compiler: Any,
+    wallet_address: str,
+    borrow_asset_address: str,
+    borrow_asset_symbol: str,
+    requested_amount_decimal: Decimal,
+    borrow_decimals: int,
+    *,
+    safety_margin: Decimal = _BORROW_CAPACITY_SAFETY_MARGIN,
+) -> tuple[str | None, Decimal | None]:
+    """Aave V3 borrow-capacity pre-flight via ``Pool.getUserAccountData`` + oracle.
+
+    Returns a ``(reason, available_in_underlying)`` tuple:
+      - ``reason`` is ``None`` when the requested amount fits within capacity
+        (or when the check could not be performed — fail-open). It is a
+        human-readable string when the requested amount conclusively exceeds
+        the available capacity.
+      - ``available_in_underlying`` is the computed cap (in human units of the
+        borrow asset, *after* applying the safety margin) or ``None`` when not
+        determinable.
+    """
+    chain = compiler.chain
+    if chain not in AAVE_V3:
+        return None, None
+
+    # Cache: (chain, protocol, wallet, asset) → (reason, available)
+    cache = getattr(compiler, "_lending_borrow_capacity_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrow_capacity_cache = cache
+    cache_key = (chain, "aave_v3", wallet_address.lower(), borrow_asset_address.lower())
+
+    if cache_key in cache:
+        prev_reason, prev_available = cache[cache_key]
+        # Cache hit returns the prior verdict only when the new request would
+        # also fail (or we have no available number). When we previously had
+        # capacity for amount X but the new request asks for Y > X, recompute.
+        if prev_available is None:
+            return prev_reason, None
+        if requested_amount_decimal <= prev_available:
+            return None, prev_available
+        # Recompute below — a tighter request may now exceed.
+
+    pool_address = AAVE_V3[chain].get("pool")
+    oracle_address = AAVE_V3[chain].get("oracle")
+    if not pool_address or not oracle_address:
+        return None, None
+
+    # 1. Pool.getUserAccountData(wallet) → 6 uint256 words. Word 2 is
+    #    availableBorrowsBase (8-decimal USD on Aave V3).
+    user_calldata = _AAVE_GET_USER_ACCOUNT_DATA_SELECTOR + wallet_address.lower().replace("0x", "").zfill(64)
+    user_resp = _gateway_eth_call_raw(compiler, pool_address, user_calldata, "aave_v3 borrow-capacity user")
+    if user_resp is None:
+        return None, None
+    available_borrows_base = _decode_uint_word(user_resp, 2)
+    if available_borrows_base is None:
+        return None, None
+
+    # 2. IAaveOracle.getAssetPrice(asset) → uint256 base-currency price
+    #    (8-decimal USD).
+    oracle_calldata = _AAVE_GET_ASSET_PRICE_SELECTOR + borrow_asset_address.lower().replace("0x", "").zfill(64)
+    oracle_resp = _gateway_eth_call_raw(compiler, oracle_address, oracle_calldata, "aave_v3 borrow-capacity oracle")
+    if oracle_resp is None:
+        return None, None
+    asset_price_base = _decode_uint_word(oracle_resp, 0)
+    if asset_price_base is None or asset_price_base == 0:
+        return None, None
+
+    # 3. Convert the USD-base capacity to underlying units of the borrow
+    #    asset. Both numerator and denominator are 8-decimal USD; the ratio is
+    #    a dimensionless number of borrow-asset units (in human / non-wei
+    #    terms — caller handles the decimals scale separately if it needs wei).
+    available_in_underlying = Decimal(available_borrows_base) / Decimal(asset_price_base)
+
+    # Apply safety margin (1% default) — absorbs minor oracle drift between
+    # the pre-flight read and the borrow tx execution.
+    cap = available_in_underlying * (Decimal("1") - safety_margin)
+
+    if requested_amount_decimal > cap:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"aave_v3 {chain} exceeds wallet capacity ({cap} after "
+            f"{safety_margin * 100}% safety margin; "
+            f"availableBorrowsBase={available_borrows_base / Decimal('1e8')} USD, "
+            f"oracle price={asset_price_base / Decimal('1e8')} USD). "
+            "Reduce the borrow amount or supply more collateral first."
+        )
+        cache[cache_key] = (reason, cap)
+        return reason, cap
+
+    cache[cache_key] = (None, cap)
+    return None, cap
+
+
+def _fetch_compv2_account_liquidity(
+    compiler: Any,
+    comptroller_address: str,
+    wallet_address: str,
+) -> tuple[int, int, int] | None:
+    """Read Compound V2 ``getAccountLiquidity(wallet)``.
+
+    Returns ``(err_code, liquidity, shortfall)`` or ``None`` on RPC failure.
+    """
+    calldata = _COMPV2_GET_ACCOUNT_LIQUIDITY_SELECTOR + wallet_address.lower().replace("0x", "").zfill(64)
+    resp = _gateway_eth_call_raw(compiler, comptroller_address, calldata, "benqi borrow-capacity liquidity")
+    if resp is None:
+        return None
+    err_code = _decode_uint_word(resp, 0)
+    liquidity = _decode_uint_word(resp, 1)
+    shortfall = _decode_uint_word(resp, 2)
+    if err_code is None or liquidity is None or shortfall is None:
+        return None
+    return err_code, liquidity, shortfall
+
+
+def _fetch_compv2_underlying_price(
+    compiler: Any,
+    comptroller_address: str,
+    qi_token_address: str,
+) -> int | None:
+    """Read ``Comptroller.oracle().getUnderlyingPrice(qiToken)``.
+
+    Returns the raw 1e(36 - decimals)-scaled price or ``None`` on any RPC /
+    decode failure (caller fails open).
+    """
+    oracle_resp = _gateway_eth_call_raw(
+        compiler, comptroller_address, _COMPV2_ORACLE_SELECTOR, "benqi borrow-capacity oracle-addr"
+    )
+    if oracle_resp is None:
+        return None
+    oracle_word = _decode_uint_word(oracle_resp, 0)
+    if oracle_word is None or oracle_word == 0:
+        return None
+    oracle_address = "0x" + format(oracle_word, "040x")
+
+    px_calldata = _COMPV2_GET_UNDERLYING_PRICE_SELECTOR + qi_token_address.lower().replace("0x", "").zfill(64)
+    px_resp = _gateway_eth_call_raw(compiler, oracle_address, px_calldata, "benqi borrow-capacity underlying-price")
+    if px_resp is None:
+        return None
+    underlying_price = _decode_uint_word(px_resp, 0)
+    if underlying_price is None or underlying_price == 0:
+        return None
+    return underlying_price
+
+
+def _check_lending_borrow_capacity_benqi(
+    compiler: Any,
+    wallet_address: str,
+    qi_token_address: str,
+    borrow_asset_symbol: str,
+    requested_amount_decimal: Decimal,
+    borrow_decimals: int,
+    *,
+    safety_margin: Decimal = _BORROW_CAPACITY_SAFETY_MARGIN,
+) -> tuple[str | None, Decimal | None]:
+    """BENQI (Compound V2 fork) borrow-capacity pre-flight.
+
+    Calls ``Comptroller.getAccountLiquidity(wallet)`` and converts the 18-decimal
+    USD "liquidity" into units of the borrow asset using
+    ``Comptroller.oracle().getUnderlyingPrice(qiToken)``. The oracle returns
+    price scaled by ``1e(36 - underlying_decimals)`` (Compound V2 convention),
+    so the conversion is dimension-clean: ``liquidity / underlying_price`` gives
+    units of the underlying scaled by ``10**underlying_decimals`` — i.e., wei.
+
+    Returns ``(reason, available_in_underlying)`` analogous to the Aave V3 helper.
+    """
+    from almanak.connectors.benqi.adapter import BENQI_COMPTROLLER_ADDRESS
+
+    chain = compiler.chain
+    if chain != "avalanche":
+        return None, None
+
+    cache = getattr(compiler, "_lending_borrow_capacity_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrow_capacity_cache = cache
+    cache_key = (chain, "benqi", wallet_address.lower(), qi_token_address.lower())
+
+    if cache_key in cache:
+        prev_reason, prev_available = cache[cache_key]
+        if prev_available is None:
+            return prev_reason, None
+        if requested_amount_decimal <= prev_available:
+            return None, prev_available
+
+    liquidity_tuple = _fetch_compv2_account_liquidity(compiler, BENQI_COMPTROLLER_ADDRESS, wallet_address)
+    if liquidity_tuple is None:
+        return None, None
+    err_code, liquidity, shortfall = liquidity_tuple
+
+    # Non-zero error code from getAccountLiquidity is a Comptroller fault —
+    # fail-open (the borrow tx will surface the same error on-chain).
+    if err_code != 0:
+        return None, None
+
+    # If the wallet is already underwater (shortfall > 0), capacity is zero —
+    # any borrow exceeds it.
+    if shortfall > 0:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"benqi {chain} cannot proceed — wallet is already underwater "
+            f"(shortfall={Decimal(shortfall) / Decimal('1e18')} USD). "
+            "Repay outstanding debt or supply more collateral first."
+        )
+        cache[cache_key] = (reason, Decimal("0"))
+        return reason, Decimal("0")
+
+    underlying_price = _fetch_compv2_underlying_price(compiler, BENQI_COMPTROLLER_ADDRESS, qi_token_address)
+    if underlying_price is None:
+        return None, None
+
+    # Compound V2 conversion.
+    #   underlying_price = USD_per_unit * 1e(36 - decimals)
+    #   liquidity        = USD_amount * 1e18
+    # available_wei = liquidity * 1e18 / underlying_price
+    #                = (USD_amount / USD_per_unit) * 1e(decimals)
+    # We then divide by 10**decimals to compare against the human-decimal
+    # requested amount.
+    available_wei = (Decimal(liquidity) * Decimal(10**18)) / Decimal(underlying_price)
+    available_in_underlying = available_wei / Decimal(10**borrow_decimals)
+    cap = available_in_underlying * (Decimal("1") - safety_margin)
+
+    if requested_amount_decimal > cap:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"benqi {chain} exceeds wallet capacity ({cap} after "
+            f"{safety_margin * 100}% safety margin; "
+            f"liquidity={Decimal(liquidity) / Decimal('1e18')} USD). "
+            "Reduce the borrow amount or supply more collateral first."
+        )
+        cache[cache_key] = (reason, cap)
+        return reason, cap
+
+    cache[cache_key] = (None, cap)
+    return None, cap
+
+
+class _CompilerLikeShim:
+    """Tiny duck-typed shim used when a strategy calls the public
+    ``assert_lending_reserve_active`` helper without a real ``IntentCompiler``.
+
+    The runner does not assign ``state.compiler`` back onto ``strategy._compiler``
+    until *after* ``decide()`` returns (see ``StrategyRunner.run_iteration``),
+    so a strategy that wants the pre-flight in ``decide()`` can't go through
+    ``self.compiler``. This shim lets the helper run with just the
+    gateway_client + chain that every strategy already exposes.
+    """
+
+    __slots__ = ("chain", "rpc_timeout", "_gateway_client", "_lending_reserve_active_cache")
+
+    def __init__(
+        self,
+        chain: str,
+        gateway_client: Any,
+        rpc_timeout: float,
+        cache: dict[Any, Any] | None,
+    ) -> None:
+        self.chain = chain
+        self.rpc_timeout = rpc_timeout
+        self._gateway_client = gateway_client
+        self._lending_reserve_active_cache = cache if cache is not None else {}
+
+
+def assert_lending_reserve_active(
+    compiler_or_strategy: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> None:
+    """Strategy-facing pre-flight: raise ``PoolReserveFrozenError`` if frozen.
+
+    Call this from ``decide()`` before constructing a SUPPLY/BORROW Intent so
+    the strategy can short-circuit to ``Intent.hold(...)`` on iteration 1
+    rather than submitting a SUPPLY that the on-chain reserve will revert.
+
+    Accepts either:
+      - an ``IntentCompiler`` (or anything exposing ``chain``,
+        ``_gateway_client``, ``rpc_timeout``); or
+      - an ``IntentStrategy`` instance (we read ``self.chain``,
+        ``self._gateway_client``, ``self.rpc_timeout`` if present, and stash
+        the cache on the strategy instance directly).
+
+    The dual-input shape is necessary because the runner doesn't propagate
+    ``state.compiler`` back onto ``strategy._compiler`` until after
+    ``decide()`` returns — so accessing ``self.compiler`` from inside
+    ``decide()`` would raise ``RuntimeError`` for the pre-flight call.
+
+    Re-uses the same ``getReserveConfigurationData`` query and per-instance
+    cache as the compile-time pre-flight, so the strategy-level check costs
+    at most one RPC per (chain, protocol, asset) for the entire strategy run.
+
+    Fails open when the gateway / RPC is unavailable — caller continues to
+    behave as before in offline / placeholder-mode compiles.
+
+    VIB-3749. Reusable for any Aave V2 fork or Aave V3 market governance can
+    pause: Radiant V2 (Arbitrum frozen post-Oct-2024), Aave V3 markets where a
+    reserve gets paused, etc.
+
+    Raises:
+        PoolReserveFrozenError: when the reserve is conclusively frozen or
+        inactive on the target pool.
+    """
+    target = compiler_or_strategy
+
+    # Detect the strategy path: strategies have `_gateway_client` but their
+    # `.compiler` property raises if `_compiler` is unset (the runner-path
+    # gap). If the caller has `chain` + `_gateway_client` we run directly;
+    # otherwise we treat it as a compiler-shaped object as before.
+    has_chain = hasattr(target, "chain")
+    has_gateway = hasattr(target, "_gateway_client")
+    if has_chain and has_gateway and not _looks_like_compiler(target):
+        shim = _CompilerLikeShim(
+            chain=target.chain,
+            gateway_client=target._gateway_client,
+            rpc_timeout=getattr(target, "rpc_timeout", 5.0),
+            cache=getattr(target, "_lending_reserve_active_cache", None),
+        )
+        # Stash the cache on the strategy so iteration N+1 hits it.
+        if not isinstance(getattr(target, "_lending_reserve_active_cache", None), dict):
+            target._lending_reserve_active_cache = shim._lending_reserve_active_cache
+        else:
+            shim._lending_reserve_active_cache = target._lending_reserve_active_cache
+        reason = _check_lending_reserve_active(shim, asset_address, asset_symbol, protocol)
+    else:
+        reason = _check_lending_reserve_active(target, asset_address, asset_symbol, protocol)
+    if reason is not None:
+        raise PoolReserveFrozenError(reason)
+
+
+def _looks_like_compiler(obj: Any) -> bool:
+    """True when the duck-type matches the IntentCompiler surface we depend on.
+
+    Distinguishes a real compiler from a strategy. Strategies expose
+    ``_gateway_client`` and ``chain`` too, so we additionally check for the
+    `_resolve_token` method and the `_compile_*` family that only the compiler
+    has. Cheap, no imports, defensive.
+    """
+    return hasattr(obj, "_resolve_token") and hasattr(obj, "_format_amount")
+
+
+def _validate_curvance_market_tokens(
+    curvance_adapter: Any,
+    market_id: str,
+    *,
+    expected_collateral_symbol: str | None = None,
+    expected_debt_symbol: str | None = None,
+) -> str | None:
+    """Verify the intent's tokens match the Curvance market's collateral/debt symbols.
+
+    Returns ``None`` on a clean match, otherwise a human-readable error string.
+    Compile-time check — fails fast instead of pushing the mismatch to runtime
+    where the wrong cToken would be approved/called.
+    """
+    try:
+        market = curvance_adapter.get_market(market_id)
+    except (KeyError, ValueError) as e:
+        return f"Curvance market lookup failed for market_id={market_id}: {e}"
+
+    if (
+        expected_collateral_symbol is not None
+        and market.collateral_symbol.upper() != expected_collateral_symbol.upper()
+    ):
+        return (
+            f"Curvance market {market.name} ({market_id}) has collateral '{market.collateral_symbol}' "
+            f"but intent requested '{expected_collateral_symbol}'."
+        )
+    if expected_debt_symbol is not None and market.debt_symbol.upper() != expected_debt_symbol.upper():
+        return (
+            f"Curvance market {market.name} ({market_id}) has debt asset '{market.debt_symbol}' "
+            f"but intent requested '{expected_debt_symbol}'."
+        )
+    return None
+
+
+# Public pre-flight helper aliases. The implementation keeps the historical
+# private names because tests and older internal imports still patch them.
+resolve_pool_data_provider = _resolve_pool_data_provider
+fetch_reserve_config = _fetch_reserve_config
+check_aave_v3_collateral_eligibility = _check_aave_v3_collateral_eligibility
+check_lending_reserve_active = _check_lending_reserve_active
+check_lending_reserve_borrowable = _check_lending_reserve_borrowable
+check_lending_borrow_capacity_aave_v3 = _check_lending_borrow_capacity_aave_v3
+
+
+def _compile_borrow_morpho_blue(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    # Validate market_id is provided
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue borrow",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Create Morpho adapter
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        # Build approve TX for Morpho Blue contract
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            morpho_adapter.morpho_address,
+            int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply collateral TX
+        supply_result: Any = morpho_adapter.supply_collateral(
+            market_id=intent.market_id,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Morpho Blue supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=supply_result.tx_data["value"],
+            data=supply_result.tx_data["data"],
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description
+            or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral",
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_result: Any = morpho_adapter.borrow(
+        market_id=intent.market_id,
+        amount=intent.borrow_amount,
+        on_behalf_of=compiler.wallet_address,
+        receiver=compiler.wallet_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=borrow_result.tx_data["value"],
+        data=borrow_result.tx_data["data"],
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description or f"Borrow {intent.borrow_amount} {borrow_token.symbol}",
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle for Morpho
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> {intent.borrow_amount} {borrow_token.symbol} on Morpho Blue"
+    )
+    return result
+
+
+def _compile_borrow_curvance(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Curvance (Monad — per-market cToken / BorrowableCToken pairs)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance borrow (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from almanak.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_collateral_symbol=collateral_token.symbol,
+        expected_debt_symbol=borrow_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Step A: If collateral_amount > 0, approve + depositAsCollateral on the collateral cToken.
+    if collateral_amount_decimal > 0:
+        supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            supply_spender,
+            int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        )
+        transactions.extend(approve_txs)
+
+        curvance_borrow_supply_result = curvance_adapter.supply_collateral(
+            market_id=intent.market_id,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+        if not curvance_borrow_supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Curvance supply collateral failed: {curvance_borrow_supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert curvance_borrow_supply_result.tx_data is not None
+        transactions.append(
+            TransactionData(
+                to=curvance_borrow_supply_result.tx_data["to"],
+                value=curvance_borrow_supply_result.tx_data["value"],
+                data=curvance_borrow_supply_result.tx_data["data"],
+                gas_estimate=curvance_borrow_supply_result.gas_estimate,
+                description=curvance_borrow_supply_result.description,
+                tx_type="lending_supply_collateral",
+            )
+        )
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Step B: borrow on the BorrowableCToken.
+    curvance_borrow_result = curvance_adapter.borrow(
+        market_id=intent.market_id,
+        amount=intent.borrow_amount,
+    )
+    if not curvance_borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance borrow failed: {curvance_borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_borrow_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_borrow_result.tx_data["to"],
+            value=curvance_borrow_result.tx_data["value"],
+            data=curvance_borrow_result.tx_data["data"],
+            gas_estimate=curvance_borrow_result.gas_estimate,
+            description=curvance_borrow_result.description,
+            tx_type="lending_borrow",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    market_info = curvance_adapter.get_market(intent.market_id)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "collateral_ctoken": market_info.collateral_ctoken,
+            "borrowable_ctoken": market_info.borrowable_ctoken,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(
+        f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> "
+        f"{intent.borrow_amount} {borrow_token.symbol} on Curvance {market_info.name}"
+    )
+    return result
+
+
+def _compile_borrow_aave_compatible(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Aave V3 and Aave-compatible forks (Radiant V2)."""
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    protocol_lower = intent.protocol.lower()
+
+    # Get lending adapter
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    # VIB-3825: pre-flight the borrow asset's reserve state. Two governance bits
+    # gate a borrow on Aave-compatible pools, and they're independent —
+    # ``isActive``/``isFrozen`` (reserve-level pause) and ``borrowingEnabled``
+    # (per-asset toggle, code 11 = BORROWING_NOT_ENABLED). A frozen reserve can
+    # still report ``borrowingEnabled=true`` and a borrow against it will
+    # revert on-chain. Check active/frozen first (cheaper, hits the same
+    # ``getReserveConfigurationData`` cache as SUPPLY) so a paused or frozen
+    # reserve fails the compile before the borrowable check runs. Both checks
+    # fail open on RPC errors so placeholder-mode compiles still produce
+    # calldata; the on-chain revert remains the final guard.
+    frozen_reason = _check_lending_reserve_active(
+        compiler,
+        borrow_token.address,
+        borrow_token.symbol,
+        protocol_lower,
+    )
+    if frozen_reason is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=frozen_reason,
+            intent_id=intent.intent_id,
+        )
+
+    borrow_disabled_reason = _check_lending_reserve_borrowable(
+        compiler,
+        borrow_token.address,
+        borrow_token.symbol,
+        protocol_lower,
+    )
+    if borrow_disabled_reason is not None:
+        from almanak.framework.intents.intent_errors import LendingBorrowNotEnabledError
+
+        raise LendingBorrowNotEnabledError(
+            chain=compiler.chain,
+            protocol=intent.protocol,
+            asset_symbol=borrow_token.symbol,
+            asset_address=borrow_token.address,
+            reason=borrow_disabled_reason,
+        )
+
+    # Borrow-capacity pre-flight — defense in depth on top of the on-chain
+    # protocol enforcement (Aave V3 ``executeBorrow`` → code 35
+    # COLLATERAL_CANNOT_COVER_NEW_BORROW). Reads ``getUserAccountData`` at
+    # ``latest`` to compute available borrow against current on-chain
+    # collateral. Fail-open on RPC errors keeps placeholder-mode compiles
+    # flowing.
+    #
+    # Compute the on-chain integer collateral amount up-front so the
+    # capacity-bypass check uses the same wei value the supply tx will emit.
+    # Comparing the raw Decimal would let dust amounts like ``1e-19`` WETH
+    # bypass the pre-flight while flooring to ``0`` wei downstream — the
+    # bundle would emit no supply tx but skip the capacity gate, so an
+    # over-capacity borrow could still compile.
+    collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+    borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
+
+    # Same-bundle supply+borrow: when the intent supplies a non-zero
+    # collateral wei amount AND borrows against it in the same ActionBundle,
+    # the on-chain ``getUserAccountData`` does not yet see the pending
+    # supply. The capacity check would false-reject a valid bundle. Skip
+    # the gate when ``collateral_amount > 0`` (scaled wei, not raw Decimal)
+    # to avoid that false-negative; the on-chain protocol still enforces
+    # correctness if the supply turns out insufficient. Modeling pending
+    # collateral inside the helper is a follow-up enhancement (see linked
+    # GitHub issue in the PR).
+    if protocol_lower == "aave_v3" and collateral_amount == 0:
+        capacity_reason, _capacity = _check_lending_borrow_capacity_aave_v3(
+            compiler,
+            compiler.wallet_address,
+            borrow_token.address,
+            borrow_token.symbol,
+            intent.borrow_amount,
+            borrow_token.decimals,
+        )
+        if capacity_reason is not None:
+            from almanak.framework.intents.intent_errors import LendingBorrowExceedsCapacityError
+
+            raise LendingBorrowExceedsCapacityError(
+                chain=compiler.chain,
+                protocol=intent.protocol,
+                asset_symbol=borrow_token.symbol,
+                asset_address=borrow_token.address,
+                requested_amount=intent.borrow_amount,
+                available_amount=_capacity,
+                reason=capacity_reason,
+            )
+
+    # Build approve TX and supply TX for collateral (if collateral > 0)
+    if collateral_amount > 0:
+        actual_collateral_address = collateral_token.address
+        supply_value = 0
+
+        if collateral_token.is_native:
+            weth_address = compiler._get_wrapped_native_address()
+            if weth_address:
+                actual_collateral_address = weth_address
+                # Wrap native -> wrapped native (deposit() selector is the same
+                # across WETH/WAVAX/WBNB/etc.)
+                wrap_tx = TransactionData(
+                    to=weth_address,
+                    value=collateral_amount,
+                    data="0xd0e30db0",  # wrapped-native deposit()
+                    gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                    description=(
+                        f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
+                        f"{collateral_token.symbol} to wrapped native token"
+                    ),
+                    tx_type="wrap",
+                )
+                transactions.append(wrap_tx)
+                # Approve wrapped native for pool
+                approve_txs = compiler._build_approve_tx(
+                    weth_address,
+                    pool_address,
+                    collateral_amount,
+                )
+                transactions.extend(approve_txs)
+                warnings.append(f"Native {collateral_token.symbol} collateral: wrapped before supplying")
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Cannot use native {collateral_token.symbol} as collateral - "
+                        f"wrapped native token address not found on {compiler.chain}"
+                    ),
+                    intent_id=intent.intent_id,
+                )
+        else:
+            approve_txs = compiler._build_approve_tx(
+                actual_collateral_address,
+                pool_address,
+                collateral_amount,
+            )
+            transactions.extend(approve_txs)
+
+        supply_calldata = adapter.get_supply_calldata(
+            asset=actual_collateral_address,
+            amount=collateral_amount,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        supply_tx = TransactionData(
+            to=pool_address,
+            value=supply_value,
+            data="0x" + supply_calldata.hex(),
+            gas_estimate=adapter.estimate_supply_gas(),
+            description=(
+                f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral"
+            ),
+            tx_type="lending_supply",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
+    borrow_rate_mode_label = "variable"
+
+    # Build borrow TX
+    borrow_calldata = adapter.get_borrow_calldata(
+        asset=borrow_token.address,
+        amount=borrow_amount,
+        interest_rate_mode=aave_borrow_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    borrow_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + borrow_calldata.hex(),
+        gas_estimate=adapter.estimate_borrow_gas(),
+        description=(
+            f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} ({borrow_rate_mode_label} rate)"
+        ),
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount),
+            "borrow_amount": str(borrow_amount),
+            "interest_rate_mode": aave_borrow_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
+    borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: {intent.protocol} | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_spark(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from almanak.connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SPARK_VARIABLE_RATE_MODE,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+    borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
+
+    # Build approve TX and supply TX for collateral (if collateral > 0)
+    if collateral_amount > 0:
+        actual_collateral_address = collateral_token.address
+        supply_value = 0
+
+        if collateral_token.is_native:
+            weth_address = compiler._get_wrapped_native_address()
+            if weth_address:
+                actual_collateral_address = weth_address
+                # Wrap native -> wrapped native (deposit() selector is the same
+                # across WETH/WAVAX/WBNB/etc.)
+                wrap_tx = TransactionData(
+                    to=weth_address,
+                    value=collateral_amount,
+                    data="0xd0e30db0",  # wrapped-native deposit()
+                    gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                    description=(
+                        f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
+                        f"{collateral_token.symbol} to wrapped native token"
+                    ),
+                    tx_type="wrap",
+                )
+                transactions.append(wrap_tx)
+                # Approve wrapped native for pool
+                approve_txs = compiler._build_approve_tx(
+                    weth_address,
+                    pool_address,
+                    collateral_amount,
+                )
+                transactions.extend(approve_txs)
+                warnings.append(f"Native {collateral_token.symbol} collateral: wrapped before supplying")
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Cannot use native {collateral_token.symbol} as collateral - "
+                        f"wrapped native token address not found on {compiler.chain}"
+                    ),
+                    intent_id=intent.intent_id,
+                )
+        else:
+            approve_txs = compiler._build_approve_tx(
+                actual_collateral_address,
+                pool_address,
+                collateral_amount,
+            )
+            transactions.extend(approve_txs)
+
+        # Build supply TX via Spark adapter
+        supply_result = spark_adapter.supply(
+            asset=actual_collateral_address,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Spark supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_value = int(supply_result.tx_data.get("value", 0))
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=supply_value,
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=(
+                f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral to Spark"
+            ),
+            tx_type="lending_supply",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
+    spark_borrow_rate_label = "variable"
+
+    # Build borrow TX via Spark adapter
+    borrow_result = spark_adapter.borrow(
+        asset=borrow_token.address,
+        amount=intent.borrow_amount,
+        interest_rate_mode=spark_borrow_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=0,
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=(
+            f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} from Spark ({spark_borrow_rate_label} rate)"
+        ),
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount),
+            "borrow_amount": str(borrow_amount),
+            "interest_rate_mode": spark_borrow_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
+    borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Spark | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_compound_v3(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Compound V3."""
+    from almanak.connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+        default_compound_v3_market_for_chain,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Validate that the intent's borrow token matches the market's base asset.
+    # Compound V3 markets are single-asset: borrow() can only draw the base
+    # token. Calling comet.withdraw(non_base_address, amount) reverts on-chain
+    # with an opaque error, so we fail fast at compile time.
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    if borrow_token.address.lower() != base_token_address.lower():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 {market} market expects base asset {base_token_address}, "
+                f"got {borrow_token.address} ({borrow_token.symbol}). "
+                f"Compound V3 markets are single-asset - the borrow token must match the market's base asset."
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # Build approve TX for Comet contract (collateral token)
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            compound_adapter.comet_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply collateral TX
+        # Determine collateral symbol for adapter
+        collateral_symbol = collateral_token.symbol.upper()
+        supply_result = compound_adapter.supply_collateral(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Compound V3 supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description
+            or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral to Compound V3",
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_result = compound_adapter.borrow(amount=intent.borrow_amount)
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description
+        or f"Borrow {intent.borrow_amount} {borrow_token.symbol} from Compound V3",
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Compound V3 ({market} market) | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_benqi(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for BENQI (Compound V2 fork on Avalanche)."""
+    from almanak.connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    # Compute the on-chain integer collateral amount up-front so the
+    # capacity-bypass check below can use the same wei value the supply tx
+    # would emit. A dust Decimal like ``1e-19`` floors to ``0`` wei and
+    # must not skip the pre-flight (no actual supply tx would land).
+    collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+    # If collateral > 0, first supply collateral + enterMarkets
+    if collateral_amount_decimal > 0:
+        collateral_symbol = collateral_token.symbol.upper()
+        collateral_market = benqi_adapter.get_market_info(collateral_symbol)
+
+        if not collateral_market:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI does not support collateral asset: {collateral_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+                intent_id=intent.intent_id,
+            )
+
+        # Build approve TX for qiToken (skip for native AVAX)
+        if not collateral_market.is_native:
+            approve_txs = compiler._build_approve_tx(
+                collateral_token.address,
+                collateral_market.qi_token_address,
+                collateral_amount_wei,
+            )
+            transactions.extend(approve_txs)
+
+        # Build supply (mint) TX
+        supply_result = benqi_adapter.supply(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+
+        # Build enterMarkets TX to enable as collateral
+        enter_result = benqi_adapter.enter_markets([collateral_symbol])
+        if not enter_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI enterMarkets failed: {enter_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert enter_result.tx_data is not None
+        enter_data = enter_result.tx_data["data"]
+        if not enter_data.startswith("0x"):
+            enter_data = "0x" + enter_data
+        enter_tx = TransactionData(
+            to=enter_result.tx_data["to"],
+            value=0,
+            data=enter_data,
+            gas_estimate=enter_result.gas_estimate,
+            description=enter_result.description,
+            tx_type="lending_enter_markets",
+        )
+        transactions.append(enter_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_symbol = borrow_token.symbol.upper()
+
+    # Borrow-capacity pre-flight — defense in depth on top of the BENQI
+    # Comptroller's on-chain enforcement (``borrowAllowed`` → error code 4
+    # INSUFFICIENT_LIQUIDITY). The Anvil-fork harness has historically failed
+    # to enforce this reliably (oracle prices on the fork drift); this
+    # pre-flight makes the bound observable at compile-time. Mainnet
+    # behaviour is presumed correct — a follow-up probe verifies empirically.
+    #
+    # Same-bundle supply+enterMarkets+borrow: when the intent supplies new
+    # collateral (non-zero scaled wei) and enters its market in the same
+    # ActionBundle, ``getAccountLiquidity`` at ``latest`` does not yet see
+    # those side-effects, so the pre-flight would false-reject a valid
+    # bundle. Skip the gate in that case and rely on the on-chain
+    # Comptroller; modeling pending collateral inside the helper is a
+    # follow-up enhancement (see linked GitHub issue in the PR).
+    #
+    # Bypass is gated on ``collateral_amount_wei == 0`` (not the raw
+    # Decimal) so a dust amount that floors to 0 wei still runs the
+    # pre-flight — there's no actual supply tx to mask the false-negative.
+    borrow_market_for_capacity = benqi_adapter.get_market_info(borrow_symbol)
+    if borrow_market_for_capacity is not None and collateral_amount_wei == 0:
+        capacity_reason, _capacity = _check_lending_borrow_capacity_benqi(
+            compiler,
+            compiler.wallet_address,
+            borrow_market_for_capacity.qi_token_address,
+            borrow_token.symbol,
+            intent.borrow_amount,
+            borrow_token.decimals,
+        )
+        if capacity_reason is not None:
+            from almanak.framework.intents.intent_errors import LendingBorrowExceedsCapacityError
+
+            raise LendingBorrowExceedsCapacityError(
+                chain=compiler.chain,
+                protocol=intent.protocol,
+                asset_symbol=borrow_token.symbol,
+                asset_address=borrow_token.address,
+                requested_amount=intent.borrow_amount,
+                available_amount=_capacity,
+                reason=capacity_reason,
+            )
+
+    borrow_result = benqi_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: BENQI | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_euler_v2(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Euler V2 (ERC-4626 vaults + EVC)."""
+    from almanak.connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    # Find collateral vault
+    collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
+    if not collateral_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for collateral asset: {collateral_token.symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # Build approve TX for vault
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            collateral_vault.vault_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply (deposit) TX
+        supply_result = euler_adapter.supply(
+            asset=collateral_token.symbol.upper(),
+            amount=collateral_amount_decimal,
+            vault_symbol=collateral_vault.vault_symbol,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Euler V2 supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX (includes EVC enableCollateral + enableController + borrow)
+    borrow_result = euler_adapter.borrow(
+        borrow_asset=borrow_token.symbol.upper(),
+        borrow_amount=intent.borrow_amount,
+        collateral_vault_address=collateral_vault.vault_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "evc_address": euler_adapter.evc_address,
+            "collateral_vault": collateral_vault.vault_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Euler V2 | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_silo_v2(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Silo V2 (isolated lending on Avalanche)."""
+    from almanak.connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    collateral_symbol = collateral_token.symbol.upper()
+    borrow_symbol = borrow_token.symbol.upper()
+
+    sv2_market = silo_adapter.find_market(collateral_symbol, borrow_symbol)
+    if not sv2_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for {collateral_symbol}/{borrow_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # If collateral > 0, deposit into the collateral silo
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        sv2_silo_result = silo_adapter.find_silo_for_asset(collateral_symbol, sv2_market.market_name)
+        if not sv2_silo_result:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Cannot find silo for collateral {collateral_symbol} in market {sv2_market.market_name}",
+                intent_id=intent.intent_id,
+            )
+        _, collateral_silo_address, _ = sv2_silo_result
+
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            collateral_silo_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        sv2_supply_result = silo_adapter.supply(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+            market_name=sv2_market.market_name,
+        )
+
+        if not sv2_supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Silo V2 deposit failed: {sv2_supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert sv2_supply_result.tx_data is not None
+        supply_data = sv2_supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=sv2_supply_result.tx_data["to"],
+            value=int(sv2_supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=sv2_supply_result.gas_estimate,
+            description=sv2_supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    borrow_result = silo_adapter.borrow(
+        collateral_asset=collateral_symbol,
+        borrow_asset=borrow_symbol,
+        borrow_amount=intent.borrow_amount,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Silo V2 ({sv2_market.market_name}) | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_repay_morpho_blue(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue repay",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Use _get_chain_rpc_url() (not compiler.rpc_url) so Anvil fork URL is detected via
+    # ANVIL_{CHAIN}_PORT env var when running on a fork. compiler.rpc_url is always None
+    # in gateway mode, which caused the SDK to use Alchemy mainnet RPC even on Anvil,
+    # returning borrow_shares=0 and breaking repay_full=True (VIB-587).
+    morpho_rpc_url = compiler._get_chain_rpc_url()
+
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # Build approve TX for Morpho Blue contract
+    if repay_amount_decimal is not None:
+        approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    else:
+        approve_amount = MAX_UINT256  # Approve max for full repay
+
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        morpho_adapter.morpho_address,
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result: Any = morpho_adapter.repay(
+        market_id=intent.market_id,
+        amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
+        on_behalf_of=compiler.wallet_address,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=repay_result.tx_data["value"],
+        data=repay_result.tx_data["data"],
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description or f"Repay {amount_description} {repay_token.symbol}",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Morpho Blue")
+    return result
+
+
+def _compile_repay_curvance(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Curvance (Monad — repay to BorrowableCToken)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance repay (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from almanak.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_debt_symbol=repay_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Approve the BorrowableCToken to pull the repayment.
+    approve_amount = (
+        MAX_UINT256
+        if intent.repay_full or repay_amount_decimal is None
+        else int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    )
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        curvance_adapter.get_repay_spender(intent.market_id),
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build the repay tx.
+    curvance_repay_result = curvance_adapter.repay(
+        market_id=intent.market_id,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_full=intent.repay_full,
+    )
+    if not curvance_repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance repay failed: {curvance_repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_repay_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_repay_result.tx_data["to"],
+            value=curvance_repay_result.tx_data["value"],
+            data=curvance_repay_result.tx_data["data"],
+            gas_estimate=curvance_repay_result.gas_estimate,
+            description=curvance_repay_result.description,
+            tx_type="lending_repay",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    market_info = curvance_adapter.get_market(intent.market_id)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "borrowable_ctoken": market_info.borrowable_ctoken,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Curvance {market_info.name}")
+    return result
+
+
+def _compile_repay_aave_compatible(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+    protocol_lower = intent.protocol.lower()
+
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    if intent.repay_full:
+        # Query wallet balance to use as repay amount — avoids InsufficientFunds()
+        # when accrued interest causes debt to exceed the borrowed principal.
+        # Aave accepts any amount up to the debt; we repay as much as the wallet holds.
+        wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
+        if wallet_balance is None:
+            repay_amount = MAX_UINT256
+            logger.warning(
+                f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+            )
+        else:
+            repay_amount = wallet_balance
+            logger.debug(f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}")
+    else:
+        assert repay_amount_decimal is not None
+        repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+
+    approve_amount = repay_amount
+
+    if not repay_token.is_native:
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+    else:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            approve_txs = compiler._build_approve_tx(
+                weth_address,
+                pool_address,
+                approve_amount,
+            )
+            transactions.extend(approve_txs)
+            warnings.append("Native token debt: using WETH for repayment")
+
+    actual_repay_address = repay_token.address
+    if repay_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_repay_address = weth_address
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    aave_rate_mode = AAVE_VARIABLE_RATE_MODE
+    rate_mode_label = "variable"
+
+    repay_calldata = adapter.get_repay_calldata(
+        asset=actual_repay_address,
+        amount=repay_amount,
+        interest_rate_mode=aave_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    repay_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + repay_calldata.hex(),
+        gas_estimate=adapter.estimate_repay_gas(),
+        description=(f"Repay {amount_description} {repay_token.symbol} ({rate_mode_label} rate)"),
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": str(repay_amount),
+            "repay_full": intent.repay_full,
+            "interest_rate_mode": aave_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_spark(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from almanak.connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SPARK_VARIABLE_RATE_MODE,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    if intent.repay_full:
+        # repay_full on a native token is unsafe: we would wrap the wallet's
+        # entire native balance, leaving nothing to pay gas for the wrap tx
+        # itself (and the subsequent approve/repay txs). Reject at compile
+        # time and require the caller to supply an explicit amount that
+        # reserves gas.
+        if repay_token.is_native:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"repay_full is not supported for native {repay_token.symbol} on Spark: "
+                    "wrapping the full balance would leave no native token to pay gas. "
+                    "Provide an explicit repay_amount that reserves gas."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        # Same as Aave path: query wallet balance to avoid InsufficientFunds()
+        # if accrued interest exceeds original principal in the wallet.
+        wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
+        if wallet_balance is None:
+            repay_amount = MAX_UINT256
+            logger.warning(
+                f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+            )
+        else:
+            repay_amount = wallet_balance
+            logger.debug(f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}")
+    else:
+        assert repay_amount_decimal is not None
+        repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+
+    approve_amount = repay_amount
+
+    actual_repay_address = repay_token.address
+    if not repay_token.is_native:
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+    else:
+        weth_address = compiler._get_wrapped_native_address()
+        if not weth_address:
+            # Fail fast: without a wrapped-native address we cannot approve or
+            # repay native ETH debt. Previously control fell through silently
+            # and a later _build_approve_tx call was built against the native
+            # sentinel address, producing invalid transactions.
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(f"Wrapped native token address not available on {compiler.chain} for native repayment"),
+                intent_id=intent.intent_id,
+            )
+
+        # Native debt requires wrapping ETH -> WETH before approve/repay.
+        # If repay_full fell back to MAX_UINT256 (wallet balance query failed),
+        # we cannot know how much ETH to wrap: fail fast with a clear error
+        # instead of emitting an unfundable wrap transaction.
+        if repay_amount == MAX_UINT256:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Cannot repay native debt with unknown wallet balance: wrap amount "
+                    "is undetermined. Either provide an explicit repay amount or ensure "
+                    "the gateway can report the wallet's native token balance."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        actual_repay_address = weth_address
+
+        # Wrap native ETH -> WETH so the pool can pull WETH during repay.
+        # Matches the pattern used by _compile_supply_spark and _compile_borrow_spark.
+        wrap_tx = TransactionData(
+            to=weth_address,
+            value=repay_amount,
+            data="0xd0e30db0",  # WETH.deposit()
+            gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+            description=(
+                f"Wrap {compiler._format_amount(repay_amount, repay_token.decimals)} {repay_token.symbol} to WETH"
+            ),
+            tx_type="wrap",
+        )
+        transactions.append(wrap_tx)
+
+        approve_txs = compiler._build_approve_tx(
+            weth_address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+        warnings.append("Native token debt: wrapped to WETH for repayment")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
+    spark_repay_rate_label = "variable"
+
+    # Build repay TX via Spark adapter.
+    # When we have a concrete wallet balance, pass repay_all=False so the
+    # adapter uses the exact amount instead of overriding with MAX_UINT256.
+    spark_use_repay_all = repay_amount == MAX_UINT256
+    spark_amount = (
+        Decimal(repay_amount) / Decimal(10**repay_token.decimals)
+        if not spark_use_repay_all
+        else (repay_amount_decimal or Decimal("0"))
+    )
+    repay_result = spark_adapter.repay(
+        asset=actual_repay_address,
+        amount=spark_amount,
+        interest_rate_mode=spark_repay_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+        repay_all=spark_use_repay_all,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=0,
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description
+        or f"Repay {amount_description} {repay_token.symbol} to Spark ({spark_repay_rate_label} rate)",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": str(repay_amount),
+            "repay_full": intent.repay_full,
+            "interest_rate_mode": spark_repay_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas (Spark)"
+    )
+    return result
+
+
+def _compile_repay_compound_v3(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Compound V3."""
+    from almanak.connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+        default_compound_v3_market_for_chain,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Validate that the intent's repay token matches the market's base asset.
+    # Compound V3 repay is implemented as comet.supply(baseToken, amount) which
+    # only accepts the base asset. Supplying any other token would either revert
+    # or be treated as collateral supply (not a repayment), so fail fast.
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    if repay_token.address.lower() != base_token_address.lower():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 {market} market expects base asset {base_token_address}, "
+                f"got {repay_token.address} ({repay_token.symbol}). "
+                f"Compound V3 markets are single-asset - the repay token must match the market's base asset."
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    # Build approve TX for Comet contract (repay token -> Comet)
+    if repay_amount_decimal is not None:
+        approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    else:
+        approve_amount = MAX_UINT256  # Approve max for full repay
+
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        compound_adapter.comet_address,
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build repay TX via Compound V3 adapter
+    repay_result = compound_adapter.repay(
+        amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
+        on_behalf_of=compiler.wallet_address,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description or f"Repay {amount_description} {repay_token.symbol} to Compound V3",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Compound V3 {market}, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_benqi(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for BENQI (Compound V2 fork on Avalanche)."""
+    from almanak.connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    repay_market = benqi_adapter.get_market_info(repay_symbol)
+
+    if not repay_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI does not support asset: {repay_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build approve TX for qiToken (skip for native AVAX)
+    if not repay_market.is_native and not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="BENQI repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_market.qi_token_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    elif not repay_market.is_native and intent.repay_full:
+        # For repay_full, approve MAX_UINT256
+        from almanak.connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
+
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_market.qi_token_address,
+            BENQI_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = benqi_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to BENQI, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_euler_v2(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Euler V2 (ERC-4626 vaults + EVC)."""
+    from almanak.connectors.euler_v2.adapter import (
+        MAX_UINT256 as EULER_MAX_UINT256,
+    )
+    from almanak.connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    repay_vault = euler_adapter.find_vault_for_asset(repay_symbol)
+
+    if not repay_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for asset: {repay_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build approve TX for vault
+    if not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Euler V2 repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_vault.vault_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    else:
+        # For repay_full, approve MAX_UINT256
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_vault.vault_address,
+            EULER_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = euler_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_all=intent.repay_full,
+        vault_symbol=repay_vault.vault_symbol,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "vault_address": repay_vault.vault_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Euler V2, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_silo_v2(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Silo V2 (Avalanche)."""
+    from almanak.connectors.silo_v2.adapter import (
+        MAX_UINT256 as SILO_MAX_UINT256,
+    )
+    from almanak.connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    sv2_silo_result = silo_adapter.find_silo_for_asset(repay_symbol)
+
+    if not sv2_silo_result:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for asset: {repay_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    sv2_market, silo_address, _ = sv2_silo_result
+
+    # Build approve TX for the silo
+    if not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Silo V2 repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            silo_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    else:
+        # For repay_full, approve MAX_UINT256
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            silo_address,
+            SILO_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = silo_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        market_name=sv2_market.market_name,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Silo V2 ({sv2_market.market_name}), "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_supply_morpho_blue(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    # Validate market_id is provided
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue supply",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Create Morpho adapter
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # Build approve TX for Morpho Blue contract
+    approve_txs = compiler._build_approve_tx(
+        supply_token.address,
+        morpho_adapter.morpho_address,
+        int(amount_decimal * Decimal(10**supply_token.decimals)),
+    )
+    transactions.extend(approve_txs)
+
+    # Morpho Blue has two supply paths:
+    # - supply() for loan-token deposits (lending to earn interest)
+    # - supply_collateral() for collateral deposits (to enable borrowing)
+    # Route based on use_as_collateral flag: True -> collateral, False -> loan-token
+    if intent.use_as_collateral:
+        tx_result = morpho_adapter.supply_collateral(
+            market_id=intent.market_id,
+            amount=amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+        tx_type_label = "lending_supply_collateral"
+        description_suffix = "as collateral"
+    else:
+        tx_result = morpho_adapter.supply(
+            market_id=intent.market_id,
+            amount=amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+        tx_type_label = "lending_supply"
+        description_suffix = "as loan token"
+
+    if not tx_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue supply failed: {tx_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert tx_result.tx_data is not None
+    supply_tx = TransactionData(
+        to=tx_result.tx_data["to"],
+        value=tx_result.tx_data["value"],
+        data=tx_result.tx_data["data"],
+        gas_estimate=tx_result.gas_estimate,
+        description=tx_result.description
+        or f"Supply {amount_decimal} {supply_token.symbol} to Morpho Blue {description_suffix}",
+        tx_type=tx_type_label,
+    )
+    transactions.append(supply_tx)
+
+    # Build ActionBundle for Morpho
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled SUPPLY: {amount_decimal} {supply_token.symbol} to Morpho Blue market {intent.market_id[:16]}..."
+    )
+    return result
+
+
+def _compile_supply_curvance(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Curvance (Monad - supply to collateral cToken)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance supply (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from almanak.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_collateral_symbol=supply_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Curvance's depositAsCollateral is the primary supply path. Plain
+    # deposit() (lend-only, no collateral posting) is not wired yet, so
+    # honor the intent rather than silently routing through the
+    # collateral path.
+    if not intent.use_as_collateral:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                "Curvance supply with use_as_collateral=False is not implemented. "
+                "Lend-only deposit() is not wired yet — set use_as_collateral=True "
+                "or use a different protocol."
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
+    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+    approve_txs = compiler._build_approve_tx(supply_token.address, supply_spender, supply_amount_wei)
+    transactions.extend(approve_txs)
+
+    curvance_supply_result = curvance_adapter.supply_collateral(
+        market_id=intent.market_id,
+        amount=amount_decimal,
+        on_behalf_of=compiler.wallet_address,
+    )
+    if not curvance_supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance supply failed: {curvance_supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_supply_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_supply_result.tx_data["to"],
+            value=curvance_supply_result.tx_data["value"],
+            data=curvance_supply_result.tx_data["data"],
+            gas_estimate=curvance_supply_result.gas_estimate,
+            description=curvance_supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    market_info = curvance_adapter.get_market(intent.market_id)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "collateral_ctoken": market_info.collateral_ctoken,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(f"Compiled SUPPLY: {amount_decimal} {supply_token.symbol} to Curvance {market_info.name}")
+    return result
+
+
+def _compile_supply_aave_compatible(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+    protocol_lower = intent.protocol.lower()
+
+    # Get lending adapter
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    supply_amount = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Handle native token vs ERC20
+    actual_supply_address = supply_token.address
+    supply_value = 0
+
+    if supply_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot supply native {supply_token.symbol} - "
+                    f"wrapped native token address not found on {compiler.chain}"
+                ),
+                intent_id=intent.intent_id,
+            )
+        actual_supply_address = weth_address
+
+    # Pre-flight: confirm the reserve for this asset is active and unfrozen on
+    # the target pool. Surfaces a typed `PoolReserveFrozenError` (relayed as a
+    # FAILED compilation result) instead of submitting a SUPPLY TX that will
+    # revert opaquely on-chain — covering any Aave V2 fork or Aave V3 market
+    # whose governance has paused a reserve. The Radiant V2 Arbitrum
+    # deployment is *not* exercised here: its LendingPool proxy was reduced
+    # to a stub post-Oct-2024 attack, so the chain entry is removed from
+    # ``LENDING_POOL_ADDRESSES`` and the supply path fails earlier on the
+    # zero-address guard above (issues #1842 / #1847 / #1889).
+    # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when no
+    # gateway is attached so offline / placeholder-mode compiles still produce
+    # calldata; the on-chain revert remains the final guard.
+    frozen_reason = _check_lending_reserve_active(
+        compiler,
+        asset_address=actual_supply_address,
+        asset_symbol=supply_token.symbol,
+        protocol=protocol_lower,
+    )
+    if frozen_reason is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=frozen_reason,
+            intent_id=intent.intent_id,
+        )
+
+    if supply_token.is_native:
+        # Wrap native -> wrapped native (deposit() selector is the same
+        # across WETH/WAVAX/WBNB/etc.)
+        wrap_tx = TransactionData(
+            to=actual_supply_address,
+            value=supply_amount,
+            data="0xd0e30db0",  # wrapped-native deposit()
+            gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+            description=(
+                f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
+                f"{supply_token.symbol} to wrapped native token"
+            ),
+            tx_type="wrap",
+        )
+        transactions.append(wrap_tx)
+        # Approve wrapped native for pool
+        approve_txs = compiler._build_approve_tx(
+            actual_supply_address,
+            pool_address,
+            supply_amount,
+        )
+        transactions.extend(approve_txs)
+        warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
+    else:
+        approve_txs = compiler._build_approve_tx(
+            actual_supply_address,
+            pool_address,
+            supply_amount,
+        )
+        transactions.extend(approve_txs)
+
+    # Build supply TX
+    supply_calldata = adapter.get_supply_calldata(
+        asset=actual_supply_address,
+        amount=supply_amount,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    supply_tx = TransactionData(
+        to=pool_address,
+        value=supply_value,
+        data="0x" + supply_calldata.hex(),
+        gas_estimate=adapter.estimate_supply_gas(),
+        description=(
+            f"Supply {compiler._format_amount(supply_amount, supply_token.decimals)} {supply_token.symbol} to {intent.protocol}"
+        ),
+        tx_type="lending_supply",
+    )
+    transactions.append(supply_tx)
+
+    # Build setUserUseReserveAsCollateral TX if requested
+    if intent.use_as_collateral:
+        # Pre-flight: confirm asset can actually be used as collateral on this
+        # market. Surfaces a typed error instead of the opaque on-chain
+        # 0x0cafc072 (UnderlyingCannotBeUsedAsCollateral) revert. Aave-only;
+        # V2 forks (Radiant) skip this check because they expose a different
+        # PoolDataProvider interface. VIB-3701.
+        if not adapter._is_v2_fork and protocol_lower == "aave_v3":
+            ineligible_reason = _check_aave_v3_collateral_eligibility(
+                compiler,
+                asset_address=actual_supply_address,
+                asset_symbol=supply_token.symbol,
+            )
+            if ineligible_reason is not None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=ineligible_reason,
+                    intent_id=intent.intent_id,
+                )
+
+        set_collateral_calldata = adapter.get_set_collateral_calldata(
+            asset=actual_supply_address,
+            use_as_collateral=True,
+        )
+
+        set_collateral_tx = TransactionData(
+            to=pool_address,
+            value=0,
+            data="0x" + set_collateral_calldata.hex(),
+            gas_estimate=adapter.estimate_set_collateral_gas(),
+            description=(f"Enable {supply_token.symbol} as collateral on {intent.protocol}"),
+            tx_type="lending_set_collateral",
+        )
+        transactions.append(set_collateral_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(supply_amount),
+            "use_as_collateral": intent.use_as_collateral,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    # Format amounts for user-friendly logging
+    supply_fmt = format_token_amount(supply_amount, supply_token.symbol, supply_token.decimals)
+    collateral_str = " (as collateral)" if intent.use_as_collateral else ""
+
+    logger.info(f"Compiled SUPPLY: {supply_fmt} to {intent.protocol}{collateral_str}")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_supply_spark(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Spark (Aave V3 fork with Spark-specific addresses)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    from almanak.connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    supply_amount = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Handle native token vs ERC20
+    actual_supply_address = supply_token.address
+    supply_value = 0
+
+    if supply_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_supply_address = weth_address
+            # Wrap native -> wrapped native (deposit() selector is the same
+            # across WETH/WAVAX/WBNB/etc.)
+            wrap_tx = TransactionData(
+                to=weth_address,
+                value=supply_amount,
+                data="0xd0e30db0",  # wrapped-native deposit()
+                gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                description=(
+                    f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
+                    f"{supply_token.symbol} to wrapped native token"
+                ),
+                tx_type="wrap",
+            )
+            transactions.append(wrap_tx)
+            # Approve wrapped native for pool
+            approve_txs = compiler._build_approve_tx(
+                weth_address,
+                pool_address,
+                supply_amount,
+            )
+            transactions.extend(approve_txs)
+            warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot supply native {supply_token.symbol} - "
+                    f"wrapped native token address not found on {compiler.chain}"
+                ),
+                intent_id=intent.intent_id,
+            )
+    else:
+        approve_txs = compiler._build_approve_tx(
+            actual_supply_address,
+            pool_address,
+            supply_amount,
+        )
+        transactions.extend(approve_txs)
+
+    # Build supply TX via Spark adapter
+    supply_result: Any = spark_adapter.supply(
+        asset=actual_supply_address,
+        amount=amount_decimal,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    if not supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark supply failed: {supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert supply_result.tx_data is not None
+    supply_data = supply_result.tx_data["data"]
+    if not supply_data.startswith("0x"):
+        supply_data = "0x" + supply_data
+
+    supply_value = int(supply_result.tx_data.get("value", 0))
+
+    supply_tx = TransactionData(
+        to=supply_result.tx_data["to"],
+        value=supply_value,
+        data=supply_data,
+        gas_estimate=supply_result.gas_estimate,
+        description=supply_result.description
+        or f"Supply {compiler._format_amount(supply_amount, supply_token.decimals)} {supply_token.symbol} to Spark",
+        tx_type="lending_supply",
+    )
+    transactions.append(supply_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(supply_amount),
+            "use_as_collateral": intent.use_as_collateral,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    supply_fmt = format_token_amount(supply_amount, supply_token.symbol, supply_token.decimals)
+    collateral_str = " (as collateral)" if intent.use_as_collateral else ""
+
+    logger.info(f"Compiled SUPPLY: {supply_fmt} to Spark{collateral_str}")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_supply_compound_v3(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Compound V3."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    from almanak.connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+        default_compound_v3_market_for_chain,
+    )
+
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Build approve TX for Comet contract
+    approve_txs = compiler._build_approve_tx(
+        supply_token.address,
+        compound_adapter.comet_address,
+        supply_amount_wei,
+    )
+    transactions.extend(approve_txs)
+
+    # Detect if the token is the base token or a collateral token.
+    # Compound V3 uses supply() for the base asset and supply_collateral()
+    # for collateral assets — they are different contract methods.
+    # Use address comparison (not symbol) for reliable matching.
+    # Fail closed if market_config is incomplete — we cannot safely route
+    # without knowing the base token address.
+    base_token_address = compound_adapter.market_config.get("base_token_address", "")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for {market} on {compiler.chain} — cannot determine supply routing",
+            intent_id=intent.intent_id,
+        )
+    is_base_token = supply_token.address.lower() == base_token_address.lower()
+
+    if is_base_token:
+        # Supply base asset (earn interest)
+        supply_result = compound_adapter.supply(amount=amount_decimal)
+    else:
+        # In Compound V3, non-base tokens can ONLY be supplied as collateral.
+        # If the caller explicitly opted out of collateral, fail closed.
+        if not intent.use_as_collateral:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Cannot supply {supply_token.symbol} to Compound V3 {market} market with use_as_collateral=False — non-base tokens can only be supplied as collateral in Compound V3",
+                intent_id=intent.intent_id,
+            )
+        # Supply collateral asset (enable borrowing)
+        supply_result = compound_adapter.supply_collateral(
+            asset=supply_token.symbol,
+            amount=amount_decimal,
+        )
+
+    if not supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 supply failed: {supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert supply_result.tx_data is not None
+    supply_data = supply_result.tx_data["data"]
+    if not supply_data.startswith("0x"):
+        supply_data = "0x" + supply_data
+
+    supply_tx = TransactionData(
+        to=supply_result.tx_data["to"],
+        value=int(supply_result.tx_data.get("value", 0)),
+        data=supply_data,
+        gas_estimate=supply_result.gas_estimate,
+        description=supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to Compound V3",
+        tx_type="lending_supply" if is_base_token else "lending_supply_collateral",
+    )
+    transactions.append(supply_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "supply_type": "base" if is_base_token else "collateral",
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    supply_type = "base" if is_base_token else "collateral"
+    supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+    logger.info(f"Compiled SUPPLY ({supply_type}): {supply_fmt} to Compound V3 ({market} market)")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_supply_benqi(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for BENQI (Compound V2 fork on Avalanche)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    from almanak.connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    supply_symbol = supply_token.symbol.upper()
+    supply_market = benqi_adapter.get_market_info(supply_symbol)
+
+    if not supply_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI does not support asset: {supply_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Build approve TX for qiToken (skip for native AVAX)
+    if not supply_market.is_native:
+        approve_txs = compiler._build_approve_tx(
+            supply_token.address,
+            supply_market.qi_token_address,
+            supply_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+    # Build supply (mint) TX
+    supply_result = benqi_adapter.supply(
+        asset=supply_symbol,
+        amount=amount_decimal,
+    )
+
+    if not supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI supply failed: {supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert supply_result.tx_data is not None
+    supply_data = supply_result.tx_data["data"]
+    if not supply_data.startswith("0x"):
+        supply_data = "0x" + supply_data
+
+    supply_tx = TransactionData(
+        to=supply_result.tx_data["to"],
+        value=int(supply_result.tx_data.get("value", 0)),
+        data=supply_data,
+        gas_estimate=supply_result.gas_estimate,
+        description=supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to BENQI",
+        tx_type="lending_supply",
+    )
+    transactions.append(supply_tx)
+
+    # Optionally enable as collateral via enterMarkets
+    if intent.use_as_collateral:
+        enter_result = benqi_adapter.enter_markets([supply_symbol])
+        if not enter_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI enterMarkets failed: {enter_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert enter_result.tx_data is not None
+        enter_data = enter_result.tx_data["data"]
+        if not enter_data.startswith("0x"):
+            enter_data = "0x" + enter_data
+        enter_tx = TransactionData(
+            to=enter_result.tx_data["to"],
+            value=0,
+            data=enter_data,
+            gas_estimate=enter_result.gas_estimate,
+            description=enter_result.description,
+            tx_type="lending_enter_markets",
+        )
+        transactions.append(enter_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "qi_token_address": supply_market.qi_token_address,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "use_as_collateral": intent.use_as_collateral,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+    collateral_str = " (as collateral)" if intent.use_as_collateral else ""
+    logger.info(f"Compiled SUPPLY: {supply_fmt} to BENQI{collateral_str}")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_supply_euler_v2(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Euler V2 (ERC-4626 vaults)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    from almanak.connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    supply_symbol = supply_token.symbol.upper()
+    supply_vault = euler_adapter.find_vault_for_asset(supply_symbol)
+
+    if not supply_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for asset: {supply_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Build approve TX for vault
+    approve_txs = compiler._build_approve_tx(
+        supply_token.address,
+        supply_vault.vault_address,
+        supply_amount_wei,
+    )
+    transactions.extend(approve_txs)
+
+    # Build supply (deposit) TX
+    supply_result = euler_adapter.supply(
+        asset=supply_symbol,
+        amount=amount_decimal,
+        vault_symbol=supply_vault.vault_symbol,
+    )
+
+    if not supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 supply failed: {supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert supply_result.tx_data is not None
+    supply_data = supply_result.tx_data["data"]
+    if not supply_data.startswith("0x"):
+        supply_data = "0x" + supply_data
+
+    supply_tx = TransactionData(
+        to=supply_result.tx_data["to"],
+        value=int(supply_result.tx_data.get("value", 0)),
+        data=supply_data,
+        gas_estimate=supply_result.gas_estimate,
+        description=supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to Euler V2",
+        tx_type="lending_supply",
+    )
+    transactions.append(supply_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "vault_address": supply_vault.vault_address,
+            "vault_symbol": supply_vault.vault_symbol,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+    logger.info(f"Compiled SUPPLY: {supply_fmt} to Euler V2 vault {supply_vault.vault_symbol}")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_supply_silo_v2(
+    compiler,
+    intent: SupplyIntent,
+    supply_token: Any,
+    amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile SUPPLY for Silo V2."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    from almanak.connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    supply_symbol = supply_token.symbol.upper()
+    sv2_silo_result = silo_adapter.find_silo_for_asset(supply_symbol)
+
+    if not sv2_silo_result:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for asset: {supply_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    sv2_market, silo_address, _ = sv2_silo_result
+    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+    # Build approve TX for the silo
+    approve_txs = compiler._build_approve_tx(
+        supply_token.address,
+        silo_address,
+        supply_amount_wei,
+    )
+    transactions.extend(approve_txs)
+
+    # Build deposit TX
+    sv2_supply_result = silo_adapter.supply(
+        asset=supply_symbol,
+        amount=amount_decimal,
+        market_name=sv2_market.market_name,
+    )
+
+    if not sv2_supply_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 supply failed: {sv2_supply_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert sv2_supply_result.tx_data is not None
+    supply_data = sv2_supply_result.tx_data["data"]
+    if not supply_data.startswith("0x"):
+        supply_data = "0x" + supply_data
+
+    supply_tx = TransactionData(
+        to=sv2_supply_result.tx_data["to"],
+        value=int(sv2_supply_result.tx_data.get("value", 0)),
+        data=supply_data,
+        gas_estimate=sv2_supply_result.gas_estimate,
+        description=sv2_supply_result.description or f"Deposit {amount_decimal} {supply_token.symbol} to Silo V2",
+        tx_type="lending_supply",
+    )
+    transactions.append(supply_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.SUPPLY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "silo_address": silo_address,
+            "supply_token": supply_token.to_dict(),
+            "supply_amount": str(amount_decimal),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+    logger.info(f"Compiled SUPPLY: {supply_fmt} to Silo V2 ({sv2_market.market_name})")
+    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+    return result
+
+
+def _compile_withdraw_morpho_blue(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue withdraw",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from almanak.connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Resolve RPC URL with compiler's chain-aware fallback logic
+    # (explicit rpc_url -> managed Anvil fork -> configured provider)
+    morpho_rpc_url = compiler._get_chain_rpc_url()
+
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        rpc_url=morpho_rpc_url,  # DEPRECATED - only used when gateway_client is None
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # Morpho Blue has two withdraw paths (mirrors supply):
+    # - withdraw_collateral() for collateral withdrawals
+    # - withdraw() for loan-token withdrawals (lender reclaiming supplied funds)
+    # Route based on is_collateral flag (default True for backward compat)
+    amount_for_adapter = withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0")
+    if intent.is_collateral:
+        withdraw_result: Any = morpho_adapter.withdraw_collateral(
+            market_id=intent.market_id,
+            amount=amount_for_adapter,
+            receiver=compiler.wallet_address,
+            on_behalf_of=compiler.wallet_address,
+            withdraw_all=intent.withdraw_all,
+        )
+        tx_type_label = "lending_withdraw_collateral"
+        description_suffix = "collateral"
+    else:
+        withdraw_result = morpho_adapter.withdraw(
+            market_id=intent.market_id,
+            amount=amount_for_adapter,
+            receiver=compiler.wallet_address,
+            on_behalf_of=compiler.wallet_address,
+            withdraw_all=intent.withdraw_all,
+        )
+        tx_type_label = "lending_withdraw"
+        description_suffix = "loan token"
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=withdraw_result.tx_data["value"],
+        data=withdraw_result.tx_data["data"],
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description
+        or f"Withdraw {amount_display} {withdraw_token.symbol} {description_suffix} from Morpho Blue",
+        tx_type=tx_type_label,
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Morpho Blue")
+    return result
+
+
+def _compile_withdraw_curvance(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Curvance (Monad - withdraw from collateral cToken)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance withdraw (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from almanak.connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_collateral_symbol=withdraw_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Curvance-side asset amount. ChainedAmount (``"all"``) is already
+    # rejected upstream for lending intents; the else-branch is therefore
+    # a concrete Decimal.
+    market_info = curvance_adapter.get_market(intent.market_id)
+    share_balance: int | None = None
+    if intent.withdraw_all:
+        curvance_withdraw_amount = Decimal("0")
+        # withdraw_all calls redeemCollateral(shares, receiver, owner)
+        # which has no MAX_UINT256 sentinel - we MUST read the cToken
+        # share balance and pass it explicitly or the adapter raises.
+        share_balance = compiler._query_erc20_balance(
+            market_info.collateral_ctoken,
+            compiler.wallet_address,
+        )
+        if share_balance is None or share_balance <= 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Curvance withdraw_all requires reading the cToken share balance "
+                    f"({market_info.collateral_ctoken}) for {compiler.wallet_address}; "
+                    "balance query returned no value or zero."
+                ),
+                intent_id=intent.intent_id,
+            )
+    else:
+        assert isinstance(intent.amount, Decimal), "amount must be Decimal at this point"
+        curvance_withdraw_amount = intent.amount
+    amount_display = "all" if intent.withdraw_all else str(curvance_withdraw_amount)
+    curvance_withdraw_result = curvance_adapter.withdraw_collateral(
+        market_id=intent.market_id,
+        amount=curvance_withdraw_amount,
+        withdraw_all=intent.withdraw_all,
+        receiver=compiler.wallet_address,
+        share_balance=share_balance,
+    )
+    if not curvance_withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance withdraw failed: {curvance_withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_withdraw_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_withdraw_result.tx_data["to"],
+            value=curvance_withdraw_result.tx_data["value"],
+            data=curvance_withdraw_result.tx_data["data"],
+            gas_estimate=curvance_withdraw_result.gas_estimate,
+            description=curvance_withdraw_result.description,
+            tx_type="lending_withdraw",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "collateral_ctoken": market_info.collateral_ctoken,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Curvance {market_info.name}")
+    return result
+
+
+def _compile_withdraw_aave_compatible(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    from almanak.framework.intents.compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+    protocol_lower = intent.protocol.lower()
+
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    if intent.withdraw_all:
+        withdraw_amount = MAX_UINT256
+    else:
+        assert withdraw_amount_decimal is not None
+        withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
+
+    actual_withdraw_address = withdraw_token.address
+
+    if withdraw_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_withdraw_address = weth_address
+            warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Cannot withdraw native ETH - WETH address not found",
+                intent_id=intent.intent_id,
+            )
+
+    withdraw_calldata = adapter.get_withdraw_calldata(
+        asset=actual_withdraw_address,
+        amount=withdraw_amount,
+        to=compiler.wallet_address,
+    )
+
+    amount_display = "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
+
+    withdraw_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + withdraw_calldata.hex(),
+        gas_estimate=adapter.estimate_withdraw_gas(),
+        description=(f"Withdraw {amount_display} {withdraw_token.symbol} from {intent.protocol}"),
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": str(withdraw_amount),
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_withdraw_spark(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from almanak.connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    if intent.withdraw_all:
+        withdraw_amount = MAX_UINT256
+    else:
+        assert withdraw_amount_decimal is not None
+        withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
+
+    actual_withdraw_address = withdraw_token.address
+
+    if withdraw_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_withdraw_address = weth_address
+            warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Cannot withdraw native ETH - WETH address not found",
+                intent_id=intent.intent_id,
+            )
+
+    # Build withdraw TX via Spark adapter
+    withdraw_result = spark_adapter.withdraw(
+        asset=actual_withdraw_address,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        to=compiler.wallet_address,
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=0,
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Spark",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": str(withdraw_amount),
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Spark)"
+    )
+    return result
+
+
+def _compile_withdraw_compound_v3(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Compound V3 (base asset or collateral)."""
+    from almanak.connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+        default_compound_v3_market_for_chain,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    market = intent.market_id or default_compound_v3_market_for_chain(compiler.chain)
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Detect if the token is the base token or a collateral token.
+    # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
+    # for collateral assets - they are different contract methods.
+    # Compare by address (more robust than symbol, avoids alias ambiguity).
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    is_base_token = withdraw_token.address.lower() == base_token_address.lower()
+
+    compound_withdraw_amount: Decimal = withdraw_amount_decimal if withdraw_amount_decimal is not None else Decimal("0")
+
+    if is_base_token:
+        # Withdraw base asset (reduce lending position)
+        # Base token withdraw supports MAX_UINT256 for withdraw_all natively.
+        withdraw_result = compound_adapter.withdraw(
+            amount=compound_withdraw_amount,
+            withdraw_all=intent.withdraw_all,
+        )
+    else:
+        # Withdraw collateral asset.
+        # For withdraw_all: use the intent's original amount if available, since
+        # Compound V3 stores collateral as uint128 and MAX_UINT256 causes safe128() revert.
+        # The on-chain query in the adapter is the primary path; the intent amount is
+        # the fallback for when no RPC is available.
+        collateral_amount = compound_withdraw_amount
+        if intent.withdraw_all and collateral_amount == 0 and intent.amount not in (None, "all"):
+            try:
+                collateral_amount = Decimal(str(intent.amount))
+            except (TypeError, ValueError, ArithmeticError):
+                pass
+
+        withdraw_result = compound_adapter.withdraw_collateral(
+            asset=withdraw_token.symbol,
+            amount=collateral_amount,
+            withdraw_all=intent.withdraw_all,
+        )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    # No-op: withdraw_all on zero collateral returns success with no tx_data.
+    # Return a SUCCESS result with an empty ActionBundle so callers don't crash.
+    if withdraw_result.tx_data is None:
+        return CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            action_bundle=ActionBundle(
+                intent_type=IntentType.WITHDRAW.value,
+                transactions=[],
+                metadata={
+                    "protocol": intent.protocol,
+                    "comet_address": compound_adapter.comet_address,
+                    "market": market,
+                    "withdraw_token": withdraw_token.to_dict(),
+                    "withdraw_amount": "0",
+                    "withdraw_all": intent.withdraw_all,
+                    "withdraw_type": "collateral" if not is_base_token else "base",
+                    "chain": compiler.chain,
+                    "no_op": True,
+                    "reason": withdraw_result.description or "Nothing to withdraw (balance is 0)",
+                },
+            ),
+            intent_id=intent.intent_id,
+            warnings=warnings,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description
+        or f"Withdraw {amount_display} {withdraw_token.symbol} from Compound V3",
+        tx_type="lending_withdraw" if is_base_token else "lending_withdraw_collateral",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "withdraw_type": "base" if is_base_token else "collateral",
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    withdraw_type = "base" if is_base_token else "collateral"
+    logger.info(
+        f"Compiled WITHDRAW ({withdraw_type}): {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
+    )
+    return result
+
+
+def _compile_withdraw_benqi(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for BENQI (Compound V2 fork on Avalanche)."""
+    from almanak.connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    withdraw_market = benqi_adapter.get_market_info(withdraw_symbol)
+
+    if not withdraw_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI does not support asset: {withdraw_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build withdraw (redeem) TX
+    withdraw_result = benqi_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from BENQI",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "qi_token_address": withdraw_market.qi_token_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (BENQI)"
+    )
+    return result
+
+
+def _compile_withdraw_euler_v2(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Euler V2 (ERC-4626 vaults)."""
+    from almanak.connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    withdraw_vault = euler_adapter.find_vault_for_asset(withdraw_symbol)
+
+    if not withdraw_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for asset: {withdraw_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build withdraw TX
+    withdraw_result = euler_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        withdraw_all=intent.withdraw_all,
+        vault_symbol=withdraw_vault.vault_symbol,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Euler V2",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "vault_address": withdraw_vault.vault_address,
+            "vault_symbol": withdraw_vault.vault_symbol,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
+    )
+    return result
+
+
+def _compile_withdraw_silo_v2(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Silo V2 (isolated markets on Avalanche)."""
+    from almanak.connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    sv2_silo_result = silo_adapter.find_silo_for_asset(withdraw_symbol)
+
+    if not sv2_silo_result:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for asset: {withdraw_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    sv2_market, silo_address, _ = sv2_silo_result
+
+    # Build withdraw TX
+    withdraw_result = silo_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        market_name=sv2_market.market_name,
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Silo V2",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "silo_address": silo_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Silo V2 {sv2_market.market_name})"
+    )
+    return result

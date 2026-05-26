@@ -15,7 +15,7 @@ changes through receipt-event assertions and exact-wei balance deltas.
 Borrow/repay tests are marked ``xfail(strict=True)`` until a non-stablecoin
 collateral vault (e.g. eWETH, eWBTC) is added to the Ethereum branch of
 ``EULER_V2_VAULTS_BY_CHAIN`` in
-``almanak/framework/connectors/euler_v2/adapter.py``. The compilation path
+``almanak/connectors/euler_v2/adapter.py``. The compilation path
 runs end-to-end, but execution reverts because eUSDC-2 is not a valid
 collateral vault for borrowing USDC from itself. Mirrors the Avalanche
 ``test_euler_v2_borrow.py`` pattern (VIB-2643).
@@ -31,7 +31,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.euler_v2.receipt_parser import EulerV2ReceiptParser
+from almanak.connectors.euler_v2.receipt_parser import EulerV2ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     BorrowIntent,

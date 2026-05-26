@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,

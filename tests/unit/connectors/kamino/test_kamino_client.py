@@ -12,14 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.kamino.client import (
+from almanak.connectors.kamino.client import (
     KAMINO_MAIN_MARKET,
     U64_MAX,
     KaminoClient,
     KaminoConfig,
 )
-from almanak.framework.connectors.kamino.exceptions import KaminoAPIError, KaminoConfigError
-from almanak.framework.connectors.kamino.models import KaminoMarket, KaminoReserve, KaminoTransactionResponse
+from almanak.connectors.kamino.exceptions import KaminoAPIError, KaminoConfigError
+from almanak.connectors.kamino.models import KaminoMarket, KaminoReserve, KaminoTransactionResponse
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
 RESERVE_USDC = "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59"

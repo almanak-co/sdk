@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.core.models.config import VaultVersion
-from almanak.framework.connectors.lagoon.sdk import (
+from almanak.connectors.lagoon.sdk import (
     BALANCE_OF_SELECTOR,
     CONVERT_TO_ASSETS_SELECTOR,
     PENDING_DEPOSIT_REQUEST_SELECTOR,

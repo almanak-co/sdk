@@ -16,19 +16,19 @@ class TestGMXV2SDKPositionCount:
 
     def _make_sdk(self, reader_mock=None, web3_mock=None):
         """Create a GMXV2SDK with mocked Web3 and contracts."""
-        with patch("almanak.framework.connectors.gmx_v2.sdk.Web3") as MockWeb3:
+        with patch("almanak.connectors.gmx_v2.sdk.Web3") as MockWeb3:
             mock_w3 = MagicMock()
             mock_w3.to_checksum_address = lambda x: x
             MockWeb3.return_value = mock_w3
             MockWeb3.HTTPProvider = MagicMock()
             MockWeb3.keccak = MagicMock(return_value=b"\x00" * 32)
 
-            with patch("almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK._load_abi", return_value=[]):
-                with patch("almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK._load_contract") as mock_load:
+            with patch("almanak.connectors.gmx_v2.sdk.GMXV2SDK._load_abi", return_value=[]):
+                with patch("almanak.connectors.gmx_v2.sdk.GMXV2SDK._load_contract") as mock_load:
                     reader = reader_mock or MagicMock()
                     mock_load.return_value = reader
 
-                    from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+                    from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
                     sdk = GMXV2SDK.__new__(GMXV2SDK)
                     sdk.web3 = mock_w3
@@ -80,7 +80,7 @@ class TestGMXV2SDKGetPositions:
 
     def _make_sdk(self):
         """Create a GMXV2SDK with mocked internals."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         sdk = GMXV2SDK.__new__(GMXV2SDK)
         sdk.web3 = MagicMock()
@@ -122,7 +122,7 @@ class TestGMXV2SDKGetPositions:
 
     def test_positions_everything_reverts_raises_error(self):
         """All queries revert → raises PositionQueryError (not silent empty)."""
-        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+        from almanak.connectors.gmx_v2.sdk import PositionQueryError
 
         sdk = self._make_sdk()
         sdk.reader.functions.getAccountPositionCount.return_value.call.side_effect = Exception("reverted")
@@ -149,7 +149,7 @@ class TestGMXV2SDKParsePositions:
 
     def test_parse_raw_positions(self):
         """Parse raw Reader tuples into position dicts."""
-        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
         raw = [
             (
@@ -174,7 +174,7 @@ class TestGMXv2AdapterPositionsOnchain:
 
     def test_adapter_arbitrum_delegates_to_sdk(self):
         """Arbitrum path delegates to GMXV2SDK.get_account_positions."""
-        from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter
+        from almanak.connectors.gmx_v2.adapter import GMXv2Adapter
 
         adapter = GMXv2Adapter.__new__(GMXv2Adapter)
         adapter.chain = "arbitrum"
@@ -187,7 +187,7 @@ class TestGMXv2AdapterPositionsOnchain:
         mock_sdk = MagicMock()
         mock_sdk.get_account_positions.return_value = []
 
-        with patch("almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK", return_value=mock_sdk):
+        with patch("almanak.connectors.gmx_v2.sdk.GMXV2SDK", return_value=mock_sdk):
             positions = adapter.get_positions_onchain("http://rpc")
 
         assert positions == []
@@ -195,7 +195,7 @@ class TestGMXv2AdapterPositionsOnchain:
 
     def test_adapter_unsupported_chain_raises(self):
         """Non-Arbitrum/Avalanche chain raises ValueError."""
-        from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter
+        from almanak.connectors.gmx_v2.adapter import GMXv2Adapter
 
         adapter = GMXv2Adapter.__new__(GMXv2Adapter)
         adapter.chain = "base"
@@ -205,7 +205,7 @@ class TestGMXv2AdapterPositionsOnchain:
 
     def test_adapter_missing_addresses_raises(self):
         """Missing reader or data_store raises ValueError."""
-        from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter
+        from almanak.connectors.gmx_v2.adapter import GMXv2Adapter
 
         adapter = GMXv2Adapter.__new__(GMXv2Adapter)
         adapter.chain = "arbitrum"
@@ -225,7 +225,7 @@ class TestGMXv2AdapterNonArbitrumPath:
     )
 
     def _make_avalanche_adapter(self):
-        from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter
+        from almanak.connectors.gmx_v2.adapter import GMXv2Adapter
 
         adapter = GMXv2Adapter.__new__(GMXv2Adapter)
         adapter.chain = "avalanche"
@@ -249,7 +249,7 @@ class TestGMXv2AdapterNonArbitrumPath:
         mock_w3.eth.contract.return_value = mock_reader
 
         with patch(
-            "almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK",
+            "almanak.connectors.gmx_v2.sdk.GMXV2SDK",
             side_effect=ValueError("forced SDK fallback for test"),
         ):
             with patch("web3.Web3", return_value=mock_w3) as MockWeb3:

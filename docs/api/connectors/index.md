@@ -2,7 +2,7 @@
 
 Protocol connectors provide adapters for interacting with DeFi protocols. Each connector includes an SDK (low-level interactions), an adapter (standard interface), and a receipt parser.
 
-The matrix below is generated from ``almanak.framework.connectors.registry.ConnectorRegistry``. To regenerate, run ``uv run python scripts/docs/generate_connector_matrix.py --apply``.
+The matrix below is generated from ``almanak.connectors._strategy_base.registry.ConnectorRegistry``. To regenerate, run ``uv run python scripts/docs/generate_connector_matrix.py --apply``.
 
 ## Supported Protocols
 
@@ -13,7 +13,7 @@ The matrix below is generated from ``almanak.framework.connectors.registry.Conne
 | [Across](across.md) | Bridge | Arbitrum, Base, Ethereum, Optimism, Polygon | BRIDGE | `across` |
 | [Aerodrome](aerodrome.md) | DEX | Base, Optimism | LP_CLOSE, LP_OPEN, SWAP | `aerodrome` |
 | [Aster Perps](aster_perps.md) | Perp | BNB Chain | PERP_CLOSE, PERP_OPEN | `aster_perps` |
-| [Balancer](balancer.md) | Flash Loan | Arbitrum, Avalanche, Base, Ethereum, Optimism, Polygon | FLASH_LOAN | `balancer` |
+| Balancer V2 | Flash Loan | Arbitrum, Avalanche, Base, Ethereum, Optimism, Polygon | FLASH_LOAN | `balancer_v2` |
 | [Benqi](benqi.md) | Lending | Avalanche | BORROW, REPAY, SUPPLY, WITHDRAW | `benqi` |
 | [Camelot](camelot.md) | DEX | Arbitrum | SWAP | `camelot` |
 | [Compound V3](compound_v3.md) | Lending | Arbitrum, Base, Ethereum, Optimism, Polygon | BORROW, REPAY, SUPPLY, WITHDRAW | `compound_v3` |

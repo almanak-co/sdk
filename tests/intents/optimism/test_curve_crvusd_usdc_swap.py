@@ -23,7 +23,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.curve.adapter import CURVE_POOLS
+from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance
@@ -278,7 +278,7 @@ class TestCurveOptimismSwapOnAnvil:
         - Receipt parsed correctly (Layer 3)
         - USDC balance decreased, crvUSD balance increased (Layer 4)
         """
-        from almanak.framework.connectors.curve.receipt_parser import CurveReceiptParser
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
         from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]

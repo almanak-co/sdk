@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.hyperliquid.adapter import (
+from almanak.connectors.hyperliquid.adapter import (
     HYPERLIQUID_API_URLS,
     HYPERLIQUID_ASSETS,
     HYPERLIQUID_CHAIN_IDS,

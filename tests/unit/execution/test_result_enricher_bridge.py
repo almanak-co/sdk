@@ -17,17 +17,17 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
-from almanak.framework.connectors.across.receipt_parser import (
+from almanak.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
+from almanak.connectors.across.receipt_parser import (
     AcrossReceiptParser,
     V3_FUNDS_DEPOSITED_TOPIC,
 )
-from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
-from almanak.framework.connectors.stargate.receipt_parser import (
+from almanak.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
+from almanak.connectors.stargate.receipt_parser import (
     OFT_SENT_TOPIC,
     StargateReceiptParser,
 )
-from almanak.framework.connectors.lifi.receipt_parser import LiFiReceiptParser
+from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 from almanak.framework.execution.extracted_data import BridgeData
 from almanak.framework.execution.result_enricher import ResultEnricher
 

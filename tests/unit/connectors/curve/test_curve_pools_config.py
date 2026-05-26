@@ -16,7 +16,7 @@ import re
 import httpx
 import pytest
 
-from almanak.framework.connectors.curve.adapter import CURVE_POOLS
+from almanak.connectors.curve.adapter import CURVE_POOLS
 
 _logger = logging.getLogger(__name__)
 

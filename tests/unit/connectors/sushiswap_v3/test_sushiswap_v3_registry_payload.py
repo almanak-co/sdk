@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+from almanak.connectors.sushiswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     SushiSwapV3ReceiptParser,
@@ -694,7 +694,7 @@ class TestCrossForkHelperReuse:
         """Smoke test — calling ``extract_registry_payload_close`` with a
         disagreeing open_payload must hit UV3's cross-check, not a Sushi
         copy."""
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -756,10 +756,10 @@ class TestRunnerSushiDispatch:
         """
         from types import SimpleNamespace
 
-        from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+        from almanak.connectors.sushiswap_v3.receipt_parser import (
             SushiSwapV3ReceiptParser,
         )
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
         from almanak.framework.runner.strategy_runner import StrategyRunner

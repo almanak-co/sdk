@@ -280,7 +280,7 @@ def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dic
             can succeed, or if the fulfill TX reverts.
     """
     from almanak.core.contracts import PANCAKESWAP_PERPS
-    from almanak.framework.connectors.pancakeswap_perps.sdk import (
+    from almanak.connectors.pancakeswap_perps.sdk import (
         _check_address as _addr_ok,  # noqa: F401 (sanity import)
     )
 

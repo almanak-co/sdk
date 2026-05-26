@@ -114,7 +114,7 @@ def main():
 
     # -- Step 3: Parse receipt --
     print(f"\n--- STEP 3: Parse receipt ---")
-    from almanak.framework.connectors.fluid.receipt_parser import FluidReceiptParser
+    from almanak.connectors.fluid.receipt_parser import FluidReceiptParser
 
     parser = FluidReceiptParser()
     last_receipt = dict(receipt)

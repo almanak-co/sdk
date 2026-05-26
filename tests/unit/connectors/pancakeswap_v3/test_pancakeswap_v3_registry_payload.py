@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+from almanak.connectors.pancakeswap_v3.receipt_parser import (
     EVENT_TOPICS,
     POSITION_MANAGER_ADDRESSES,
     PancakeSwapV3ReceiptParser,
@@ -715,7 +715,7 @@ class TestHelperImportContract:
     """
 
     def test_uniswap_v3_helpers_importable(self) -> None:
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -725,7 +725,7 @@ class TestHelperImportContract:
 
     def test_helper_signatures_accept_pancake_payload_shape(self) -> None:
         """Smoke test that the helpers accept the dict/object shapes we pass."""
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
 
@@ -774,10 +774,10 @@ class TestRunnerPancakeDispatch:
         """
         from types import SimpleNamespace
 
-        from almanak.framework.connectors.pancakeswap_v3.receipt_parser import (
+        from almanak.connectors.pancakeswap_v3.receipt_parser import (
             PancakeSwapV3ReceiptParser,
         )
-        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+        from almanak.connectors.uniswap_v3.receipt_parser import (
             UniswapV3ReceiptParser,
         )
         from almanak.framework.runner.strategy_runner import StrategyRunner

@@ -54,27 +54,51 @@ _FORBIDDEN_FRAMEWORK_SUBPACKAGES = (
     # module costs ~17 MB without pulling pandas / pyarrow / numpy — those
     # remain in the third-party forbidden set above.
 )
-_FORBIDDEN_CONNECTORS = (
-    # The gateway only needs the polymarket connector at module level (via
-    # polymarket_service). Every other connector adapter must remain unloaded
-    # until a strategy actually uses it.
-    "almanak.framework.connectors.aave_v3",
-    "almanak.framework.connectors.uniswap_v3",
-    "almanak.framework.connectors.morpho_blue",
-    "almanak.framework.connectors.compound_v3",
-    "almanak.framework.connectors.curve",
-    "almanak.framework.connectors.aerodrome",
-    "almanak.framework.connectors.gmx_v2",
-    "almanak.framework.connectors.hyperliquid",
-    "almanak.framework.connectors.traderjoe_v2",
-    "almanak.framework.connectors.pancakeswap_v3",
-    "almanak.framework.connectors.spark",
-    "almanak.framework.connectors.lido",
-    "almanak.framework.connectors.ethena",
-    "almanak.framework.connectors.gimo",
-    "almanak.framework.connectors.across",
-    "almanak.framework.connectors.stargate",
-    "almanak.framework.connectors.enso",
+# VIB-4835: each connector's gateway-side provider lives at
+# ``almanak.connectors.<protocol>.gateway.provider`` and is loaded eagerly
+# by ``_gateway_registry.py`` at gateway boot. Python's import machinery
+# initialises the parent package ``almanak.connectors.<protocol>`` as a
+# side effect — so the *package* will always appear in ``sys.modules``
+# after gateway boot. What the lean-imports test guards is the
+# strategy-side **heavy submodules** (``.adapter``, ``.sdk``,
+# ``.compiler``, ``.receipt_parser``) — those must remain unloaded
+# because every connector's ``__init__.py`` is PEP 562 lazy.
+_FORBIDDEN_CONNECTOR_SUBMODULES = (
+    ".adapter",
+    ".sdk",
+    ".compiler",
+    ".receipt_parser",
+    ".client",
+    ".models",
+)
+_CONNECTOR_PACKAGES_TO_CHECK = (
+    "almanak.connectors.aave_v3",
+    "almanak.connectors.uniswap_v3",
+    "almanak.connectors.morpho_blue",
+    "almanak.connectors.compound_v3",
+    "almanak.connectors.curve",
+    "almanak.connectors.aerodrome",
+    "almanak.connectors.gmx_v2",
+    "almanak.connectors.hyperliquid",
+    "almanak.connectors.traderjoe_v2",
+    "almanak.connectors.pancakeswap_v3",
+    "almanak.connectors.spark",
+    "almanak.connectors.lido",
+    "almanak.connectors.ethena",
+    "almanak.connectors.gimo",
+    "almanak.connectors.across",
+    "almanak.connectors.stargate",
+    "almanak.connectors.enso",
+    "almanak.connectors.pendle",
+    # ``polymarket`` is intentionally NOT in this list. Its gateway-side
+    # service (``almanak.connectors.polymarket.gateway.service``) imports
+    # several of the connector's strategy-side modules — ``exceptions``,
+    # ``signer``, ``models`` — because the CLOB protocol's signing and
+    # EIP-712 envelopes are shared between strategy and gateway code.
+    # That sharing predates VIB-4835 and is legitimately part of the
+    # gateway-side import graph for this connector. Mark polymarket as a
+    # known exception rather than expanding the forbidden-submodules list
+    # with carve-outs.
 )
 
 
@@ -120,7 +144,16 @@ def test_gateway_import_does_not_pull_heavy_modules() -> None:
     failures: list[str] = []
     failures.extend(_check_absent(loaded, _FORBIDDEN_THIRD_PARTY, "third-party"))
     failures.extend(_check_absent(loaded, _FORBIDDEN_FRAMEWORK_SUBPACKAGES, "framework subpackage"))
-    failures.extend(_check_absent(loaded, _FORBIDDEN_CONNECTORS, "connector"))
+    # For each connector package, assert the strategy-side heavy
+    # submodules (adapter / sdk / compiler / receipt_parser / client /
+    # models) are NOT loaded. The package itself is allowed to be in
+    # ``sys.modules`` because the gateway-side ``gateway.provider`` lives
+    # under it and Python initialises the parent package on import.
+    for pkg in _CONNECTOR_PACKAGES_TO_CHECK:
+        for suffix in _FORBIDDEN_CONNECTOR_SUBMODULES:
+            mod = pkg + suffix
+            if mod in loaded:
+                failures.append(f"connector-submodule: {mod} is in sys.modules")
 
     if failures:
         msg_lines = [

@@ -75,7 +75,7 @@ def _mock_lifi_quote(
 class TestCompileLiFiSwapSameChain:
     """Tests for same-chain LiFi swap compilation."""
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_same_chain_swap_compiles_successfully(self, mock_get_quote: MagicMock) -> None:
         """Same-chain LiFi swap produces a valid ActionBundle."""
         mock_get_quote.return_value = _mock_lifi_quote()
@@ -102,7 +102,7 @@ class TestCompileLiFiSwapSameChain:
         assert metadata["from_chain_id"] == 42161
         assert metadata["to_chain_id"] == 42161
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_same_chain_swap_includes_approval_for_erc20(self, mock_get_quote: MagicMock) -> None:
         """ERC-20 same-chain swap includes an approve TX."""
         mock_get_quote.return_value = _mock_lifi_quote()
@@ -124,7 +124,7 @@ class TestCompileLiFiSwapSameChain:
         last_tx = result.transactions[-1]
         assert last_tx.tx_type == "swap_deferred"
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_amount_usd_conversion(self, mock_get_quote: MagicMock) -> None:
         """amount_usd is converted to token amount using price oracle."""
         mock_get_quote.return_value = _mock_lifi_quote()
@@ -147,7 +147,7 @@ class TestCompileLiFiSwapSameChain:
         from_amount = call_kwargs.kwargs.get("from_amount") or call_kwargs[1].get("from_amount")
         assert from_amount is not None
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_amount_decimal_conversion(self, mock_get_quote: MagicMock) -> None:
         """Decimal amount is converted to wei correctly."""
         mock_get_quote.return_value = _mock_lifi_quote()
@@ -185,7 +185,7 @@ class TestCompileLiFiSwapSameChain:
         assert result.status == CompilationStatus.FAILED
         assert "amount='all'" in result.error
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_metadata_contains_route_params(self, mock_get_quote: MagicMock) -> None:
         """ActionBundle metadata includes route_params for deferred execution."""
         mock_get_quote.return_value = _mock_lifi_quote()
@@ -213,7 +213,7 @@ class TestCompileLiFiSwapSameChain:
 class TestCompileLiFiSwapCrossChain:
     """Tests for cross-chain LiFi swap compilation."""
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_cross_chain_swap_compiles_successfully(self, mock_get_quote: MagicMock) -> None:
         """Cross-chain LiFi swap produces valid ActionBundle with bridge metadata."""
         mock_get_quote.return_value = _mock_lifi_quote(
@@ -246,7 +246,7 @@ class TestCompileLiFiSwapCrossChain:
         assert metadata["to_chain_id"] == 8453
         assert metadata["deferred_swap"] is True
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_cross_chain_swap_tx_type_is_bridge_deferred(self, mock_get_quote: MagicMock) -> None:
         """Cross-chain swap transaction type is 'bridge_deferred'."""
         mock_get_quote.return_value = _mock_lifi_quote(
@@ -291,7 +291,7 @@ class TestCompileLiFiSwapErrors:
         assert result.status == CompilationStatus.FAILED
         assert "does not support chain" in result.error
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_unsupported_destination_chain(self, mock_get_quote: MagicMock) -> None:
         """Unsupported destination chain returns FAILED compilation."""
         compiler = _make_compiler()
@@ -310,7 +310,7 @@ class TestCompileLiFiSwapErrors:
         assert result.status == CompilationStatus.FAILED
         assert "does not support chain" in result.error
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_token_resolution_failure(self, mock_get_quote: MagicMock) -> None:
         """Unknown token returns FAILED compilation."""
         compiler = _make_compiler()
@@ -327,10 +327,10 @@ class TestCompileLiFiSwapErrors:
         assert result.status == CompilationStatus.FAILED
         assert "UNKNOWN_TOKEN_XYZ" in result.error
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_lifi_api_error_handled(self, mock_get_quote: MagicMock) -> None:
         """LiFi API errors are caught and produce FAILED compilation."""
-        from almanak.framework.connectors.lifi.exceptions import LiFiAPIError
+        from almanak.connectors.lifi.exceptions import LiFiAPIError
 
         mock_get_quote.side_effect = LiFiAPIError(
             message="Rate limit exceeded",
@@ -351,10 +351,10 @@ class TestCompileLiFiSwapErrors:
         assert result.status == CompilationStatus.FAILED
         assert "Rate limit" in result.error
 
-    @patch("almanak.framework.connectors.lifi.client.LiFiClient.get_quote")
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
     def test_route_not_found_error_handled(self, mock_get_quote: MagicMock) -> None:
         """LiFi route-not-found errors produce FAILED compilation."""
-        from almanak.framework.connectors.lifi.exceptions import LiFiRouteNotFoundError
+        from almanak.connectors.lifi.exceptions import LiFiRouteNotFoundError
 
         mock_get_quote.side_effect = LiFiRouteNotFoundError("No route found")
         compiler = _make_compiler()

@@ -10,7 +10,7 @@ import pytest
 from solders.instruction import AccountMeta
 from solders.pubkey import Pubkey
 
-from almanak.framework.connectors.drift.constants import (
+from almanak.connectors.drift.constants import (
     DIRECTION_LONG,
     DIRECTION_SHORT,
     DRIFT_PROGRAM_ID,
@@ -20,9 +20,9 @@ from almanak.framework.connectors.drift.constants import (
     PLACE_PERP_ORDER_DISCRIMINATOR,
     USER_PERP_POSITIONS_OFFSET,
 )
-from almanak.framework.connectors.drift.exceptions import DriftConfigError
-from almanak.framework.connectors.drift.models import OrderParams
-from almanak.framework.connectors.drift.sdk import DriftSDK
+from almanak.connectors.drift.exceptions import DriftConfigError
+from almanak.connectors.drift.models import OrderParams
+from almanak.connectors.drift.sdk import DriftSDK
 
 # A valid Solana pubkey for testing
 TEST_WALLET = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"

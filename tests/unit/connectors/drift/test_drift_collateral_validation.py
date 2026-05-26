@@ -15,7 +15,7 @@ actionable error to the strategy author before any transaction is built.
 This test suite exercises three levels:
 
 1. The rules module's pure-function API
-   (:mod:`almanak.framework.connectors.drift.market_rules`).
+   (:mod:`almanak.connectors.drift.market_rules`).
 2. The compiler's Step 1.5 dispatch for ``protocol="drift"`` — proving that
    validation fires BEFORE the Drift adapter is instantiated.
 3. Error-shape contract: the raised
@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.drift.market_rules import (
+from almanak.connectors.drift.market_rules import (
     ALLOWED_COLLATERAL_MINTS,
     is_supported_collateral,
     validate_drift_collateral,
@@ -238,7 +238,7 @@ class TestDriftPerpOpenCompilerCollateralValidation:
 
         # Patch the connector adapter class and assert it is never constructed
         # when collateral is invalid.
-        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+        with patch("almanak.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             intent = _make_perp_open_intent(
                 collateral_token="WETH-on-arbitrum",
                 market="SOL-PERP",
@@ -259,7 +259,7 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         """Garbage collateral symbols are rejected up-front too."""
         compiler = _make_mock_compiler(chain="solana")
 
-        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+        with patch("almanak.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             intent = _make_perp_open_intent(
                 collateral_token="!!!",
                 market="SOL-PERP",
@@ -278,7 +278,7 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         bundle = MagicMock()
         bundle.metadata = {}
 
-        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+        with patch("almanak.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             mock_drift_adapter.return_value.compile_perp_open_intent.return_value = bundle
             intent = _make_perp_open_intent(
                 collateral_token="USDC",
@@ -298,7 +298,7 @@ class TestDriftPerpOpenCompilerCollateralValidation:
         bundle = MagicMock()
         bundle.metadata = {}
 
-        with patch("almanak.framework.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
+        with patch("almanak.connectors.drift.compiler.DriftAdapter") as mock_drift_adapter:
             mock_drift_adapter.return_value.compile_perp_open_intent.return_value = bundle
             # "msol" (lowercase) is the same as Drift's canonical "mSOL".
             intent = _make_perp_open_intent(

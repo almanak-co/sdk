@@ -7,7 +7,7 @@ Since SushiSwap V3 is a fork of Uniswap V3, the event formats are identical.
 
 from decimal import Decimal
 
-from almanak.framework.connectors.sushiswap_v3.receipt_parser import (
+from almanak.connectors.sushiswap_v3.receipt_parser import (
     SushiSwapV3EventType,
     SushiSwapV3ReceiptParser,
 )

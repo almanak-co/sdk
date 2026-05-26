@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+from almanak.connectors.uniswap_v3.receipt_parser import (
     SwapEventData,
     TransferEventData,
     UniswapV3ReceiptParser,

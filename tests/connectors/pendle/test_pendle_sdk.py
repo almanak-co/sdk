@@ -20,7 +20,7 @@ import os
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.pendle import (
+from almanak.connectors.pendle import (
     PENDLE_ADDRESSES,
     PendleAdapter,
     PendleEventType,

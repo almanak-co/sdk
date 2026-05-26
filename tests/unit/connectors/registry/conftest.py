@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.connectors.registry import ConnectorRegistry
+from almanak.connectors._strategy_base.registry import ConnectorRegistry
 
 
 @pytest.fixture(autouse=True)

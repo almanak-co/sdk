@@ -117,17 +117,17 @@ PARSER_CITATIONS = [
     # class names so the test survives benign renames; require at least one
     # method per class.
     (
-        "almanak.framework.connectors.uniswap_v3.receipt_parser",
+        "almanak.connectors.uniswap_v3.receipt_parser",
         ["UniswapV3ReceiptParser"],
         ["extract_lp_open_data", "extract_lp_close_data"],
     ),
     (
-        "almanak.framework.connectors.gmx_v2.receipt_parser",
+        "almanak.connectors.gmx_v2.receipt_parser",
         ["GMXv2ReceiptParser"],
         ["_parse_position_increase", "_parse_position_decrease"],
     ),
     (
-        "almanak.framework.connectors.pendle.receipt_parser",
+        "almanak.connectors.pendle.receipt_parser",
         ["PendleReceiptParser", "PendleLPReceiptParser"],
         ["extract_lp_open_data", "extract_lp_close_data"],
     ),
@@ -138,7 +138,7 @@ def _parser_id(module_path: str) -> str:
     """Pick a stable, human-readable test id from the parser module path.
 
     Uses the connector name segment when available (e.g. ``uniswap_v3`` from
-    ``almanak.framework.connectors.uniswap_v3.receipt_parser``); falls back to
+    ``almanak.connectors.uniswap_v3.receipt_parser``); falls back to
     the leaf module name when the path is shallower than expected. Avoids the
     ``rsplit(".", 2)[-2]`` IndexError trap on shallow paths (gemini-bot, PR
     #2200 review).

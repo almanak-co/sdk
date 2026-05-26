@@ -138,8 +138,8 @@ class TestSettleVaultCrashRecoveryPhases:
         executor._client.rpc.Call = MagicMock(return_value=_mock_rpc_response())
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -164,8 +164,8 @@ class TestSettleVaultCrashRecoveryPhases:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -191,8 +191,8 @@ class TestSettleVaultCrashRecoveryPhases:
         executor._client.rpc.Call = MagicMock(return_value=_mock_rpc_response())
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -214,8 +214,8 @@ class TestSettleVaultCrashRecoveryPhases:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -239,8 +239,8 @@ class TestSettleVaultCrashRecoveryPhases:
         adapter = _mock_adapter()
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -265,8 +265,8 @@ class TestSettleVaultCrashRecoveryPhases:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -287,8 +287,8 @@ class TestSettleVaultCrashRecoveryPhases:
         adapter = _mock_adapter()
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -312,8 +312,8 @@ class TestSettleVaultFailureRecovery:
         executor._client.rpc.Call = MagicMock(return_value=_mock_rpc_response())
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             with pytest.raises(ExecutionFailedError):
                 await executor._execute_settle_vault(SETTLE_ARGS)
@@ -334,8 +334,8 @@ class TestSettleVaultFailureRecovery:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             with pytest.raises(ExecutionFailedError):
                 await executor._execute_settle_vault(SETTLE_ARGS)
@@ -359,8 +359,8 @@ class TestSettleVaultEpochTracking:
         adapter = _mock_adapter()
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -380,8 +380,8 @@ class TestSettleVaultEpochTracking:
         adapter = _mock_adapter()
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -405,8 +405,8 @@ class TestSettleVaultRedeems:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -429,8 +429,8 @@ class TestSettleVaultRedeems:
         executor._client.execution.Execute = MagicMock(return_value=exec_resp)
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
         ):
             result = await executor._execute_settle_vault(SETTLE_ARGS)
 
@@ -454,8 +454,8 @@ class TestSettleVaultSimulationFlag:
         executor._client.rpc.Call = MagicMock(return_value=_mock_rpc_response())
 
         with (
-            patch("almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
-            patch("almanak.framework.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=sdk),
+            patch("almanak.connectors.lagoon.adapter.LagoonVaultAdapter", return_value=adapter),
             patch.object(executor, "_resolve_simulation_flag", wraps=executor._resolve_simulation_flag) as mock_sim,
         ):
             await executor._execute_settle_vault(SETTLE_ARGS)

@@ -79,7 +79,7 @@ class TestTraderJoeV2PostCondition:
         sdk.get_position_balances_for_ids.return_value = {}
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -104,7 +104,7 @@ class TestTraderJoeV2PostCondition:
         sdk.get_position_balances_for_ids.return_value = {100: 4567, 101: 1234}
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -128,7 +128,7 @@ class TestTraderJoeV2PostCondition:
         sdk.get_position_balances.return_value = {}
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -150,7 +150,7 @@ class TestTraderJoeV2PostCondition:
         sdk.get_position_balances.return_value = {500: 999}
 
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -196,7 +196,7 @@ class TestTraderJoeV2PostCondition:
 
     def test_sdk_init_failure_returns_error(self) -> None:
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter",
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter",
             side_effect=RuntimeError("boom"),
         ):
             position = _make_position()
@@ -219,7 +219,7 @@ class TestTraderJoeV2PostCondition:
         """
         # Pre-empt any SDK init by ensuring the adapter is never constructed.
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             position = SimpleNamespace(
                 protocol="traderjoe_v2",
@@ -251,7 +251,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {}
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -282,7 +282,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {10: 7777}
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
@@ -306,7 +306,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.side_effect = RuntimeError("rpc-down")
         with patch(
-            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
         ) as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 

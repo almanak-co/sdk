@@ -1,4 +1,4 @@
-"""Extra coverage tests for ``almanak.framework.connectors.uniswap_v3.sdk``.
+"""Extra coverage tests for ``almanak.connectors.uniswap_v3.sdk``.
 
 Targets uncovered branches in the SDK: dataclass round-trips, async quote
 fallback, gateway-vs-rpc-vs-web3 ``_get_web3`` resolution, decode-quote
@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.uniswap_v3.sdk import (
+from almanak.connectors.uniswap_v3.sdk import (
     EXACT_OUTPUT_SINGLE_SELECTOR,
     QUOTE_EXACT_INPUT_SINGLE_SELECTOR,
     Q96,
@@ -117,7 +117,7 @@ class TestSqrtPriceTickEdges:
         """Extremely large sqrt price would overflow but the implementation
         clamps to MAX_TICK."""
         # A huge value should clamp to MAX_TICK
-        from almanak.framework.connectors.uniswap_v3.sdk import MAX_TICK
+        from almanak.connectors.uniswap_v3.sdk import MAX_TICK
 
         result = sqrt_price_x96_to_tick(2**200)
         assert result == MAX_TICK

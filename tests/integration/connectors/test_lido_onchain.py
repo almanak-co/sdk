@@ -233,7 +233,7 @@ class TestLidoOnChain:
         2. ETH balance decreases by stake amount
         3. stETH balance increases by approximately stake amount
         """
-        from almanak.framework.connectors.lido import LidoAdapter, LidoConfig
+        from almanak.connectors.lido import LidoAdapter, LidoConfig
 
         # Get initial balances
         eth_before = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
@@ -304,7 +304,7 @@ class TestLidoOnChain:
         3. stETH balance decreases
         4. wstETH balance increases
         """
-        from almanak.framework.connectors.lido import LidoAdapter, LidoConfig
+        from almanak.connectors.lido import LidoAdapter, LidoConfig
 
         # Get initial balances
         steth_before = steth_contract.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()
@@ -390,7 +390,7 @@ class TestLidoOnChain:
         2. wstETH balance decreases
         3. stETH balance increases
         """
-        from almanak.framework.connectors.lido import LidoAdapter, LidoConfig
+        from almanak.connectors.lido import LidoAdapter, LidoConfig
 
         # Get initial balances
         steth_before = steth_contract.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()

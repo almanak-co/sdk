@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.jupiter.receipt_parser import (
+from almanak.connectors.jupiter.receipt_parser import (
     WSOL_MINT,
     JupiterReceiptParser,
 )
@@ -62,7 +62,7 @@ class TestJupiterReceiptParserInit:
 
 
 class TestExtractSwapAmounts:
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_basic_swap_usdc_to_sol(self, mock_decimals, parser):
         """Test extracting a simple USDC -> WSOL swap."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6, WSOL_MINT: 9}.get(mint)
@@ -88,7 +88,7 @@ class TestExtractSwapAmounts:
         assert amounts.amount_in_decimal == Decimal("100")
         assert amounts.amount_out_decimal == Decimal("0.666666666")
 
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_swap_sol_to_usdc(self, mock_decimals, parser):
         """Test extracting a WSOL -> USDC swap."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6, WSOL_MINT: 9}.get(mint)
@@ -159,7 +159,7 @@ class TestExtractSwapAmounts:
         assert amounts.amount_in == 100
         assert amounts.amount_out == 50
 
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_ignores_other_wallets(self, mock_decimals, parser):
         """Only tracks balance changes for the configured wallet."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6, WSOL_MINT: 9}.get(mint)
@@ -187,7 +187,7 @@ class TestExtractSwapAmounts:
         assert amounts.amount_in == 100_000_000  # Wallet's USDC decrease
         assert amounts.amount_out == 666_000_000  # Wallet's SOL increase
 
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_simplified_balance_format(self, mock_decimals, parser):
         """Test with simplified amount format (no uiTokenAmount wrapper)."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6, WSOL_MINT: 9}.get(mint)
@@ -209,7 +209,7 @@ class TestExtractSwapAmounts:
         assert amounts.amount_in == 1_000_000
         assert amounts.amount_out == 6_666_666
 
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_unresolvable_output_decimals_returns_none(self, mock_decimals, parser):
         """If output token decimals can't be resolved, return None."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6}.get(mint)  # No WSOL decimals
@@ -227,7 +227,7 @@ class TestExtractSwapAmounts:
 
         assert parser.extract_swap_amounts(receipt) is None
 
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_new_mint_in_post_only(self, mock_decimals, parser):
         """Handle case where output mint doesn't exist in pre_balances."""
         mock_decimals.side_effect = lambda mint: {USDC_MINT: 6, WSOL_MINT: 9}.get(mint)
@@ -251,7 +251,7 @@ class TestExtractSwapAmounts:
 
 
 class TestParseReceipt:
-    @patch("almanak.framework.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
+    @patch("almanak.connectors.jupiter.receipt_parser.JupiterReceiptParser._resolve_decimals")
     def test_parse_receipt_returns_dict(self, mock_decimals, parser):
         mock_decimals.return_value = 6
 

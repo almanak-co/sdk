@@ -18,10 +18,10 @@ from almanak.framework.intents.compiler import (
 )
 
 # Patch targets
-TJ_ADAPTER_MODULE = "almanak.framework.connectors.traderjoe_v2"
+TJ_ADAPTER_MODULE = "almanak.connectors.traderjoe_v2"
 TJ_ADAPTER_CLS = f"{TJ_ADAPTER_MODULE}.TraderJoeV2Adapter"
 TJ_CONFIG_CLS = f"{TJ_ADAPTER_MODULE}.TraderJoeV2Config"
-TJ_SDK_MODULE = "almanak.framework.connectors.traderjoe_v2.sdk"
+TJ_SDK_MODULE = "almanak.connectors.traderjoe_v2.sdk"
 TJ_ADDRESSES_MODULE = "almanak.core.contracts"
 
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
@@ -132,7 +132,7 @@ class TestTraderJoeV2SwapCompilation:
         # get_swap_quote raises, so we MUST return a valid quote here. The
         # baseline-metadata value is covered explicitly by
         # ``TestTraderJoeV2ExpectedOutputHumanPlumbing``.
-        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote
+        from almanak.connectors.traderjoe_v2.adapter import SwapQuote
 
         mock_adapter.get_swap_quote.return_value = SwapQuote(
             token_in="USDC",
@@ -147,7 +147,7 @@ class TestTraderJoeV2SwapCompilation:
         )
 
         # Mock build_swap_transaction to return adapter's TransactionData
-        from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
+        from almanak.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
 
         mock_swap_tx = TJTransactionData(
             to="0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",
@@ -255,7 +255,7 @@ class TestTraderJoeV2SwapMetadata:
         mock_get_rpc,
     ):
         """ActionBundle metadata must include protocol and bin_step."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
+        from almanak.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
         from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
@@ -273,7 +273,7 @@ class TestTraderJoeV2SwapMetadata:
         # VIB-3203 Phase B audit fix: compile is fail-closed on quote failure,
         # so provide a valid quote here. This test asserts baseline metadata
         # (protocol/bin_step/router) so the specific quote value is irrelevant.
-        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote
+        from almanak.connectors.traderjoe_v2.adapter import SwapQuote
 
         mock_adapter.get_swap_quote.return_value = SwapQuote(
             token_in="WAVAX",
@@ -332,7 +332,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         """When ``get_swap_quote`` returns a positive quote: metadata carries
         ``expected_output_human`` AND the same SwapQuote instance is forwarded
         to ``build_swap_transaction(quote=...)``."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import (
+        from almanak.connectors.traderjoe_v2.adapter import (
             SwapQuote,
             TransactionData as TJTransactionData,
         )
@@ -413,8 +413,8 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         so the "graceful degradation" was illusory (Codex P2, pr-auditor
         Potential #3). Fail-closed here yields a clearer error with a single
         on-chain read attempt."""
-        from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2SDKError
-        from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
+        from almanak.connectors.traderjoe_v2 import TraderJoeV2SDKError
+        from almanak.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
         from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
@@ -470,7 +470,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         """Audit fix (pr-auditor Potential #6): a quote with ``amount_out == 0``
         (e.g. drained or malformed pool) would produce ``amount_out_min = 0`` —
         a swap with no slippage floor. Refuse the compile instead."""
-        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote, TransactionData as TJTransactionData
+        from almanak.connectors.traderjoe_v2.adapter import SwapQuote, TransactionData as TJTransactionData
         from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"

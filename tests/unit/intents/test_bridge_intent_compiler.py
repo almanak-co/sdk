@@ -4,9 +4,9 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.bridge_base import BridgeQuote
-from almanak.framework.connectors.bridge_compiler import BridgeCompiler
-from almanak.framework.connectors.compiler_registry import get_compiler as get_connector_compiler
+from almanak.connectors._strategy_base.bridge_base import BridgeQuote
+from almanak.connectors._strategy_base.bridge_compiler import BridgeCompiler
+from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.bridge_selector import (
     BridgeSelectionResult,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.connectors.morpho_blue.receipt_parser import (
+from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueReceiptParser,
 )
 from almanak.framework.execution.extracted_data import ProtocolFees

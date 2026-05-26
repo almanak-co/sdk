@@ -8,10 +8,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.drift.adapter import DriftAdapter
-from almanak.framework.connectors.drift.constants import PERP_MARKETS
-from almanak.framework.connectors.drift.exceptions import DriftMarketError, DriftValidationError
-from almanak.framework.connectors.drift.models import DriftConfig, DriftUserAccount
+from almanak.connectors.drift.adapter import DriftAdapter
+from almanak.connectors.drift.constants import PERP_MARKETS
+from almanak.connectors.drift.exceptions import DriftMarketError, DriftValidationError
+from almanak.connectors.drift.models import DriftConfig, DriftUserAccount
 from almanak.framework.intents.vocabulary import PerpCloseIntent, PerpOpenIntent
 
 TEST_WALLET = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"

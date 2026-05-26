@@ -49,8 +49,8 @@ from almanak.framework.accounting.models import (
 )
 from almanak.framework.accounting.writer import AccountingWriter
 from almanak.framework.state.exceptions import AccountingPersistenceError
-from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS, PendleReceiptParser
-from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS, PendleReceiptParser
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     BorrowIntent,
@@ -596,7 +596,7 @@ class TestPendleTopicHashFix:
     @pytest.mark.intent(IntentType.SWAP)
     def test_topic_to_event_reverse_map_consistent(self):  # noqa: layers
         """TOPIC_TO_EVENT must be the exact inverse of EVENT_TOPICS."""
-        from almanak.framework.connectors.pendle.receipt_parser import TOPIC_TO_EVENT
+        from almanak.connectors.pendle.receipt_parser import TOPIC_TO_EVENT
 
         for name, topic in EVENT_TOPICS.items():
             assert topic.lower() in TOPIC_TO_EVENT, f"Topic for {name} missing from TOPIC_TO_EVENT"
@@ -1061,7 +1061,7 @@ class TestLendingAccountingE2E:
         This is what works today. Every action lands in transaction_ledger with
         tx_hash, token amounts, and gas. Balance deltas are traceable.
         """
-        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+        from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
 
         store, db_path = _make_temp_store()
         try:

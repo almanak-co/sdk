@@ -114,7 +114,7 @@ def _normalize_amount_out(value: list[int | str] | int | str | None) -> str:
 ENSO_BASE_URL = "https://api.enso.finance"
 
 # Chain ID mapping
-# Keep aligned with almanak/framework/connectors/enso/client.py:CHAIN_MAPPING.
+# Keep aligned with almanak/connectors/enso/client.py:CHAIN_MAPPING.
 CHAIN_MAPPING = {
     "ethereum": 1,
     "optimism": 10,

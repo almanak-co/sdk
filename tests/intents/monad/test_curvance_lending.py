@@ -40,11 +40,11 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.curvance import (
+from almanak.connectors.curvance import (
     CURVANCE_MARKETS,
     CurvanceReceiptParser,
 )
-from almanak.framework.connectors.curvance.receipt_parser import (
+from almanak.connectors.curvance.receipt_parser import (
     CurvanceEvent,
     CurvanceEventType,
 )

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.sushiswap_v3.adapter import (
+from almanak.connectors.sushiswap_v3.adapter import (
     DEFAULT_FEE_TIER,
     LPResult,
     SushiSwapV3Adapter,

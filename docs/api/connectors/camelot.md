@@ -1,3 +1,3 @@
 # Camelot
 
-::: almanak.framework.connectors.camelot
+::: almanak.connectors.camelot

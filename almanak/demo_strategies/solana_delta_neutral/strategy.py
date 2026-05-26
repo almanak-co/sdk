@@ -304,7 +304,7 @@ class SolanaDeltaNeutralStrategy(IntentStrategy):
         # SOL price should come from market.price("SOL") via gateway.
         # TODO: Use MarketSnapshot price provider once gateway supports Solana prices.
         try:
-            from almanak.framework.connectors.drift import PERP_MARKET_SYMBOL_TO_INDEX, DriftDataClient
+            from almanak.connectors.drift import PERP_MARKET_SYMBOL_TO_INDEX, DriftDataClient
 
             client = DriftDataClient()
             market_index = PERP_MARKET_SYMBOL_TO_INDEX.get("SOL-PERP", 0)
@@ -325,7 +325,7 @@ class SolanaDeltaNeutralStrategy(IntentStrategy):
         # GATEWAY_VIOLATION: Direct HTTP call to Drift Data API.
         # TODO: Add funding rate provider to gateway MarketSnapshot.
         try:
-            from almanak.framework.connectors.drift import PERP_MARKET_SYMBOL_TO_INDEX, DriftDataClient
+            from almanak.connectors.drift import PERP_MARKET_SYMBOL_TO_INDEX, DriftDataClient
 
             market = self.config.get("perp_market", "SOL-PERP")
             client = DriftDataClient()

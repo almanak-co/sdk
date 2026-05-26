@@ -4,7 +4,7 @@ These tests verify model parsing handles missing fields, partial data,
 and edge cases that may occur with real API responses.
 """
 
-from almanak.framework.connectors.lifi.models import (
+from almanak.connectors.lifi.models import (
     LiFiAction,
     LiFiEstimate,
     LiFiFeeCost,

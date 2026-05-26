@@ -13,18 +13,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.fluid.adapter import (
+from almanak.connectors.fluid.adapter import (
     FluidAdapter,
     FluidConfig,
     FluidPositionDetails,
     MAX_INT256,
 )
-from almanak.framework.connectors.fluid.receipt_parser import (
+from almanak.connectors.fluid.receipt_parser import (
     ERC721_TRANSFER_TOPIC,
     LOG_OPERATE_TOPIC,
     FluidReceiptParser,
 )
-from almanak.framework.connectors.fluid.sdk import (
+from almanak.connectors.fluid.sdk import (
     DEFAULT_GAS_ESTIMATES,
     FLUID_ADDRESSES,
     DexPoolData,
@@ -126,7 +126,7 @@ class TestFluidSDK:
         assert "operate_open" in DEFAULT_GAS_ESTIMATES
         assert "operate_close" in DEFAULT_GAS_ESTIMATES
 
-    @patch("almanak.framework.connectors.fluid.sdk.Web3")
+    @patch("almanak.connectors.fluid.sdk.Web3")
     def test_build_operate_tx_rejects_debt(self, mock_web3_cls):
         """Phase 1 rejects operate() calls with non-zero debt."""
         mock_web3_cls.return_value = MagicMock()
@@ -158,7 +158,7 @@ class TestFluidAdapter:
 
     def _make_adapter(self, mock_sdk=None, mock_resolver=None):
         """Create a FluidAdapter with mocked dependencies."""
-        with patch("almanak.framework.connectors.fluid.adapter.FluidSDK") as mock_sdk_cls:
+        with patch("almanak.connectors.fluid.adapter.FluidSDK") as mock_sdk_cls:
             mock_sdk_instance = mock_sdk or MagicMock()
             mock_sdk_cls.return_value = mock_sdk_instance
 
@@ -180,7 +180,7 @@ class TestFluidAdapter:
 
     def test_non_arbitrum_chain_rejected(self):
         """Phase 1 only supports Arbitrum."""
-        with patch("almanak.framework.connectors.fluid.adapter.FluidSDK"):
+        with patch("almanak.connectors.fluid.adapter.FluidSDK"):
             with pytest.raises(FluidSDKError, match="Arbitrum only"):
                 FluidAdapter(
                     FluidConfig(chain="ethereum", wallet_address="0x0", rpc_url="http://localhost"),

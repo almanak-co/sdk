@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.enso.adapter import EnsoAdapter
-from almanak.framework.connectors.enso.client import EnsoConfig
+from almanak.connectors.enso.adapter import EnsoAdapter
+from almanak.connectors.enso.client import EnsoConfig
 
 
 @pytest.fixture

@@ -358,7 +358,7 @@ class TestSellDirectionMinAmountDiscount:
 
     def test_pt_sell_min_amount_out_is_discounted(self, compiler_arbitrum):
         """PT-wstETH -> wstETH should use min_amount_out = amount_in // 2, not amount_in."""
-        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+        from almanak.connectors.pendle.adapter import PendleSwapParams
 
         captured_params = []
         original_init = PendleSwapParams.__init__
@@ -390,7 +390,7 @@ class TestSellDirectionMinAmountDiscount:
 
     def test_pt_buy_min_amount_out_is_1to1(self, compiler_arbitrum):
         """wstETH -> PT-wstETH should use min_amount_out = amount_in (1:1 estimate)."""
-        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+        from almanak.connectors.pendle.adapter import PendleSwapParams
 
         captured_params = []
         original_init = PendleSwapParams.__init__
@@ -426,7 +426,7 @@ class TestSellDirectionMinAmountDiscount:
         YT represents only yield, which can approach zero near maturity.
         A 50% floor (used for PT) would still cause reverts for YT sells.
         """
-        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+        from almanak.connectors.pendle.adapter import PendleSwapParams
 
         captured_params = []
         original_init = PendleSwapParams.__init__

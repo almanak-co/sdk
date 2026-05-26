@@ -15,16 +15,16 @@ import pytest
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from almanak.framework.connectors.orca.constants import (
+from almanak.connectors.orca.constants import (
     CLOSE_POSITION_DISCRIMINATOR,
     DECREASE_LIQUIDITY_DISCRIMINATOR,
     INCREASE_LIQUIDITY_DISCRIMINATOR,
     OPEN_POSITION_WITH_METADATA_DISCRIMINATOR,
     WHIRLPOOL_PROGRAM_ID,
 )
-from almanak.framework.connectors.orca.exceptions import OrcaConfigError, OrcaPoolError
-from almanak.framework.connectors.orca.models import OrcaPool, OrcaPosition
-from almanak.framework.connectors.orca.sdk import OrcaWhirlpoolSDK
+from almanak.connectors.orca.exceptions import OrcaConfigError, OrcaPoolError
+from almanak.connectors.orca.models import OrcaPool, OrcaPosition
+from almanak.connectors.orca.sdk import OrcaWhirlpoolSDK
 
 WALLET = "KUMtRazMP7vwvc2kthnGZ9Cq6ZsGRiYC97snMYepNx9"
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -322,7 +322,7 @@ class TestBuildHighLevelTransactions:
 class TestPoolFetch:
     """Pool info fetching (mocked HTTP)."""
 
-    @patch("almanak.framework.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
+    @patch("almanak.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
     def test_get_pool_info_success(self, mock_request):
         mock_request.return_value = {
             "address": MOCK_POOL.address,
@@ -352,7 +352,7 @@ class TestPoolFetch:
         assert pool.tick_spacing == 64
         assert pool.current_price == 150.0
 
-    @patch("almanak.framework.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
+    @patch("almanak.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
     def test_get_pool_info_not_found(self, mock_request):
         mock_request.return_value = {}
 
@@ -360,7 +360,7 @@ class TestPoolFetch:
         with pytest.raises(OrcaPoolError, match="not found"):
             sdk.get_pool_info("nonexistent-pool")
 
-    @patch("almanak.framework.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
+    @patch("almanak.connectors.orca.sdk.OrcaWhirlpoolSDK._make_request")
     def test_get_pool_info_missing_vaults(self, mock_request):
         mock_request.return_value = {
             "address": "some-pool",

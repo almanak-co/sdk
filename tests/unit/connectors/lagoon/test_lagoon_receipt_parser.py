@@ -1,6 +1,6 @@
 """Tests for Lagoon vault receipt parser."""
 
-from almanak.framework.connectors.lagoon.receipt_parser import (
+from almanak.connectors.lagoon.receipt_parser import (
     EVENT_TOPICS,
     LagoonEventType,
     LagoonReceiptParser,

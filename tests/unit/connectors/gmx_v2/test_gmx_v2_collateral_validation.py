@@ -15,7 +15,7 @@ This test suite exercises the three relevant behaviours:
    ``market_rules`` module yet.
 
 The rule table lives in
-``almanak.framework.connectors.gmx_v2.market_rules`` and is the single
+``almanak.connectors.gmx_v2.market_rules`` and is the single
 source of truth across the SDK.
 """
 
@@ -24,9 +24,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.connectors.base.compiler import PerpCompilerContext
-from almanak.framework.connectors.gmx_v2.compiler import GMXV2Compiler
-from almanak.framework.connectors.gmx_v2.market_rules import (
+from almanak.connectors._strategy_base.base.compiler import PerpCompilerContext
+from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
+from almanak.connectors.gmx_v2.market_rules import (
     get_allowed_collaterals,
     is_market_registered,
     registered_markets,
@@ -244,7 +244,7 @@ class TestMarketRulesPureFunctions:
 class TestPerpOpenCompilerCollateralValidation:
     """End-to-end checks on `_compile_perp_open` for the validation gate."""
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_valid_sol_usd_with_usdc_compiles(self, mock_web3_cls):
         """Valid (SOL/USD, USDC) on GMX V2 Arbitrum compiles successfully."""
         mock_web3 = MagicMock()
@@ -264,15 +264,15 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch(
-                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
+                "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
                 {"arbitrum": {"SOL/USD": "0xmarket"}},
             ),
             patch(
-                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
+                "almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"}},
             ),
         ):
@@ -302,7 +302,7 @@ class TestPerpOpenCompilerCollateralValidation:
 
         # Do NOT patch GMXV2SDK / adapter — we want to prove the compiler
         # short-circuits before they are touched.
-        with patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
+        with patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
             result = compiler.compile(intent)
             assert mock_adapter_cls.called is False, (
                 "Collateral validation must happen BEFORE GMXv2Adapter is instantiated; "
@@ -323,7 +323,7 @@ class TestPerpOpenCompilerCollateralValidation:
         assert "USDC" in result.error
         assert "WETH" in result.error
 
-    @patch("almanak.framework.connectors.gmx_v2.sdk.Web3")
+    @patch("almanak.connectors.gmx_v2.sdk.Web3")
     def test_valid_eth_usd_with_weth_long_compiles(self, mock_web3_cls):
         """Valid (ETH/USD, WETH) on GMX V2 Arbitrum still compiles."""
         mock_web3 = MagicMock()
@@ -343,15 +343,15 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch(
-                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
+                "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
                 {"arbitrum": {"ETH/USD": "0xmarket"}},
             ),
             patch(
-                "almanak.framework.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
+                "almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"}},
             ),
         ):
@@ -380,9 +380,9 @@ class TestPerpOpenCompilerCollateralValidation:
         )
 
         with (
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
-            patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Config"),
-            patch("almanak.framework.connectors.gmx_v2.sdk.Web3"),
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
+            patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
+            patch("almanak.connectors.gmx_v2.sdk.Web3"),
         ):
             result = compiler.compile(intent)
             assert mock_adapter_cls.called is False, (
@@ -454,7 +454,7 @@ class TestPerpCloseCompilerCollateralValidation:
             protocol="gmx_v2",
         )
 
-        with patch("almanak.framework.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
+        with patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls:
             result = compiler.compile_perp_close(ctx, intent)
             assert mock_adapter_cls.called is False, (
                 "Close-path collateral validation must short-circuit before the "

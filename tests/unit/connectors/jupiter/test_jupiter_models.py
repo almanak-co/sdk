@@ -2,7 +2,7 @@
 
 import pytest
 
-from almanak.framework.connectors.jupiter.models import (
+from almanak.connectors.jupiter.models import (
     JupiterQuote,
     JupiterRoutePlan,
     JupiterSwapTransaction,
