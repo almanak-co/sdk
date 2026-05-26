@@ -39,12 +39,19 @@ EVENT_TOPICS: dict[str, str] = {
     # AddLiquidity for old-style Twocrypto (pre-NG, no fees array):
     # AddLiquidity(address,uint256[2],uint256,uint256) — provider, amounts, invariant, supply
     "AddLiquidityV2Crypto2": "0x540ab385f9b5d450a27404172caade516b3ba3f4be88239ac56a2ad1de2a1f5a",
+    # AddLiquidity for StableSwap NG pools that emit a dynamic-array event
+    # (e.g. Optimism crvUSD/USDC at 0x03771e24…). Signature:
+    # AddLiquidity(address,uint256[],uint256[],uint256,uint256) — VIB-4836.
+    "AddLiquidityDyn": "0x189c623b666b1b45b83d7178f39b8c087cb09774317ca2f53c2d3c3726f222a2",
     # RemoveLiquidity for NG pools (includes fees array):
     # RemoveLiquidity(address,uint256[2],uint256[2],uint256)
     "RemoveLiquidity2": "0x7c363854ccf79623411f8995b362bce5eddff18c927edc6f5dbbb5e05819a82c",
     "RemoveLiquidity3": "0xa49d4cf02656aebf8c771f5a8585638a2a15ee6c97cf7205d4208ed7c1df252d",
     # RemoveLiquidity(address,uint256[4],uint256[4],uint256) — 4-coin NG pool
     "RemoveLiquidity4": "0x9878ca375e106f2a43c3b599fc624568131c4c9a4ba66a14563715763be9d59d",
+    # RemoveLiquidity for StableSwap NG pools that emit a dynamic-array event
+    # (mirrors AddLiquidityDyn). VIB-4836.
+    "RemoveLiquidityDyn": "0x347ad828e58cbe534d8f6b67985d791360756b18f0d95fd9f197a66cc46480ea",
     # RemoveLiquidity for old-style Twocrypto (no fees array):
     # RemoveLiquidity(address,uint256[2],uint256)
     "RemoveLiquidityV2Crypto2": "0xdd3c0336a16f1b64f172b7bb0dad5b2b3c7c76f91e8c4aafd6aae60dce800153",
@@ -86,10 +93,12 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity4": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidityV2Crypto2": CurveEventType.ADD_LIQUIDITY,  # old-style Twocrypto (pre-NG)
+    "AddLiquidityDyn": CurveEventType.ADD_LIQUIDITY,  # StableSwap NG dynamic-array (VIB-4836)
     "RemoveLiquidity2": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity4": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
+    "RemoveLiquidityDyn": CurveEventType.REMOVE_LIQUIDITY,  # StableSwap NG dynamic-array (VIB-4836)
     "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
     "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
     "Transfer": CurveEventType.TRANSFER,
@@ -514,6 +523,32 @@ class CurveReceiptParser:
                     "pool_address": pool_address,
                 }
 
+            # StableSwap NG pools that emit a dynamic-array event:
+            # AddLiquidity(address provider, uint256[] amounts, uint256[] fees,
+            #              uint256 invariant, uint256 token_supply)
+            # ABI head (4 × 32 bytes): offset_to_amounts, offset_to_fees,
+            # invariant, supply. Tail at each offset: [length, *elements].
+            if event_name == "AddLiquidityDyn":
+                offset_amounts = HexDecoder.decode_uint256(data, 0)
+                offset_fees = HexDecoder.decode_uint256(data, 32)
+                invariant = HexDecoder.decode_uint256(data, 64)
+                token_supply = HexDecoder.decode_uint256(data, 96)
+
+                amounts_len = HexDecoder.decode_uint256(data, offset_amounts)
+                token_amounts = [
+                    HexDecoder.decode_uint256(data, offset_amounts + 32 + i * 32) for i in range(amounts_len)
+                ]
+                fees_len = HexDecoder.decode_uint256(data, offset_fees)
+                fees = [HexDecoder.decode_uint256(data, offset_fees + 32 + i * 32) for i in range(fees_len)]
+                return {
+                    "provider": provider,
+                    "token_amounts": token_amounts,
+                    "fees": fees,
+                    "invariant": invariant,
+                    "token_supply": token_supply,
+                    "pool_address": pool_address,
+                }
+
             # NG pools: amounts + fees + invariant + supply
             # Determine n_coins from data length: n_coins*2 + 2 fields, each 64 hex chars
             # 2-coin: 6 * 64 = 384, 3-coin: 8 * 64 = 512, 4-coin: 10 * 64 = 640
@@ -584,6 +619,30 @@ class CurveReceiptParser:
                     "provider": provider,
                     "token_amounts": token_amounts,
                     "fees": [],  # Old-style pools don't emit fees in this event
+                    "token_supply": token_supply,
+                    "pool_address": pool_address,
+                }
+
+            # StableSwap NG pools that emit a dynamic-array event:
+            # RemoveLiquidity(address provider, uint256[] amounts, uint256[] fees,
+            #                 uint256 token_supply)
+            # ABI head (3 × 32 bytes): offset_to_amounts, offset_to_fees, supply.
+            # Tail at each offset: [length, *elements].
+            if event_name == "RemoveLiquidityDyn":
+                offset_amounts = HexDecoder.decode_uint256(data, 0)
+                offset_fees = HexDecoder.decode_uint256(data, 32)
+                token_supply = HexDecoder.decode_uint256(data, 64)
+
+                amounts_len = HexDecoder.decode_uint256(data, offset_amounts)
+                token_amounts = [
+                    HexDecoder.decode_uint256(data, offset_amounts + 32 + i * 32) for i in range(amounts_len)
+                ]
+                fees_len = HexDecoder.decode_uint256(data, offset_fees)
+                fees = [HexDecoder.decode_uint256(data, offset_fees + 32 + i * 32) for i in range(fees_len)]
+                return {
+                    "provider": provider,
+                    "token_amounts": token_amounts,
+                    "fees": fees,
                     "token_supply": token_supply,
                     "pool_address": pool_address,
                 }

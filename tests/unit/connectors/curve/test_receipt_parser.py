@@ -671,6 +671,268 @@ class TestNG4CoinPool:
         assert add_events[0].data["token_amounts"] == amounts
 
 
+# =============================================================================
+# StableSwap NG dynamic-array event decoding (VIB-4836)
+# =============================================================================
+
+
+def _build_add_liquidity_dyn_data(
+    amounts: list[int], fees: list[int], invariant: int, token_supply: int
+) -> str:
+    """Encode `AddLiquidity(address,uint256[],uint256[],uint256,uint256)` data.
+
+    Layout (with `provider` indexed):
+        head (4 × 32B):  offset_to_amounts, offset_to_fees, invariant, token_supply
+        tail:            amounts_length, *amounts, fees_length, *fees
+
+    The offsets are byte counts from the *start of `data`*.
+    """
+    n = len(amounts)
+    assert len(fees) == n
+    head_len = 4 * 32  # 0x80
+    amounts_tail_len = 32 + n * 32  # length word + elements
+    offset_to_amounts = head_len  # = 0x80
+    offset_to_fees = head_len + amounts_tail_len
+
+    head = (
+        _pad_hex(offset_to_amounts)
+        + _pad_hex(offset_to_fees)
+        + _pad_hex(invariant)
+        + _pad_hex(token_supply)
+    )
+    amounts_tail = _pad_hex(n) + "".join(_pad_hex(a) for a in amounts)
+    fees_tail = _pad_hex(n) + "".join(_pad_hex(f) for f in fees)
+    return "0x" + head + amounts_tail + fees_tail
+
+
+def _build_remove_liquidity_dyn_data(
+    amounts: list[int], fees: list[int], token_supply: int
+) -> str:
+    """Encode `RemoveLiquidity(address,uint256[],uint256[],uint256)` data.
+
+    Layout (with `provider` indexed):
+        head (3 × 32B):  offset_to_amounts, offset_to_fees, token_supply
+        tail:            amounts_length, *amounts, fees_length, *fees
+    """
+    n = len(amounts)
+    assert len(fees) == n
+    head_len = 3 * 32  # 0x60
+    amounts_tail_len = 32 + n * 32
+    offset_to_amounts = head_len
+    offset_to_fees = head_len + amounts_tail_len
+
+    head = (
+        _pad_hex(offset_to_amounts)
+        + _pad_hex(offset_to_fees)
+        + _pad_hex(token_supply)
+    )
+    amounts_tail = _pad_hex(n) + "".join(_pad_hex(a) for a in amounts)
+    fees_tail = _pad_hex(n) + "".join(_pad_hex(f) for f in fees)
+    return "0x" + head + amounts_tail + fees_tail
+
+
+def _build_add_liquidity_dyn_receipt(
+    pool: str = "0x03771e24b7c9172d163bf447490b142a15be3485",  # OPT crvUSD/USDC
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+    fees: list[int] | None = None,
+    invariant: int = 200_000_000_000_000_000_000,
+    token_supply: int = 1_000_000_000_000_000_000_000,
+    lp_minted: int = 19_525_895_236_381_251_599,
+) -> dict:
+    """Build an AddLiquidityDyn receipt for an NG pool (e.g. OPT crvUSD/USDC)."""
+    if token_amounts is None:
+        token_amounts = [10 * 10**18, 10 * 10**6]
+    if fees is None:
+        fees = [0] * len(token_amounts)
+
+    add_liq_topic = _make_topic(EVENT_TOPICS["AddLiquidityDyn"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    data = _build_add_liquidity_dyn_data(token_amounts, fees, invariant, token_supply)
+
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    zero_topic = "0x" + "00" * 12 + ZERO_ADDR[2:]
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    mint_data = "0x" + _pad_hex(lp_minted)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "1a" * 32,
+        "blockNumber": 25_000_100,
+        "gasUsed": 250_000,
+        "logs": [
+            {
+                "address": pool,
+                "topics": [add_liq_topic, provider_topic],
+                "data": data,
+                "logIndex": 0,
+            },
+            # NG pool: LP token address IS the pool address.
+            {
+                "address": pool,
+                "topics": [transfer_topic, zero_topic, wallet_topic],
+                "data": mint_data,
+                "logIndex": 1,
+            },
+        ],
+    }
+
+
+def _build_remove_liquidity_dyn_receipt(
+    pool: str = "0x03771e24b7c9172d163bf447490b142a15be3485",
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+    fees: list[int] | None = None,
+    token_supply: int = 900_000_000_000_000_000_000,
+) -> dict:
+    """Build a RemoveLiquidityDyn receipt for an NG pool."""
+    if token_amounts is None:
+        token_amounts = [9 * 10**18, 11 * 10**6]
+    if fees is None:
+        fees = [0] * len(token_amounts)
+
+    remove_liq_topic = _make_topic(EVENT_TOPICS["RemoveLiquidityDyn"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    data = _build_remove_liquidity_dyn_data(token_amounts, fees, token_supply)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "1b" * 32,
+        "blockNumber": 25_000_101,
+        "gasUsed": 180_000,
+        "logs": [
+            {
+                "address": pool,
+                "topics": [remove_liq_topic, provider_topic],
+                "data": data,
+                "logIndex": 0,
+            },
+        ],
+    }
+
+
+class TestNGDynamicArrayDecoding:
+    """Tests for AddLiquidityDyn / RemoveLiquidityDyn parsing (VIB-4836).
+
+    StableSwap NG pools (e.g. Optimism crvUSD/USDC at 0x03771e24…) emit
+    AddLiquidity / RemoveLiquidity with **dynamic** uint256[] arrays for both
+    amounts and fees, instead of the fixed-size variants. The decoder must
+    follow offset pointers in the ABI head section.
+    """
+
+    OPT_CRVUSD_USDC = "0x03771e24b7c9172d163bf447490b142a15be3485"
+
+    def test_add_liquidity_dyn_event_recognised(self):
+        """AddLiquidityDyn topic resolves to ADD_LIQUIDITY event type."""
+        receipt = _build_add_liquidity_dyn_receipt()
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        assert result.success
+        add_events = [e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY]
+        assert len(add_events) == 1
+        assert add_events[0].event_name == "AddLiquidityDyn"
+
+    def test_add_liquidity_dyn_amounts_decoded(self):
+        """Dynamic-array decoder follows the offset pointer and reads correct amounts."""
+        amounts = [10 * 10**18, 10 * 10**6]
+        fees = [123, 456]
+        invariant = 200_000_000_000_000_000_000
+        token_supply = 1_000_000_000_000_000_000_000
+        receipt = _build_add_liquidity_dyn_receipt(
+            token_amounts=amounts,
+            fees=fees,
+            invariant=invariant,
+            token_supply=token_supply,
+        )
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)
+        assert add.data["token_amounts"] == amounts
+        assert add.data["fees"] == fees
+        assert add.data["invariant"] == invariant
+        assert add.data["token_supply"] == token_supply
+        assert add.data["provider"].lower() == WALLET.lower()
+
+    def test_add_liquidity_dyn_3coin_pool(self):
+        """Decoder handles n_coins=3 (different offset to fees)."""
+        amounts = [1 * 10**18, 2 * 10**18, 3 * 10**18]
+        fees = [10, 20, 30]
+        receipt = _build_add_liquidity_dyn_receipt(token_amounts=amounts, fees=fees)
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)
+        assert add.data["token_amounts"] == amounts
+        assert add.data["fees"] == fees
+
+    def test_extract_position_id_dyn_returns_pool_address(self):
+        """NG dyn pools: LP token = pool, so position_id is the pool address."""
+        receipt = _build_add_liquidity_dyn_receipt()
+        parser = CurveReceiptParser(chain="optimism")
+        position_id = parser.extract_position_id(receipt)
+        assert position_id == self.OPT_CRVUSD_USDC
+
+    def test_extract_liquidity_dyn_returns_lp_minted(self):
+        """extract_liquidity reads the mint Transfer (zero -> wallet) for NG dyn pools."""
+        lp_minted = 19_525_895_236_381_251_599
+        receipt = _build_add_liquidity_dyn_receipt(lp_minted=lp_minted)
+        resolver = _mock_resolver({self.OPT_CRVUSD_USDC: 18})
+        parser = CurveReceiptParser(chain="optimism")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            result = parser.extract_liquidity(receipt)
+        assert isinstance(result, Decimal)
+        assert result == Decimal(lp_minted) / Decimal(10**18)
+
+    def test_remove_liquidity_dyn_event_recognised(self):
+        """RemoveLiquidityDyn topic resolves to REMOVE_LIQUIDITY event type."""
+        receipt = _build_remove_liquidity_dyn_receipt()
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        assert result.success
+        rm_events = [e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY]
+        assert len(rm_events) == 1
+        assert rm_events[0].event_name == "RemoveLiquidityDyn"
+
+    def test_remove_liquidity_dyn_amounts_decoded(self):
+        """Dynamic-array decoder for RemoveLiquidity reads amounts + fees + supply."""
+        amounts = [9 * 10**18, 11 * 10**6]
+        fees = [7, 8]
+        supply = 900_000_000_000_000_000_000
+        receipt = _build_remove_liquidity_dyn_receipt(
+            token_amounts=amounts, fees=fees, token_supply=supply
+        )
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        rm = next(e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY)
+        assert rm.data["token_amounts"] == amounts
+        assert rm.data["fees"] == fees
+        assert rm.data["token_supply"] == supply
+        # invariant is not part of RemoveLiquidity (only AddLiquidity carries it)
+        assert "invariant" not in rm.data
+
+    def test_remove_liquidity_dyn_3coin_pool(self):
+        """RemoveLiquidity decoder handles n_coins=3."""
+        amounts = [1 * 10**6, 2 * 10**6, 3 * 10**18]
+        fees = [100, 200, 300]
+        receipt = _build_remove_liquidity_dyn_receipt(token_amounts=amounts, fees=fees)
+        parser = CurveReceiptParser(chain="optimism")
+        result = parser.parse_receipt(receipt)
+        rm = next(e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY)
+        assert rm.data["token_amounts"] == amounts
+        assert rm.data["fees"] == fees
+
+    def test_extract_lp_close_data_dyn_2coin(self):
+        """extract_lp_close_data reads amounts from a RemoveLiquidityDyn receipt."""
+        amounts = [9 * 10**18, 11 * 10**6]
+        receipt = _build_remove_liquidity_dyn_receipt(token_amounts=amounts)
+        parser = CurveReceiptParser(chain="optimism")
+        close_data = parser.extract_lp_close_data(receipt)
+        assert close_data is not None
+        assert close_data.amount0_collected == amounts[0]
+        assert close_data.amount1_collected == amounts[1]
+
+
 class TestLPCloseDataModel:
     """Test LPCloseData model's all_amounts/all_fees properties."""
 

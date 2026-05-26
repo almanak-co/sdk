@@ -325,8 +325,14 @@ class TestUniswapV3SwapIntent:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
-        if usdc_balance == 0:
-            pytest.skip("USDC funding missing for funded_wallet; skipping insufficient-balance test")
+        # USDC is in CHAIN_CONFIGS["monad"]["tokens"] at slot 9 (verified
+        # 2026-05-26 via eth_getStorageAt probe). A zero balance here means the
+        # funded_wallet seeding silently failed — fail loudly instead of skipping
+        # (VIB-4823).
+        assert usdc_balance > 0, (
+            "USDC funding produced zero balance — investigate "
+            "CHAIN_CONFIGS['monad']['balance_slots']['USDC'] or anvil_setStorageAt"
+        )
 
         # Exceed balance by 2x so execution fails on-chain with insufficient balance,
         # but stay inside the compiler's price-impact guard (default 30%) so this

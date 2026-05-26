@@ -55,10 +55,13 @@ LP_TOKEN = "0x03771e24b7C9172d163Bf447490B142a15be3485"  # StableSwap NG: LP = p
 CRVUSD_ADDRESS = "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6"
 USDC_ADDRESS = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"  # native USDC
 
-# crvUSD balance slot — crvUSD is a Vyper-based token; slot 1 is the canonical
-# `_balances` mapping for the OpenZeppelin-compatible layout most Curve assets
-# use. Verified by funding pattern shared across optimism/arbitrum/base crvUSD.
-CRVUSD_BALANCE_SLOT = 4
+# crvUSD on Optimism (0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6) stores its
+# `_balances` mapping at slot 0 (Solidity ERC20 base layout, NOT Vyper).
+# Verified 2026-05-26 via on-chain probe: eth_getStorageAt against the pool
+# (0x03771e24…) for the same holder returns balanceOf() iff base_slot=0.
+# The previous value (4) silently no-op'd funding, causing the runtime
+# pytest.skip below to fire on every run (VIB-4822).
+CRVUSD_BALANCE_SLOT = 0
 
 # LP deposit amounts
 LP_AMOUNT_CRVUSD = Decimal("10")  # 10 crvUSD (18 decimals)

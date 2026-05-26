@@ -191,9 +191,14 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
         # Pool reserves (2026-03-23): ~$50K USDC, ~$50K USDbC, ~$50K axlUSDC, ~$91K crvUSD
         # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
         # Queried on-chain 2026-03-23: pool.get_virtual_price() = 1019566780337011070 -> 1.0196
+        # NOTE: despite the "StableSwap NG" lp_token comment above, the deployed
+        # implementation (0x1621e58d36eb5ef26f9768ebe9db77181b1f5a02, an EIP-1167
+        # minimal-proxy target) exposes only the legacy fixed-size selectors
+        # (verified 2026-05-26 via bytecode probe). is_ng=False keeps the
+        # legacy uint256[4] calldata path. VIB-4836.
         "4pool": {
             "address": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
-            "lp_token": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",  # StableSwap NG: LP = pool
+            "lp_token": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
             "coins": ["USDC", "USDbC", "axlUSDC", "crvUSD"],
             "coin_addresses": [
                 "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC (native) on Base
@@ -242,6 +247,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "pool_type": "stableswap",
             "n_coins": 2,
             "virtual_price": Decimal("1.0"),
+            "is_ng": True,  # StableSwap NG variant (VIB-4836)
         },
     },
     "polygon": {
@@ -293,9 +299,11 @@ EXCHANGE_UNDERLYING_SELECTOR = "0xa6417ed6"  # exchange_underlying(int128,int128
 ADD_LIQUIDITY_2_SELECTOR = "0x0b4c7e4d"  # add_liquidity(uint256[2],uint256)
 ADD_LIQUIDITY_3_SELECTOR = "0x4515cef3"  # add_liquidity(uint256[3],uint256)
 ADD_LIQUIDITY_4_SELECTOR = "0x029b2f34"  # add_liquidity(uint256[4],uint256)
+ADD_LIQUIDITY_DYN_SELECTOR = "0xb72df5de"  # add_liquidity(uint256[],uint256) — StableSwap NG
 REMOVE_LIQUIDITY_2_SELECTOR = "0x5b36389c"  # remove_liquidity(uint256,uint256[2])
 REMOVE_LIQUIDITY_3_SELECTOR = "0xecb586a5"  # remove_liquidity(uint256,uint256[3])
 REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4])
+REMOVE_LIQUIDITY_DYN_SELECTOR = "0xd40ddb8c"  # remove_liquidity(uint256,uint256[]) — StableSwap NG
 REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256)
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -390,6 +398,13 @@ class PoolInfo:
     name: str = ""
     virtual_price: Decimal = field(default_factory=lambda: Decimal("1.0"))
     use_underlying: bool = False  # When True, use exchange_underlying() (aave-type pools)
+    # StableSwap NG pools encode add_liquidity / remove_liquidity with a dynamic
+    # `uint256[]` array regardless of n_coins, instead of the legacy fixed-size
+    # `uint256[N_COINS]` ABI. exchange / remove_liquidity_one_coin selectors are
+    # unchanged. See VIB-4836 for the diagnostic; pool bytecode probe of the
+    # Optimism crvUSD/USDC pool (0x03771e24…) on 2026-05-26 confirmed only the
+    # dynamic-array selectors are present.
+    is_ng: bool = False
 
     def get_coin_index(self, coin: str) -> int:
         """Get the index of a coin in the pool.
@@ -427,6 +442,7 @@ class PoolInfo:
             "name": self.name,
             "virtual_price": str(self.virtual_price),
             "use_underlying": self.use_underlying,
+            "is_ng": self.is_ng,
         }
 
 
@@ -631,6 +647,7 @@ class CurveAdapter:
                     name=name,
                     virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
                     use_underlying=pool_data.get("use_underlying", False),
+                    is_ng=pool_data.get("is_ng", False),
                 )
         return None
 
@@ -655,6 +672,7 @@ class CurveAdapter:
                 name=name,
                 virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
                 use_underlying=pool_data.get("use_underlying", False),
+                is_ng=pool_data.get("is_ng", False),
             )
         return None
 
@@ -858,6 +876,7 @@ class CurveAdapter:
                 n_coins=pool_info.n_coins,
                 value=native_value,
                 pool_name=pool_info.name,
+                is_ng=pool_info.is_ng,
             )
             transactions.append(add_liq_tx)
 
@@ -948,6 +967,7 @@ class CurveAdapter:
                 min_amounts=min_amounts,
                 n_coins=pool_info.n_coins,
                 pool_name=pool_info.name,
+                is_ng=pool_info.is_ng,
             )
             transactions.append(remove_tx)
 
@@ -1115,29 +1135,38 @@ class CurveAdapter:
         n_coins: int,
         value: int = 0,
         pool_name: str = "",
+        is_ng: bool = False,
     ) -> TransactionData:
         """Build add_liquidity transaction.
 
-        add_liquidity(uint256[N_COINS] amounts, uint256 min_mint_amount)
+        Legacy:        add_liquidity(uint256[N_COINS] amounts, uint256 min_mint_amount)
+        StableSwap NG: add_liquidity(uint256[] amounts, uint256 min_mint_amount)
         """
-        # Select correct selector based on n_coins
-        if n_coins == 2:
-            selector = ADD_LIQUIDITY_2_SELECTOR
-            gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_2"]
-        elif n_coins == 3:
-            selector = ADD_LIQUIDITY_3_SELECTOR
-            gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_3"]
-        elif n_coins == 4:
-            selector = ADD_LIQUIDITY_4_SELECTOR
-            gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_4"]
-        else:
-            raise ValueError(f"Unsupported n_coins={n_coins} for add_liquidity (expected 2, 3, or 4)")
+        gas_estimate = CURVE_GAS_ESTIMATES.get(f"add_liquidity_{n_coins}", CURVE_GAS_ESTIMATES["add_liquidity_4"])
 
-        # Encode amounts array
-        calldata = selector
-        for amount in amounts:
-            calldata += self._pad_uint256(amount)
-        calldata += self._pad_uint256(min_lp_tokens)
+        if is_ng:
+            # Dynamic-array ABI: head = [offset_to_amounts, min_mint]; tail = [length, *amounts]
+            # offset = 0x40 (two head slots × 32 bytes).
+            calldata = ADD_LIQUIDITY_DYN_SELECTOR
+            calldata += self._pad_uint256(0x40)
+            calldata += self._pad_uint256(min_lp_tokens)
+            calldata += self._pad_uint256(n_coins)
+            for amount in amounts:
+                calldata += self._pad_uint256(amount)
+        else:
+            if n_coins == 2:
+                selector = ADD_LIQUIDITY_2_SELECTOR
+            elif n_coins == 3:
+                selector = ADD_LIQUIDITY_3_SELECTOR
+            elif n_coins == 4:
+                selector = ADD_LIQUIDITY_4_SELECTOR
+            else:
+                raise ValueError(f"Unsupported n_coins={n_coins} for add_liquidity (expected 2, 3, or 4)")
+
+            calldata = selector
+            for amount in amounts:
+                calldata += self._pad_uint256(amount)
+            calldata += self._pad_uint256(min_lp_tokens)
 
         return TransactionData(
             to=pool_address,
@@ -1155,25 +1184,35 @@ class CurveAdapter:
         min_amounts: list[int],
         n_coins: int,
         pool_name: str = "",
+        is_ng: bool = False,
     ) -> TransactionData:
         """Build remove_liquidity transaction.
 
-        remove_liquidity(uint256 _amount, uint256[N_COINS] min_amounts)
+        Legacy:        remove_liquidity(uint256 _amount, uint256[N_COINS] min_amounts)
+        StableSwap NG: remove_liquidity(uint256 _amount, uint256[] min_amounts)
         """
-        # Select correct selector based on n_coins
-        if n_coins == 2:
-            selector = REMOVE_LIQUIDITY_2_SELECTOR
-        elif n_coins == 3:
-            selector = REMOVE_LIQUIDITY_3_SELECTOR
-        elif n_coins == 4:
-            selector = REMOVE_LIQUIDITY_4_SELECTOR
+        if is_ng:
+            # Dynamic-array ABI: head = [_amount, offset_to_min_amounts]; tail = [length, *min_amounts]
+            # offset = 0x40 (two head slots × 32 bytes).
+            calldata = REMOVE_LIQUIDITY_DYN_SELECTOR
+            calldata += self._pad_uint256(lp_amount)
+            calldata += self._pad_uint256(0x40)
+            calldata += self._pad_uint256(n_coins)
+            for min_amount in min_amounts:
+                calldata += self._pad_uint256(min_amount)
         else:
-            raise ValueError(f"Unsupported n_coins={n_coins} for remove_liquidity (expected 2, 3, or 4)")
+            if n_coins == 2:
+                selector = REMOVE_LIQUIDITY_2_SELECTOR
+            elif n_coins == 3:
+                selector = REMOVE_LIQUIDITY_3_SELECTOR
+            elif n_coins == 4:
+                selector = REMOVE_LIQUIDITY_4_SELECTOR
+            else:
+                raise ValueError(f"Unsupported n_coins={n_coins} for remove_liquidity (expected 2, 3, or 4)")
 
-        # Encode calldata
-        calldata = selector + self._pad_uint256(lp_amount)
-        for min_amount in min_amounts:
-            calldata += self._pad_uint256(min_amount)
+            calldata = selector + self._pad_uint256(lp_amount)
+            for min_amount in min_amounts:
+                calldata += self._pad_uint256(min_amount)
 
         return TransactionData(
             to=pool_address,
@@ -1331,6 +1370,14 @@ class CurveAdapter:
         The sum/virtual_price formula works for stablecoin pools because deposit
         value is proportional to LP supply.
 
+        For StableSwap NG pools (``pool_info.is_ng``): if a gateway client or
+        RPC URL is configured, query ``calc_token_amount(uint256[], bool)``
+        on-chain for an accurate quote. The naive sum/virtual_price estimate
+        is too tight for NG pools because their imbalance-fee model means the
+        actual minted amount is meaningfully below the deposit value on small
+        single-asset-heavy deposits, and the configured ``virtual_price``
+        drifts as fees accrue (VIB-4836).
+
         For CryptoSwap/Tricrypto pools: returns 0 (no LP slippage protection).
         Volatile-asset pools track LP tokens as a share of D-invariant, not deposit
         value. Accurate estimation requires querying calc_token_amount() on-chain
@@ -1348,6 +1395,16 @@ class CurveAdapter:
                 "(no slippage protection — use calc_token_amount on-chain for production)"
             )
             return 0
+
+        if pool_info.is_ng and (self._gateway_client is not None or self._rpc_url):
+            try:
+                return self._query_calc_token_amount_ng_onchain(pool_info, amounts)
+            except Exception as exc:  # noqa: BLE001 — fall back to naive estimate
+                logger.warning(
+                    "StableSwap NG calc_token_amount query failed for pool %s (%s); falling back to naive estimate",
+                    pool_info.name,
+                    exc,
+                )
 
         total = 0
         for i, amount in enumerate(amounts):
@@ -1523,6 +1580,70 @@ class CurveAdapter:
             f"lp={lp_amount}, total_supply={total_supply}, amounts={amounts}"
         )
         return amounts
+
+    def _query_calc_token_amount_ng_onchain(self, pool_info: PoolInfo, amounts: list[int]) -> int:
+        """Query ``calc_token_amount(uint256[], bool)`` on a StableSwap NG pool.
+
+        Returns the exact LP-token mint quote the pool would produce for these
+        deposit amounts. Used by ``_estimate_add_liquidity`` for NG pools so
+        slippage protection is computed against real pool math rather than the
+        naive sum/virtual_price estimator (which drifts as fees accrue and
+        ignores imbalance fees). VIB-4836.
+
+        Routing mirrors the existing ``_eth_call`` helper used by
+        ``_estimate_remove_liquidity_proportional``: gateway-first when a
+        ``GatewayRpcClient`` is wired, falling back to ``rpc_url`` for
+        intent-test / ad-hoc adapter constructions that don't go through the
+        gateway. The httpx fallback carries the same ``vib-2986-exempt`` marker
+        as the rest of this connector's gateway-internal RPC paths.
+        """
+        import json as _json
+
+        # selector: calc_token_amount(uint256[],bool) → 0x3db06dd8
+        # head: [offset_to_amounts=0x40, is_deposit=1]
+        # tail: [length=n_coins, amounts...]
+        calldata = "0x3db06dd8"
+        calldata += self._pad_uint256(0x40)
+        calldata += self._pad_uint256(1)  # is_deposit
+        calldata += self._pad_uint256(pool_info.n_coins)
+        for amount in amounts:
+            calldata += self._pad_uint256(amount)
+
+        if self._gateway_client is not None:
+            from almanak.gateway.proto import gateway_pb2
+
+            rpc_request = gateway_pb2.RpcRequest(
+                chain=self.chain,
+                method="eth_call",
+                params=_json.dumps([{"to": pool_info.address, "data": calldata}, "latest"]),
+                id="curve_add_liquidity_ng",
+            )
+            response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
+            if not response.success:
+                raise ValueError(f"calc_token_amount eth_call failed: {response.error or 'gateway failure'}")
+            hex_result = _json.loads(response.result) if response.result else "0x"
+        else:
+            import httpx
+
+            assert self._rpc_url is not None, "calc_token_amount on-chain requires either a gateway client or rpc_url"
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": pool_info.address, "data": calldata}, "latest"],
+                "id": 1,
+            }
+            response = httpx.post(
+                self._rpc_url, json=payload, timeout=10.0
+            )  # vib-2986-exempt: gateway-internal fallback
+            response.raise_for_status()
+            result = response.json()
+            if "error" in result:
+                raise ValueError(f"calc_token_amount eth_call failed: {result['error']}")
+            hex_result = result.get("result", "0x0")
+
+        if not hex_result or hex_result == "0x":
+            raise ValueError("calc_token_amount returned empty result")
+        return int(hex_result, 16)
 
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
         """Estimate tokens from remove_liquidity_one_coin.

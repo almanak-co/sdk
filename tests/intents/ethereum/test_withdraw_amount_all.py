@@ -81,10 +81,15 @@ class TestWithdrawAmountAllMorphoBlue:
         collateral_token = market_info["collateral_token"]  # wstETH
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
 
-        # Find the collateral token address
+        # Find the collateral token address. wstETH is in CHAIN_CONFIGS for
+        # ethereum at slot 0 (verified 2026-05-26 via eth_getStorageAt probe);
+        # missing entries or zero balance here mean the funded_wallet seeding
+        # silently failed — fail loudly instead of skipping (VIB-4824).
         token_address = tokens.get(collateral_token) or tokens.get("wstETH")
-        if not token_address:
-            pytest.skip(f"Token {collateral_token} not configured for {CHAIN_NAME}")
+        assert token_address, (
+            f"Token {collateral_token} missing from CHAIN_CONFIGS[{CHAIN_NAME!r}]['tokens'] — "
+            "add the address before running this test"
+        )
 
         decimals = get_token_decimals(web3, token_address)
 
@@ -96,8 +101,11 @@ class TestWithdrawAmountAllMorphoBlue:
         balance_before_supply = get_token_balance(web3, token_address, funded_wallet)
         print(f"  {collateral_token} before supply: {format_token_amount(balance_before_supply, decimals)}")
 
-        if balance_before_supply <= 0:
-            pytest.skip(f"No {collateral_token} balance available for testing")
+        assert balance_before_supply > 0, (
+            f"{collateral_token} funding produced zero balance — investigate "
+            f"CHAIN_CONFIGS[{CHAIN_NAME!r}]['balance_slots'][{collateral_token!r}] "
+            "or anvil_setStorageAt"
+        )
 
         supply_amount = Decimal("0.01")  # Small amount of wstETH
 

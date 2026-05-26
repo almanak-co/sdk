@@ -8,6 +8,7 @@ This module tests the CurveAdapter class functionality including:
 - Token resolution and pool info lookup
 """
 
+import json
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -963,3 +964,273 @@ class TestEstimateRemoveLiquiditySlippage:
         with patch("httpx.post", return_value=_make_mock_rpc_response(_hex_uint256(0))):
             with pytest.raises(ValueError, match="totalSupply is zero"):
                 adapter._query_proportional_amounts_onchain(pool_info, lp_amount=10**18)
+
+
+# =============================================================================
+# StableSwap NG calc_token_amount on-chain query (VIB-4836)
+# =============================================================================
+
+
+def _make_ng_2pool_info() -> PoolInfo:
+    """Build a PoolInfo for the Optimism crvUSD/USDC StableSwap NG pool."""
+    return PoolInfo(
+        address="0x03771e24b7C9172d163Bf447490B142a15be3485",
+        lp_token="0x03771e24b7C9172d163Bf447490B142a15be3485",
+        coins=["crvUSD", "USDC"],
+        coin_addresses=[
+            "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6",
+            "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        ],
+        pool_type=PoolType.STABLESWAP,
+        n_coins=2,
+        name="crvusd_usdc",
+        virtual_price=Decimal("1.0"),
+        is_ng=True,
+    )
+
+
+class TestQueryCalcTokenAmountNGOnchain:
+    """Tests for _query_calc_token_amount_ng_onchain (VIB-4836).
+
+    Routing mirrors the existing `_eth_call` helper used by
+    `_estimate_remove_liquidity_proportional`: gateway-first when a
+    `GatewayRpcClient` is wired, with an `rpc_url` httpx fallback for
+    intent-test / ad-hoc adapter constructions that don't go through the
+    gateway. Tests cover both paths plus the relevant error branches and
+    the caller's gating + naive-estimator fallback.
+    """
+
+    def _build_adapter_with_gateway(self) -> tuple["CurveAdapter", MagicMock]:
+        """Construct an adapter with a mocked gateway client attached."""
+        config = CurveConfig(
+            chain="optimism",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+        adapter = CurveAdapter(config)
+        adapter._gateway_client = MagicMock()
+        return adapter, adapter._gateway_client
+
+    def _build_adapter_with_rpc_only(self) -> "CurveAdapter":
+        """Construct an adapter with rpc_url only (no gateway client)."""
+        config = CurveConfig(
+            chain="optimism",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        return CurveAdapter(config)
+
+    def test_gateway_path_returns_int(self) -> None:
+        """Gateway path: hex result string is decoded to int."""
+        adapter, client = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+        expected = 19_525_895_236_381_251_599  # mainnet quote at probe time
+
+        gateway_resp = MagicMock()
+        gateway_resp.success = True
+        # The adapter calls _json.loads(response.result) so the gateway must
+        # return a JSON-encoded string, mirroring how proto wraps RPC results.
+        gateway_resp.result = f'"{_hex_uint256(expected)}"'
+        client.rpc.Call.return_value = gateway_resp
+
+        got = adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[10**18, 10**6])
+        assert got == expected
+        rpc_request = client.rpc.Call.call_args.args[0]
+        assert rpc_request.chain == "optimism"
+        assert rpc_request.method == "eth_call"
+
+    def test_gateway_path_emits_correct_calldata(self) -> None:
+        """Calldata is selector + offset(0x40) + is_deposit(1) + len + amounts."""
+        adapter, client = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+
+        gateway_resp = MagicMock()
+        gateway_resp.success = True
+        gateway_resp.result = f'"{_hex_uint256(1)}"'
+        client.rpc.Call.return_value = gateway_resp
+
+        adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+
+        rpc_request = client.rpc.Call.call_args.args[0]
+        params = json.loads(rpc_request.params)
+        to = params[0]["to"]
+        data = params[0]["data"]
+        assert to == pool_info.address
+        # selector + 4 head words (offset, is_deposit, length, amount0, amount1)
+        # = 10 + 5*64 = 330 hex chars
+        assert data.startswith("0x3db06dd8")
+        assert len(data) == 2 + 8 + 5 * 64
+        assert data[10:74] == "0" * 62 + "40"  # offset to amounts array
+        assert data[74:138] == "0" * 63 + "1"  # is_deposit
+        assert data[138:202] == "0" * 63 + "2"  # array length
+        assert int(data[202:266], 16) == 10 * 10**18  # amount0
+        assert int(data[266:330], 16) == 10 * 10**6  # amount1
+
+    def test_gateway_failure_raises(self) -> None:
+        """Gateway returning success=False raises ValueError."""
+        adapter, client = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+
+        bad = MagicMock()
+        bad.success = False
+        bad.error = "node connection refused"
+        client.rpc.Call.return_value = bad
+
+        with pytest.raises(ValueError, match="calc_token_amount"):
+            adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[1, 1])
+
+    def test_gateway_empty_result_raises(self) -> None:
+        """Gateway returning empty result raises ValueError."""
+        adapter, client = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+
+        empty = MagicMock()
+        empty.success = True
+        empty.result = ""  # falsy → _json.loads is skipped, default "0x"
+        client.rpc.Call.return_value = empty
+
+        with pytest.raises(ValueError, match="empty result"):
+            adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[1, 1])
+
+    def test_rpc_path_returns_int(self) -> None:
+        """rpc_url fallback: hex result body is decoded to int."""
+        adapter = self._build_adapter_with_rpc_only()
+        pool_info = _make_ng_2pool_info()
+        expected = 19_525_895_236_381_251_599
+
+        with patch(
+            "httpx.post",
+            return_value=_make_mock_rpc_response(_hex_uint256(expected)),
+        ):
+            got = adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[10**18, 10**6])
+        assert got == expected
+
+    def test_rpc_path_emits_correct_calldata(self) -> None:
+        """rpc_url fallback emits the same selector/head/tail calldata layout."""
+        adapter = self._build_adapter_with_rpc_only()
+        pool_info = _make_ng_2pool_info()
+
+        captured: dict = {}
+
+        def fake_post(url, json, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            return _make_mock_rpc_response(_hex_uint256(1))
+
+        with patch("httpx.post", side_effect=fake_post):
+            adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+
+        assert captured["url"] == "http://localhost:8545"
+        params = captured["json"]["params"]
+        data = params[0]["data"]
+        assert params[0]["to"] == pool_info.address
+        assert data.startswith("0x3db06dd8")
+        assert len(data) == 2 + 8 + 5 * 64
+        assert int(data[202:266], 16) == 10 * 10**18  # amount0
+        assert int(data[266:330], 16) == 10 * 10**6  # amount1
+
+    def test_rpc_error_response_raises(self) -> None:
+        """rpc_url body containing `error` raises ValueError."""
+        adapter = self._build_adapter_with_rpc_only()
+        pool_info = _make_ng_2pool_info()
+
+        bad_resp = MagicMock()
+        bad_resp.raise_for_status = MagicMock()
+        bad_resp.json.return_value = {"error": {"message": "execution reverted"}}
+
+        with patch("httpx.post", return_value=bad_resp):
+            with pytest.raises(ValueError, match="calc_token_amount"):
+                adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[1, 1])
+
+    def test_rpc_empty_result_raises(self) -> None:
+        """rpc_url returning '0x' raises ValueError."""
+        adapter = self._build_adapter_with_rpc_only()
+        pool_info = _make_ng_2pool_info()
+
+        with patch("httpx.post", return_value=_make_mock_rpc_response("0x")):
+            with pytest.raises(ValueError, match="empty result"):
+                adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[1, 1])
+
+    def test_missing_gateway_and_rpc_raises(self) -> None:
+        """Without gateway client AND without rpc_url, the helper raises."""
+        config = CurveConfig(
+            chain="optimism",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            # no rpc_url, no gateway client
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_ng_2pool_info()
+
+        with pytest.raises(AssertionError, match="gateway client or rpc_url"):
+            adapter._query_calc_token_amount_ng_onchain(pool_info, amounts=[1, 1])
+
+    def test_estimate_add_liquidity_uses_ng_query_with_gateway(self) -> None:
+        """_estimate_add_liquidity for NG pools routes through the on-chain helper."""
+        adapter, _ = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+        expected = 19_525_895_236_381_251_599
+
+        with patch.object(
+            adapter,
+            "_query_calc_token_amount_ng_onchain",
+            return_value=expected,
+        ) as mocked:
+            got = adapter._estimate_add_liquidity(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+
+        assert got == expected
+        mocked.assert_called_once()
+
+    def test_estimate_add_liquidity_uses_ng_query_with_rpc_only(self) -> None:
+        """rpc_url alone is sufficient to trigger the NG on-chain quote.
+
+        Intent tests construct adapters with `rpc_url` and no gateway client;
+        without this gating, NG pools would fall back to the naive estimator
+        and revert with "Slippage screwed you" (VIB-4836)."""
+        adapter = self._build_adapter_with_rpc_only()
+        pool_info = _make_ng_2pool_info()
+        expected = 19_525_895_236_381_251_599
+
+        with patch.object(
+            adapter,
+            "_query_calc_token_amount_ng_onchain",
+            return_value=expected,
+        ) as mocked:
+            got = adapter._estimate_add_liquidity(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+
+        assert got == expected
+        mocked.assert_called_once()
+
+    def test_estimate_add_liquidity_falls_back_when_ng_query_raises(self) -> None:
+        """If the on-chain NG query fails, fall back to the naive estimator."""
+        adapter, _ = self._build_adapter_with_gateway()
+        pool_info = _make_ng_2pool_info()
+
+        # Mock the token decimals lookup to avoid token registry calls.
+        with patch.object(adapter, "_get_token_decimals", side_effect=[18, 6]):
+            with patch.object(
+                adapter,
+                "_query_calc_token_amount_ng_onchain",
+                side_effect=ValueError("RPC down"),
+            ):
+                got = adapter._estimate_add_liquidity(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+
+        # Naive: (10e18 + 10e6 * 10^12) / 1.0 = 20e18
+        assert got == 20 * 10**18
+
+    def test_estimate_add_liquidity_skips_ng_query_without_rpc_or_gateway(self) -> None:
+        """Without gateway client and without rpc_url, the NG on-chain query
+        is never invoked (the caller falls back to the naive estimator)."""
+        config = CurveConfig(
+            chain="optimism",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            # no rpc_url, no gateway_client
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_ng_2pool_info()
+
+        with patch.object(adapter, "_get_token_decimals", side_effect=[18, 6]):
+            with patch.object(
+                adapter,
+                "_query_calc_token_amount_ng_onchain",
+            ) as mocked:
+                adapter._estimate_add_liquidity(pool_info, amounts=[10 * 10**18, 10 * 10**6])
+        mocked.assert_not_called()
