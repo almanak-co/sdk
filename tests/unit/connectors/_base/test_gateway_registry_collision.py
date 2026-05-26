@@ -27,6 +27,7 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 class _ServicerConnector(GatewayConnector):
     protocol: ClassVar[ProtocolName] = ProtocolName("alpha")
     kind: ClassVar[ProtocolKind] = ProtocolKind.PREDICTION_MARKET
+    servicer: Any | None = None
 
     def register_servicers(self, server: Any, settings: Any) -> None:
         pass
@@ -45,6 +46,7 @@ class _Collider(GatewayConnector):
 
     protocol: ClassVar[ProtocolName] = ProtocolName("alpha")
     kind: ClassVar[ProtocolKind] = ProtocolKind.PREDICTION_MARKET
+    servicer: Any | None = None
 
     def register_servicers(self, server: Any, settings: Any) -> None:
         pass

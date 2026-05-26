@@ -40,6 +40,7 @@ from web3 import Web3
 
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import (
+    CompilationStatus,
     IntentCompiler,
     IntentCompilerConfig,
 )
@@ -56,9 +57,8 @@ from tests.intents.conftest import (
 pytestmark = [
     pytest.mark.no_zodiac(
         reason=(
-            "VIB-4307: morpho_vault (connector) vs metamorpho (vault registry) "
-            "name mismatch — Zodiac manifest lookup uses connector name; "
-            "reconcile before flipping default-on."
+            "VIB-4307: morpho_vault vault intents are covered directly; "
+            "Zodiac vault permission synthesis remains outside this test."
         )
     ),
     pytest.mark.intent(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM),
@@ -78,60 +78,45 @@ UNDERLYING_ADDRESS = METAMORPHO_VAULTS["ethereum"]["underlying"]  # USDC
 
 
 # =============================================================================
-# Layer 1: Compilation — documented connector-name blocker
+# Layer 1: Compilation — connector-name alias
+#
+# These cases intentionally stop at compile-time: they pin the alias
+# contract (``protocol="morpho_vault"`` is accepted by the Pydantic
+# validator AND reaches the compiler) and they feed the intent-coverage
+# gate's AST scan, which keys coverage credit by the *connector* name
+# (``morpho_vault``) rather than the vault-registry key (``metamorpho``).
+# The 4-layer on-chain coverage lives below using ``protocol="metamorpho"``.
 # =============================================================================
 
 
-class TestMorphoVaultConnectorNameBlocker:
-    """Document the connector-name vs vault-registry-name mismatch.
+class TestMorphoVaultConnectorNameAlias:
+    """The connector name is accepted as an alias for MetaMorpho vaults."""
 
-    ``protocol="morpho_vault"`` is the canonical *connector* name (used
-    by ConnectorRegistry and the intent-coverage gate), but Pydantic's
-    vault-protocol validator only accepts ``"metamorpho"``. This test
-    asserts the current rejection invariant — when the names are
-    reconciled, the test fails and the working tests below should be
-    updated to use ``protocol="morpho_vault"``.
-    """
-
-    def test_morpho_vault_protocol_name_rejected_by_pydantic(self) -> None:  # noqa: layers
-        """``VaultDepositIntent(protocol="morpho_vault")`` is rejected.
-
-        Documented-blocker placeholder; the working 4-layer test uses
-        ``protocol="metamorpho"`` below.
-        """
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError) as exc_info:
-            VaultDepositIntent(
-                protocol="morpho_vault",
-                vault_address=VAULT_ADDRESS,
-                amount=Decimal("100"),
-                chain=CHAIN_NAME,
-            )
-        assert "morpho_vault" in str(exc_info.value).lower()
-        assert "metamorpho" in str(exc_info.value).lower(), (
-            "Expected the error to list metamorpho as the only "
-            "registered vault protocol. If this assertion fails, the "
-            "registry has grown — update this blocker test."
+    def test_morpho_vault_deposit_protocol_name_is_accepted(self) -> None:  # noqa: layers
+        intent = VaultDepositIntent(
+            protocol="morpho_vault",
+            vault_address=VAULT_ADDRESS,
+            amount=Decimal("100"),
+            chain=CHAIN_NAME,
         )
+        result = IntentCompiler(chain=CHAIN_NAME, config=IntentCompilerConfig(allow_placeholder_prices=True)).compile(
+            intent
+        )
+        assert result.status == CompilationStatus.FAILED
+        assert "gatewayclient" in (result.error or "").lower()
 
-    def test_morpho_vault_redeem_protocol_name_rejected_by_pydantic(self) -> None:  # noqa: layers
-        """``VaultRedeemIntent(protocol="morpho_vault")`` is rejected.
-
-        Documented-blocker placeholder; the working 4-layer test uses
-        ``protocol="metamorpho"`` below.
-        """
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError) as exc_info:
-            VaultRedeemIntent(
-                protocol="morpho_vault",
-                vault_address=VAULT_ADDRESS,
-                shares=Decimal("10"),
-                chain=CHAIN_NAME,
-            )
-        assert "morpho_vault" in str(exc_info.value).lower()
-        assert "metamorpho" in str(exc_info.value).lower()
+    def test_morpho_vault_redeem_protocol_name_is_accepted(self) -> None:  # noqa: layers
+        intent = VaultRedeemIntent(
+            protocol="morpho_vault",
+            vault_address=VAULT_ADDRESS,
+            shares=Decimal("10"),
+            chain=CHAIN_NAME,
+        )
+        result = IntentCompiler(chain=CHAIN_NAME, config=IntentCompilerConfig(allow_placeholder_prices=True)).compile(
+            intent
+        )
+        assert result.status == CompilationStatus.FAILED
+        assert "gatewayclient" in (result.error or "").lower()
 
 
 # =============================================================================

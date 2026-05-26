@@ -40,6 +40,14 @@ almanak/bin/almanak-code-*
 # LLM docs (generated during CI build from mkdocs)
 almanak/llms/llms-full.txt
 
+# Generated docs — produced by scripts/docs/ generators and mdclick at build
+# time. Never commit; ``make docs`` regenerates them before ``mkdocs build``.
+# See scripts/docs/generate_connector_matrix.py,
+# scripts/docs/generate_chain_table.py, and the ``docs-cli`` Makefile target.
+docs/api/connectors/index.md
+docs/chains.md
+docs/cli/*.md
+
 # Build script temp dirs
 .bin_stash/
 .wheel_staging/

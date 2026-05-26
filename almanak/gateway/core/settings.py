@@ -8,13 +8,31 @@ from typing import Annotated
 from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
+# VIB-4812: per-connector settings fragments composed into the central
+# ``GatewaySettings`` via multi-inheritance. Each fragment is a
+# ``BaseModel`` (NOT ``BaseSettings``) — the composed class is the single
+# env-loader. The env-var surface (``ALMANAK_GATEWAY_<FIELD>``) is
+# preserved byte-identically; adding a new connector field is a one-line
+# edit in the connector's ``gateway/settings.py`` plus one extra base
+# class on ``GatewaySettings`` below.
+from almanak.connectors.enso.gateway.settings import EnsoGatewaySettings
+from almanak.connectors.pendle.gateway.settings import PendleGatewaySettings
+from almanak.connectors.polymarket.gateway.settings import (
+    PolymarketGatewaySettings,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default persistent DB path for gateway data (timeline events, instance registry)
 DEFAULT_GATEWAY_DB_PATH = str(Path.home() / ".config" / "almanak" / "gateway.db")
 
 
-class GatewaySettings(BaseSettings):
+class GatewaySettings(
+    BaseSettings,
+    PolymarketGatewaySettings,
+    EnsoGatewaySettings,
+    PendleGatewaySettings,
+):
     """Gateway configuration from environment variables.
 
     The gateway server supports both HTTP (FastAPI) and gRPC interfaces:
@@ -125,8 +143,9 @@ class GatewaySettings(BaseSettings):
     # Platform secrets - only gateway has access to these
     alchemy_api_key: str | None = None
     coingecko_api_key: str | None = None
-    enso_api_key: str | None = None
-    pendle_api_key: str | None = None
+    # ``enso_api_key`` is contributed by ``EnsoGatewaySettings`` (VIB-4812).
+    # ``pendle_api_key`` + ``pendle_api_cache_ttl`` by ``PendleGatewaySettings``.
+    # ``polymarket_*`` by ``PolymarketGatewaySettings``.
     thegraph_api_key: str | None = None
     portfolio_api_key: str | None = None
     portfolio_api_provider: str = "zerion"
@@ -137,9 +156,6 @@ class GatewaySettings(BaseSettings):
     # Each provider reads its API key from {NAME}_API_KEY env var.
     portfolio_providers: str | None = None
 
-    # Pendle API settings
-    pendle_api_cache_ttl: float = 15.0  # seconds
-
     # Gateway-side third-party integrations / service thresholds.
     tenderly_account_slug: str | None = None
     tenderly_project_slug: str | None = None
@@ -148,8 +164,6 @@ class GatewaySettings(BaseSettings):
     dexscreener_min_volume_usd: float = 1_000.0
     dexscreener_min_turnover_ratio: float = 0.05
     dexscreener_dominance_multiple: float = 3.0
-    polymarket_network: str = "mainnet"
-    polymarket_market_cache_ttl_seconds: float = 60.0
     anvil_watchdog_interval: float = 5.0
 
     # Execution secrets
@@ -165,14 +179,10 @@ class GatewaySettings(BaseSettings):
     signer_service_url: str | None = None  # Remote signer service URL (zodiac mode)
     signer_service_jwt: str | None = None  # Remote signer service JWT (zodiac mode)
 
-    # Polymarket gateway-owned credentials/configuration. These are optional:
-    # local EOA mode derives the signer from the gateway execution identity and
+    # Polymarket gateway-owned credentials/configuration are contributed by
+    # ``PolymarketGatewaySettings`` (VIB-4812). They are optional: local EOA
+    # mode derives the signer from the gateway execution identity and
     # lazy-derives L2 credentials automatically when absent.
-    polymarket_wallet_address: str | None = None
-    polymarket_private_key: str | None = None
-    polymarket_api_key: str | None = None
-    polymarket_secret: str | None = None
-    polymarket_passphrase: str | None = None
 
     # State persistence
     database_url: str | None = None
@@ -280,18 +290,8 @@ class GatewaySettings(BaseSettings):
             raise ValueError(f"dexscreener_min_turnover_ratio must be in [0, 1] (got {value})")
         return value
 
-    @field_validator("polymarket_market_cache_ttl_seconds")
-    @classmethod
-    def _validate_cache_ttl(cls, value: float) -> float:
-        # The legacy ``_parse_polymarket_market_cache_ttl_seconds`` helper
-        # clamps to ``[0, 24h]`` for the unprefixed fallback path; mirror
-        # ``>= 0`` here so the kwargs / ALMANAK_GATEWAY_* paths agree on the
-        # floor, and reject NaN that would defeat the clamp.
-        if not math.isfinite(value):
-            raise ValueError(f"polymarket_market_cache_ttl_seconds must be a finite number (got {value!r})")
-        if value < 0:
-            raise ValueError(f"polymarket_market_cache_ttl_seconds must be >= 0 (got {value})")
-        return value
+    # ``polymarket_market_cache_ttl_seconds`` validator is contributed by
+    # ``PolymarketGatewaySettings`` (VIB-4812).
 
     @field_validator("chains", mode="before")
     @classmethod

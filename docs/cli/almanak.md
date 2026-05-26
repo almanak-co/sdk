@@ -9,6 +9,9 @@ Almanak CLI for managing strategies.
 Usage: almanak [OPTIONS] COMMAND [ARGS]...
 ```
 
+## Arguments
+
+
 ## Options
 
 * `version`:
@@ -37,9 +40,15 @@ Options:
   --help     Show this message and exit.
 
 Commands:
-  auth       Authenticate the Almanak CLI
-  ax         Execute DeFi actions directly (swap, balance, price, etc.)
-  dashboard  Start the Almanak Operator Dashboard.
-  gateway    Start the Almanak Gateway gRPC server.
-  strat      Commands for managing strategies.
+  agent             Manage AI agent skill files for strategy development.
+  ax                Execute DeFi actions directly from the command line.
+  backtest-service  Start the BacktestService HTTP API.
+  copy              Commands for copy-trading validation, replay, and...
+  dashboard         Start the Almanak Operator Dashboard.
+  docs              Access bundled SDK documentation for LLM agents.
+  gateway           Start the Almanak Gateway gRPC server.
+  info              SDK information and capabilities.
+  mcp               MCP (Model Context Protocol) server commands.
+  strat             Commands for managing strategies.
 ```
+

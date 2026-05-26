@@ -48,6 +48,7 @@ plugins:
             Environment Variables: 环境变量
             Agent Skills: AI 代理技能
             Agentic Trading: 代理交易
+            Solana: Solana
             CLI Reference: CLI 参考
             Gateway: 网关
             API Reference: API 参考
@@ -62,6 +63,7 @@ plugins:
             Environment Variables: Variables d'environnement
             Agent Skills: Compétences d'agent
             Agentic Trading: Trading agentique
+            Solana: Solana
             CLI Reference: Référence CLI
             Gateway: Passerelle
             API Reference: Référence API
@@ -76,6 +78,7 @@ plugins:
             Environment Variables: Variables de entorno
             Agent Skills: Habilidades de agente
             Agentic Trading: Trading agente
+            Solana: Solana
             CLI Reference: Referencia CLI
             Gateway: Pasarela
             API Reference: Referencia API
@@ -151,8 +154,12 @@ nav:
     - Getting Started: getting-started.md
     - Environment Variables: environment-variables.md
     - Agent Skills: agent-skills.md
-    - Agentic Trading: agentic/index.md
+    - Agentic Trading:
+      - agentic/index.md
+      - Agent Tools: agentic/agent-tools.md
+      - Adapters: agentic/adapters.md
     - Solana: solana.md
+    - Supported Chains: chains.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md

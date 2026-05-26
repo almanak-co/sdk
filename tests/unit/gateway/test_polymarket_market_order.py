@@ -27,7 +27,7 @@ import pytest
 from eth_account import Account
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 from almanak.connectors.polymarket.gateway.service import (
     CLOB_BASE_URL,
     PolymarketServiceServicer,
@@ -61,10 +61,10 @@ def servicer(settings: MagicMock) -> PolymarketServiceServicer:
     return PolymarketServiceServicer(settings=settings)
 
 
-def _success_order_response() -> gateway_pb2.PolymarketOrderResponse:
+def _success_order_response() -> polymarket_pb2.PolymarketOrderResponse:
     """A canned downstream success — the unit under test is the market-order
     wrapper, not ``CreateAndPostOrder`` itself, so we stub the latter."""
-    return gateway_pb2.PolymarketOrderResponse(
+    return polymarket_pb2.PolymarketOrderResponse(
         order_id="order-123",
         status="MATCHED",
         size_matched="10",
@@ -92,7 +92,7 @@ class TestCrossSidePriceSampling:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.55"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5.5", side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -116,7 +116,7 @@ class TestCrossSidePriceSampling:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.45"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="10", side="SELL"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -141,7 +141,7 @@ class TestCrossSidePriceSampling:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.50"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="1", side="BUY"
         )
         await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -171,7 +171,7 @@ class TestWorstPriceGuard:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.60"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="5",
             side="BUY",
@@ -194,7 +194,7 @@ class TestWorstPriceGuard:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.40"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="10",
             side="SELL",
@@ -218,7 +218,7 @@ class TestWorstPriceGuard:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.55"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="5.5",
             side="BUY",
@@ -236,7 +236,7 @@ class TestWorstPriceGuard:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.45"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="10",
             side="SELL",
@@ -253,7 +253,7 @@ class TestWorstPriceGuard:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.50"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="5",
             side="BUY",
@@ -283,7 +283,7 @@ class TestHappyPath:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.55"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID,
             amount="5.5",
             side="BUY",
@@ -294,7 +294,7 @@ class TestHappyPath:
         assert response.success is True
         servicer.CreateAndPostOrder.assert_awaited_once()
         forwarded = servicer.CreateAndPostOrder.await_args.args[0]
-        assert isinstance(forwarded, gateway_pb2.PolymarketCreateOrderRequest)
+        assert isinstance(forwarded, polymarket_pb2.PolymarketCreateOrderRequest)
         assert forwarded.token_id == TEST_TOKEN_ID
         assert forwarded.side == "BUY"
         assert forwarded.price == "0.55"
@@ -309,7 +309,7 @@ class TestHappyPath:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.45"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="10", side="SELL"
         )
         await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -337,7 +337,7 @@ class TestInputValidation:
         servicer._request = AsyncMock()  # Should never be called
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5", side=bad_side
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -355,7 +355,7 @@ class TestInputValidation:
         servicer._request = AsyncMock(return_value=(True, {"price": "0.55"}, None))
         servicer.CreateAndPostOrder = AsyncMock(return_value=_success_order_response())
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5.5", side="buy"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -372,7 +372,7 @@ class TestInputValidation:
         servicer._request = AsyncMock()
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount=bad_amount, side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -390,7 +390,7 @@ class TestInputValidation:
         servicer._request = AsyncMock()
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount=bad_amount, side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -417,7 +417,7 @@ class TestPriceEndpointFailures:
         servicer._request = AsyncMock(return_value=(False, None, "HTTP 404: No orderbook"))
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5", side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -435,7 +435,7 @@ class TestPriceEndpointFailures:
         servicer._request = AsyncMock(return_value=(True, {"price": "0"}, None))
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5", side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -451,7 +451,7 @@ class TestPriceEndpointFailures:
         servicer._request = AsyncMock(return_value=(True, {"price": "not-a-number"}, None))
         servicer.CreateAndPostOrder = AsyncMock()
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5", side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())
@@ -484,7 +484,7 @@ class TestNotConfigured:
         servicer = PolymarketServiceServicer(settings=s)
         assert servicer._available is False
 
-        request = gateway_pb2.PolymarketMarketOrderRequest(
+        request = polymarket_pb2.PolymarketMarketOrderRequest(
             token_id=TEST_TOKEN_ID, amount="5", side="BUY"
         )
         response = await servicer.CreateAndPostMarketOrder(request, MagicMock())

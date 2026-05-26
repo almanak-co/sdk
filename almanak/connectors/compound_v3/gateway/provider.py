@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayDefillamaSlugCapability,
     GatewayMarketLookupCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
@@ -23,7 +24,11 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from .market_lookup import get_compound_lookup
 
 
-class CompoundV3GatewayConnector(GatewayConnector, GatewayMarketLookupCapability):
+class CompoundV3GatewayConnector(
+    GatewayConnector,
+    GatewayMarketLookupCapability,
+    GatewayDefillamaSlugCapability,
+):
     """Gateway-side connector for Compound v3."""
 
     protocol: ClassVar[ProtocolName] = ProtocolName("compound_v3")
@@ -32,6 +37,13 @@ class CompoundV3GatewayConnector(GatewayConnector, GatewayMarketLookupCapability
     def market_lookup(self):
         """Return the awaitable Compound market-lookup singleton factory."""
         return get_compound_lookup
+
+    def defillama_slug(self) -> str | None:
+        """DefiLlama project slug for Compound v3."""
+        return "compound-v3"
+
+    def defillama_slug_aliases(self) -> dict[str, str]:
+        return {}
 
 
 __all__ = ["CompoundV3GatewayConnector"]

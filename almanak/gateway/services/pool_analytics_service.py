@@ -88,16 +88,116 @@ _CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
     "solana": "Solana",
 }
 
-# Protocol hint → DefiLlama project slug
-_PROTOCOL_TO_LLAMA: dict[str, str] = {
-    "uniswap_v3": "uniswap-v3",
-    "aerodrome": "aerodrome-v2",
-    "aerodrome_slipstream": "aerodrome-slipstream",
-    "pancakeswap_v3": "pancakeswap-amm-v3",
-    "aave_v3": "aave-v3",
-    "morpho": "morpho-blue",
-    "compound_v3": "compound-v3",
-}
+# Protocol hint → DefiLlama project slug — registry-driven (VIB-4811 / VIB-4817).
+#
+# Phase 3 (VIB-4811) replaces the hardcoded dispatch dict with a
+# derivation from ``GATEWAY_REGISTRY.capability_providers(
+# GatewayDefillamaSlugCapability)``. Each connector declares its own
+# slug (and any alias variants like ``aerodrome_slipstream``); this
+# module composes them at import time. The dispatcher uses the result
+# identically to the previous static dict.
+#
+# VIB-4817 migrated the last two TODO-fallback entries
+# (``pancakeswap_v3`` and ``morpho``) onto their connectors —
+# ``PancakeSwapV3GatewayConnector`` and ``MorphoVaultGatewayConnector``
+# now publish those slugs directly.
+
+
+def _build_protocol_to_llama() -> dict[str, str]:
+    """Compose ``protocol -> defillama_slug`` from the registry.
+
+    Iterates every ``GatewayDefillamaSlugCapability`` provider once and
+    unions their canonical slug + alias entries.
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayDefillamaSlugCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    table: dict[str, str] = {}
+    # mypy: ``capability_providers`` accepts a ``@runtime_checkable`` Protocol
+    # by design — see ``_derive_pool_history_tables`` in
+    # ``pool_history_service.py`` for the rationale.
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayDefillamaSlugCapability):  # type: ignore[type-abstract]
+        slug = connector.defillama_slug()
+        if slug is not None:
+            # Normalize protocol key to lowercase — request validation
+            # already lowercases ``protocol``; mixed-case connector
+            # names would silently miss the lookup. (Gemini code-review.)
+            table[str(connector.protocol).lower()] = slug  # type: ignore[attr-defined]
+        # Aliases (e.g. ``aerodrome_slipstream`` rides aerodrome,
+        # ``morpho`` rides morpho_vault for the morpho-blue project).
+        for alias_key, alias_slug in connector.defillama_slug_aliases().items():
+            table[alias_key.lower()] = alias_slug
+    return table
+
+
+class _LazyProtocolToLlama(dict[str, str]):
+    """Lazy proxy for ``_PROTOCOL_TO_LLAMA`` — built on first access.
+
+    Eager build at module import races against ``_gateway_registry``
+    when an entry point lands on ``_gateway_registry`` first and the
+    aave_v3 / etc. provider modules transitively pull in
+    ``gateway.services.__init__`` (which loads this module) before
+    registration finishes.
+    """
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            super().update(_build_protocol_to_llama())
+            self._built = True
+
+    def __contains__(self, key: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, key: str) -> str:
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        raise TypeError("unhashable type: '_LazyProtocolToLlama'")
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+
+_PROTOCOL_TO_LLAMA: dict[str, str] = _LazyProtocolToLlama()
 
 # Cache TTL (seconds) — 60s strikes a balance between provider load and
 # strategy iteration cadence. Iteration loops typically tick every ~60s so

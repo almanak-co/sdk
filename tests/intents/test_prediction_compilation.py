@@ -294,7 +294,12 @@ class TestPredictionBuyCompilation:
 
     def test_compile_prediction_buy_success(self, test_wallet, mock_polymarket_config, mock_successful_buy_bundle):
         """Test successful compilation of prediction buy intent."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -303,11 +308,6 @@ class TestPredictionBuyCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            # Mock the adapter
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionBuyIntent(
                 market_id="test-market",
@@ -329,7 +329,12 @@ class TestPredictionBuyCompilation:
         self, test_wallet, mock_polymarket_config, mock_successful_buy_bundle
     ):
         """Test compilation of prediction buy with limit order."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -338,10 +343,6 @@ class TestPredictionBuyCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_buy_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionBuyIntent(
                 market_id="test-market",
@@ -362,7 +363,12 @@ class TestPredictionSellCompilation:
 
     def test_compile_prediction_sell_success(self, test_wallet, mock_polymarket_config, mock_successful_sell_bundle):
         """Test successful compilation of prediction sell intent."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -371,10 +377,6 @@ class TestPredictionSellCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionSellIntent(
                 market_id="test-market",
@@ -392,7 +394,12 @@ class TestPredictionSellCompilation:
 
     def test_compile_prediction_sell_all_shares(self, test_wallet, mock_polymarket_config, mock_successful_sell_bundle):
         """Test compilation of prediction sell with shares='all'."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -401,10 +408,6 @@ class TestPredictionSellCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_sell_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionSellIntent(
                 market_id="test-market",
@@ -425,7 +428,12 @@ class TestPredictionRedeemCompilation:
         self, test_wallet, mock_polymarket_config, mock_successful_redeem_bundle
     ):
         """Test successful compilation of prediction redeem intent."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -434,10 +442,6 @@ class TestPredictionRedeemCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionRedeemIntent(
                 market_id="test-market",
@@ -456,7 +460,12 @@ class TestPredictionRedeemCompilation:
         self, test_wallet, mock_polymarket_config, mock_successful_redeem_bundle
     ):
         """Test compilation of prediction redeem with specific outcome."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -465,10 +474,6 @@ class TestPredictionRedeemCompilation:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_successful_redeem_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionRedeemIntent(
                 market_id="test-market",
@@ -490,7 +495,12 @@ class TestPredictionCompilationErrors:
 
     def test_compile_prediction_buy_adapter_error(self, test_wallet, mock_polymarket_config, mock_error_bundle):
         """Test compilation returns error from adapter."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.return_value = mock_error_bundle
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -499,10 +509,6 @@ class TestPredictionCompilationErrors:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.return_value = mock_error_bundle
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionBuyIntent(
                 market_id="nonexistent",
@@ -517,7 +523,12 @@ class TestPredictionCompilationErrors:
 
     def test_compile_prediction_buy_exception(self, test_wallet, mock_polymarket_config):
         """Test compilation handles exceptions from adapter."""
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.side_effect = RuntimeError("Connection failed")
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -526,10 +537,6 @@ class TestPredictionCompilationErrors:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.side_effect = RuntimeError("Connection failed")
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionBuyIntent(
                 market_id="test-market",
@@ -548,7 +555,12 @@ class TestPredictionCompilationErrors:
             PolymarketMarketNotResolvedError,
         )
 
-        with patch("almanak.framework.intents.compiler.IntentCompiler._init_polymarket_adapter"):
+        mock_adapter = MagicMock()
+        mock_adapter.compile_intent.side_effect = PolymarketMarketNotResolvedError("test-market")
+        with patch(
+            "almanak.framework.connectors.polymarket.compiler.PolymarketCompiler._get_adapter",
+            return_value=mock_adapter,
+        ):
             compiler = IntentCompiler(
                 chain="polygon",
                 wallet_address=test_wallet,
@@ -557,10 +569,6 @@ class TestPredictionCompilationErrors:
                     polymarket_config=mock_polymarket_config,
                 ),
             )
-
-            mock_adapter = MagicMock()
-            mock_adapter.compile_intent.side_effect = PolymarketMarketNotResolvedError("test-market")
-            compiler._polymarket_adapter = mock_adapter
 
             intent = PredictionRedeemIntent(
                 market_id="test-market",

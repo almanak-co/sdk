@@ -116,6 +116,10 @@ class CompilerRegistry:
             "almanak.framework.connectors.jupiter_lend.compiler",
             "JupiterLendCompiler",
         ),
+        "jupiter": (
+            "almanak.framework.connectors.jupiter.compiler",
+            "JupiterCompiler",
+        ),
         "kamino": (
             "almanak.framework.connectors.kamino.compiler",
             "KaminoCompiler",
@@ -167,6 +171,18 @@ class CompilerRegistry:
         "raydium_clmm": (
             "almanak.framework.connectors.raydium.compiler",
             "RaydiumCompiler",
+        ),
+        "metamorpho": (
+            "almanak.framework.connectors.morpho_vault.compiler",
+            "MorphoVaultCompiler",
+        ),
+        "morpho_vault": (
+            "almanak.framework.connectors.morpho_vault.compiler",
+            "MorphoVaultCompiler",
+        ),
+        "polymarket": (
+            "almanak.framework.connectors.polymarket.compiler",
+            "PolymarketCompiler",
         ),
     }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}

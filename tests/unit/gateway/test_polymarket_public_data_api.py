@@ -32,7 +32,7 @@ from eth_account import Account
 
 from almanak.framework.connectors.polymarket.models import Position
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
 
 TEST_PRIVATE_KEY = "0x" + "ab" * 32
@@ -127,7 +127,7 @@ class TestGetPositionsSkipsL2Auth:
             ) as derive_creds,
         ):
             response = await servicer_no_api_keys.GetPositions(
-                gateway_pb2.PolymarketGetPositionsRequest(),
+                polymarket_pb2.PolymarketGetPositionsRequest(),
                 MagicMock(),
             )
 
@@ -162,7 +162,7 @@ class TestGetPositionsSkipsL2Auth:
             patch.object(servicer, "_build_authenticated_client", new=AsyncMock()) as build_auth,
         ):
             response = await servicer.GetPositions(
-                gateway_pb2.PolymarketGetPositionsRequest(),
+                polymarket_pb2.PolymarketGetPositionsRequest(),
                 MagicMock(),
             )
 
@@ -219,7 +219,7 @@ class TestWriteEndpointsStillAuthenticated:
             patch.object(servicer_with_api_keys, "_build_public_client") as build_public,
         ):
             response = await servicer_with_api_keys.CancelOrder(
-                gateway_pb2.PolymarketCancelOrderRequest(order_id="0xabc"),
+                polymarket_pb2.PolymarketCancelOrderRequest(order_id="0xabc"),
                 MagicMock(),
             )
 
@@ -245,7 +245,7 @@ class TestWriteEndpointsStillAuthenticated:
             patch.object(servicer_with_api_keys, "_build_public_client") as build_public,
         ):
             await servicer_with_api_keys.CancelOrders(
-                gateway_pb2.PolymarketCancelOrdersRequest(order_ids=["a", "b"]),
+                polymarket_pb2.PolymarketCancelOrdersRequest(order_ids=["a", "b"]),
                 MagicMock(),
             )
 
@@ -274,7 +274,7 @@ class TestWriteEndpointsStillAuthenticated:
             patch.object(servicer_with_api_keys, "_build_public_client") as build_public,
         ):
             response = await servicer_with_api_keys.GetOpenOrders(
-                gateway_pb2.PolymarketGetOpenOrdersRequest(),
+                polymarket_pb2.PolymarketGetOpenOrdersRequest(),
                 MagicMock(),
             )
 
@@ -300,7 +300,7 @@ class TestWriteEndpointsStillAuthenticated:
             patch.object(servicer_with_api_keys, "_build_public_client") as build_public,
         ):
             await servicer_with_api_keys.GetOrder(
-                gateway_pb2.PolymarketGetOrderRequest(order_id="0xabc"),
+                polymarket_pb2.PolymarketGetOrderRequest(order_id="0xabc"),
                 MagicMock(),
             )
 

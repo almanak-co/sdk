@@ -74,11 +74,18 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
     mock_pb2_grpc = MagicMock()
     monkeypatch.setattr("almanak.gateway.server.gateway_pb2_grpc", mock_pb2_grpc)
     # VIB-4810 — Enso + Polymarket gateway-side servicers are registered via
-    # connector providers. Each provider module has its own bound
-    # ``gateway_pb2_grpc`` reference; redirect those to the same MagicMock so
-    # the ``add_*ServiceServicer_to_server`` calls below assert correctly.
+    # connector providers. VIB-4812 collapses the hand-wiring into a single
+    # ``capability_providers(GatewayServicerCapability)`` loop in
+    # ``server.py``. VIB-4813 further relocates the Polymarket proto into
+    # the connector's own module, so the polymarket provider binds
+    # ``polymarket_pb2_grpc`` (NOT ``gateway_pb2_grpc``). We point both
+    # provider-bound symbols at the same MagicMock so the
+    # ``add_*ServiceServicer_to_server`` assertions below work uniformly.
     monkeypatch.setattr("almanak.connectors.enso.gateway.provider.gateway_pb2_grpc", mock_pb2_grpc)
-    monkeypatch.setattr("almanak.connectors.polymarket.gateway.provider.gateway_pb2_grpc", mock_pb2_grpc)
+    monkeypatch.setattr(
+        "almanak.connectors.polymarket.gateway.provider.polymarket_pb2_grpc",
+        mock_pb2_grpc,
+    )
 
     reflection_enable = MagicMock()
     monkeypatch.setattr("almanak.gateway.server.reflection.enable_server_reflection", reflection_enable)
@@ -121,6 +128,9 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
 
     # Servicer classes — replace with MagicMock so construction never touches
     # the network (e.g. ExecutionServiceServicer spins up aiohttp sessions).
+    # VIB-4812: Polymarket + Enso servicers are no longer imported by
+    # ``server.py`` itself — they are constructed inside their respective
+    # connector providers. Their MagicMock patches live below.
     for cls_name in (
         "ExecutionServiceServicer",
         "MarketServiceServicer",
@@ -131,8 +141,6 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
         "DashboardServiceServicer",
         "FundingRateServiceServicer",
         "SimulationServiceServicer",
-        "PolymarketServiceServicer",
-        "EnsoServiceServicer",
         "TokenServiceServicer",
         "LifecycleServiceServicer",
     ):

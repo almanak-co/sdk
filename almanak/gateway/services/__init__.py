@@ -10,23 +10,26 @@ This package contains the gRPC service implementations for the gateway:
 - DashboardService: Operator dashboard data access
 - FundingRateService: Perpetual funding rate data
 - SimulationService: Transaction simulation via Alchemy/Tenderly
-- PolymarketService: Polymarket CLOB API proxy
 - PoolAnalyticsService: Off-chain pool analytics — TVL / volume / fee APR (VIB-4727)
 - PoolHistoryService: Off-chain pool history time-series (VIB-4728; POOL-2 skeleton)
-- EnsoService: Enso Finance routing API proxy
 - TokenService: Unified token resolution and on-chain metadata discovery
 - LifecycleService: Agent state and command management (V2 deployment)
 - TeardownService: Hosted teardown state access through the gateway boundary
 - PositionService: On-chain reconciliation of position_registry (T24 / VIB-4210)
+
+Connector-owned servicers (e.g. ``PolymarketServiceServicer``,
+``EnsoServiceServicer``) live in
+``almanak.connectors.<protocol>.gateway.service`` and are discovered at
+gateway boot via ``GATEWAY_REGISTRY``. They are NOT re-exported from
+this package — import them directly from their connector module.
 """
 
-# VIB-4810: Enso + Polymarket servicers moved to their respective connector
-# folders (`almanak.connectors.<protocol>.gateway.service`). Re-exported here
-# so existing imports of ``*ServiceServicer`` from ``almanak.gateway.services``
-# keep working until Phase 4 collapses ``server.py`` to a registry-driven
-# loop and the re-exports can be dropped.
-from almanak.connectors.enso.gateway.service import EnsoServiceServicer
-from almanak.connectors.polymarket.gateway.service import PolymarketServiceServicer
+# VIB-4810 / VIB-4812: Enso + Polymarket servicers live in their respective
+# connector folders (``almanak.connectors.<protocol>.gateway.service``) and
+# are discovered via ``GATEWAY_REGISTRY`` at gateway boot. The re-exports
+# previously kept here as a backwards-compat shim were dropped in VIB-4813
+# now that ``server.py`` is registry-driven and there are no in-repo
+# consumers importing connector servicers from ``almanak.gateway.services``.
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
 from almanak.gateway.services.funding_rate_service import FundingRateServiceServicer
@@ -45,7 +48,6 @@ from almanak.gateway.services.token_service import TokenServiceServicer
 
 __all__ = [
     "DashboardServiceServicer",
-    "EnsoServiceServicer",
     "MarketServiceServicer",
     "PositionServiceServicer",
     "StateServiceServicer",
@@ -57,7 +59,6 @@ __all__ = [
     "IntegrationServiceServicer",
     "FundingRateServiceServicer",
     "SimulationServiceServicer",
-    "PolymarketServiceServicer",
     "PoolAnalyticsServiceServicer",
     "PoolHistoryServiceServicer",
     "TokenServiceServicer",

@@ -6,6 +6,7 @@ access to external services or credentials.
 """
 
 import asyncio
+import inspect
 import logging
 import signal
 from concurrent import futures
@@ -37,14 +38,12 @@ from almanak.gateway.metrics import MetricsServer
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services import (
     DashboardServiceServicer,
-    EnsoServiceServicer,
     ExecutionServiceServicer,
     FundingRateServiceServicer,
     IntegrationServiceServicer,
     LifecycleServiceServicer,
     MarketServiceServicer,
     ObserveServiceServicer,
-    PolymarketServiceServicer,
     PoolAnalyticsServiceServicer,
     PoolHistoryServiceServicer,
     PositionServiceServicer,
@@ -222,8 +221,12 @@ class GatewayServer:
         self._observe_servicer: ObserveServiceServicer | None = None
         self._funding_rate_servicer: FundingRateServiceServicer | None = None
         self._simulation_servicer: SimulationServiceServicer | None = None
-        self._polymarket_servicer: PolymarketServiceServicer | None = None
-        self._enso_servicer: EnsoServiceServicer | None = None
+        # VIB-4812 — connector-owned servicers (e.g. Polymarket, Enso) are
+        # discovered via ``GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability)``
+        # in ``_register_services``. The constructed servicer instances are
+        # appended to ``self._connector_servicers`` so the shutdown loop can
+        # call ``close()`` on each without naming individual providers.
+        self._connector_servicers: list[Any] = []
         # VIB-4727: pool analytics (off-chain DefiLlama / GeckoTerminal egress
         # moved from the framework PoolAnalyticsReader to the gateway).
         self._pool_analytics_servicer: PoolAnalyticsServiceServicer | None = None
@@ -463,40 +466,38 @@ class GatewayServer:
         self._simulation_servicer = SimulationServiceServicer(self.settings)
         gateway_pb2_grpc.add_SimulationServiceServicer_to_server(self._simulation_servicer, self.server)
 
-        # VIB-4810 — Polymarket + Enso servicers are owned by their respective
-        # connectors (`almanak.connectors.<protocol>.gateway.provider`). They
-        # are instantiated through GATEWAY_REGISTRY here; their
-        # `register_servicers` methods perform the existing
-        # `gateway_pb2_grpc.add_*ServiceServicer_to_server` calls. Phase 4
-        # collapses this block into a single loop over
-        # ``capability_providers(GatewayServicerCapability)``.
+        # VIB-4812 — every connector that ships its own gRPC servicer
+        # advertises ``GatewayServicerCapability`` on its
+        # ``almanak.connectors.<protocol>.gateway.provider`` module. The
+        # registry is the discovery surface: ``server.py`` knows nothing
+        # about which protocols are connector-owned. Adding a new
+        # connector-owned servicer is a one-line registration in
+        # ``almanak.connectors._gateway_registry`` plus the connector's own
+        # provider module — no edit here.
+        #
+        # Each provider's ``register_servicers(server, settings)`` performs
+        # the underlying ``gateway_pb2_grpc.add_<X>ServiceServicer_to_server``
+        # call and stashes the constructed servicer on itself (exposed via
+        # ``provider.servicer``). We collect those references so the
+        # shutdown loop can call ``close()`` on each without naming
+        # individual protocols.
         from almanak.connectors._base.gateway_capabilities import (
             GatewayServicerCapability,
         )
-        from almanak.connectors._base.types import ProtocolName
         from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 
-        polymarket_provider = GATEWAY_REGISTRY.get(ProtocolName("polymarket"))
-        if not isinstance(polymarket_provider, GatewayServicerCapability):
-            # ``assert`` would be stripped under ``python -O`` and silently
-            # boot the gateway without the PolymarketService wired up.
-            # Refuse to start instead — there is no working fallback.
-            raise RuntimeError(
-                "PolymarketGatewayConnector missing from GATEWAY_REGISTRY or does "
-                "not implement GatewayServicerCapability — refusing to boot."
-            )
-        polymarket_provider.register_servicers(self.server, self.settings)
-        # Keep the named handle for the shutdown iteration loop below.
-        self._polymarket_servicer = polymarket_provider.servicer
-
-        enso_provider = GATEWAY_REGISTRY.get(ProtocolName("enso"))
-        if not isinstance(enso_provider, GatewayServicerCapability):
-            raise RuntimeError(
-                "EnsoGatewayConnector missing from GATEWAY_REGISTRY or does not "
-                "implement GatewayServicerCapability — refusing to boot."
-            )
-        enso_provider.register_servicers(self.server, self.settings)
-        self._enso_servicer = enso_provider.servicer
+        self._connector_servicers = []
+        # ``type-abstract``: passing a runtime-checkable Protocol class is the
+        # documented usage of ``capability_providers``, but mypy treats every
+        # Protocol as abstract by default. The runtime check is correct.
+        for provider in GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability):  # type: ignore[type-abstract]
+            provider.register_servicers(self.server, self.settings)
+            # ``servicer`` is part of the GatewayServicerCapability contract
+            # (declared on the Protocol). ``None`` is legitimate but rare —
+            # means the connector intentionally exposed no concrete
+            # servicer for shutdown management.
+            if provider.servicer is not None:
+                self._connector_servicers.append(provider.servicer)
 
         # VIB-4727: pool analytics service. Owns the HTTP egress to
         # DefiLlama / GeckoTerminal so strategy containers do not.
@@ -542,7 +543,12 @@ class GatewayServer:
         self._dashboard_servicer.position_servicer = self._position_servicer
 
         logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
-        logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
+        logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation")
+        if self._connector_servicers:
+            logger.debug(
+                "Registered %d connector-owned servicer(s) via GATEWAY_REGISTRY",
+                len(self._connector_servicers),
+            )
         logger.debug("Registered Dashboard, Token, Lifecycle, Teardown, and Position services")
 
     # ------------------------------------------------------------------
@@ -698,20 +704,49 @@ class GatewayServer:
         # Note: _lifecycle_servicer is excluded -- it delegates to the
         # LifecycleStore singleton whose lifecycle is managed via
         # reset_lifecycle_store() and owns no HTTP sessions.
-        for servicer in (
+        gateway_owned_servicers: tuple[Any, ...] = (
             self._market_servicer,
             self._rpc_servicer,
             self._integration_servicer,
             self._observe_servicer,
             self._funding_rate_servicer,
             self._simulation_servicer,
-            self._polymarket_servicer,
-            self._enso_servicer,
             self._pool_analytics_servicer,
             self._token_servicer,
-        ):
-            if servicer:
-                await servicer.close()
+        )
+        # VIB-4812: connector-owned servicers (Polymarket, Enso, …) are
+        # discovered via ``GATEWAY_REGISTRY`` at boot and accumulated on
+        # ``self._connector_servicers``. Adding a new connector-owned
+        # servicer requires no edit here. The capability contract
+        # (``GatewayServicerCapability``) mandates only ``register_servicers``;
+        # ``close()`` is therefore best-effort for the connector-owned slice —
+        # a future connector whose servicer holds no aiohttp / web3 resources
+        # may legitimately not implement it.
+        #
+        # ``close()`` may be sync or async (gateway-owned helpers under
+        # ``timeline/store.py``, ``registry/store.py`` and ``lifecycle/`` are
+        # synchronous; aiohttp / web3-backed servicers are coroutines).
+        # Inspect the return value rather than committing to ``await`` so a
+        # future sync-close connector doesn't crash shutdown with ``TypeError:
+        # object NoneType can't be used in 'await' expression``. Any error
+        # from one ``close()`` is logged and shutdown continues with the
+        # remaining servicers — losing a single connector's teardown is
+        # better than stranding the rest.
+        for servicer in (*gateway_owned_servicers, *self._connector_servicers):
+            if not servicer:
+                continue
+            close_fn = getattr(servicer, "close", None)
+            if close_fn is None:
+                continue
+            try:
+                result = close_fn()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception(
+                    "Error closing servicer %s during shutdown",
+                    type(servicer).__qualname__,
+                )
         # Allow aiohttp's underlying connectors to finalize cleanup.
         # Without this yield, session.__del__ fires the "Unclosed client session"
         # warning before the TCP transport has been torn down (VIB-1832).

@@ -1,0 +1,466 @@
+syntax = "proto3";
+
+// VIB-4813 (Phase 5 of VIB-4808): Polymarket-specific RPCs relocated
+// from ``almanak/gateway/proto/gateway.proto`` so the gateway proto
+// layer no longer names individual connectors. The wire-level service
+// name is unchanged — ``package`` is intentionally still
+// ``almanak.gateway.proto`` so that the fully-qualified gRPC method
+// paths (``/almanak.gateway.proto.PolymarketService/...``) remain
+// byte-identical to the pre-move version. Only the source-of-truth
+// proto file and the generated Python module location moved.
+package almanak.gateway.proto;
+
+// =============================================================================
+// PolymarketService - Polymarket CLOB API proxy
+// =============================================================================
+
+service PolymarketService {
+  // Market data endpoints
+  rpc GetMarket(PolymarketGetMarketRequest) returns (PolymarketMarketResponse);
+  rpc GetMarkets(PolymarketGetMarketsRequest) returns (PolymarketMarketsResponse);
+  rpc GetSimplifiedMarkets(PolymarketGetSimplifiedMarketsRequest) returns (PolymarketSimplifiedMarketsResponse);
+
+  // Order book and pricing
+  rpc GetOrderBook(PolymarketOrderBookRequest) returns (PolymarketOrderBookResponse);
+  rpc GetMidpoint(PolymarketMidpointRequest) returns (PolymarketMidpointResponse);
+  rpc GetPrice(PolymarketPriceRequest) returns (PolymarketPriceResponse);
+  rpc GetSpread(PolymarketSpreadRequest) returns (PolymarketSpreadResponse);
+  rpc GetTickSize(PolymarketTickSizeRequest) returns (PolymarketTickSizeResponse);
+
+  // Order management (requires credentials - handled by gateway)
+  rpc CreateAndPostOrder(PolymarketCreateOrderRequest) returns (PolymarketOrderResponse);
+  rpc CreateAndPostMarketOrder(PolymarketMarketOrderRequest) returns (PolymarketOrderResponse);
+  rpc CancelOrder(PolymarketCancelOrderRequest) returns (PolymarketCancelResponse);
+  rpc CancelOrders(PolymarketCancelOrdersRequest) returns (PolymarketCancelResponse);
+  rpc CancelAll(PolymarketCancelAllRequest) returns (PolymarketCancelResponse);
+
+  // Position and trade queries
+  rpc GetPositions(PolymarketGetPositionsRequest) returns (PolymarketPositionsResponse);
+  rpc GetOpenOrders(PolymarketGetOpenOrdersRequest) returns (PolymarketOpenOrdersResponse);
+  rpc GetTradesHistory(PolymarketGetTradesRequest) returns (PolymarketTradesResponse);
+  rpc GetOrder(PolymarketGetOrderRequest) returns (PolymarketOrderInfoResponse);
+
+  // Historical data
+  rpc GetPriceHistory(PolymarketGetPriceHistoryRequest) returns (PolymarketPriceHistoryResponse);
+  // ``GetTradeTape`` (NOT ``GetTrades``) intentionally avoids colliding with
+  // the existing ``GetTradesHistory`` RPC above. The two have different
+  // semantics: ``GetTradesHistory`` is the gateway-managed wallet's own fills
+  // (authenticated /trades), while ``GetTradeTape`` is the public market-wide
+  // trade tape (authenticated /data/trades, optional token filter).
+  rpc GetTradeTape(PolymarketGetTradeTapeRequest) returns (PolymarketTradeTapeResponse);
+
+  // Balance queries
+  rpc GetBalanceAllowance(PolymarketBalanceAllowanceRequest) returns (PolymarketBalanceAllowanceResponse);
+}
+
+// =============================================================================
+// Polymarket Market Data Messages
+// =============================================================================
+
+message PolymarketGetMarketRequest {
+  string condition_id = 1;    // Backward-compatible alias for market ID
+  string slug = 2;            // Optional market slug
+}
+
+message PolymarketMarketResponse {
+  string condition_id = 1;
+  string question_id = 2;
+  repeated string tokens = 3;           // Token IDs for outcomes
+  string rewards_daily_rate = 4;
+  string rewards_min_size = 5;
+  string rewards_max_spread = 6;
+  bool active = 7;
+  bool closed = 8;
+  bool accepting_orders = 9;
+  string accepting_order_timestamp = 10;
+  string minimum_order_size = 11;
+  string minimum_tick_size = 12;
+  bool success = 13;
+  string error = 14;
+  string market_id = 15;
+  string question = 16;
+  string slug = 17;
+  repeated string outcomes = 18;
+  repeated string outcome_prices = 19;
+  repeated string clob_token_ids = 20;
+  string volume = 21;
+  string volume_24hr = 22;
+  string liquidity = 23;
+  string end_date = 24;
+  bool enable_order_book = 25;
+  string maker_base_fee_bps = 26;
+  string taker_base_fee_bps = 27;
+  string best_bid = 28;
+  string best_ask = 29;
+  string last_trade_price = 30;
+  string event_id = 31;
+  string event_slug = 32;
+  string group_slug = 33;
+  repeated string tags = 34;
+  string raw_json = 35;       // Full Gamma market payload
+}
+
+message PolymarketGetMarketsRequest {
+  string next_cursor = 1;     // Pagination cursor (optional)
+  string filters_json = 2;    // JSON-encoded MarketFilters payload
+}
+
+message PolymarketMarketsResponse {
+  repeated PolymarketMarketResponse markets = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message PolymarketGetSimplifiedMarketsRequest {
+  string next_cursor = 1;     // Pagination cursor (optional)
+}
+
+message PolymarketSimplifiedMarket {
+  string condition_id = 1;
+  repeated string tokens = 2;
+  string min_incentive_size = 3;
+  string max_incentive_spread = 4;
+  bool active = 5;
+  bool closed = 6;
+}
+
+message PolymarketSimplifiedMarketsResponse {
+  repeated PolymarketSimplifiedMarket markets = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// Polymarket Order Book Messages
+// =============================================================================
+
+message PolymarketOrderBookRequest {
+  string token_id = 1;        // Token ID for the outcome
+}
+
+message PolymarketOrderBookLevel {
+  string price = 1;           // Price level
+  string size = 2;            // Size at this level
+}
+
+message PolymarketOrderBookResponse {
+  string market = 1;          // Token ID
+  string asset_id = 2;
+  string hash = 3;
+  int64 timestamp = 4;
+  repeated PolymarketOrderBookLevel bids = 5;
+  repeated PolymarketOrderBookLevel asks = 6;
+  bool success = 7;
+  string error = 8;
+}
+
+message PolymarketMidpointRequest {
+  string token_id = 1;
+}
+
+message PolymarketMidpointResponse {
+  string midpoint = 1;        // Midpoint price as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketPriceRequest {
+  string token_id = 1;
+  string side = 2;            // "BUY" or "SELL"
+}
+
+message PolymarketPriceResponse {
+  string price = 1;           // Best price as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketSpreadRequest {
+  string token_id = 1;
+}
+
+message PolymarketSpreadResponse {
+  string spread = 1;          // Spread as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketTickSizeRequest {
+  string token_id = 1;
+}
+
+message PolymarketTickSizeResponse {
+  string tick_size = 1;       // Minimum tick size
+  bool success = 2;
+  string error = 3;
+}
+
+// =============================================================================
+// Polymarket Order Messages
+// =============================================================================
+
+message PolymarketCreateOrderRequest {
+  string token_id = 1;        // Token ID for the outcome
+  string price = 2;           // Limit price as decimal string
+  string size = 3;            // Order size as decimal string
+  string side = 4;            // "BUY" or "SELL"
+  string fee_rate_bps = 5;    // Fee rate in basis points (optional, default "0")
+  int64 expiration = 6;       // Order expiration timestamp (optional, 0 for no expiration)
+  string nonce = 7;           // Optional nonce (auto-generated if empty)
+  string time_in_force = 8;   // "GTC", "FOK", "GTD" (optional, default "GTC")
+}
+
+message PolymarketMarketOrderRequest {
+  string token_id = 1;
+  string amount = 2;          // USDC amount for buy, token amount for sell
+  string side = 3;            // "BUY" or "SELL"
+  string fee_rate_bps = 4;    // Fee rate in basis points (optional)
+  int64 expiration = 5;       // Order expiration timestamp (optional)
+  string nonce = 6;           // Optional nonce
+  string worst_price = 7;     // Optional worst acceptable price
+}
+
+message PolymarketOrderResponse {
+  string order_id = 1;
+  string status = 2;          // "LIVE", "MATCHED", "CANCELLED", etc.
+  string size_matched = 3;
+  string transact_time = 4;
+  bool success = 5;
+  string error = 6;
+  string error_code = 7;
+  string price = 8;
+  string size = 9;
+  string avg_fill_price = 10;
+  string created_at = 11;
+  // VIB-3710: on-chain setup transactions submitted by _ensure_wallet_ready
+  // (token approvals + source-asset wrap to pUSD) before this order. Empty
+  // when allowances were already in place AND no wrap was needed. Populated
+  // exactly once per order — drained server-side after each response is built
+  // so the next order does not double-count the same gas spend.
+  repeated PolymarketSetupTx setup_txs = 12;
+  // VIB-3710: pUSD fee charged by the Polymarket operator at match time.
+  // Decimal string in pUSD (6-decimal) human units, e.g. "0.012345". Empty
+  // string when the order did not match (no fee yet) or when the response
+  // body did not carry an explicit fee field. Distinct from any signed-order
+  // fee — V2 fees are operator-set at match time and are NOT part of the
+  // EIP-712 payload.
+  string fee_pusd = 13;
+}
+
+// VIB-3710: per-tx record of a Polymarket V2 setup transaction (token
+// approval or pUSD wrap) submitted by the gateway before an order. The
+// strategy container uses these to attribute MATIC gas spend to the
+// position whose first BUY triggered the setup.
+message PolymarketSetupTx {
+  string tx_hash = 1;
+  string description = 2;          // e.g. "Approve pUSD → CTF V2 exchange"
+  uint64 gas_used = 3;
+  string gas_price_wei = 4;        // Decimal string for precision
+  string total_cost_wei = 5;       // gas_used * gas_price (Decimal string)
+}
+
+message PolymarketCancelOrderRequest {
+  string order_id = 1;
+}
+
+message PolymarketCancelOrdersRequest {
+  repeated string order_ids = 1;
+}
+
+message PolymarketCancelAllRequest {
+  string market_id = 1;       // Optional: cancel only for specific market
+  string asset_id = 2;        // Optional: cancel only for specific asset
+}
+
+message PolymarketCancelResponse {
+  repeated string canceled = 1;
+  repeated string not_canceled = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// Polymarket Position and Trade Messages
+// =============================================================================
+
+message PolymarketGetPositionsRequest {
+  // Uses wallet address from gateway credentials
+}
+
+message PolymarketPosition {
+  string asset = 1;           // Token ID
+  string condition_id = 2;
+  string size = 3;
+  string avg_price = 4;
+  string realized_pnl = 5;
+  string cur_price = 6;
+  string market_id = 7;
+  string token_id = 8;
+  string outcome = 9;
+  string market_question = 10;
+}
+
+message PolymarketPositionsResponse {
+  repeated PolymarketPosition positions = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketGetOpenOrdersRequest {
+  string market_id = 1;       // Optional: filter by market
+  string asset_id = 2;        // Optional: filter by asset
+}
+
+message PolymarketOpenOrder {
+  string order_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string original_size = 6;
+  string size_matched = 7;
+  string outcome = 8;
+  string status = 9;
+  string expiration = 10;
+  string created_at = 11;
+}
+
+message PolymarketOpenOrdersResponse {
+  repeated PolymarketOpenOrder orders = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketGetTradesRequest {
+  string market_id = 1;       // Optional: filter by market
+  string asset_id = 2;        // Optional: filter by asset
+  int32 limit = 3;            // Optional: limit results
+  string before = 4;          // Optional: pagination cursor
+  string after = 5;           // Optional: pagination cursor
+}
+
+message PolymarketTrade {
+  string trade_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string size = 6;
+  string fee_rate_bps = 7;
+  string status = 8;
+  string match_time = 9;
+  string transaction_hash = 10;
+  string bucket_index = 11;
+}
+
+message PolymarketTradesResponse {
+  repeated PolymarketTrade trades = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message PolymarketGetOrderRequest {
+  string order_id = 1;
+}
+
+message PolymarketOrderInfoResponse {
+  string order_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string original_size = 6;
+  string size_matched = 7;
+  string status = 8;
+  string outcome = 9;
+  string owner = 10;
+  string expiration = 11;
+  string created_at = 12;
+  string associate_trades_json = 13;  // JSON array of associated trades
+  bool success = 14;
+  string error = 15;
+}
+
+// =============================================================================
+// Polymarket Balance Messages
+// =============================================================================
+
+message PolymarketBalanceAllowanceRequest {
+  string asset_type = 1;      // "COLLATERAL" or "CONDITIONAL"
+  string token_id = 2;        // Required for CONDITIONAL type
+}
+
+message PolymarketBalanceAllowanceResponse {
+  string balance = 1;
+  string allowance = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// Polymarket Historical Data Messages
+// =============================================================================
+//
+// ``GetPriceHistory`` proxies the public CLOB ``/prices-history`` endpoint.
+// Either ``interval`` (predefined: 1m/1h/6h/1d/1w/max) or
+// ``start_ts``+``end_ts`` (custom Unix-second range) may be provided — they
+// are mutually exclusive at the source endpoint, validated server-side.
+// ``fidelity`` (resolution in minutes) is optional in either mode.
+message PolymarketGetPriceHistoryRequest {
+  string token_id = 1;        // CLOB token id (YES or NO outcome)
+  string interval = 2;        // Optional: 1m / 1h / 6h / 1d / 1w / max
+  int64 start_ts = 3;         // Optional: Unix seconds, requires end_ts
+  int64 end_ts = 4;           // Optional: Unix seconds, requires start_ts
+  int32 fidelity = 5;         // Optional: minute-resolution buckets
+}
+
+// One CLOB ``/prices-history`` point. Polymarket returns ``t`` (Unix seconds)
+// and ``p`` (probability 0.0-1.0); we mirror them as int64 + string-decimal.
+message PolymarketHistoricalPrice {
+  int64 timestamp = 1;        // Unix seconds (UTC)
+  string price = 2;           // Decimal string (probability 0.0-1.0)
+}
+
+message PolymarketPriceHistoryResponse {
+  string token_id = 1;
+  string interval = 2;        // Echo of the resolved interval ("custom" if range)
+  repeated PolymarketHistoricalPrice prices = 3;
+  int64 start_time = 4;       // Unix seconds of first price (0 if empty)
+  int64 end_time = 5;         // Unix seconds of last price (0 if empty)
+  bool success = 6;
+  string error = 7;
+}
+
+// ``GetTradeTape`` proxies the authenticated CLOB ``/data/trades`` endpoint.
+// ``token_id`` is optional (omit for market-wide tape). ``limit`` is capped
+// at 500 by the upstream and defaults to 100 when zero.
+message PolymarketGetTradeTapeRequest {
+  string token_id = 1;        // Optional: filter trades by CLOB token id
+  int32 limit = 2;             // Default 100, capped at 500 server-side
+}
+
+// One trade from the tape. Mirrors ``HistoricalTrade`` model fields plus
+// any market/asset metadata the upstream returns (kept for compatibility
+// with future provider-side enrichment).
+message PolymarketHistoricalTrade {
+  string id = 1;              // Trade id (sometimes ``tradeId`` upstream)
+  string token_id = 2;        // CLOB token id
+  string side = 3;            // "BUY" or "SELL"
+  string price = 4;           // Decimal string
+  string size = 5;            // Decimal string
+  int64 timestamp = 6;        // Unix seconds (UTC)
+  string maker = 7;           // Optional maker address
+  string taker = 8;           // Optional taker address
+  string market_id = 9;       // Optional condition / market id when present
+  string asset_id = 10;       // Optional asset id (alias for token_id upstream)
+  string outcome = 11;        // Optional "YES"/"NO" if upstream tags it
+}
+
+message PolymarketTradeTapeResponse {
+  repeated PolymarketHistoricalTrade trades = 1;
+  bool success = 2;
+  string error = 3;
+}

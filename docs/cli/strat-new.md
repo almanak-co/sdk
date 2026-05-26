@@ -1,17 +1,27 @@
 
 # strat new
 
-Create a new v2 IntentStrategy from template.
+Create a new strategy from template.
 
-This creates a self-contained Python project using the v2 intent-based framework with:
-- pyproject.toml: Dependencies + [tool.almanak] metadata
-- strategy.py: Main strategy with decide() method
-- config.json: Runtime configuration
-- .venv/ and uv.lock: Per-strategy virtual environment (created by uv sync)
-- .gitignore: Git ignore rules
-- .python-version: Python version pin (3.12)
-- AGENTS.md: Per-strategy AI agent guide
-- tests/: Test scaffolding
+    
+    This scaffolds a strategy project with:
+    - strategy.py: Main strategy with decide() method
+    - config.json: Runtime configuration
+    - tests/: Test scaffolding
+
+    
+    Templates:
+      blank          Minimal starting point for custom implementations
+      ta_swap        Technical analysis swap (RSI, Bollinger, or combined)
+      dynamic_lp     Price-based LP range management
+      lending_loop   Supply/borrow leverage loop (Aave V3)
+      basis_trade    Spot+perp funding rate arbitrage (GMX V2)
+      vault_yield    Vault deposit/redeem yield farming (MetaMorpho)
+      copy_trader    Copy trading from leader wallets
+      perps          Perpetual futures with TP/SL (GMX V2)
+      multi_step     Atomic multi-step via IntentSequence
+      staking        Liquid staking (Lido)
+    
 
 ## Usage
 
@@ -19,33 +29,42 @@ This creates a self-contained Python project using the v2 intent-based framework
 Usage: almanak strat new [OPTIONS]
 ```
 
+## Arguments
+
+
 ## Options
 
 * `name`:
     * Type: STRING
     * Default: `None`
-    * Usage: `--name`, `-n`
+    * Usage: `--name
+-n`
     Name for the new strategy. If not provided, will prompt interactively.
+
 
 * `working_dir`:
     * Type: `Path`
     * Default: `None`
-    * Usage: `--working-dir`, `-o`
+    * Usage: `--working-dir
+-o`
     Output directory for the new strategy. Defaults to current directory.
 
+
 * `template`:
-    * Type: Choice
-    * Choices: `blank`, `dynamic_lp`, `mean_reversion`, `basis_trade`, `lending_loop`
+    * Type: Choice(['blank', 'ta_swap', 'dynamic_lp', 'lending_loop', 'basis_trade', 'vault_yield', 'copy_trader', 'perps', 'multi_step', 'staking'])
     * Default: `blank`
-    * Usage: `--template`, `-t`
-    Strategy template to use.
+    * Usage: `--template
+-t`
+    Strategy template to use (default: blank)
+
 
 * `chain`:
-    * Type: Choice
-    * Choices: `ethereum`, `arbitrum`, `optimism`, `polygon`, `base`, `avalanche`
+    * Type: Choice(['ethereum', 'arbitrum', 'optimism', 'polygon', 'base', 'avalanche', 'bsc', 'sonic', 'plasma', 'blast', 'mantle', 'berachain', 'solana', 'monad'])
     * Default: `arbitrum`
-    * Usage: `--chain`, `-c`
-    Target blockchain network.
+    * Usage: `--chain
+-c`
+    Target blockchain network (default: arbitrum)
+
 
 * `help`:
     * Type: BOOL
@@ -53,59 +72,41 @@ Usage: almanak strat new [OPTIONS]
     * Usage: `--help`
     Show this message and exit.
 
-## Templates
-
-| Template | Description | Protocol |
-|----------|-------------|----------|
-| `blank` | Minimal template for custom implementations | custom |
-| `mean_reversion` | RSI-based trading strategy | Uniswap V3 |
-| `dynamic_lp` | Volatility-based LP strategy | Uniswap V3 |
-| `basis_trade` | Spot+perp funding arbitrage | GMX V2 |
-| `lending_loop` | Aave/Morpho leverage looping | Aave V3 |
 
 ## CLI Help
 
 ```
 Usage: almanak strat new [OPTIONS]
 
-  Create a new v2 IntentStrategy from template.
+  Create a new strategy from template.
 
-  This creates a self-contained Python project with:
-  - pyproject.toml: Dependencies + [tool.almanak] metadata
+  This scaffolds a strategy project with:
   - strategy.py: Main strategy with decide() method
   - config.json: Runtime configuration
-  - .venv/ and uv.lock: Virtual environment (via uv sync)
-  - .gitignore: Git ignore rules
-  - .python-version: Python version pin (3.12)
-  - AGENTS.md: Per-strategy AI agent guide
   - tests/: Test scaffolding
 
   Templates:
-  - blank: Minimal strategy for custom implementations
-  - dynamic_lp: Volatility-based LP strategy
-  - mean_reversion: RSI-based trading strategy
-  - basis_trade: Spot+perp funding arbitrage
-  - lending_loop: Aave/Morpho leverage looping
+    blank          Minimal starting point for custom implementations
+    ta_swap        Technical analysis swap (RSI, Bollinger, or combined)
+    dynamic_lp     Price-based LP range management
+    lending_loop   Supply/borrow leverage loop (Aave V3)
+    basis_trade    Spot+perp funding rate arbitrage (GMX V2)
+    vault_yield    Vault deposit/redeem yield farming (MetaMorpho)
+    copy_trader    Copy trading from leader wallets
+    perps          Perpetual futures with TP/SL (GMX V2)
+    multi_step     Atomic multi-step via IntentSequence
+    staking        Liquid staking (Lido)
 
 Options:
-  -n, --name TEXT         Name for the new strategy.
-  -o, --working-dir PATH  Output directory for the new strategy.
-  -t, --template [blank|dynamic_lp|mean_reversion|basis_trade|lending_loop]
-                           Strategy template to use (default: blank).
-  -c, --chain [ethereum|arbitrum|optimism|polygon|base|avalanche]
-                           Target blockchain network (default: arbitrum).
-  --help                   Show this message and exit.
+  -n, --name TEXT                 Name for the new strategy. If not provided,
+                                  will prompt interactively.
+  -o, --working-dir PATH          Output directory for the new strategy.
+                                  Defaults to current directory.
+  -t, --template [blank|ta_swap|dynamic_lp|lending_loop|basis_trade|vault_yield|copy_trader|perps|multi_step|staking]
+                                  Strategy template to use (default: blank)
+  -c, --chain [ethereum|arbitrum|optimism|polygon|base|avalanche|bsc|sonic|plasma|blast|mantle|berachain|solana|monad]
+                                  Target blockchain network (default:
+                                  arbitrum)
+  --help                          Show this message and exit.
 ```
 
-## Examples
-
-```bash
-# Interactive (prompts for name)
-almanak strat new
-
-# Specify all options
-almanak strat new --name my_strategy --template mean_reversion --chain arbitrum
-
-# Short form
-almanak strat new -n my_lp -t dynamic_lp -c ethereum -o ./strategies/my_lp
-```

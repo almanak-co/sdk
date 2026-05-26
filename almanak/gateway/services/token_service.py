@@ -462,64 +462,58 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         )
 
     # ------------------------------------------------------------------
-    # Protocol lookup accessors
+    # Protocol lookup accessor (VIB-4817)
     #
-    # Each accessor delegates to the corresponding module-level factory
-    # (``get_pendle_lookup``, ``get_aave_lookup``, ...).  Do NOT cache the
-    # returned instance on ``self`` here — the factory is idempotent and
-    # owns both the singleton lifecycle and the retry-after-failure
-    # backoff (``ProtocolTokenLookup._load`` re-enters after the backoff
-    # window passes).  A per-instance cache would pin a failed first load
-    # and silently disable retries until the gateway restarts.
+    # Single dispatcher replaces eight hand-wired ``_get_<protocol>()``
+    # methods. Each registered ``GatewayMarketLookupCapability`` provider
+    # exposes the same market-lookup-factory contract (``market_lookup()``
+    # returns the awaitable factory); the dispatcher resolves the
+    # provider via ``GATEWAY_REGISTRY.get(ProtocolName(protocol))`` and
+    # awaits the factory.
+    #
+    # The factory itself is idempotent and owns both the singleton
+    # lifecycle and the retry-after-failure backoff
+    # (``ProtocolTokenLookup._load`` re-enters after the backoff window
+    # passes). Do NOT cache the returned instance on ``self`` — a
+    # per-instance cache would pin a failed first load and silently
+    # disable retries until the gateway restarts.
     # ------------------------------------------------------------------
 
-    async def _get_jupiter(self) -> Any:
-        """Get the JupiterTokenLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.jupiter.gateway.token_lookup import get_jupiter_lookup
+    async def _get_lookup(self, protocol: str) -> Any:
+        """Get the market-lookup singleton for ``protocol`` (factory handles retry/load).
 
-        return await get_jupiter_lookup()
+        Resolves the connector via ``GATEWAY_REGISTRY``, asserts it
+        implements ``GatewayMarketLookupCapability``, and awaits the
+        factory the provider returns.
 
-    async def _get_pendle(self) -> Any:
-        """Get the PendleMarketLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.pendle.gateway.market_lookup import get_pendle_lookup
+        ``protocol`` is the registered ``ProtocolName`` for the
+        connector (e.g. ``"aave_v3"``, ``"compound_v3"``, ``"jupiter"``).
+        Unknown protocols raise ``KeyError`` — caller code is expected
+        to pass a known protocol name (the caller's surrounding method
+        is always protocol-specific, so this is a programmer error,
+        not a runtime contract violation).
+        """
+        from almanak.connectors._base.gateway_capabilities import (
+            GatewayMarketLookupCapability,
+        )
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 
-        return await get_pendle_lookup()
-
-    async def _get_aave(self) -> Any:
-        """Get the AaveMarketLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.aave_v3.gateway.market_lookup import get_aave_lookup
-
-        return await get_aave_lookup()
-
-    async def _get_morpho(self) -> Any:
-        """Get the MorphoVaultLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.morpho_vault.gateway.vault_lookup import get_morpho_lookup
-
-        return await get_morpho_lookup()
-
-    async def _get_compound(self) -> Any:
-        """Get the CompoundMarketLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.compound_v3.gateway.market_lookup import get_compound_lookup
-
-        return await get_compound_lookup()
-
-    async def _get_beefy(self) -> Any:
-        """Get the BeefyVaultLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.beefy.gateway.vault_lookup import get_beefy_lookup
-
-        return await get_beefy_lookup()
-
-    async def _get_yearn(self) -> Any:
-        """Get the YearnVaultLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.yearn.gateway.vault_lookup import get_yearn_lookup
-
-        return await get_yearn_lookup()
-
-    async def _get_fluid(self) -> Any:
-        """Get the FluidMarketLookup singleton (factory handles retry/load)."""
-        from almanak.connectors.fluid.gateway.market_lookup import get_fluid_lookup
-
-        return await get_fluid_lookup()
+        connector = GATEWAY_REGISTRY.get(ProtocolName(protocol))
+        if connector is None:
+            raise KeyError(
+                f"no gateway connector registered for protocol {protocol!r}; "
+                f"register a GatewayConnector subclass in "
+                f"almanak.connectors._gateway_registry._register_all()"
+            )
+        if not isinstance(connector, GatewayMarketLookupCapability):
+            raise TypeError(
+                f"connector for {protocol!r} does not implement "
+                f"GatewayMarketLookupCapability; declare the capability "
+                f"on {type(connector).__qualname__}"
+            )
+        factory = connector.market_lookup()
+        return await factory()
 
     async def _get_spl_lookup(self) -> SplMintLookup:
         """Get (or lazily create) the SplMintLookup for Solana.
@@ -626,7 +620,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         Returns a TokenMetadataResponse on success, None if not found.
         """
         try:
-            jupiter = await self._get_jupiter()
+            jupiter = await self._get_lookup("jupiter")
             meta = jupiter.lookup_by_symbol(symbol)
             if meta is None:
                 return None
@@ -659,7 +653,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         """
         # Stage 1: Jupiter
         try:
-            jupiter = await self._get_jupiter()
+            jupiter = await self._get_lookup("jupiter")
             meta = jupiter.lookup_by_mint(mint)
             if meta is not None:
                 resolved = self._build_resolved_from_jupiter(meta)
@@ -716,7 +710,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         misses or the Aave API is unavailable.
         """
         try:
-            aave = await self._get_aave()
+            aave = await self._get_lookup("aave_v3")
             meta = aave.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -773,7 +767,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         list for unrelated tokens like ``FRAX``.
         """
         try:
-            fluid = await self._get_fluid()
+            fluid = await self._get_lookup("fluid")
             meta = fluid.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -828,7 +822,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         misses or the ydaemon endpoint is unavailable.
         """
         try:
-            yearn = await self._get_yearn()
+            yearn = await self._get_lookup("yearn")
             meta = yearn.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -887,7 +881,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         misses or the Beefy API is unavailable.
         """
         try:
-            beefy = await self._get_beefy()
+            beefy = await self._get_lookup("beefy")
             meta = beefy.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -945,7 +939,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         misses or the aggregator is unavailable.
         """
         try:
-            compound = await self._get_compound()
+            compound = await self._get_lookup("compound_v3")
             meta = compound.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -1003,7 +997,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         misses or the Morpho API is unavailable.
         """
         try:
-            morpho = await self._get_morpho()
+            morpho = await self._get_lookup("morpho_vault")
             meta = morpho.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None
@@ -1060,7 +1054,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         or the Pendle API is unavailable.
         """
         try:
-            pendle = await self._get_pendle()
+            pendle = await self._get_lookup("pendle")
             meta = pendle.lookup_by_symbol(symbol, chain)
             if meta is None:
                 return None

@@ -20,6 +20,10 @@ import grpc
 from pydantic import BaseModel
 from web3 import AsyncHTTPProvider, AsyncWeb3
 
+from almanak.connectors._base.gateway_capabilities import (
+    GatewayFundingRateCapability,
+)
+from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils import get_rpc_url
@@ -142,23 +146,13 @@ GMX_V2_READER_ABI = [
     },
 ]
 
-# Default funding rates (fallback)
-DEFAULT_RATES = {
-    "gmx_v2": {
-        "ETH-USD": Decimal("0.000012"),
-        "BTC-USD": Decimal("0.000010"),
-        "ARB-USD": Decimal("0.000015"),
-        "LINK-USD": Decimal("0.000008"),
-        "SOL-USD": Decimal("0.000018"),
-    },
-    "hyperliquid": {
-        "ETH-USD": Decimal("0.000015"),
-        "BTC-USD": Decimal("0.000011"),
-        "ARB-USD": Decimal("0.000018"),
-        "LINK-USD": Decimal("0.000009"),
-        "SOL-USD": Decimal("0.000022"),
-    },
-}
+# Default funding rates — registry-driven (VIB-4811 / Phase 3).
+#
+# Previously a hardcoded ``DEFAULT_RATES = {"gmx_v2": {...}, "hyperliquid":
+# {...}}`` dispatch dict. Each venue's defaults now live on its own
+# connector under ``almanak/connectors/<venue>/gateway/provider.py`` and
+# implement ``GatewayFundingRateCapability``. ``_get_default_rate``
+# below queries the registry; behavior is byte-identical.
 
 # Default mark prices (fallback)
 DEFAULT_MARK_PRICES = {
@@ -270,7 +264,38 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         self._http_session: aiohttp.ClientSession | None = None
         self._web3_cache: dict[str, AsyncWeb3] = {}
 
-        logger.debug("Initialized FundingRateService")
+        # Venue → ``GatewayFundingRateCapability`` provider. Resolved
+        # once at servicer construction so the dispatch path stays
+        # O(1) (no per-request registry walk). Built from
+        # ``GATEWAY_REGISTRY.capability_providers`` so adding a new
+        # perp venue is purely a new connector registration — no edit
+        # to this file required. (VIB-4811 / Phase 3.)
+        # Venue keys are lowercased so the dispatcher (which does
+        # ``request.venue.lower()`` on incoming requests) lines up
+        # whatever case a connector's ``venue()`` returns. Duplicate
+        # venue ids across two registered connectors are a hard error —
+        # ``GATEWAY_REGISTRY.register`` only guards unique
+        # ``ProtocolName``, not unique ``venue()``. (CodeRabbit +
+        # Gemini code-review.)
+        self._funding_rate_providers: dict[str, GatewayFundingRateCapability] = {}
+        # mypy: passing a ``@runtime_checkable`` Protocol class to
+        # ``capability_providers`` trips ``type-abstract``; this is
+        # the intentional dispatcher contract.
+        for connector in GATEWAY_REGISTRY.capability_providers(GatewayFundingRateCapability):  # type: ignore[type-abstract]
+            venue = connector.venue().lower()
+            existing = self._funding_rate_providers.get(venue)
+            if existing is not None and existing is not connector:
+                raise RuntimeError(
+                    f"Duplicate funding-rate provider for venue {venue!r}: "
+                    f"{type(existing).__qualname__} vs "
+                    f"{type(connector).__qualname__}"
+                )
+            self._funding_rate_providers[venue] = connector
+
+        logger.debug(
+            "Initialized FundingRateService (venues=%s)",
+            sorted(self._funding_rate_providers.keys()),
+        )
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -298,9 +323,18 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             return None
 
     def _get_default_rate(self, venue: str, market: str) -> Decimal:
-        """Get default funding rate for a market."""
-        venue_rates = DEFAULT_RATES.get(venue.lower(), {})
-        return venue_rates.get(market, Decimal("0.00001"))
+        """Get default funding rate for a market via the capability registry.
+
+        Each perp connector publishes its own per-market default table
+        through ``GatewayFundingRateCapability.default_funding_rate``;
+        the gateway no longer carries a hardcoded venue dict. Returns
+        the historical ``Decimal("0.00001")`` fallback for unknown
+        ``(venue, market)`` pairs.
+        """
+        connector = self._funding_rate_providers.get(venue.lower())
+        if connector is None:
+            return Decimal("0.00001")
+        return connector.default_funding_rate(market)
 
     def _get_default_mark_price(self, market: str) -> Decimal:
         """Get default mark price for a market."""
@@ -494,14 +528,12 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         start_time = time.time()
 
         try:
-            if venue == "hyperliquid":
-                rate_data = await self._fetch_hyperliquid_rate(market)
-            elif venue == "gmx_v2":
-                rate_data = await self._fetch_gmx_v2_rate(market, chain)
-            else:
+            connector = self._funding_rate_providers.get(venue)
+            if connector is None:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"Unknown venue: {venue}")
                 return gateway_pb2.FundingRateResponse(success=False, error=f"Unknown venue: {venue}")
+            rate_data = await connector.fetch_funding_rate(self, market, chain)
 
             latency = time.time() - start_time
             logger.debug(
@@ -584,14 +616,15 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             return gateway_pb2.FundingRateSpreadResponse(success=False, error=str(e))
 
     async def _fetch_rate(self, venue: str, market: str, chain: str) -> FundingRateData:
-        """Fetch rate for any supported venue."""
-        if venue == "hyperliquid":
-            return await self._fetch_hyperliquid_rate(market)
-        elif venue == "gmx_v2":
-            return await self._fetch_gmx_v2_rate(market, chain)
-        else:
+        """Fetch rate for any supported venue via the capability registry."""
+        # ``_funding_rate_providers`` is lower-case keyed; normalize the
+        # incoming venue so spread-request callers that don't pre-lower
+        # the string still resolve. (Gemini code-review.)
+        connector = self._funding_rate_providers.get(venue.lower())
+        if connector is None:
             logger.error("Unknown venue requested: %s", venue)
             raise ValueError("Unknown venue")
+        return await connector.fetch_funding_rate(self, market, chain)
 
     async def close(self) -> None:
         """Close HTTP session and Web3 connections."""

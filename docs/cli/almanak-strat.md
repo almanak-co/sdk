@@ -9,6 +9,9 @@ Commands for managing strategies.
 Usage: almanak strat [OPTIONS] COMMAND [ARGS]...
 ```
 
+## Arguments
+
+
 ## Options
 
 * `help`:
@@ -29,35 +32,20 @@ Options:
   --help  Show this message and exit.
 
 Commands:
-  backtest  Backtesting commands (pnl, sweep, paper, etc.)
-  demo      Browse and copy a demo strategy to get started quickly.
-  new       Create a new v2 IntentStrategy from template.
-  run       Run a strategy from its working directory.
-  teardown  Manage strategy teardowns (close all positions safely).
+  backtest     Run backtests for Almanak strategies.
+  check        Pre-flight validation for a strategy.
+  demo         Browse and copy a demo strategy to get started quickly.
+  export       Export strategy data to CSV or JSON.
+  list         List all strategies registered with the gateway.
+  logs         Show timeline events for a strategy.
+  new          Create a new strategy from template.
+  pause        Suspend a strategy's iteration loop without closing...
+  permissions  Generate a Zodiac Roles permission manifest for a strategy.
+  pnl          Per-strategy PnL breakdown from persisted accounting data...
+  resume       Resume a previously paused strategy.
+  run          Run a strategy from its working directory.
+  status       Get detailed status of a strategy.
+  teardown     Manage strategy teardowns.
+  test         Run a force-action lifecycle test for a strategy on a...
 ```
 
-## almanak strat demo
-
-Browse and copy a working demo strategy into your directory, ready to run.
-
-### Usage
-
-```bash
-# Interactive arrow-key selection
-almanak strat demo
-
-# Copy a specific strategy by name
-almanak strat demo --name uniswap_rsi
-
-# Copy into a specific parent directory
-almanak strat demo --name aave_borrow --output-dir ./my-strategies
-
-# List available demo strategies
-almanak strat demo --list
-```
-
-### Options
-
-* `--name`, `-n`: Demo strategy name (skips interactive selection)
-* `--output-dir`, `-o`: Parent directory for the copied strategy folder (default: `.`)
-* `--list`: List available demo strategies and exit

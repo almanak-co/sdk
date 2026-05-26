@@ -95,12 +95,12 @@ def test_gateway_banner_emits_and_is_sentinel_parseable(monkeypatch, caplog):
     assert fields["sdk_version"] == "2.16.0"
 
 
-def test_cli_banner_uses_caller_override(monkeypatch, capsys):
-    """The CLI banner uses caller-supplied strategy name + version when given.
+def test_cli_banner_falls_back_to_caller_hint_in_local_mode(monkeypatch):
+    """In local mode (no env), the CLI banner uses the caller's hint.
 
-    The ``almanak strat run`` entrypoint fires this before the strategy
-    class is loaded; it derives a name from ``working_dir`` and passes it
-    in. Env-injected values should be the fallback, not the override.
+    The ``almanak strat run`` entrypoint passes the ``working_dir``
+    basename so local users still get something more informative than
+    ``unknown``.
     """
     _clear_env(monkeypatch)
 
@@ -119,31 +119,40 @@ def test_cli_banner_uses_caller_override(monkeypatch, capsys):
     assert fields["strategy_version"] == "unknown"
 
 
-def test_cli_banner_prefers_env_when_no_override(monkeypatch):
-    """When the caller does not override, env-injected values fill the banner."""
+def test_cli_banner_env_wins_over_caller_hint_in_hosted_mode(monkeypatch):
+    """In hosted V2, the deployer-injected ALMANAK_STRATEGY_NAME wins.
+
+    Regression test for v2.16.1-rc6 stage feedback: the CLI was passing
+    ``Path(working_dir).resolve().name`` which is ``"src"`` for the
+    hosted ``/app/src`` working dir. The deployer-injected env var is
+    the authoritative strategy name in hosted mode and must beat the
+    working-dir hint.
+    """
     _clear_env(monkeypatch)
     monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
     monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "deploy-456")
-    monkeypatch.setenv("ALMANAK_STRATEGY_NAME", "deployer_injected_name")
-    monkeypatch.setenv("ALMANAK_STRATEGY_VERSION", "2.0.0")
+    monkeypatch.setenv("ALMANAK_STRATEGY_NAME", "dynamic_lp_vol_rebalance")
+    monkeypatch.setenv("ALMANAK_STRATEGY_VERSION", "1.0.0")
     monkeypatch.setenv("ALMANAK_COMMIT_SHA", "deadbeef")
-    monkeypatch.setenv("ALMANAK_SDK_VERSION", "2.16.1rc5")
+    monkeypatch.setenv("ALMANAK_SDK_VERSION", "2.16.1rc6")
 
     runner = click.testing.CliRunner(mix_stderr=False)
 
     @click.command()
     def cmd():
-        emit_cli_banner()
+        # Simulate what cli.py does: pass the working-dir basename as a
+        # local-mode hint. Env-injected values must still win.
+        emit_cli_banner(strategy_name="src")
 
     result = runner.invoke(cmd)
     assert result.exit_code == 0
     sentinel_line = next(line for line in result.stdout.splitlines() if "ALMANAK_DEPLOYMENT_BANNER" in line)
     fields = dict(_SENTINEL_KV.findall(sentinel_line))
     assert fields["deployment_id"] == "deploy-456"
-    assert fields["strategy"] == "deployer_injected_name"
-    assert fields["strategy_version"] == "2.0.0"
+    assert fields["strategy"] == "dynamic_lp_vol_rebalance"  # env wins, not "src"
+    assert fields["strategy_version"] == "1.0.0"
     assert fields["commit_sha"] == "deadbeef"
-    assert fields["sdk_version"] == "2.16.1rc5"
+    assert fields["sdk_version"] == "2.16.1rc6"
 
 
 if __name__ == "__main__":

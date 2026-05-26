@@ -1336,6 +1336,14 @@ Return the current midpoint price for a token (CLOB outcome).
 rpc GetMidpoint(PolymarketMidpointRequest) returns (PolymarketMidpointResponse)
 ```
 
+### GetPrice
+
+Return the current best bid or ask price for a token, depending on the requested side.
+
+```protobuf
+rpc GetPrice(PolymarketPriceRequest) returns (PolymarketPriceResponse)
+```
+
 ### GetSimplifiedMarkets
 
 List condensed market summaries optimized for discovery flows.
@@ -1414,6 +1422,14 @@ List historical fills for the funder, with cursor pagination.
 
 ```protobuf
 rpc GetTradesHistory(PolymarketGetTradesRequest) returns (PolymarketTradesResponse)
+```
+
+### GetPositions
+
+List the funder's current Polymarket outcome-token positions.
+
+```protobuf
+rpc GetPositions(PolymarketGetPositionsRequest) returns (PolymarketPositionsResponse)
 ```
 
 ### CancelOrder

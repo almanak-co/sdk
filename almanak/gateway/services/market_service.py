@@ -959,9 +959,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Double-checked: another coroutine may have constructed while
             # we were waiting on the lock.
             if self._v4_pool_key_cache is None:
-                from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
-                    seed_canonical_pool_keys,
+                # VIB-4817 — seeding now dispatches through
+                # ``GATEWAY_REGISTRY.capability_providers(
+                # GatewayPoolKeySeedCapability)`` so the gateway no
+                # longer hardcodes a uniswap_v4 import to invoke the
+                # seed table. The cache type itself stays V4-specific
+                # — the gateway's V4 PoolKey backfill cursor lives on
+                # the cache instance.
+                from almanak.connectors._base.gateway_capabilities import (
+                    GatewayPoolKeySeedCapability,
                 )
+                from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
                 from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyCache
 
                 cache = V4PoolKeyCache(network=self.settings.network)
@@ -970,7 +978,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 # a partially-seeded cache could mis-classify a canonical
                 # pool as "not found"; doing the work before the assignment
                 # closes that window.
-                seed_canonical_pool_keys(cache)
+                # mypy: ``@runtime_checkable`` Protocol is the registry
+                # contract; see ``pool_history_service._derive_pool_history_tables``.
+                for provider in GATEWAY_REGISTRY.capability_providers(GatewayPoolKeySeedCapability):  # type: ignore[type-abstract]
+                    provider.seed_pool_keys(cache)
                 self._v4_pool_key_cache = cache
             return self._v4_pool_key_cache
 

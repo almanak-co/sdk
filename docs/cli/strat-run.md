@@ -3,8 +3,37 @@
 
 Run a strategy from its working directory.
 
-By default, a managed gateway is auto-started in the background.
-Use `--no-gateway` to connect to an existing gateway instead.
+    By default, a managed gateway is auto-started in the background.
+    Use --no-gateway to connect to an existing gateway instead.
+
+    Prerequisites:
+        - Environment variables: ALMANAK_PRIVATE_KEY, RPC_URL (or ALCHEMY_API_KEY)
+        - For anvil mode: Foundry installed (Anvil is auto-started by managed gateway)
+
+    Examples:
+
+        # Run from strategy directory (auto-starts gateway)
+        cd almanak/demo_strategies/uniswap_rsi
+        almanak strat run --once
+
+        # Run with explicit working directory
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
+
+        # Connect to an existing gateway
+        almanak strat run --no-gateway --once
+
+        # Run continuously
+        almanak strat run --interval 30
+
+        # Dry run (no transactions)
+        almanak strat run --dry-run --once
+
+        # Fresh start (clear stale state, useful for Anvil forks)
+        almanak strat run --fresh --once
+
+        # Run with live dashboard
+        almanak strat run -d almanak/demo_strategies/uniswap_lp --network anvil --dashboard
+    
 
 ## Usage
 
@@ -12,30 +41,26 @@ Use `--no-gateway` to connect to an existing gateway instead.
 Usage: almanak strat run [OPTIONS]
 ```
 
-## Prerequisites
+## Arguments
 
-- Environment variables: `ALMANAK_PRIVATE_KEY` (RPC_URL recommended; free public RPCs used if nothing is set)
-- For anvil mode: Anvil is auto-started by the managed gateway (requires Foundry installed)
 
 ## Options
 
 * `working_dir`:
     * Type: `Path`
     * Default: `.`
-    * Usage: `--working-dir`, `-d`
+    * Usage: `--working-dir
+-d`
     Working directory containing the strategy files. Defaults to the current directory.
 
-* `id`:
-    * Type: STRING
-    * Default: `None`
-    * Usage: `--id`
-    Strategy instance ID to resume a previous run.
 
 * `config_file`:
     * Type: `Path`
     * Default: `None`
-    * Usage: `--config`, `-c`
-    Path to strategy config JSON file. Auto-detected from working directory if not provided (looks for config.json, config.yaml, config.yml).
+    * Usage: `--config
+-c`
+    Path to strategy config JSON file.
+
 
 * `once`:
     * Type: BOOL
@@ -43,11 +68,14 @@ Usage: almanak strat run [OPTIONS]
     * Usage: `--once`
     Run single iteration then exit.
 
+
 * `interval`:
     * Type: INT
-    * Default: `60`
-    * Usage: `--interval`, `-i`
-    Loop interval in seconds (default: 60).
+    * Default: `None`
+    * Usage: `--interval
+-i`
+    Loop interval in seconds. Defaults to [tool.almanak.run].interval or 60.
+
 
 * `dry_run`:
     * Type: BOOL
@@ -55,38 +83,134 @@ Usage: almanak strat run [OPTIONS]
     * Usage: `--dry-run`
     Execute decide() but don't submit transactions.
 
+
+* `fresh`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--fresh`
+    Clear strategy state before running (useful for fresh Anvil forks).
+
+
 * `verbose`:
     * Type: BOOL
     * Default: `False`
-    * Usage: `--verbose`, `-v`
+    * Usage: `--verbose
+-v`
     Enable verbose output.
 
+
 * `network`:
-    * Type: Choice
-    * Choices: `mainnet`, `anvil`
+    * Type: Choice(['mainnet', 'anvil'])
     * Default: `None`
-    * Usage: `--network`, `-n`
-    Network environment: 'mainnet' for production RPC, 'anvil' for local fork. When using anvil with a managed gateway, Anvil forks are auto-started for the chains specified in the strategy config.
+    * Usage: `--network
+-n`
+    Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing. For paper trading with PnL tracking, use 'almanak strat backtest paper'.
+
 
 * `gateway_host`:
     * Type: STRING
-    * Default: `localhost`
-    * Env: `GATEWAY_HOST`
+    * Default: `127.0.0.1`
     * Usage: `--gateway-host`
-    Gateway sidecar hostname.
+    Gateway gRPC host.
+
 
 * `gateway_port`:
     * Type: INT
     * Default: `50051`
-    * Env: `GATEWAY_PORT`
     * Usage: `--gateway-port`
-    Gateway sidecar gRPC port.
+    Gateway gRPC port.
+
 
 * `no_gateway`:
     * Type: BOOL
     * Default: `False`
     * Usage: `--no-gateway`
     Do not auto-start a gateway; connect to an existing one.
+
+
+* `copy_mode`:
+    * Type: Choice(['live', 'shadow', 'replay'])
+    * Default: `None`
+    * Usage: `--copy-mode`
+    Copy-trading mode override for this run.
+
+
+* `copy_shadow`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--copy-shadow`
+    Enable copy-trading shadow mode (decisioning only, no submissions).
+
+
+* `copy_replay_file`:
+    * Type: `Path`
+    * Default: `None`
+    * Usage: `--copy-replay-file`
+    Replay file (JSON/JSONL CopySignal fixtures) for copy-trading replay mode.
+
+
+* `copy_strict`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--copy-strict`
+    Enable strict copy-trading validation and fail-closed behavior.
+
+
+* `dashboard`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--dashboard`
+    Launch live dashboard alongside strategy execution.
+
+
+* `dashboard_port`:
+    * Type: INT
+    * Default: `8501`
+    * Usage: `--dashboard-port`
+    Port to run the dashboard on (default: 8501).
+
+
+* `wallet`:
+    * Type: Choice(['default', 'isolated'])
+    * Default: `default`
+    * Usage: `--wallet`
+    Wallet mode for Anvil: 'isolated' derives a unique wallet per strategy for balance isolation.
+
+
+* `log_file`:
+    * Type: `Path`
+    * Default: `None`
+    * Usage: `--log-file`
+    Write JSON logs to this file (in addition to console output). Useful for AI agent analysis.
+
+
+* `reset_fork`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--reset-fork`
+    Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil).
+
+
+* `max_iterations`:
+    * Type: INT
+    * Default: `None`
+    * Usage: `--max-iterations`
+    Maximum number of iterations to run before exiting cleanly. Without this flag, continuous mode runs indefinitely.
+
+
+* `teardown_after`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--teardown-after`
+    After --once iteration, automatically teardown (close all positions). Useful for CI/testing to avoid accumulating stale positions on-chain.
+
+
+* `anvil_ports`:
+    * Type: STRING
+    * Default: `None`
+    * Usage: `--anvil-port`
+    Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.
+
 
 * `help`:
     * Type: BOOL
@@ -102,44 +226,90 @@ Usage: almanak strat run [OPTIONS]
 
   Run a strategy from its working directory.
 
-  By default, a managed gateway is auto-started in the background.
-  Use --no-gateway to connect to an existing gateway instead.
+  By default, a managed gateway is auto-started in the background. Use --no-
+  gateway to connect to an existing gateway instead.
 
-  Prerequisites:
-      - Environment variables: ALMANAK_PRIVATE_KEY (RPC_URL recommended; public RPCs used if unset)
-      - For anvil mode: Foundry installed (Anvil is auto-started)
+  Prerequisites:     - Environment variables: ALMANAK_PRIVATE_KEY, RPC_URL (or
+  ALCHEMY_API_KEY)     - For anvil mode: Foundry installed (Anvil is auto-
+  started by managed gateway)
 
   Examples:
 
-      # Run from strategy directory
-      cd strategies/demo/uniswap_rsi
-      almanak strat run --once
+      # Run from strategy directory (auto-starts gateway)     cd
+      almanak/demo_strategies/uniswap_rsi     almanak strat run --once
 
-      # Run with explicit working directory
-      almanak strat run -d strategies/demo/uniswap_rsi --once
+      # Run with explicit working directory     almanak strat run -d
+      almanak/demo_strategies/uniswap_rsi --once
 
-      # Run continuously
-      almanak strat run --interval 30
+      # Connect to an existing gateway     almanak strat run --no-gateway
+      --once
 
-      # Dry run (no transactions)
-      almanak strat run --dry-run --once
+      # Run continuously     almanak strat run --interval 30
 
-      # Resume a previous run
-      almanak strat run --id abc123 --once
+      # Dry run (no transactions)     almanak strat run --dry-run --once
+
+      # Fresh start (clear stale state, useful for Anvil forks)     almanak
+      strat run --fresh --once
+
+      # Run with live dashboard     almanak strat run -d
+      almanak/demo_strategies/uniswap_lp --network anvil --dashboard
 
 Options:
-  -d, --working-dir PATH  Working directory containing the strategy files.
-                           Defaults to the current directory.
-  --id TEXT                Strategy instance ID to resume a previous run.
-  -c, --config PATH        Path to strategy config JSON file.
-  --once                   Run single iteration then exit.
-  -i, --interval INTEGER   Loop interval in seconds (default: 60).
-  --dry-run                Execute decide() but don't submit transactions.
-  -v, --verbose            Enable verbose output.
-  -n, --network [mainnet|anvil]
-                           Network environment.
-  --gateway-host TEXT      Gateway sidecar hostname.
-  --gateway-port INTEGER   Gateway sidecar gRPC port.
-  --no-gateway             Do not auto-start a gateway; connect to an existing one.
-  --help                   Show this message and exit.
+  -d, --working-dir PATH          Working directory containing the strategy
+                                  files. Defaults to the current directory.
+  -c, --config PATH               Path to strategy config JSON file.
+  --once                          Run single iteration then exit.
+  -i, --interval INTEGER          Loop interval in seconds. Defaults to
+                                  [tool.almanak.run].interval or 60.
+  --dry-run                       Execute decide() but don't submit
+                                  transactions.
+  --fresh                         Clear strategy state before running (useful
+                                  for fresh Anvil forks).
+  -v, --verbose                   Enable verbose output.
+  -n, --network [mainnet|anvil]   Network environment: 'mainnet' for
+                                  production RPC, 'anvil' for local fork
+                                  testing. For paper trading with PnL
+                                  tracking, use 'almanak strat backtest
+                                  paper'.
+  --gateway-host TEXT             Gateway gRPC host.  [env var:
+                                  ALMANAK_GATEWAY_HOST, GATEWAY_HOST; default:
+                                  127.0.0.1]
+  --gateway-port INTEGER          Gateway gRPC port.  [env var:
+                                  ALMANAK_GATEWAY_PORT, GATEWAY_PORT; default:
+                                  50051]
+  --no-gateway                    Do not auto-start a gateway; connect to an
+                                  existing one.
+  --copy-mode [live|shadow|replay]
+                                  Copy-trading mode override for this run.
+  --copy-shadow                   Enable copy-trading shadow mode (decisioning
+                                  only, no submissions).
+  --copy-replay-file PATH         Replay file (JSON/JSONL CopySignal fixtures)
+                                  for copy-trading replay mode.
+  --copy-strict                   Enable strict copy-trading validation and
+                                  fail-closed behavior.
+  --dashboard                     Launch live dashboard alongside strategy
+                                  execution.
+  --dashboard-port INTEGER        Port to run the dashboard on (default:
+                                  8501).
+  --wallet [default|isolated]     Wallet mode for Anvil: 'isolated' derives a
+                                  unique wallet per strategy for balance
+                                  isolation.
+  --log-file PATH                 Write JSON logs to this file (in addition to
+                                  console output). Useful for AI agent
+                                  analysis.
+  --reset-fork                    Reset Anvil fork to latest mainnet block
+                                  before each iteration (requires --network
+                                  anvil).
+  --max-iterations INTEGER        Maximum number of iterations to run before
+                                  exiting cleanly. Without this flag,
+                                  continuous mode runs indefinitely.
+  --teardown-after                After --once iteration, automatically
+                                  teardown (close all positions). Useful for
+                                  CI/testing to avoid accumulating stale
+                                  positions on-chain.
+  --anvil-port TEXT               Use existing Anvil instance: CHAIN=PORT
+                                  (e.g., --anvil-port arbitrum=8545).
+                                  Repeatable.
+  --help                          Show this message and exit.
 ```
+

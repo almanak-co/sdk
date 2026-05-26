@@ -32,7 +32,7 @@ from almanak.framework.connectors.polymarket.gateway_client import (
 )
 from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 
 
 # ---------------------------------------------------------------------------
@@ -40,9 +40,9 @@ from almanak.gateway.proto import gateway_pb2
 # ---------------------------------------------------------------------------
 
 
-def _success_response() -> gateway_pb2.PolymarketOrderResponse:
+def _success_response() -> polymarket_pb2.PolymarketOrderResponse:
     """A populated PolymarketOrderResponse that satisfies OrderResponse parsing."""
-    return gateway_pb2.PolymarketOrderResponse(
+    return polymarket_pb2.PolymarketOrderResponse(
         order_id="order-abc-123",
         status="LIVE",
         size_matched="0",
@@ -155,7 +155,7 @@ class TestCreateAndPostOrderAcceptsMarketKwarg:
         assert stub_with_success.CreateAndPostOrder.call_count == 1
         call = stub_with_success.CreateAndPostOrder.call_args
         request = call.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketCreateOrderRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketCreateOrderRequest)
         assert request.token_id == "111"
         assert request.price == "0.5"
         assert request.size == "10"

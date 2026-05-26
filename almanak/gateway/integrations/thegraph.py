@@ -6,9 +6,34 @@ Provides access to TheGraph subgraph queries through the gateway:
 - Caching with configurable TTL
 
 The gateway can optionally restrict queries to allowlisted subgraphs.
+
+The default subgraph allowlist is assembled lazily from the gateway
+connector registry (VIB-4811 / VIB-4817):
+
+``GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)`` —
+each registered gateway connector publishes its own
+``subgraph_endpoints()`` mapping and the dispatcher merges them.
+
+VIB-4817 retired the ``_PENDING_SUBGRAPHS`` fallback dict; the two
+Curve entries that previously lived there now ride on
+``CurveGatewayConnector.subgraph_endpoints()``.
+
+``DEFAULT_ALLOWED_SUBGRAPHS`` is a module-level proxy dict that builds
+itself on first access — building it eagerly at import time would
+trigger a circular import between this module and
+``almanak.gateway.services`` (which imports ``TheGraphIntegration``
+via ``integration_service``). The dict is built once and cached.
+
+Collisions (two connectors publishing the same alias with diverging
+URLs) raise ``RuntimeError`` at first access — a silent overwrite
+would make subgraph identity ambiguous and is a registry contract
+violation.
+
+Strategy-side code MUST NOT import this module.
 """
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
@@ -16,26 +41,120 @@ from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 logger = logging.getLogger(__name__)
 
 
-# Default allowlisted subgraphs (can be extended via configuration)
-DEFAULT_ALLOWED_SUBGRAPHS = {
-    # Uniswap V3 subgraphs
-    "uniswap-v3-ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-    "uniswap-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-    "uniswap-v3-optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-    "uniswap-v3-polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-    "uniswap-v3-base": "https://api.studio.thegraph.com/query/48211/uniswap-v3-base/version/latest",
-    # Aave V3 subgraphs
-    "aave-v3-ethereum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
-    "aave-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum",
-    "aave-v3-optimism": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-optimism",
-    "aave-v3-polygon": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-polygon",
-    # Curve subgraphs
-    "curve-ethereum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-mainnet",
-    "curve-arbitrum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-arbitrum",
-    # Balancer subgraphs
-    "balancer-v2-ethereum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-v2",
-    "balancer-v2-arbitrum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-arbitrum-v2",
-}
+def _build_default_allowed_subgraphs() -> dict[str, str]:
+    """Assemble the default allowlist from the gateway-connector registry.
+
+    Iterates ``GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)``
+    and merges each connector's ``subgraph_endpoints()`` mapping into a
+    single dict. Collisions on alias with diverging URLs raise — silent
+    overwrite would make subgraph identity ambiguous.
+
+    Imports are local so this module can be imported without immediately
+    triggering ``almanak.connectors._gateway_registry`` loading — that
+    chain pulls in every concrete gateway connector module, which in
+    turn pulls in ``almanak.gateway.services``, which pulls in this
+    module again (circular).
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewaySubgraphCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    merged: dict[str, str] = {}
+    # mypy: ``@runtime_checkable`` Protocol is the registry contract;
+    # see ``pool_history_service._derive_pool_history_tables``.
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability):  # type: ignore[type-abstract]
+        for alias, url in connector.subgraph_endpoints().items():
+            existing = merged.get(alias)
+            if existing is not None and existing != url:
+                raise RuntimeError(
+                    f"Subgraph alias collision for {alias!r}: "
+                    f"already registered as {existing!r}, refusing to "
+                    f"overwrite with {url!r} from "
+                    f"{type(connector).__qualname__}"
+                )
+            merged[alias] = url
+    return merged
+
+
+class _LazyAllowedSubgraphs(dict[str, str]):
+    """A ``dict[str, str]`` that builds its contents from the registry on first access.
+
+    Eager construction would trigger a circular import (see module
+    docstring). Building lazily lets ``TheGraphIntegration`` import this
+    module safely; the dict is fully populated by the time the gateway's
+    boot sequence asks for an allowlist.
+
+    Treating the proxy as a plain ``dict`` (.keys() / .items() / membership)
+    triggers the build; mutation is allowed and matches the historical
+    ``DEFAULT_ALLOWED_SUBGRAPHS.copy()`` behaviour.
+    """
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            super().update(_build_default_allowed_subgraphs())
+            self._built = True
+
+    def __contains__(self, key: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def __iter__(self) -> Iterator[str]:
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, key: str) -> str:
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        # dict is unhashable; explicit override silences ruff's
+        # "defined __eq__ without __hash__" lint without changing
+        # behaviour.
+        raise TypeError("unhashable type: '_LazyAllowedSubgraphs'")
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+    def copy(self) -> dict[str, str]:
+        self._ensure_built()
+        return dict(self)
+
+
+# Default allowlisted subgraphs (can be extended via configuration).
+# Built lazily on first access from the connector registry + pending rows.
+DEFAULT_ALLOWED_SUBGRAPHS: dict[str, str] = _LazyAllowedSubgraphs()
 
 
 class TheGraphIntegration(BaseIntegration):

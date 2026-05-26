@@ -60,7 +60,7 @@ class TestSolanaMintFallbackChain:
         spl_lookup.lookup = AsyncMock()
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
         ):
             result = await token_service._try_solana_mint_lookup(MINT_ADDRESS)
@@ -86,7 +86,7 @@ class TestSolanaMintFallbackChain:
         )
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
         ):
             result = await token_service._try_solana_mint_lookup(MINT_ADDRESS)
@@ -115,7 +115,7 @@ class TestSolanaMintFallbackChain:
         )
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
         ):
             result = await token_service._try_solana_mint_lookup(MINT_ADDRESS)
@@ -134,7 +134,7 @@ class TestSolanaMintFallbackChain:
         spl_lookup.lookup = AsyncMock(return_value=None)
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
         ):
             result = await token_service._try_solana_mint_lookup(MINT_ADDRESS)
@@ -163,7 +163,7 @@ class TestGetTokenMetadataSolanaIntegration:
 
         # Force the static-resolve fast path to miss so we reach the Solana branch.
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,
@@ -190,7 +190,7 @@ class TestGetTokenMetadataSolanaIntegration:
         spl_lookup.lookup = AsyncMock(return_value=None)
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,
@@ -233,7 +233,7 @@ class TestGetTokenMetadataSolanaIntegration:
         spl_lookup.lookup = AsyncMock(return_value=None)
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(token_service._resolver, "resolve", return_value=cached),
         ):
@@ -261,7 +261,7 @@ class TestGetTokenMetadataSolanaIntegration:
         spl_lookup.lookup = AsyncMock(side_effect=TimeoutError())
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,
@@ -289,7 +289,7 @@ class TestGetTokenMetadataSolanaIntegration:
         )
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,
@@ -350,7 +350,7 @@ class TestResolveTokenSolanaGuards:
         from almanak.framework.data.tokens import TokenNotFoundError
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,
@@ -378,7 +378,7 @@ class TestResolveTokenSolanaGuards:
         from almanak.framework.data.tokens import TokenNotFoundError
 
         with (
-            patch.object(token_service, "_get_jupiter", AsyncMock(return_value=jupiter)),
+            patch.object(token_service, "_get_lookup", AsyncMock(return_value=jupiter)),
             patch.object(token_service, "_get_spl_lookup", AsyncMock(return_value=spl_lookup)),
             patch.object(
                 token_service._resolver,

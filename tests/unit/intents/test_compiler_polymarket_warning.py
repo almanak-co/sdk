@@ -70,8 +70,8 @@ class TestPolymarketWarningDeferral:
             amount_usd=Decimal("10"),
         )
 
-        with patch("almanak.framework.intents.compiler.logger") as mock_logger:
-            result = compiler._compile_prediction_buy(intent)
+        with patch("almanak.framework.connectors.polymarket.compiler.logger") as mock_logger:
+            result = compiler.compile(intent)
 
         # Should fail compilation (no adapter)
         assert result.status.name == "FAILED"

@@ -30,7 +30,7 @@ from almanak.framework.connectors.polymarket.gateway_client import (
 )
 from almanak.framework.connectors.polymarket.models import PriceHistory, PriceHistoryInterval
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 
 
 # ---------------------------------------------------------------------------
@@ -58,13 +58,13 @@ def _make_response(
     points: list[tuple[int, str]] | None = None,
     success: bool = True,
     error: str = "",
-) -> gateway_pb2.PolymarketPriceHistoryResponse:
+) -> polymarket_pb2.PolymarketPriceHistoryResponse:
     """Construct a populated PolymarketPriceHistoryResponse fixture."""
     points = points if points is not None else [(1700000000, "0.42"), (1700003600, "0.45")]
     prices = [
-        gateway_pb2.PolymarketHistoricalPrice(timestamp=ts, price=p) for ts, p in points
+        polymarket_pb2.PolymarketHistoricalPrice(timestamp=ts, price=p) for ts, p in points
     ]
-    return gateway_pb2.PolymarketPriceHistoryResponse(
+    return polymarket_pb2.PolymarketPriceHistoryResponse(
         token_id=token_id,
         interval=interval,
         prices=prices,
@@ -129,7 +129,7 @@ class TestGetPriceHistoryHappyPath:
 
         call = stub.GetPriceHistory.call_args
         request = call.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketGetPriceHistoryRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketGetPriceHistoryRequest)
         assert request.token_id == "my-token"
         assert request.interval == ""  # None becomes empty string on the wire
         assert request.start_ts == 1700000000

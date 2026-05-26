@@ -899,7 +899,7 @@ class TestGetPriceHistoryHandler:
             HistoricalPrice,
             PriceHistory,
         )
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         history = PriceHistory(
             token_id="111",
@@ -921,7 +921,7 @@ class TestGetPriceHistoryHandler:
         # Patch _build_client (sync, public path) so the handler picks up the fake.
         servicer._build_client = MagicMock(return_value=fake)
 
-        request = gateway_pb2.PolymarketGetPriceHistoryRequest(
+        request = polymarket_pb2.PolymarketGetPriceHistoryRequest(
             token_id="111",
             interval="1h",
         )
@@ -949,13 +949,13 @@ class TestGetPriceHistoryHandler:
         (``interval`` vs ``start_ts``+``end_ts``) doesn't trip on a phantom
         ``start_ts=0`` that the caller never set."""
         from almanak.framework.connectors.polymarket.models import PriceHistory
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         empty_history = PriceHistory(token_id="111", interval="1h", prices=[])
         fake = _FakeAuthenticatedClient(get_price_history=empty_history)
         servicer._build_client = MagicMock(return_value=fake)
 
-        request = gateway_pb2.PolymarketGetPriceHistoryRequest(
+        request = polymarket_pb2.PolymarketGetPriceHistoryRequest(
             token_id="111", interval="1h"
             # start_ts / end_ts / fidelity intentionally omitted — should land as None
         )
@@ -976,7 +976,7 @@ class TestGetPriceHistoryHandler:
         invoking the SDK, so a misuse never reaches the upstream."""
         from unittest.mock import AsyncMock
 
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         fake = _FakeAuthenticatedClient()
         servicer._build_client = MagicMock(return_value=fake)
@@ -991,7 +991,7 @@ class TestGetPriceHistoryHandler:
         context = AsyncMock()
         context.abort = AsyncMock(side_effect=_AbortSentinel())
 
-        request = gateway_pb2.PolymarketGetPriceHistoryRequest(
+        request = polymarket_pb2.PolymarketGetPriceHistoryRequest(
             token_id="111", interval="1h", start_ts=1, end_ts=2
         )
         with pytest.raises(_AbortSentinel):
@@ -1018,7 +1018,7 @@ class TestGetTradeTapeHandler:
         from unittest.mock import AsyncMock
 
         from almanak.framework.connectors.polymarket.models import HistoricalTrade
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         trades = [
             HistoricalTrade(
@@ -1044,7 +1044,7 @@ class TestGetTradeTapeHandler:
         # _build_authenticated_client is async — patch with AsyncMock.
         servicer._build_authenticated_client = AsyncMock(return_value=fake)
 
-        request = gateway_pb2.PolymarketGetTradeTapeRequest(token_id="111", limit=50)
+        request = polymarket_pb2.PolymarketGetTradeTapeRequest(token_id="111", limit=50)
         response = await servicer.GetTradeTape(request, MagicMock())
 
         assert response.success is True
@@ -1074,13 +1074,13 @@ class TestGetTradeTapeHandler:
         primitives, so the handler is the place to apply the SDK's default."""
         from unittest.mock import AsyncMock
 
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         fake = _FakeAuthenticatedClient(get_trade_tape=[])
         servicer._build_authenticated_client = AsyncMock(return_value=fake)
 
         # Send an explicit request with limit=0 (the proto default).
-        request = gateway_pb2.PolymarketGetTradeTapeRequest(token_id="111")
+        request = polymarket_pb2.PolymarketGetTradeTapeRequest(token_id="111")
         await servicer.GetTradeTape(request, MagicMock())
 
         args, _kwargs = fake.trade_tape_calls[0]
@@ -1095,12 +1095,12 @@ class TestGetTradeTapeHandler:
         SDK so it omits the upstream ``market`` filter param."""
         from unittest.mock import AsyncMock
 
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         fake = _FakeAuthenticatedClient(get_trade_tape=[])
         servicer._build_authenticated_client = AsyncMock(return_value=fake)
 
-        request = gateway_pb2.PolymarketGetTradeTapeRequest(token_id="", limit=10)
+        request = polymarket_pb2.PolymarketGetTradeTapeRequest(token_id="", limit=10)
         await servicer.GetTradeTape(request, MagicMock())
 
         args, _kwargs = fake.trade_tape_calls[0]
@@ -1112,12 +1112,12 @@ class TestGetTradeTapeHandler:
     ) -> None:
         from unittest.mock import AsyncMock
 
-        from almanak.gateway.proto import gateway_pb2
+        from almanak.connectors.polymarket.proto import polymarket_pb2
 
         fake = _FakeAuthenticatedClient(get_trade_tape=RuntimeError("rate limited"))
         servicer._build_authenticated_client = AsyncMock(return_value=fake)
 
-        request = gateway_pb2.PolymarketGetTradeTapeRequest(token_id="111", limit=10)
+        request = polymarket_pb2.PolymarketGetTradeTapeRequest(token_id="111", limit=10)
         response = await servicer.GetTradeTape(request, MagicMock())
 
         assert response.success is False

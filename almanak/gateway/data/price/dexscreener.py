@@ -72,24 +72,131 @@ _CHAIN_ALIASES: dict[str, str] = {
 
 # Well-known token addresses for direct lookup (faster than search).
 # Keyed by DexScreener platform slug.
-_KNOWN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
+#
+# Protocol-token addresses (JUP, ORCA, RAY) historically lived inline
+# here; VIB-4811 / Phase 3 moves them onto the owning connector's
+# ``GatewayPriceIdCapability.dexscreener_ids()`` and merges them back
+# via ``_build_registry_known_addresses`` below.
+_BASE_KNOWN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
     "solana": {
         "SOL": "So11111111111111111111111111111111111111112",
         "WSOL": "So11111111111111111111111111111111111111112",
         "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-        "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
-        "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
         "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
         "WIF": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
         "JTO": "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",
-        "ORCA": "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
         "MSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
         "JITOSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
         "PYTH": "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",
     },
     # EVM chains use TokenResolver for address lookup -- no hardcoding needed.
 }
+
+
+def _build_registry_known_addresses() -> dict[str, dict[str, str]]:
+    """Merge protocol-token addresses from the gateway-connector registry.
+
+    Iterates ``GATEWAY_REGISTRY.capability_providers(GatewayPriceIdCapability)``
+    and merges every connector's ``dexscreener_ids()`` mapping into the
+    base ``_BASE_KNOWN_TOKEN_ADDRESSES`` dict. Two connectors disagreeing
+    on a (platform, symbol) -> address triple raises ``RuntimeError``.
+
+    Imports are local so this module's import-time graph does not
+    transitively pull in the gateway-side connector registry — that
+    chain pulls in concrete connector modules whose service-side
+    imports trigger ``gateway.data.price.__init__`` again, before
+    ``multi_dex.DexQuote`` is exported (circular).
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayPriceIdCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    merged: dict[str, dict[str, str]] = {
+        platform: dict(addrs) for platform, addrs in _BASE_KNOWN_TOKEN_ADDRESSES.items()
+    }
+    # mypy: ``@runtime_checkable`` Protocol is the registry contract.
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayPriceIdCapability):  # type: ignore[type-abstract]
+        for platform, addrs in connector.dexscreener_ids().items():
+            platform_dict = merged.setdefault(platform, {})
+            for symbol, address in addrs.items():
+                existing = platform_dict.get(symbol)
+                if existing is not None and existing != address:
+                    raise RuntimeError(
+                        f"DexScreener address collision for "
+                        f"({platform!r}, {symbol!r}): already registered as "
+                        f"{existing!r}, refusing to overwrite with "
+                        f"{address!r} from {type(connector).__qualname__}"
+                    )
+                platform_dict[symbol] = address
+    return merged
+
+
+class _LazyKnownTokenAddresses(dict[str, dict[str, str]]):
+    """Dict that merges base addresses + registry contributions on first access.
+
+    Eager construction triggers a circular import — see
+    ``_build_registry_known_addresses`` docstring. Lazy build keeps the
+    post-refactor dict value byte-identical to the pre-refactor table.
+    """
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            super().update(_build_registry_known_addresses())
+            self._built = True
+
+    def __contains__(self, key: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, key: str) -> dict[str, str]:
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        raise TypeError("unhashable type: '_LazyKnownTokenAddresses'")
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+
+_KNOWN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = _LazyKnownTokenAddresses()
 
 
 # VIB-4439 / MorphoMay15 F1 (B2): DexScreener's price for liquid-staking tokens

@@ -21,6 +21,7 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 class _ServicerOnly(GatewayConnector):
     protocol: ClassVar[ProtocolName] = ProtocolName("servicer_demo")
     kind: ClassVar[ProtocolKind] = ProtocolKind.PREDICTION_MARKET
+    servicer: Any | None = None
 
     def register_servicers(self, server: Any, settings: Any) -> None:
         pass

@@ -57,7 +57,16 @@ def _resolve_fields(
     strategy_name: str | None,
     strategy_version: str | None,
 ) -> dict[str, str]:
-    """Pull deployment identity from env, applying caller overrides."""
+    """Pull deployment identity from env, falling back to caller hints.
+
+    Precedence is **env wins over caller hint**: in hosted V2 the deployer
+    injects ``ALMANAK_STRATEGY_NAME`` / ``ALMANAK_STRATEGY_VERSION`` from
+    the strategy's ``pyproject.toml`` — those are the authoritative
+    identifiers and must beat the CLI's ``working_dir`` basename hint
+    (the working dir is typically ``/app/src`` in hosted pods, which
+    would otherwise surface as ``strategy: src``). The caller hint only
+    fills in for local-mode runs where the env vars are unset.
+    """
     from ..deployment.mode import (
         deployment_commit_sha,
         deployment_id,
@@ -68,8 +77,8 @@ def _resolve_fields(
 
     return {
         "deployment_id": deployment_id() or "local",
-        "strategy_name": strategy_name or deployment_strategy_name() or "unknown",
-        "strategy_version": strategy_version or deployment_strategy_version() or "unknown",
+        "strategy_name": deployment_strategy_name() or strategy_name or "unknown",
+        "strategy_version": deployment_strategy_version() or strategy_version or "unknown",
         "commit_sha": deployment_commit_sha() or "local",
         "sdk_version": deployment_sdk_version() or _sdk_version_local(),
     }
@@ -121,6 +130,8 @@ def _emit(
     commit_sha: str,
     sdk_version: str,
 ) -> None:
+    import sys
+
     started_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     write(_RULE)
@@ -140,6 +151,18 @@ def _emit(
         f"sdk_version={_sanitize_sentinel_value(sdk_version)} "
         f"started_at={_sanitize_sentinel_value(started_at)}"
     )
+
+    # Force a flush so Cloud Logging sees each line with its real emit-time
+    # nanosecond timestamp. Without this, K8s stdout block-buffering can
+    # bundle the banner lines into one chunk; Cloud Logging then assigns
+    # them very close timestamps and the UI sorts them in a non-emit order
+    # (visible on stage with v2.16.1-rc6: started_at appearing between
+    # strategy and commit_sha).
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 __all__ = ["emit_cli_banner", "emit_gateway_banner"]

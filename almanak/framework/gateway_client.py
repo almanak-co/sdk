@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
+from almanak.connectors.polymarket.proto import polymarket_pb2_grpc
 from almanak.gateway.proto import gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
@@ -276,7 +277,7 @@ class GatewayClient:
         # VIB-4727: PoolAnalyticsService stub for market.pool_analytics(...).
         self._pool_analytics_stub: gateway_pb2_grpc.PoolAnalyticsServiceStub | None = None
         self._simulation_stub: gateway_pb2_grpc.SimulationServiceStub | None = None
-        self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
+        self._polymarket_stub: polymarket_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
         self._teardown_stub: gateway_pb2_grpc.TeardownServiceStub | None = None
@@ -377,7 +378,7 @@ class GatewayClient:
         return self._simulation_stub
 
     @property
-    def polymarket(self) -> gateway_pb2_grpc.PolymarketServiceStub:
+    def polymarket(self) -> polymarket_pb2_grpc.PolymarketServiceStub:
         """Get PolymarketService stub. Raises if not connected."""
         if self._polymarket_stub is None:
             raise RuntimeError("Gateway client not connected")
@@ -463,8 +464,9 @@ class GatewayClient:
         # Initialize Simulation service stub
         self._simulation_stub = gateway_pb2_grpc.SimulationServiceStub(self._channel)
 
-        # Initialize Polymarket service stub
-        self._polymarket_stub = gateway_pb2_grpc.PolymarketServiceStub(self._channel)
+        # Initialize Polymarket service stub (VIB-4813: proto relocated to
+        # the connector-owned module, wire path unchanged).
+        self._polymarket_stub = polymarket_pb2_grpc.PolymarketServiceStub(self._channel)
 
         # Initialize Enso service stub
         self._enso_stub = gateway_pb2_grpc.EnsoServiceStub(self._channel)

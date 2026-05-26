@@ -43,7 +43,6 @@ from ..connectors.base.swap_adapter import DefaultSwapAdapter
 from ..connectors.compiler_registry import get_compiler as get_connector_compiler
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
-# Note: PolymarketAdapter import is done lazily in __init__ to avoid circular import and allow optional usage
 # Note: MorphoBlueAdapter is imported lazily in _compile_* methods to avoid circular import
 # Note: TokenNotFoundError and get_token_resolver are imported lazily to avoid circular import
 # (compiler -> data/__init__ -> prediction_provider -> connectors/__init__ -> ... -> compiler)
@@ -69,21 +68,15 @@ from .vocabulary import (
     LPOpenIntent,
     PerpCloseIntent,
     PerpOpenIntent,
-    PredictionBuyIntent,
-    PredictionRedeemIntent,
-    PredictionSellIntent,
     RepayIntent,
     SupplyIntent,
     SwapIntent,
-    VaultDepositIntent,
-    VaultRedeemIntent,
     WithdrawIntent,
 )
 
 if TYPE_CHECKING:
     from web3 import Web3
 
-    from ..connectors.polymarket.adapter import PolymarketAdapter
     from ..data.tokens import TokenResolver as TokenResolverType
     from ..gateway_client import GatewayClient
     from .bridge import BridgeIntent
@@ -575,18 +568,11 @@ class IntentCompiler:
 
         # Allowance cache (token -> spender -> amount)
         self._allowance_cache: dict[str, dict[str, int]] = {}
+        self._connector_compiler_cache: dict[str, Any] = {}
         # Log stablecoin price fallbacks once per symbol per compiler instance.
         self._stablecoin_fallback_logged: set[str] = set()
 
-        # Polymarket adapter for prediction market intents (Polygon only)
-        self._polymarket_adapter: PolymarketAdapter | None = None
-        self._init_polymarket_adapter()
-
-        # Cached Solana adapter instances (lazily initialized)
-        self._cached_jupiter_adapter: Any = None
-        self._cached_kamino_adapter: Any = None
-        self._cached_kamino_adapter_with_rpc: Any = None
-        self._cached_jupiter_lend_adapter: Any = None
+        # Cached Solana adapter instances (lazily initialized by connector compilers)
         self._cached_drift_adapter: Any = None
 
         effective_protocol = "jupiter" if isinstance(self._family, SvmFamily) else default_protocol
@@ -640,7 +626,7 @@ class IntentCompiler:
             "token_resolver": getattr(self, "_token_resolver", None),
             "gateway_client": getattr(self, "_gateway_client", None),
             "price_oracle": getattr(self, "price_oracle", None),
-            "cache": getattr(self, "_allowance_cache", {}),
+            "cache": getattr(self, "_connector_compiler_cache", {}),
             "services": _ConnectorCompilerServices(self),
             "default_protocol": getattr(self, "default_protocol", ""),
             # Universal tx concept (lending/perp/bridge also need a deadline
@@ -682,8 +668,7 @@ class IntentCompiler:
         # their own Solana RPC client — they do NOT route through the gateway.
         # ``_get_chain_rpc_url()`` returns ``None`` when a gateway client is
         # connected, which would silently strand these adapters with an empty
-        # RPC URL. Force the raw ``self.rpc_url`` pathway for them, matching
-        # the pre-fold ``compiler_solana.py`` behaviour. VIB-4121.
+        # RPC URL. Force the raw ``self.rpc_url`` pathway for them. VIB-4121.
         resolve_rpc_url = not self._is_solana_only_connector(connector_compiler)
         if context_type is not BaseCompilerContext:
             return context_type(**self._base_compiler_context_kwargs(resolve_rpc_url=resolve_rpc_url))
@@ -732,68 +717,6 @@ class IntentCompiler:
             fixed_swap_fee_tier=config.fixed_swap_fee_tier,
             default_lp_slippage=self.default_lp_slippage,
         )
-
-    def _ensure_polymarket_adapter(self) -> None:
-        """Retry adapter init if gateway has connected since construction."""
-        if self._polymarket_adapter is not None:
-            return
-        if self.chain.lower() != "polygon":
-            return
-        if self._gateway_client is None or not self._gateway_client.is_connected:
-            return
-        self._init_polymarket_adapter()
-
-    def _init_polymarket_adapter(self) -> None:
-        """Initialize the Polymarket adapter for gateway-backed Polygon intents.
-
-        This method lazily initializes the PolymarketAdapter for prediction market
-        intents. The adapter is only initialized when:
-        1. The chain is 'polygon' (case-insensitive)
-        2. A PolymarketConfig is provided in the IntentCompilerConfig
-
-        If on Polygon without a PolymarketConfig, the method silently returns.
-        VIB-307: Warning is deferred to compile time so non-prediction Polygon
-        strategies don't see noisy Polymarket warnings at startup.
-
-        This lazy initialization ensures:
-        - Non-Polygon usage is unaffected (no import overhead)
-        - Missing gateway connectivity is handled gracefully
-        - Clear error messages when prediction intents are attempted without a
-          gateway-backed Polymarket client
-        """
-        # Only initialize for Polygon chain
-        if self.chain.lower() != "polygon":
-            return
-
-        # Lazy import to avoid circular imports and allow optional usage
-        try:
-            from ..connectors.polymarket.adapter import PolymarketAdapter
-            from ..connectors.polymarket.gateway_client import GatewayPolymarketClient
-
-            if self._gateway_client is None or not self._gateway_client.is_connected:
-                return
-
-            from web3 import Web3
-
-            from ..web3.gateway_provider import GatewayWeb3Provider
-
-            if self._web3 is None:
-                self._web3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self.chain))
-            web3_instance = self._web3
-            polymarket_client = GatewayPolymarketClient(self._gateway_client)
-
-            self._polymarket_adapter = PolymarketAdapter(
-                client=polymarket_client,
-                wallet_address=self.wallet_address,
-                web3=web3_instance,
-            )
-            logger.info("PolymarketAdapter initialized for wallet=%s...", self.wallet_address[:10])
-        except ImportError as e:
-            logger.warning(f"Failed to import PolymarketAdapter: {e}. Prediction market intents will not be available.")
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize PolymarketAdapter: {e}. Prediction market intents will not be available."
-            )
 
     def _get_chain_rpc_url(self) -> str | None:
         """Get RPC URL for the current chain.
@@ -976,15 +899,6 @@ class IntentCompiler:
             logger.warning("Pool validation: %s (reason=%s)", result.warning, result.reason.value)
         return None
 
-    @property
-    def polymarket_adapter(self) -> "PolymarketAdapter | None":
-        """Get the Polymarket adapter for prediction market intents.
-
-        Returns:
-            PolymarketAdapter if initialized, None otherwise.
-        """
-        return self._polymarket_adapter
-
     # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder
     # (cc=31, the SWAP/LP_OPEN/LP_CLOSE/.../UNWRAP_NATIVE if/elif chain). T5
     # (VIB-4165) only added a 1-line `_raise_if_placeholder_intent` call plus
@@ -1082,11 +996,11 @@ class IntentCompiler:
             elif intent_type == IntentType.UNSTAKE:
                 return self._compile_staking_via_registry(intent, "UNSTAKE")
             elif intent_type == IntentType.PREDICTION_BUY:
-                return self._compile_prediction_buy(intent)  # type: ignore[arg-type]
+                return self._compile_prediction_via_registry(intent)
             elif intent_type == IntentType.PREDICTION_SELL:
-                return self._compile_prediction_sell(intent)  # type: ignore[arg-type]
+                return self._compile_prediction_via_registry(intent)
             elif intent_type == IntentType.PREDICTION_REDEEM:
-                return self._compile_prediction_redeem(intent)  # type: ignore[arg-type]
+                return self._compile_prediction_via_registry(intent)
             elif intent_type == IntentType.BRIDGE:
                 bridge_protocol = _bridge_registry_protocol(intent)  # type: ignore[arg-type]
                 connector_compiler = get_connector_compiler(bridge_protocol)
@@ -1101,9 +1015,9 @@ class IntentCompiler:
                     intent,
                 )
             elif intent_type == IntentType.VAULT_DEPOSIT:
-                return self._compile_vault_deposit(intent)  # type: ignore[arg-type]
+                return self._compile_vault_via_registry(intent)
             elif intent_type == IntentType.VAULT_REDEEM:
-                return self._compile_vault_redeem(intent)  # type: ignore[arg-type]
+                return self._compile_vault_via_registry(intent)
             elif intent_type == IntentType.ENSURE_BALANCE:
                 return self._compile_ensure_balance(intent)
             elif intent_type == IntentType.WRAP_NATIVE:
@@ -1151,10 +1065,10 @@ class IntentCompiler:
     # :class:`SvmFamily.compile_intent` (almanak.framework.chain_family). The
     # historical ``_compile_jupiter_swap`` / ``_get_jupiter_adapter`` etc.
     # wrapper methods on this class have been removed - they were thin
-    # delegates to the module-level helpers in ``compiler_solana``, and the
-    # dispatch now goes through :meth:`_family_compile_intent` below.
+    # delegates, and dispatch now goes through :meth:`_family_compile_intent`
+    # below.
     #
-    # Jupiter swap still lives in ``compiler_solana.compile_jupiter_swap``.
+    # Jupiter swap lives in ``connectors.jupiter.compiler.JupiterCompiler``.
     # Per-protocol Solana LP compilation (Meteora / Orca / Raydium) is owned
     # by the per-connector compilers (#2416) and dispatched via
     # :data:`CompilerRegistry`. Direct unit tests should target the
@@ -2151,6 +2065,29 @@ class IntentCompiler:
             intent_id=intent.intent_id,
         )
 
+    def _compile_prediction_via_registry(self, intent: Any) -> CompilationResult:
+        """Compile a prediction-market intent through the Polymarket connector compiler."""
+        connector_compiler = get_connector_compiler("polymarket")
+        if connector_compiler is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Connector compiler for protocol 'polymarket' is not registered.",
+                intent_id=intent.intent_id,
+            )
+        return connector_compiler.compile(self._build_compiler_context("polymarket", connector_compiler), intent)
+
+    def _compile_vault_via_registry(self, intent: Any) -> CompilationResult:
+        """Compile a vault intent through a connector-owned compiler."""
+        protocol = self._resolve_protocol(intent.protocol)
+        connector_compiler = get_connector_compiler(protocol)
+        if connector_compiler is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Vault protocol '{protocol}' is not supported: connector compiler is not registered.",
+                intent_id=intent.intent_id,
+            )
+        return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
+
     def _compile_ensure_balance(self, intent: Any) -> CompilationResult:
         """Compile an ENSURE_BALANCE meta-intent by resolving it first.
 
@@ -2274,609 +2211,6 @@ class IntentCompiler:
         from .compiler_flash_loan import estimate_callback_output
 
         return estimate_callback_output(self, callback_intent, prev_output_amount, prev_output_token)
-
-    def _build_aave_flash_loan(
-        self,
-        token_info: "TokenInfo",
-        amount_wei: int,
-        callback_params: bytes,
-        callback_gas_total: int,
-    ) -> dict:
-        """Build an Aave V3 flash loan transaction."""
-        from .compiler_flash_loan import build_aave_flash_loan
-
-        return build_aave_flash_loan(
-            self,
-            token_info=token_info,
-            amount_wei=amount_wei,
-            callback_params=callback_params,
-            callback_gas_total=callback_gas_total,
-        )
-
-    def _build_balancer_flash_loan(
-        self,
-        token_info: "TokenInfo",
-        amount_wei: int,
-        callback_params: bytes,
-        callback_gas_total: int,
-    ) -> dict:
-        """Build a Balancer Vault flash loan transaction."""
-        from .compiler_flash_loan import build_balancer_flash_loan
-
-        return build_balancer_flash_loan(
-            self,
-            token_info=token_info,
-            amount_wei=amount_wei,
-            callback_params=callback_params,
-            callback_gas_total=callback_gas_total,
-        )
-
-    def _build_morpho_flash_loan(
-        self,
-        token_info: "TokenInfo",
-        amount_wei: int,
-        callback_params: bytes,
-        callback_gas_total: int,
-    ) -> dict:
-        """Build a Morpho Blue flash loan transaction."""
-        from .compiler_flash_loan import build_morpho_flash_loan
-
-        return build_morpho_flash_loan(
-            self,
-            token_info=token_info,
-            amount_wei=amount_wei,
-            callback_params=callback_params,
-            callback_gas_total=callback_gas_total,
-        )
-
-    def _encode_flash_loan_callbacks(
-        self,
-        callback_transactions: list[TransactionData],
-    ) -> bytes:
-        """Encode callback transactions for flash loan params."""
-        from .compiler_flash_loan import encode_flash_loan_callbacks
-
-        return encode_flash_loan_callbacks(callback_transactions)
-
-    # =========================================================================
-    # Prediction Market Intent Compilation
-    # =========================================================================
-
-    def _compile_prediction_buy(self, intent: PredictionBuyIntent) -> CompilationResult:
-        """Compile a PREDICTION_BUY intent into an ActionBundle.
-
-        This method delegates to the PolymarketAdapter for compilation.
-        The resulting ActionBundle contains CLOB order data in metadata,
-        not on-chain transactions (buy orders are submitted off-chain).
-
-        Args:
-            intent: PredictionBuyIntent to compile
-
-        Returns:
-            CompilationResult with prediction buy ActionBundle
-        """
-        self._ensure_polymarket_adapter()
-        # Check if adapter is available
-        if self._polymarket_adapter is None:
-            if self.chain.lower() != "polygon":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning("PredictionBuyIntent requires a gateway-backed Polymarket client on Polygon.")
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    "PolymarketAdapter not initialized. "
-                    "Connect the compiler to the gateway to enable prediction intents."
-                ),
-                intent_id=intent.intent_id,
-            )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-
-        try:
-            # Delegate to PolymarketAdapter
-            action_bundle = self._polymarket_adapter.compile_intent(intent)
-
-            # Check if compilation failed (error in metadata)
-            if "error" in action_bundle.metadata:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=action_bundle.metadata["error"],
-                    intent_id=intent.intent_id,
-                )
-
-            # CLOB orders have no on-chain transactions (gas = 0)
-            result.action_bundle = action_bundle
-            result.transactions = []
-            result.total_gas_estimate = 0
-
-            logger.info(
-                f"Compiled PREDICTION_BUY: market={intent.market_id}, "
-                f"outcome={intent.outcome}, "
-                f"amount_usd={intent.amount_usd}, shares={intent.shares}"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile PREDICTION_BUY intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_prediction_sell(self, intent: PredictionSellIntent) -> CompilationResult:
-        """Compile a PREDICTION_SELL intent into an ActionBundle.
-
-        This method delegates to the PolymarketAdapter for compilation.
-        The resulting ActionBundle contains CLOB order data in metadata,
-        not on-chain transactions (sell orders are submitted off-chain).
-
-        Args:
-            intent: PredictionSellIntent to compile
-
-        Returns:
-            CompilationResult with prediction sell ActionBundle
-        """
-        self._ensure_polymarket_adapter()
-        # Check if adapter is available
-        if self._polymarket_adapter is None:
-            if self.chain.lower() != "polygon":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning("PredictionSellIntent requires a gateway-backed Polymarket client on Polygon.")
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    "PolymarketAdapter not initialized. "
-                    "Connect the compiler to the gateway to enable prediction intents."
-                ),
-                intent_id=intent.intent_id,
-            )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-
-        try:
-            # Delegate to PolymarketAdapter
-            action_bundle = self._polymarket_adapter.compile_intent(intent)
-
-            # Check if compilation failed (error in metadata)
-            if "error" in action_bundle.metadata:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=action_bundle.metadata["error"],
-                    intent_id=intent.intent_id,
-                )
-
-            # CLOB orders have no on-chain transactions (gas = 0)
-            result.action_bundle = action_bundle
-            result.transactions = []
-            result.total_gas_estimate = 0
-
-            logger.info(
-                f"Compiled PREDICTION_SELL: market={intent.market_id}, outcome={intent.outcome}, shares={intent.shares}"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile PREDICTION_SELL intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_prediction_redeem(self, intent: PredictionRedeemIntent) -> CompilationResult:
-        """Compile a PREDICTION_REDEEM intent into an ActionBundle.
-
-        This method delegates to the PolymarketAdapter for compilation.
-        Unlike buy/sell, redemption is an on-chain CTF transaction that
-        converts winning outcome tokens into USDC.
-
-        Args:
-            intent: PredictionRedeemIntent to compile
-
-        Returns:
-            CompilationResult with prediction redeem ActionBundle
-        """
-        from ..connectors.polymarket.exceptions import PolymarketMarketNotResolvedError
-
-        self._ensure_polymarket_adapter()
-        # Check if adapter is available
-        if self._polymarket_adapter is None:
-            if self.chain.lower() != "polygon":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning("PredictionRedeemIntent requires a gateway-backed Polymarket client on Polygon.")
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    "PolymarketAdapter not initialized. "
-                    "Connect the compiler to the gateway to enable prediction intents."
-                ),
-                intent_id=intent.intent_id,
-            )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-
-        try:
-            # Delegate to PolymarketAdapter
-            action_bundle = self._polymarket_adapter.compile_intent(intent)
-
-            # Check if compilation failed (error in metadata)
-            if "error" in action_bundle.metadata:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=action_bundle.metadata["error"],
-                    intent_id=intent.intent_id,
-                )
-
-            # Convert ActionBundle transactions to TransactionData objects
-            transactions: list[TransactionData] = []
-            for tx_dict in action_bundle.transactions:
-                tx = TransactionData(
-                    to=tx_dict.get("to", ""),
-                    value=int(tx_dict.get("value", 0)),
-                    data=tx_dict.get("data", ""),
-                    gas_estimate=tx_dict.get("gas_estimate", 200_000),
-                    description=tx_dict.get("description", "Redeem prediction market positions"),
-                    tx_type=tx_dict.get("tx_type", "redeem"),
-                )
-                transactions.append(tx)
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = sum(tx.gas_estimate for tx in transactions)
-
-            logger.info(
-                f"Compiled PREDICTION_REDEEM: market={intent.market_id}, "
-                f"outcome={intent.outcome}, txs={len(transactions)}"
-            )
-
-        except PolymarketMarketNotResolvedError as e:
-            # Re-raise with clear message for unresolved markets
-            logger.warning(f"Cannot redeem - market not resolved: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        except Exception as e:
-            logger.exception(f"Failed to compile PREDICTION_REDEEM intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    # =================================================================
-    # MetaMorpho Vault Operations
-    # =================================================================
-
-    def _compile_vault_deposit(self, intent: VaultDepositIntent) -> CompilationResult:
-        """Compile a VAULT_DEPOSIT intent into an ActionBundle.
-
-        Dispatches to a vault adapter registered for ``intent.protocol`` (see
-        :mod:`almanak.framework.connectors.vaults`). Steps:
-
-        1. Resolve adapter for the protocol via the vault registry.
-        2. Query vault asset address and decimals.
-        3. Build approve TX for the vault.
-        4. Build deposit TX via the adapter SDK.
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-
-        try:
-            # Check for chained amount
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
-            amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
-            if amount_decimal <= Decimal("0"):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Vault deposit amount must be positive",
-                    intent_id=intent.intent_id,
-                )
-
-            if self._gateway_client is None or not self._gateway_client.is_connected:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="A connected GatewayClient is required for vault compilation (on-chain reads).",
-                    intent_id=intent.intent_id,
-                )
-
-            # Lazy import to avoid circular import
-            from ..connectors.vaults import (
-                build_vault_adapter,
-                is_vault_chain_supported,
-                supported_vault_chains,
-            )
-
-            # VIB-3827: fail-fast chain support check. Without this, the
-            # adapter constructor raises a generic ``ValueError("Invalid
-            # chain: …")`` which the state machine cannot classify as
-            # permanent — the runner then retries forever on a deterministic
-            # mis-configuration. Surfaces the "not supported" keyword that
-            # ``_categorize_error`` maps to ``COMPILATION_PERMANENT``.
-            #
-            # Two distinct rejection cases are handled separately so neither
-            # falls through to a misclassified error:
-            #   1. Unknown protocol (``model_construct`` bypassed the pydantic
-            #      validator, e.g. when an intent is restored from serialized
-            #      state). ``supported_vault_chains`` would raise ``KeyError``
-            #      and the broad ``except`` below would strip the message to
-            #      the bare protocol name, missing ``permanent_keywords``.
-            #   2. Known protocol, unsupported chain (the headline VIB-3827
-            #      case — Sonic on metamorpho today).
-            if not is_vault_chain_supported(intent.protocol, self.chain):
-                try:
-                    supported = supported_vault_chains(intent.protocol)
-                except KeyError:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Vault protocol '{intent.protocol}' is not supported "
-                            "(no vault adapter registered). Register the adapter "
-                            "or correct the intent's protocol field before retrying."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                supported_str = ", ".join(sorted(supported)) if supported else "(none declared)"
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Vault protocol '{intent.protocol}' is not supported on chain "
-                        f"'{self.chain}'. Supported chains: {supported_str}. "
-                        "File a vault registry / native connector ticket for the missing "
-                        "chain before retrying."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            adapter = build_vault_adapter(
-                intent.protocol,
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                gateway_client=self._gateway_client,
-                token_resolver=self._token_resolver,
-            )
-
-            # Query vault asset address
-            asset_address = adapter.sdk.get_vault_asset(intent.vault_address)
-
-            # Resolve asset token for decimals
-            asset_token = self._resolve_token(asset_address)
-            if asset_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot resolve vault asset token: {asset_address}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_wei = int(amount_decimal * Decimal(10**asset_token.decimals))
-
-            # Build approve TX
-            approve_txs = self._build_approve_tx(
-                asset_token.address,
-                intent.vault_address,
-                amount_wei,
-            )
-            transactions.extend(approve_txs)
-
-            # Build deposit TX via SDK
-            deposit_tx_data = adapter.sdk.build_deposit_tx(
-                vault_address=intent.vault_address,
-                assets=amount_wei,
-                receiver=self.wallet_address,
-            )
-
-            deposit_tx = TransactionData(
-                to=deposit_tx_data["to"],
-                value=deposit_tx_data["value"],
-                data=deposit_tx_data["data"],
-                gas_estimate=deposit_tx_data["gas_estimate"],
-                description=f"Deposit {amount_decimal} {asset_token.symbol} into {intent.protocol} vault {intent.vault_address[:10]}...",
-                tx_type="vault_deposit",
-            )
-            transactions.append(deposit_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.VAULT_DEPOSIT.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "vault_address": intent.vault_address,
-                    "asset_address": asset_token.address,
-                    "asset_symbol": asset_token.symbol,
-                    "deposit_amount": str(amount_decimal),
-                    "deposit_amount_wei": str(amount_wei),
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                f"Compiled VAULT_DEPOSIT: {amount_decimal} {asset_token.symbol} into "
-                f"{intent.protocol} vault {intent.vault_address[:10]}..."
-            )
-            return result
-
-        except Exception as e:
-            logger.exception(f"Failed to compile VAULT_DEPOSIT intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-            return result
-
-    def _compile_vault_redeem(self, intent: VaultRedeemIntent) -> CompilationResult:
-        """Compile a VAULT_REDEEM intent into an ActionBundle.
-
-        Dispatches to a vault adapter registered for ``intent.protocol`` (see
-        :mod:`almanak.framework.connectors.vaults`). Steps:
-
-        1. Resolve adapter for the protocol via the vault registry.
-        2. If shares="all", query maxRedeem to get share count.
-        3. Build redeem TX (no approve needed — redeeming own shares).
-        """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[TransactionData] = []
-
-        try:
-            if self._gateway_client is None or not self._gateway_client.is_connected:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="A connected GatewayClient is required for vault compilation (on-chain reads).",
-                    intent_id=intent.intent_id,
-                )
-
-            # Lazy import to avoid circular import
-            from ..connectors.vaults import (
-                build_vault_adapter,
-                is_vault_chain_supported,
-                supported_vault_chains,
-            )
-
-            # VIB-3827: fail-fast chain support check (mirrors deposit lane).
-            # Keeps redeem failures classifiable as ``COMPILATION_PERMANENT``
-            # so the runner does not retry indefinitely when the wallet has
-            # an open position on a chain the vault adapter does not (yet)
-            # support — a real scenario for stale state during chain rollouts.
-            # Unknown-protocol case is split out so ``supported_vault_chains``
-            # never raises ``KeyError`` into the broad ``except`` below.
-            if not is_vault_chain_supported(intent.protocol, self.chain):
-                try:
-                    supported = supported_vault_chains(intent.protocol)
-                except KeyError:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Vault protocol '{intent.protocol}' is not supported "
-                            "(no vault adapter registered). Register the adapter "
-                            "or correct the intent's protocol field before retrying."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                supported_str = ", ".join(sorted(supported)) if supported else "(none declared)"
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Vault protocol '{intent.protocol}' is not supported on chain "
-                        f"'{self.chain}'. Supported chains: {supported_str}. "
-                        "File a vault registry / native connector ticket for the missing "
-                        "chain before retrying."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            adapter = build_vault_adapter(
-                intent.protocol,
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                gateway_client=self._gateway_client,
-                token_resolver=self._token_resolver,
-            )
-
-            # Resolve shares amount
-            if intent.shares == "all":
-                # Query max redeemable shares
-                shares_wei = adapter.sdk.get_max_redeem(intent.vault_address, self.wallet_address)
-                if shares_wei <= 0:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="No shares to redeem",
-                        intent_id=intent.intent_id,
-                    )
-            else:
-                shares_decimal: Decimal = intent.shares  # type: ignore[assignment]
-                # Resolve share decimals dynamically (vault address IS the share token for ERC-4626)
-                share_decimals = adapter.sdk.get_decimals(intent.vault_address)
-                shares_wei = int(shares_decimal * Decimal(10**share_decimals))
-
-            if shares_wei <= 0:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Redeem shares must be positive",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build redeem TX via SDK (no approve needed - redeeming own shares)
-            redeem_tx_data = adapter.sdk.build_redeem_tx(
-                vault_address=intent.vault_address,
-                shares=shares_wei,
-                receiver=self.wallet_address,
-                owner=self.wallet_address,
-            )
-
-            redeem_tx = TransactionData(
-                to=redeem_tx_data["to"],
-                value=redeem_tx_data["value"],
-                data=redeem_tx_data["data"],
-                gas_estimate=redeem_tx_data["gas_estimate"],
-                description=f"Redeem {'all' if intent.shares == 'all' else intent.shares} shares from {intent.protocol} vault {intent.vault_address[:10]}...",
-                tx_type="vault_redeem",
-            )
-            transactions.append(redeem_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.VAULT_REDEEM.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "vault_address": intent.vault_address,
-                    "shares_wei": str(shares_wei),
-                    "redeem_all": intent.shares == "all",
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                f"Compiled VAULT_REDEEM: {'all' if intent.shares == 'all' else intent.shares} shares from vault {intent.vault_address[:10]}..."
-            )
-            return result
-
-        except Exception as e:
-            logger.exception(f"Failed to compile VAULT_REDEEM intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-            return result
 
     def _resolve_token(self, token: str, chain: str | None = None) -> TokenInfo | None:
         """Resolve a token symbol or address to TokenInfo.

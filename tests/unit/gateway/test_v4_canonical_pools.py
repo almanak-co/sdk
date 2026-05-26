@@ -415,30 +415,38 @@ class TestMarketServiceSeedWiring:
 
     @pytest.mark.asyncio
     async def test_market_service_seeds_cache_on_first_lookup(self) -> None:
-        """First call to ``_get_v4_pool_key_cache`` invokes
-        ``seed_canonical_pool_keys`` exactly once before returning. The
+        """First call to ``_get_v4_pool_key_cache`` invokes the connector's
+        ``seed_pool_keys`` capability exactly once before returning. The
         returned cache must contain the canonical Base WETH/USDC pool_id.
+
+        VIB-4817 — seeding dispatches via
+        ``GATEWAY_REGISTRY.capability_providers(GatewayPoolKeySeedCapability)``
+        so the spy patches the provider method, not the module-level
+        ``seed_canonical_pool_keys`` helper.
         """
+        from almanak.connectors.uniswap_v4.gateway.provider import (
+            UniswapV4GatewayConnector,
+        )
+
         servicer = self._make_servicer()
 
         observed_calls: list[V4PoolKeyCache] = []
+        original_seed = UniswapV4GatewayConnector.seed_pool_keys
 
-        from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
-            seed_canonical_pool_keys as real_seed,
-        )
-
-        def _tracking_seed(cache: V4PoolKeyCache) -> SeedReport:
+        def _tracking_seed(self_: UniswapV4GatewayConnector, cache: V4PoolKeyCache) -> None:
             observed_calls.append(cache)
-            return real_seed(cache)
+            original_seed(self_, cache)
 
-        with patch(
-            "almanak.connectors.uniswap_v4.gateway.canonical_pools.seed_canonical_pool_keys",
+        with patch.object(
+            UniswapV4GatewayConnector,
+            "seed_pool_keys",
             _tracking_seed,
         ):
             cache = await servicer._get_v4_pool_key_cache()
 
         assert len(observed_calls) == 1, (
-            f"seed_canonical_pool_keys should be invoked exactly once on first cache access; got {len(observed_calls)}"
+            f"UniswapV4GatewayConnector.seed_pool_keys should be invoked exactly once on first cache access; "
+            f"got {len(observed_calls)}"
         )
         assert observed_calls[0] is cache
         # And the canonical Base WETH/USDC pool_id is present.
@@ -450,20 +458,23 @@ class TestMarketServiceSeedWiring:
         ``_get_v4_pool_key_cache`` invocations must NOT re-invoke the seed;
         the cache is already populated.
         """
+        from almanak.connectors.uniswap_v4.gateway.provider import (
+            UniswapV4GatewayConnector,
+        )
+
         servicer = self._make_servicer()
 
         call_count = 0
-        from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
-            seed_canonical_pool_keys as real_seed,
-        )
+        original_seed = UniswapV4GatewayConnector.seed_pool_keys
 
-        def _tracking_seed(cache: V4PoolKeyCache) -> SeedReport:
+        def _tracking_seed(self_: UniswapV4GatewayConnector, cache: V4PoolKeyCache) -> None:
             nonlocal call_count
             call_count += 1
-            return real_seed(cache)
+            original_seed(self_, cache)
 
-        with patch(
-            "almanak.connectors.uniswap_v4.gateway.canonical_pools.seed_canonical_pool_keys",
+        with patch.object(
+            UniswapV4GatewayConnector,
+            "seed_pool_keys",
             _tracking_seed,
         ):
             cache1 = await servicer._get_v4_pool_key_cache()

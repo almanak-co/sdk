@@ -1563,6 +1563,33 @@ class MyStrategy(IntentStrategy):
 
 \* These protocols do not have a `Protocol` enum value. Use the string config name (e.g., `protocol="aave_v3"`) in intents. They are resolved by the intent compiler and transaction builder directly.
 
+### Additional Connectors
+
+The connector registry (`ConnectorRegistry.all()`) is the post-VIB-4298 source of truth. Connectors below have full SDK + adapter + receipt-parser implementations and are routable via the `protocol="<name>"` string in intents, but do not have a top-level `Protocol` enum entry. Use the canonical name listed in **Config Name**:
+
+| Connector | Type | Config Name | Chains |
+|-----------|------|-------------|--------|
+| Across | Bridge | `across` | Ethereum, Arbitrum, Optimism, Base, Polygon |
+| Aster Perps | Perp | `aster_perps` | BNB Chain |
+| Camelot | DEX | `camelot` | Arbitrum |
+| Curvance | Lending | `curvance` | Monad |
+| Drift | Perp | `drift` | Solana |
+| Ethena | Staking | `ethena` | Ethereum |
+| Fluid | DEX | `fluid` | Arbitrum |
+| Gimo | Staking | `gimo` | 0G |
+| Jupiter | DEX | `jupiter` | Solana |
+| Jupiter Lend | Lending | `jupiter_lend` | Solana |
+| Kamino | Lending | `kamino` | Solana |
+| Meteora | DEX | `meteora` | Solana |
+| Morpho Vault | Vault | `morpho_vault` | Ethereum, Base |
+| Orca | DEX | `orca` | Solana |
+| PancakeSwap Perps | Perp | `pancakeswap_perps` | BNB Chain |
+| Raydium | DEX | `raydium` | Solana |
+| Spark | Lending | `spark` | Ethereum |
+| Stargate | Bridge | `stargate` | Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Avalanche |
+
+For the full machine-readable inventory (every connector, every intent it implements, every chain it ships on), see the generated matrix at [`docs/api/connectors/index.md`](../../../docs/api/connectors/index.md).
+
 ### Networks
 
 | Network | Enum Value | Description |

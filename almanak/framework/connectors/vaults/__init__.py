@@ -206,6 +206,11 @@ def _register_builtin_adapters() -> None:
         _build_metamorpho,
         supported_chains=_METAMORPHO_CHAINS,
     )
+    register_vault_adapter(
+        "morpho_vault",
+        _build_metamorpho,
+        supported_chains=_METAMORPHO_CHAINS,
+    )
 
 
 _register_builtin_adapters()

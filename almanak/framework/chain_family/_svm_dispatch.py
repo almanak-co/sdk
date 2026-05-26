@@ -2,8 +2,8 @@
 
 VIB-4803. Owns the protocol-level routing for SWAP / LP_OPEN / LP_CLOSE
 intents on Solana chains. The actual per-protocol compilation lives in
-``almanak.framework.intents.compiler_solana`` (Jupiter swap only after
-#2416) and in the per-protocol connector compilers (Meteora, Orca,
+``almanak.framework.connectors.jupiter.compiler`` (Jupiter swap) and in
+the per-protocol connector compilers (Meteora, Orca,
 Raydium) — this module is the seam between :class:`SvmFamily.compile_intent`
 and those compilers.
 
@@ -17,8 +17,8 @@ module therefore does NOT replicate those chain checks; it only:
   * normalises the Solana default LP protocol (``raydium_clmm`` when
     ``intent.protocol is None``),
   * routes via :func:`get_connector_compiler` for LP intents,
-  * delegates SWAP to :func:`compiler_solana.compile_jupiter_swap`
-    (Jupiter swap still lives in ``compiler_solana``).
+  * routes SWAP through :data:`CompilerRegistry` to the Jupiter connector
+    compiler.
 
 Why this lives next to :class:`SvmFamily` and not inside ``compiler.py``:
 
@@ -56,8 +56,6 @@ def dispatch_swap(compiler: IntentCompiler, intent: SwapIntent) -> CompilationRe
     Only entered when the compiler chain is Solana (caller-gated in
     :class:`SvmFamily.compile_intent`).
     """
-    from almanak.framework.intents import compiler_solana
-
     protocol = intent.protocol
     # ``protocol is None`` falls through to the Jupiter default; only an
     # explicitly-set, non-jupiter protocol is rejected.
@@ -67,7 +65,14 @@ def dispatch_swap(compiler: IntentCompiler, intent: SwapIntent) -> CompilationRe
             intent_id=intent.intent_id,
             error=f"Protocol '{protocol}' is not supported for SWAP on Solana. Supported: jupiter",
         )
-    return compiler_solana.compile_jupiter_swap(compiler, intent)
+    connector_compiler = get_connector_compiler("jupiter")
+    if connector_compiler is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error="Connector compiler for protocol 'jupiter' is not registered.",
+        )
+    return connector_compiler.compile(compiler._build_compiler_context("jupiter", connector_compiler), intent)
 
 
 def _dispatch_lp_via_connector(

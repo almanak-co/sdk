@@ -46,13 +46,12 @@ if TYPE_CHECKING:
 class CompileContext(Protocol):
     """Minimal shape :meth:`ChainFamilyAdapter.compile_intent` consumes.
 
-    Today the ``IntentCompiler`` instance itself is the context — every Solana
-    helper in ``compiler_solana.py`` consumes the compiler by name (it reads
-    ``compiler.chain``, ``compiler.wallet_address``, etc.). We accept that as
-    the contract for VIB-4803 to keep the diff focused on the dispatch refactor.
-    A typed ``CompileContext`` dataclass — independent of ``IntentCompiler`` —
-    is a worthwhile follow-up, but is not required to flip the dispatch from
-    ``_is_solana_chain()`` to ``family.compile_intent(...)``.
+    Today the ``IntentCompiler`` instance itself is the context — SVM dispatch
+    still needs the compiler to build connector compiler contexts. We accept
+    that as the contract for VIB-4803 to keep the diff focused on the dispatch
+    refactor. A typed ``CompileContext`` dataclass — independent of
+    ``IntentCompiler`` — is a worthwhile follow-up, but is not required to flip
+    the dispatch from ``_is_solana_chain()`` to ``family.compile_intent(...)``.
     """
 
     chain: str

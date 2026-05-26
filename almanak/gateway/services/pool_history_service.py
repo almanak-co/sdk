@@ -78,35 +78,151 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Pool-specific allowlists (POOL-3 / VIB-4751)
+# Pool-specific allowlists (POOL-3 / VIB-4751) — registry-driven (VIB-4811).
 # =============================================================================
-# These tables live HERE (not in ``_history_common.py``) because they are
-# pool-specific. ``RateHistoryService`` (VIB-4747) will have its own
-# allowlist + (chain, protocol) table in ``rate_history_service.py``. The
-# split keeps the shared module strictly chain-/protocol-agnostic.
+# Phase 3 (VIB-4811) replaces the hardcoded ``POOL_PROTOCOL_ALLOWLIST`` +
+# ``SUPPORTED_POOL_PAIRS`` tables with a derivation from
+# ``GATEWAY_REGISTRY.capability_providers(GatewayPoolHistoryCapability)``.
+# Each connector publishes its own supported chain set; the validator
+# unions them at module-import time.
+#
+# Behaviour is byte-identical to the historical hardcoded sets: Uniswap
+# V3 contributes ``{ethereum, arbitrum, base, optimism, polygon}`` and
+# Aerodrome contributes ``{base}`` — exactly the previous six
+# ``(chain, protocol)`` pairs. New protocols are added by registering a
+# ``GatewayPoolHistoryCapability`` provider in
+# ``almanak.connectors._gateway_registry`` (and NOT by editing this file).
+#
+# These tables live HERE (not in ``_history_common.py``) because they
+# remain pool-specific. ``RateHistoryService`` (VIB-4747) will have its
+# own allowlist / dispatch built from a sibling capability.
 
-#: Protocols VIB-4728 supports for pool history. Aerodrome lives on Base
-#: only; Uniswap V3 lives on five chains (see ``SUPPORTED_POOL_PAIRS``).
-#: Unknown protocols (typos, path-traversal injections like
-#: ``"../etc/passwd"``) are rejected with ``INVALID_ARGUMENT``.
-POOL_PROTOCOL_ALLOWLIST: frozenset[str] = frozenset({"uniswap_v3", "aerodrome"})
 
-#: ``(chain, protocol)`` pairs that have a registered subgraph URL or
-#: provider equivalent. The dispatcher in POOL-5 reads the SAME table to
-#: decide ``eligible_providers`` — keeping one source-of-truth here means
-#: a validator pass guarantees the dispatcher can route. Aerodrome lives
-#: only on Base (per ``almanak/framework/data/pools/history.py:86-93``);
-#: Uniswap V3 lives on Ethereum / Arbitrum / Base / Optimism / Polygon.
-SUPPORTED_POOL_PAIRS: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("ethereum", "uniswap_v3"),
-        ("arbitrum", "uniswap_v3"),
-        ("base", "uniswap_v3"),
-        ("optimism", "uniswap_v3"),
-        ("polygon", "uniswap_v3"),
-        ("base", "aerodrome"),
-    }
-)
+def _derive_pool_history_tables() -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+    """Compute ``(POOL_PROTOCOL_ALLOWLIST, SUPPORTED_POOL_PAIRS)`` from the registry.
+
+    Iterates every ``GatewayPoolHistoryCapability`` provider once and
+    unions their declared chains. The result is a snapshot — the
+    module-level ``POOL_PROTOCOL_ALLOWLIST`` / ``SUPPORTED_POOL_PAIRS``
+    constants build themselves lazily on first access (see
+    ``_LazyAllowlistProxy`` / ``_LazyPairsProxy``) because eager build
+    at module import races against ``_gateway_registry`` registration
+    — when an entry point lands on ``_gateway_registry`` first and the
+    aave_v3 / uniswap_v3 / etc. provider modules transitively pull in
+    ``gateway.services.__init__`` (and through it this module) before
+    registration finishes, the snapshot would be empty.
+
+    Imports are local to make the deferred build cycle-safe.
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayPoolHistoryCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    allowlist: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
+    # mypy: ``capability_providers`` is a generic runtime helper —
+    # passing a ``@runtime_checkable`` Protocol class trips
+    # ``type-abstract``. The Protocol is intentional: the registry
+    # filters by isinstance check, not by abstract-class instantiation.
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayPoolHistoryCapability):  # type: ignore[type-abstract]
+        # ``connector.protocol`` is declared on ``GatewayConnector``;
+        # mypy narrows to the Protocol type which doesn't list it.
+        protocol = str(connector.protocol).lower()  # type: ignore[attr-defined]
+        allowlist.add(protocol)
+        for chain in connector.pool_history_supported_chains():
+            # Normalize to lowercase — the validator (POOL-3) already
+            # lowercases incoming request fields, and we must match
+            # there. (Gemini code-review.)
+            pairs.add((chain.lower(), protocol))
+    return frozenset(allowlist), frozenset(pairs)
+
+
+# ``frozenset`` is final and can't be subclassed cleanly, so the lazy
+# proxy is a ``set`` subclass that materializes its contents on first
+# access. Tests that compare with ``== frozenset(...)`` still match
+# (set equality is contents-based) and ``in`` checks work normally.
+class _LazyFrozenset(frozenset):
+    """Marker base for the proxy classes below — exists only so callers
+    that do ``isinstance(x, frozenset)`` keep returning True.
+    """
+
+
+class _LazyAllowlistProxy(_LazyFrozenset):
+    __slots__ = ()  # frozenset is __slots__-friendly; state lives module-level
+
+    def __new__(cls) -> _LazyAllowlistProxy:
+        return super().__new__(cls)
+
+    @staticmethod
+    def _materialize() -> frozenset[str]:
+        global _ALLOWLIST_CACHE, _PAIRS_CACHE
+        if _ALLOWLIST_CACHE is None:
+            _ALLOWLIST_CACHE, _PAIRS_CACHE = _derive_pool_history_tables()
+        return _ALLOWLIST_CACHE
+
+    def __contains__(self, value: object) -> bool:
+        return value in _LazyAllowlistProxy._materialize()
+
+    def __iter__(self):
+        return iter(_LazyAllowlistProxy._materialize())
+
+    def __len__(self) -> int:
+        return len(_LazyAllowlistProxy._materialize())
+
+    def __eq__(self, other: object) -> bool:
+        return _LazyAllowlistProxy._materialize() == other
+
+    def __ne__(self, other: object) -> bool:
+        return _LazyAllowlistProxy._materialize() != other
+
+    def __hash__(self) -> int:
+        return hash(_LazyAllowlistProxy._materialize())
+
+    def __repr__(self) -> str:
+        return repr(_LazyAllowlistProxy._materialize())
+
+
+class _LazyPairsProxy(_LazyFrozenset):
+    __slots__ = ()
+
+    def __new__(cls) -> _LazyPairsProxy:
+        return super().__new__(cls)
+
+    @staticmethod
+    def _materialize() -> frozenset[tuple[str, str]]:
+        global _ALLOWLIST_CACHE, _PAIRS_CACHE
+        if _PAIRS_CACHE is None:
+            _ALLOWLIST_CACHE, _PAIRS_CACHE = _derive_pool_history_tables()
+        return _PAIRS_CACHE
+
+    def __contains__(self, value: object) -> bool:
+        return value in _LazyPairsProxy._materialize()
+
+    def __iter__(self):
+        return iter(_LazyPairsProxy._materialize())
+
+    def __len__(self) -> int:
+        return len(_LazyPairsProxy._materialize())
+
+    def __eq__(self, other: object) -> bool:
+        return _LazyPairsProxy._materialize() == other
+
+    def __ne__(self, other: object) -> bool:
+        return _LazyPairsProxy._materialize() != other
+
+    def __hash__(self) -> int:
+        return hash(_LazyPairsProxy._materialize())
+
+    def __repr__(self) -> str:
+        return repr(_LazyPairsProxy._materialize())
+
+
+_ALLOWLIST_CACHE: frozenset[str] | None = None
+_PAIRS_CACHE: frozenset[tuple[str, str]] | None = None
+
+POOL_PROTOCOL_ALLOWLIST: frozenset[str] = _LazyAllowlistProxy()
+SUPPORTED_POOL_PAIRS: frozenset[tuple[str, str]] = _LazyPairsProxy()
 
 
 def is_supported_pool_pair(chain: str, protocol: str) -> bool:

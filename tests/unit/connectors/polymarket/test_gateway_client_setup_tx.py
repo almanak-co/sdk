@@ -27,7 +27,7 @@ from almanak.framework.connectors.polymarket.gateway_client import (
 )
 from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 
 
 def _make_gateway_client(stub: MagicMock) -> GatewayClient:
@@ -39,8 +39,8 @@ def _make_gateway_client(stub: MagicMock) -> GatewayClient:
     return client
 
 
-def _response_with_setup_txs(*, fee_pusd: str = "") -> gateway_pb2.PolymarketOrderResponse:
-    return gateway_pb2.PolymarketOrderResponse(
+def _response_with_setup_txs(*, fee_pusd: str = "") -> polymarket_pb2.PolymarketOrderResponse:
+    return polymarket_pb2.PolymarketOrderResponse(
         order_id="order-vib3710-1",
         status="MATCHED",
         size_matched="10",
@@ -50,14 +50,14 @@ def _response_with_setup_txs(*, fee_pusd: str = "") -> gateway_pb2.PolymarketOrd
         avg_fill_price="0.50",
         created_at="2026-04-29T12:00:00Z",
         setup_txs=[
-            gateway_pb2.PolymarketSetupTx(
+            polymarket_pb2.PolymarketSetupTx(
                 tx_hash="0x" + "ab" * 32,
                 description="Approve pUSD -> CTF V2 exchange",
                 gas_used=60_000,
                 gas_price_wei="50000000000",  # 50 gwei
                 total_cost_wei=str(60_000 * 50_000_000_000),
             ),
-            gateway_pb2.PolymarketSetupTx(
+            polymarket_pb2.PolymarketSetupTx(
                 tx_hash="0x" + "cd" * 32,
                 description="Wrap USDC.e -> pUSD",
                 gas_used=150_000,
@@ -69,9 +69,9 @@ def _response_with_setup_txs(*, fee_pusd: str = "") -> gateway_pb2.PolymarketOrd
     )
 
 
-def _response_no_setup_txs() -> gateway_pb2.PolymarketOrderResponse:
+def _response_no_setup_txs() -> polymarket_pb2.PolymarketOrderResponse:
     """A pre-VIB-3710 / no-setup-needed response — empty repeated, empty fee_pusd."""
-    return gateway_pb2.PolymarketOrderResponse(
+    return polymarket_pb2.PolymarketOrderResponse(
         order_id="order-empty-1",
         status="LIVE",
         size_matched="0",

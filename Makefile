@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation
 
 # Load .env file if it exists
 -include .env
@@ -85,6 +85,16 @@ check-deployment-id-proto-surface:
 # scripts/ci/connector-chain-allowlist.yml.
 check-connector-chains:
 	uv run python scripts/ci/check_connector_chains.py
+
+# Gateway protocol-isolation guard (VIB-4812 / epic VIB-4808).
+# Fails CI on protocol-keyed dispatch shapes inside ``almanak/gateway/**``:
+#   * ``if protocol/venue/dex == "<protocol>":`` equality dispatch
+#   * ``"<protocol>" in deployment_id_lower`` substring sniffs
+#   * module-level ``_PROTOCOL_TO_X = {"uniswap_v3": ...}`` dispatch dicts
+# Phase 3 (VIB-4811) migrates the remaining dispatch tables; the
+# allowlist inside the test file shrinks to empty once that lands.
+check-gateway-isolation:
+	uv run pytest tests/static/test_gateway_protocol_isolation.py --import-mode=importlib
 
 # Run security checks (bandit for Python security issues)
 security:
@@ -214,10 +224,10 @@ crap-diff-fresh:
 COMPLEXITY_PATH ?= $(if $(FILE),$(FILE),almanak/)
 complexity:
 	@echo "== Cyclomatic complexity (rank C+ only) =="
-	uv run radon cc $(COMPLEXITY_PATH) -s -a -nc --exclude 'almanak/gateway/proto/*,almanak/demo_strategies/*'
+	uv run radon cc $(COMPLEXITY_PATH) -s -a -nc --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/demo_strategies/*'
 	@echo
 	@echo "== Maintainability Index (rank B and below) =="
-	uv run radon mi $(COMPLEXITY_PATH) -s -nb --exclude 'almanak/gateway/proto/*,almanak/demo_strategies/*'
+	uv run radon mi $(COMPLEXITY_PATH) -s -nb --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/demo_strategies/*'
 
 # Run nightly-only visual Market Data API contract tests
 test-nightly-visual:
@@ -230,8 +240,16 @@ docs-cli:
 	sed -i.bak 's/\* Type: <click\.types\.Path.*>/* Type: `Path`/g' docs/cli/*.md
 	rm -f docs/cli/*.md.bak
 
+# Regenerate every machine-generated page used by mkdocs. These outputs are
+# gitignored — they exist only after this target runs. Anything that builds
+# the docs site (``docs``, ``docs-serve``, the deploy workflow) must depend
+# on this first.
+docs-generated: docs-cli
+	uv run python scripts/docs/generate_connector_matrix.py --apply
+	uv run python scripts/docs/generate_chain_table.py --apply
+
 # Build documentation site (includes llms.txt generation)
-docs:
+docs: docs-generated
 	uv run mkdocs build
 	@$(MAKE) docs-llms
 
@@ -248,7 +266,7 @@ docs-llms:
 	rm -rf site-llms
 
 # Serve documentation locally for development
-docs-serve:
+docs-serve: docs-generated
 	uv run mkdocs serve
 
 # Clean documentation build output
@@ -329,10 +347,17 @@ build-upload-gcp: build-platform-wheels
 	uv run python -m twine upload --disable-progress-bar dist/*.whl
 
 # Gateway commands
+# VIB-4813 (Phase 5 of VIB-4808): Polymarket-specific RPCs live under
+# ``almanak/connectors/polymarket/proto/`` so the gateway proto layer no
+# longer names individual connectors. The connector-owned proto keeps the
+# same ``package = almanak.gateway.proto`` declaration so the wire-level
+# service name is byte-identical to the pre-move version.
 proto:
 	uv run python -m grpc_tools.protoc -I./almanak/gateway/proto --python_out=./almanak/gateway/proto --grpc_python_out=./almanak/gateway/proto --mypy_out=./almanak/gateway/proto ./almanak/gateway/proto/*.proto
 	# Fix imports in generated grpc file (grpc_tools generates relative imports that break in packages)
 	sed -i.bak 's/import gateway_pb2 as gateway__pb2/from almanak.gateway.proto import gateway_pb2 as gateway__pb2/' ./almanak/gateway/proto/gateway_pb2_grpc.py && rm -f ./almanak/gateway/proto/gateway_pb2_grpc.py.bak
+	uv run python -m grpc_tools.protoc -I./almanak/connectors/polymarket/proto --python_out=./almanak/connectors/polymarket/proto --grpc_python_out=./almanak/connectors/polymarket/proto --mypy_out=./almanak/connectors/polymarket/proto ./almanak/connectors/polymarket/proto/*.proto
+	sed -i.bak 's/import polymarket_pb2 as polymarket__pb2/from almanak.connectors.polymarket.proto import polymarket_pb2 as polymarket__pb2/' ./almanak/connectors/polymarket/proto/polymarket_pb2_grpc.py && rm -f ./almanak/connectors/polymarket/proto/polymarket_pb2_grpc.py.bak
 
 # Check that generated proto files are up-to-date (CI)
 proto-check:

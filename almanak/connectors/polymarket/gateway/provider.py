@@ -13,9 +13,12 @@ point — every existing credential and lifecycle invariant in
 
 Phase 1+2 — ``server.py`` switches to instantiating the servicer
 through ``GATEWAY_REGISTRY``; the explicit
-``gateway_pb2_grpc.add_PolymarketServiceServicer_to_server`` call stays
-here inside ``register_servicers``. Phase 4 collapses ``server.py`` to a
-loop over ``GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability)``.
+``polymarket_pb2_grpc.add_PolymarketServiceServicer_to_server`` call
+stays here inside ``register_servicers``. Phase 4 collapses
+``server.py`` to a loop over
+``GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability)``;
+Phase 5 (VIB-4813) relocates the proto definition itself out of
+``almanak/gateway/proto/`` into this connector's ``proto/`` module.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from almanak.connectors._base.gateway_capabilities import (
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
-from almanak.gateway.proto import gateway_pb2_grpc
+from almanak.connectors.polymarket.proto import polymarket_pb2_grpc
 
 from .service import PolymarketServiceServicer
 
@@ -58,7 +61,7 @@ class PolymarketGatewayConnector(GatewayConnector, GatewayServicerCapability):
         construction is the only step where credentials transit.
         """
         self._servicer = PolymarketServiceServicer(settings)
-        gateway_pb2_grpc.add_PolymarketServiceServicer_to_server(self._servicer, server)
+        polymarket_pb2_grpc.add_PolymarketServiceServicer_to_server(self._servicer, server)
 
 
 __all__ = ["PolymarketGatewayConnector"]

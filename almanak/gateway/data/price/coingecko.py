@@ -68,7 +68,13 @@ COINGECKO_PLATFORM_IDS: dict[str, str] = {
 
 
 # Token ID mappings for Arbitrum tokens
-# CoinGecko uses specific IDs for each token
+# CoinGecko uses specific IDs for each token.
+#
+# Protocol-token CoinGecko IDs (GMX, JOE, LDO, PENDLE, STETH, SUSDE,
+# UNI, USDE, WSTETH) historically lived inline here; VIB-4811 / Phase 3
+# moves them onto the owning connector's
+# ``GatewayPriceIdCapability.coingecko_ids()`` and merges them back via
+# ``_REGISTRY_PRICE_IDS`` below.
 ARBITRUM_TOKEN_IDS: dict[str, str] = {
     "ETH": "ethereum",
     "WETH": "weth",
@@ -79,22 +85,16 @@ ARBITRUM_TOKEN_IDS: dict[str, str] = {
     "USDT": "tether",
     "DAI": "dai",
     "LINK": "chainlink",
-    "UNI": "uniswap",
-    "GMX": "gmx",
-    "PENDLE": "pendle",
     "RDNT": "radiant-capital",
     "SOL": "solana",
-    "JOE": "trader-joe",
-    "LDO": "lido-dao",
     "BTC": "bitcoin",
-    "STETH": "lido-dao-wrapped-staked-eth",
-    "WSTETH": "wrapped-steth",
     "CBETH": "coinbase-wrapped-staked-eth",
-    "USDE": "ethena-usde",
-    "SUSDE": "ethena-staked-usde",
 }
 
-# Token ID mappings for Avalanche tokens
+# Token ID mappings for Avalanche tokens.
+#
+# Protocol-token CoinGecko IDs (AAVE, JOE, QI) migrated to the
+# capability registry (VIB-4811 / Phase 3).
 AVALANCHE_TOKEN_IDS: dict[str, str] = {
     "AVAX": "avalanche-2",
     "WAVAX": "avalanche-2",  # Wrapped AVAX uses same price as AVAX
@@ -108,15 +108,15 @@ AVALANCHE_TOKEN_IDS: dict[str, str] = {
     "WETH.E": "weth",
     "WBTC": "wrapped-bitcoin",
     "WBTC.E": "wrapped-bitcoin",
-    "JOE": "trader-joe",
     "PNG": "pangolin",
-    "QI": "benqi",
     "LINK": "chainlink",
-    "AAVE": "aave",
     "BTC.B": "bitcoin",
 }
 
-# Token ID mappings for Base tokens
+# Token ID mappings for Base tokens.
+#
+# Protocol-token CoinGecko IDs (AERO, WSTETH) migrated to the
+# capability registry (VIB-4811 / Phase 3).
 BASE_TOKEN_IDS: dict[str, str] = {
     "ETH": "ethereum",
     "WETH": "weth",
@@ -125,14 +125,15 @@ BASE_TOKEN_IDS: dict[str, str] = {
     "USDT": "tether",
     "DAI": "dai",
     "CBETH": "coinbase-wrapped-staked-eth",
-    "WSTETH": "wrapped-steth",
-    "AERO": "aerodrome-finance",
     "BASE": "base-protocol",
     "DEGEN": "degen-base",
     "BRETT": "brett",
 }
 
-# Token ID mappings for BSC tokens
+# Token ID mappings for BSC tokens.
+#
+# Protocol-token CoinGecko IDs (CAKE) migrated to the capability
+# registry (VIB-4811 / Phase 3).
 BSC_TOKEN_IDS: dict[str, str] = {
     "BNB": "binancecoin",
     "WBNB": "binancecoin",  # Wrapped BNB uses same price as BNB
@@ -141,19 +142,18 @@ BSC_TOKEN_IDS: dict[str, str] = {
     "DAI": "dai",
     "WETH": "weth",  # Bridged ETH on BSC
     "BTCB": "bitcoin",
-    "CAKE": "pancakeswap-token",
     "BUSD": "binance-usd",
 }
 
-# Token ID mappings for Solana tokens
+# Token ID mappings for Solana tokens.
+#
+# Protocol-token CoinGecko IDs (JUP, ORCA, RAY) migrated to the
+# capability registry (VIB-4811 / Phase 3).
 SOLANA_TOKEN_IDS: dict[str, str] = {
     "SOL": "solana",
     "WSOL": "solana",  # Wrapped SOL uses same price as SOL
     "USDC": "usd-coin",
     "USDT": "tether",
-    "JUP": "jupiter-exchange-solana",
-    "RAY": "raydium",
-    "ORCA": "orca",
     "BONK": "bonk",
     "WIF": "dogwifcoin",
     "JTO": "jito-governance-token",
@@ -181,6 +181,10 @@ XLAYER_TOKEN_IDS: dict[str, str] = {
     "USDG": "usd-coin",  # Gravity USD stablecoin, pegged ~$1
 }
 
+# Ethereum chain tokens.
+#
+# Protocol-token CoinGecko IDs (AAVE, LDO, PENDLE, SUSDE, UNI, USDE,
+# WSTETH) migrated to the capability registry (VIB-4811 / Phase 3).
 ETHEREUM_TOKEN_IDS: dict[str, str] = {
     "ETH": "ethereum",
     "WETH": "weth",
@@ -189,28 +193,25 @@ ETHEREUM_TOKEN_IDS: dict[str, str] = {
     "DAI": "dai",
     "WBTC": "wrapped-bitcoin",
     "LINK": "chainlink",
-    "UNI": "uniswap",
-    "AAVE": "aave",
     "CRV": "curve-dao-token",
     "CVX": "convex-finance",
     "COMP": "compound-governance-token",
     "MKR": "maker",
     "SNX": "havven",
-    "LDO": "lido-dao",
     "RPL": "rocket-pool",
     "ENS": "ethereum-name-service",
-    "PENDLE": "pendle",
     "GHO": "gho",
     "CRVUSD": "crvusd",
-    "WSTETH": "wrapped-steth",
     "RETH": "rocket-pool-eth",
     "CBETH": "coinbase-wrapped-staked-eth",
     "WEETH": "wrapped-eeth",
     "PUFETH": "pufeth",
-    "USDE": "ethena-usde",
-    "SUSDE": "ethena-staked-usde",
 }
 
+# Monad chain tokens.
+#
+# Protocol-token CoinGecko IDs (WSTETH) migrated to the capability
+# registry (VIB-4811 / Phase 3).
 MONAD_TOKEN_IDS: dict[str, str] = {
     # MON (native) / WMON (wrapped) — Monad's gas token. Curvance markets use
     # WMON as the canonical collateral/debt asset.
@@ -220,15 +221,51 @@ MONAD_TOKEN_IDS: dict[str, str] = {
     "WETH": "weth",
     "USDC": "usd-coin",
     "WBTC": "wrapped-bitcoin",
-    # LST / LRT collateral supported by Curvance markets.
+    # LRT collateral supported by Curvance markets.
     # Keys are uppercase to match get_price()'s symbol normalization.
     "EZETH": "renzo-restaked-eth",
-    "WSTETH": "wrapped-steth",
     # APRMON / SHMON intentionally unmapped: their CG ids could not be verified
     # and pinning a wrong id would suppress the address-endpoint fallback.
 }
 
-GLOBAL_TOKEN_IDS: dict[str, str] = {
+
+def _build_registry_price_ids() -> dict[str, str]:
+    """Assemble the protocol-token CoinGecko-id dict from the registry.
+
+    Iterates ``GATEWAY_REGISTRY.capability_providers(GatewayPriceIdCapability)``
+    and merges every connector's ``coingecko_ids()`` mapping. Two
+    connectors disagreeing on a symbol's slug raises ``RuntimeError`` —
+    silent overwrite would change the resolved CoinGecko ID for the
+    affected symbol and is a registry contract violation.
+
+    Imports are local so this module's import-time graph does not
+    transitively pull in the gateway-side connector registry — that
+    chain pulls in concrete connector modules whose service-side
+    imports trigger ``gateway.data.price.__init__`` again, before
+    ``multi_dex.DexQuote`` is exported (circular).
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayPriceIdCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    merged: dict[str, str] = {}
+    # mypy: ``@runtime_checkable`` Protocol is the registry contract.
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayPriceIdCapability):  # type: ignore[type-abstract]
+        for symbol, cg_id in connector.coingecko_ids().items():
+            existing = merged.get(symbol)
+            if existing is not None and existing != cg_id:
+                raise RuntimeError(
+                    f"CoinGecko slug collision for symbol {symbol!r}: "
+                    f"already registered as {existing!r}, refusing to "
+                    f"overwrite with {cg_id!r} from "
+                    f"{type(connector).__qualname__}"
+                )
+            merged[symbol] = cg_id
+    return merged
+
+
+_CHAIN_TABLE_TOKEN_IDS: dict[str, str] = {
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
     **BASE_TOKEN_IDS,
@@ -237,9 +274,84 @@ GLOBAL_TOKEN_IDS: dict[str, str] = {
     **XLAYER_TOKEN_IDS,
     **SOLANA_TOKEN_IDS,
     **MONAD_TOKEN_IDS,
-    # Ethereum last so canonical IDs (e.g. WSTETH -> wrapped-steth) win over chain variants
+    # Ethereum next so canonical IDs (e.g. WSTETH -> wrapped-steth) win over chain variants
     **ETHEREUM_TOKEN_IDS,
 }
+
+
+class _LazyGlobalTokenIds(dict[str, str]):
+    """Dict that merges per-chain tables + registry-derived slugs on first access.
+
+    Eager construction would trigger a circular import — the registry
+    pulls in concrete connectors, which pull in ``gateway.services``,
+    which pulls in ``gateway.data.price.__init__``, which is still
+    loading this module. Building lazily breaks the cycle while
+    keeping the post-refactor dict value byte-identical to the
+    pre-refactor merge.
+    """
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            # Chain tables first, registry-driven slugs last so a
+            # connector contribution overrides a (deliberately
+            # incomplete) chain-table entry for the same symbol.
+            super().update(_CHAIN_TABLE_TOKEN_IDS)
+            super().update(_build_registry_price_ids())
+            self._built = True
+
+    def __contains__(self, key: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, key: str) -> str:
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        raise TypeError("unhashable type: '_LazyGlobalTokenIds'")
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+
+# Combined per-chain CoinGecko slugs + registry-driven protocol-token
+# slugs. Built lazily on first access (see ``_LazyGlobalTokenIds``).
+GLOBAL_TOKEN_IDS: dict[str, str] = _LazyGlobalTokenIds()
 
 
 @dataclass

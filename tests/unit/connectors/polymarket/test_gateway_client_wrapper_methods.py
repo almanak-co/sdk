@@ -37,7 +37,7 @@ from almanak.framework.connectors.polymarket.models import (
     TradeStatus,
 )
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,9 +71,9 @@ def _make_wrapper(stub: MagicMock) -> GatewayPolymarketClient:
 class TestGetSimplifiedMarkets:
     def test_returns_markets_and_cursor(self) -> None:
         stub = MagicMock()
-        stub.GetSimplifiedMarkets.return_value = gateway_pb2.PolymarketSimplifiedMarketsResponse(
+        stub.GetSimplifiedMarkets.return_value = polymarket_pb2.PolymarketSimplifiedMarketsResponse(
             markets=[
-                gateway_pb2.PolymarketSimplifiedMarket(
+                polymarket_pb2.PolymarketSimplifiedMarket(
                     condition_id="0xabc",
                     tokens=["111", "222"],
                     min_incentive_size="10",
@@ -81,7 +81,7 @@ class TestGetSimplifiedMarkets:
                     active=True,
                     closed=False,
                 ),
-                gateway_pb2.PolymarketSimplifiedMarket(
+                polymarket_pb2.PolymarketSimplifiedMarket(
                     condition_id="0xdef",
                     tokens=["333"],
                     min_incentive_size="0",
@@ -99,7 +99,7 @@ class TestGetSimplifiedMarkets:
 
         # Wire shape
         request = stub.GetSimplifiedMarkets.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketGetSimplifiedMarketsRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketGetSimplifiedMarketsRequest)
         assert request.next_cursor == "prev-token"
 
         # Parsed result
@@ -118,7 +118,7 @@ class TestGetSimplifiedMarkets:
     def test_default_cursor_is_empty_string(self) -> None:
         """Calling without ``next_cursor`` must send the empty-string default."""
         stub = MagicMock()
-        stub.GetSimplifiedMarkets.return_value = gateway_pb2.PolymarketSimplifiedMarketsResponse(
+        stub.GetSimplifiedMarkets.return_value = polymarket_pb2.PolymarketSimplifiedMarketsResponse(
             markets=[], next_cursor="", success=True
         )
         wrapper = _make_wrapper(stub)
@@ -130,7 +130,7 @@ class TestGetSimplifiedMarkets:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetSimplifiedMarkets.return_value = gateway_pb2.PolymarketSimplifiedMarketsResponse(
+        stub.GetSimplifiedMarkets.return_value = polymarket_pb2.PolymarketSimplifiedMarketsResponse(
             success=False, error="upstream 500"
         )
         wrapper = _make_wrapper(stub)
@@ -146,21 +146,21 @@ class TestGetSimplifiedMarkets:
 class TestGetMidpoint:
     def test_returns_decimal_midpoint(self) -> None:
         stub = MagicMock()
-        stub.GetMidpoint.return_value = gateway_pb2.PolymarketMidpointResponse(
+        stub.GetMidpoint.return_value = polymarket_pb2.PolymarketMidpointResponse(
             midpoint="0.5234", success=True
         )
         wrapper = _make_wrapper(stub)
         result = wrapper.get_midpoint("token-xyz")
 
         request = stub.GetMidpoint.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketMidpointRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketMidpointRequest)
         assert request.token_id == "token-xyz"
         assert result == Decimal("0.5234")
         assert isinstance(result, Decimal)
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetMidpoint.return_value = gateway_pb2.PolymarketMidpointResponse(
+        stub.GetMidpoint.return_value = polymarket_pb2.PolymarketMidpointResponse(
             success=False, error="midpoint unavailable"
         )
         wrapper = _make_wrapper(stub)
@@ -176,21 +176,21 @@ class TestGetMidpoint:
 class TestGetPrice:
     def test_returns_decimal_price_for_buy(self) -> None:
         stub = MagicMock()
-        stub.GetPrice.return_value = gateway_pb2.PolymarketPriceResponse(
+        stub.GetPrice.return_value = polymarket_pb2.PolymarketPriceResponse(
             price="0.61", success=True
         )
         wrapper = _make_wrapper(stub)
         result = wrapper.get_price("token-xyz", "BUY")
 
         request = stub.GetPrice.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketPriceRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketPriceRequest)
         assert request.token_id == "token-xyz"
         assert request.side == "BUY"
         assert result == Decimal("0.61")
 
     def test_returns_decimal_price_for_sell(self) -> None:
         stub = MagicMock()
-        stub.GetPrice.return_value = gateway_pb2.PolymarketPriceResponse(
+        stub.GetPrice.return_value = polymarket_pb2.PolymarketPriceResponse(
             price="0.39", success=True
         )
         wrapper = _make_wrapper(stub)
@@ -211,7 +211,7 @@ class TestGetPrice:
     def test_lowercase_side_normalized_to_uppercase(self) -> None:
         """``buy`` is ambiguous on the wire — normalize before sending."""
         stub = MagicMock()
-        stub.GetPrice.return_value = gateway_pb2.PolymarketPriceResponse(
+        stub.GetPrice.return_value = polymarket_pb2.PolymarketPriceResponse(
             price="0.5", success=True
         )
         wrapper = _make_wrapper(stub)
@@ -221,7 +221,7 @@ class TestGetPrice:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetPrice.return_value = gateway_pb2.PolymarketPriceResponse(
+        stub.GetPrice.return_value = polymarket_pb2.PolymarketPriceResponse(
             success=False, error="no liquidity"
         )
         wrapper = _make_wrapper(stub)
@@ -237,20 +237,20 @@ class TestGetPrice:
 class TestGetSpread:
     def test_returns_decimal_spread(self) -> None:
         stub = MagicMock()
-        stub.GetSpread.return_value = gateway_pb2.PolymarketSpreadResponse(
+        stub.GetSpread.return_value = polymarket_pb2.PolymarketSpreadResponse(
             spread="0.02", success=True
         )
         wrapper = _make_wrapper(stub)
         result = wrapper.get_spread("token-xyz")
 
         request = stub.GetSpread.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketSpreadRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketSpreadRequest)
         assert request.token_id == "token-xyz"
         assert result == Decimal("0.02")
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetSpread.return_value = gateway_pb2.PolymarketSpreadResponse(
+        stub.GetSpread.return_value = polymarket_pb2.PolymarketSpreadResponse(
             success=False, error="spread unavailable"
         )
         wrapper = _make_wrapper(stub)
@@ -266,20 +266,20 @@ class TestGetSpread:
 class TestGetTickSize:
     def test_returns_decimal_tick_size(self) -> None:
         stub = MagicMock()
-        stub.GetTickSize.return_value = gateway_pb2.PolymarketTickSizeResponse(
+        stub.GetTickSize.return_value = polymarket_pb2.PolymarketTickSizeResponse(
             tick_size="0.001", success=True
         )
         wrapper = _make_wrapper(stub)
         result = wrapper.get_tick_size("token-xyz")
 
         request = stub.GetTickSize.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketTickSizeRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketTickSizeRequest)
         assert request.token_id == "token-xyz"
         assert result == Decimal("0.001")
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetTickSize.return_value = gateway_pb2.PolymarketTickSizeResponse(
+        stub.GetTickSize.return_value = polymarket_pb2.PolymarketTickSizeResponse(
             success=False, error="not found"
         )
         wrapper = _make_wrapper(stub)
@@ -295,7 +295,7 @@ class TestGetTickSize:
 class TestGetBalanceAllowance:
     def test_returns_balance_allowance_for_collateral(self) -> None:
         stub = MagicMock()
-        stub.GetBalanceAllowance.return_value = gateway_pb2.PolymarketBalanceAllowanceResponse(
+        stub.GetBalanceAllowance.return_value = polymarket_pb2.PolymarketBalanceAllowanceResponse(
             balance="100.50", allowance="500.00", success=True
         )
         wrapper = _make_wrapper(stub)
@@ -303,7 +303,7 @@ class TestGetBalanceAllowance:
 
         # Default asset_type should be COLLATERAL with empty token_id.
         request = stub.GetBalanceAllowance.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketBalanceAllowanceRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketBalanceAllowanceRequest)
         assert request.asset_type == "COLLATERAL"
         assert request.token_id == ""
 
@@ -313,7 +313,7 @@ class TestGetBalanceAllowance:
 
     def test_returns_balance_allowance_for_conditional_with_token_id(self) -> None:
         stub = MagicMock()
-        stub.GetBalanceAllowance.return_value = gateway_pb2.PolymarketBalanceAllowanceResponse(
+        stub.GetBalanceAllowance.return_value = polymarket_pb2.PolymarketBalanceAllowanceResponse(
             balance="42", allowance="0", success=True
         )
         wrapper = _make_wrapper(stub)
@@ -327,7 +327,7 @@ class TestGetBalanceAllowance:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetBalanceAllowance.return_value = gateway_pb2.PolymarketBalanceAllowanceResponse(
+        stub.GetBalanceAllowance.return_value = polymarket_pb2.PolymarketBalanceAllowanceResponse(
             success=False, error="auth failed"
         )
         wrapper = _make_wrapper(stub)
@@ -343,9 +343,9 @@ class TestGetBalanceAllowance:
 class TestGetTrades:
     def test_returns_trades_with_filters(self) -> None:
         stub = MagicMock()
-        stub.GetTradesHistory.return_value = gateway_pb2.PolymarketTradesResponse(
+        stub.GetTradesHistory.return_value = polymarket_pb2.PolymarketTradesResponse(
             trades=[
-                gateway_pb2.PolymarketTrade(
+                polymarket_pb2.PolymarketTrade(
                     trade_id="trade-1",
                     market="0xmarket",
                     asset_id="111",
@@ -357,7 +357,7 @@ class TestGetTrades:
                     match_time="1745930000",
                     transaction_hash="0xtx",
                 ),
-                gateway_pb2.PolymarketTrade(
+                polymarket_pb2.PolymarketTrade(
                     trade_id="trade-2",
                     market="0xmarket",
                     asset_id="222",
@@ -377,7 +377,7 @@ class TestGetTrades:
         results = wrapper.get_trades(filters)
 
         request = stub.GetTradesHistory.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketGetTradesRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketGetTradesRequest)
         assert request.market_id == "0xmarket"
         assert request.limit == 50
 
@@ -399,7 +399,7 @@ class TestGetTrades:
 
     def test_no_filters_sends_empty_request(self) -> None:
         stub = MagicMock()
-        stub.GetTradesHistory.return_value = gateway_pb2.PolymarketTradesResponse(success=True)
+        stub.GetTradesHistory.return_value = polymarket_pb2.PolymarketTradesResponse(success=True)
         wrapper = _make_wrapper(stub)
         results = wrapper.get_trades()
         request = stub.GetTradesHistory.call_args.args[0]
@@ -409,7 +409,7 @@ class TestGetTrades:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.GetTradesHistory.return_value = gateway_pb2.PolymarketTradesResponse(
+        stub.GetTradesHistory.return_value = polymarket_pb2.PolymarketTradesResponse(
             success=False, error="auth required"
         )
         wrapper = _make_wrapper(stub)
@@ -427,7 +427,7 @@ class TestCancelOrders:
         """Partial-success response: caller must see both populated lists so
         retries don't double-cancel the successes."""
         stub = MagicMock()
-        stub.CancelOrders.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelOrders.return_value = polymarket_pb2.PolymarketCancelResponse(
             canceled=["ord-1", "ord-2"],
             not_canceled=["ord-3"],
             # Partial failure: success=False on the wire, but the wrapper
@@ -438,7 +438,7 @@ class TestCancelOrders:
         result = wrapper.cancel_orders(["ord-1", "ord-2", "ord-3"])
 
         request = stub.CancelOrders.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketCancelOrdersRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketCancelOrdersRequest)
         assert list(request.order_ids) == ["ord-1", "ord-2", "ord-3"]
 
         assert result == {
@@ -448,7 +448,7 @@ class TestCancelOrders:
 
     def test_full_success_returns_empty_not_canceled(self) -> None:
         stub = MagicMock()
-        stub.CancelOrders.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelOrders.return_value = polymarket_pb2.PolymarketCancelResponse(
             canceled=["ord-1", "ord-2"],
             not_canceled=[],
             success=True,
@@ -480,7 +480,7 @@ class TestCancelOrders:
 class TestCancelAllOrders:
     def test_returns_list_of_canceled_ids(self) -> None:
         stub = MagicMock()
-        stub.CancelAll.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelAll.return_value = polymarket_pb2.PolymarketCancelResponse(
             canceled=["ord-1", "ord-2", "ord-3"],
             not_canceled=[],
             success=True,
@@ -489,14 +489,14 @@ class TestCancelAllOrders:
         result = wrapper.cancel_all_orders(market_id="0xmkt", asset_id="111")
 
         request = stub.CancelAll.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketCancelAllRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketCancelAllRequest)
         assert request.market_id == "0xmkt"
         assert request.asset_id == "111"
         assert result == ["ord-1", "ord-2", "ord-3"]
 
     def test_no_filters_sends_empty_strings(self) -> None:
         stub = MagicMock()
-        stub.CancelAll.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelAll.return_value = polymarket_pb2.PolymarketCancelResponse(
             canceled=[], success=True
         )
         wrapper = _make_wrapper(stub)
@@ -510,7 +510,7 @@ class TestCancelAllOrders:
         """When CancelAll succeeds for a subset, the wrapper returns the
         canceled subset (not_canceled is informational on the wire)."""
         stub = MagicMock()
-        stub.CancelAll.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelAll.return_value = polymarket_pb2.PolymarketCancelResponse(
             canceled=["ord-1"],
             not_canceled=["ord-2"],
             success=True,
@@ -521,7 +521,7 @@ class TestCancelAllOrders:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.CancelAll.return_value = gateway_pb2.PolymarketCancelResponse(
+        stub.CancelAll.return_value = polymarket_pb2.PolymarketCancelResponse(
             success=False, error="auth required"
         )
         wrapper = _make_wrapper(stub)
@@ -538,7 +538,7 @@ class TestCreateAndPostMarketOrder:
     def test_buy_market_order_sends_amount_as_usdc(self) -> None:
         """For BUY, ``amount`` is USDC notional — wrapper sends it verbatim."""
         stub = MagicMock()
-        stub.CreateAndPostMarketOrder.return_value = gateway_pb2.PolymarketOrderResponse(
+        stub.CreateAndPostMarketOrder.return_value = polymarket_pb2.PolymarketOrderResponse(
             order_id="ord-buy-1",
             status="MATCHED",
             size_matched="20",
@@ -558,7 +558,7 @@ class TestCreateAndPostMarketOrder:
         )
 
         request = stub.CreateAndPostMarketOrder.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketMarketOrderRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketMarketOrderRequest)
         assert request.token_id == "111"
         assert request.amount == "10"
         assert request.side == "BUY"
@@ -572,7 +572,7 @@ class TestCreateAndPostMarketOrder:
     def test_sell_market_order_sends_amount_as_token_size(self) -> None:
         """For SELL, ``amount`` is token (share) size — wrapper sends verbatim."""
         stub = MagicMock()
-        stub.CreateAndPostMarketOrder.return_value = gateway_pb2.PolymarketOrderResponse(
+        stub.CreateAndPostMarketOrder.return_value = polymarket_pb2.PolymarketOrderResponse(
             order_id="ord-sell-1",
             status="MATCHED",
             size_matched="5",
@@ -604,7 +604,7 @@ class TestCreateAndPostMarketOrder:
         from types import SimpleNamespace
 
         stub = MagicMock()
-        stub.CreateAndPostMarketOrder.return_value = gateway_pb2.PolymarketOrderResponse(
+        stub.CreateAndPostMarketOrder.return_value = polymarket_pb2.PolymarketOrderResponse(
             order_id="ord-x",
             status="LIVE",
             size_matched="0",
@@ -626,7 +626,7 @@ class TestCreateAndPostMarketOrder:
 
     def test_failure_raises_polymarket_api_error(self) -> None:
         stub = MagicMock()
-        stub.CreateAndPostMarketOrder.return_value = gateway_pb2.PolymarketOrderResponse(
+        stub.CreateAndPostMarketOrder.return_value = polymarket_pb2.PolymarketOrderResponse(
             success=False, error="insufficient balance"
         )
         wrapper = _make_wrapper(stub)

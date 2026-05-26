@@ -17,8 +17,8 @@ import grpc
 if TYPE_CHECKING:
     from ...data.prediction_provider import PositionFilters
 
+from almanak.connectors.polymarket.proto import polymarket_pb2
 from almanak.framework.gateway_client import GatewayClient
-from almanak.gateway.proto import gateway_pb2
 
 from .exceptions import PolymarketAPIError
 from .models import (
@@ -60,8 +60,10 @@ class GatewayPolymarketClient:
     def _raise_rpc_error(prefix: str, error: str | None, *, status_code: int | None = None) -> None:
         raise PolymarketAPIError(f"{prefix}: {error or 'unknown error'}", status_code=status_code)
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
+    # file, not this function body. Pre-existing complexity tracked separately.
     @staticmethod
-    def _parse_market(response: gateway_pb2.PolymarketMarketResponse) -> GammaMarket:
+    def _parse_market(response: polymarket_pb2.PolymarketMarketResponse) -> GammaMarket:
         raw_payload = response.raw_json.strip()
         if raw_payload:
             return GammaMarket.from_api_response(json.loads(raw_payload))
@@ -101,7 +103,7 @@ class GatewayPolymarketClient:
     def get_market(self, market_id: str) -> GammaMarket:
         try:
             response = self._gateway_client.polymarket.GetMarket(
-                gateway_pb2.PolymarketGetMarketRequest(condition_id=market_id),
+                polymarket_pb2.PolymarketGetMarketRequest(condition_id=market_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -113,7 +115,7 @@ class GatewayPolymarketClient:
     def get_market_by_slug(self, slug: str) -> GammaMarket | None:
         try:
             response = self._gateway_client.polymarket.GetMarket(
-                gateway_pb2.PolymarketGetMarketRequest(slug=slug),
+                polymarket_pb2.PolymarketGetMarketRequest(slug=slug),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -128,7 +130,7 @@ class GatewayPolymarketClient:
         filters_json = filters.model_dump_json(exclude_none=True) if filters else ""
         try:
             response = self._gateway_client.polymarket.GetMarkets(
-                gateway_pb2.PolymarketGetMarketsRequest(filters_json=filters_json),
+                polymarket_pb2.PolymarketGetMarketsRequest(filters_json=filters_json),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -140,7 +142,7 @@ class GatewayPolymarketClient:
     def get_orderbook(self, token_id: str) -> OrderBook:
         try:
             response = self._gateway_client.polymarket.GetOrderBook(
-                gateway_pb2.PolymarketOrderBookRequest(token_id=token_id),
+                polymarket_pb2.PolymarketOrderBookRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -177,7 +179,7 @@ class GatewayPolymarketClient:
         # API-level GTD timestamp (Unix seconds), not the signed-struct field.
         try:
             response = self._gateway_client.polymarket.CreateAndPostOrder(
-                gateway_pb2.PolymarketCreateOrderRequest(
+                polymarket_pb2.PolymarketCreateOrderRequest(
                     token_id=token_id,
                     price=str(price),
                     size=str(size),
@@ -224,6 +226,8 @@ class GatewayPolymarketClient:
             }
         )
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
+    # file, not this function body. Pre-existing complexity tracked separately.
     def get_positions(
         self,
         wallet: str | None = None,
@@ -237,7 +241,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.GetPositions(
-                gateway_pb2.PolymarketGetPositionsRequest(),
+                polymarket_pb2.PolymarketGetPositionsRequest(),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -266,8 +270,10 @@ class GatewayPolymarketClient:
                 positions = [p for p in positions if p.outcome == filters.outcome]
         return positions
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
+    # file, not this function body. Pre-existing complexity tracked separately.
     def get_open_orders(self, filters: OrderFilters | None = None) -> list[OpenOrder]:
-        request = gateway_pb2.PolymarketGetOpenOrdersRequest(
+        request = polymarket_pb2.PolymarketGetOpenOrdersRequest(
             market_id=filters.market if filters and filters.market else "",
         )
         try:
@@ -299,10 +305,12 @@ class GatewayPolymarketClient:
             )
         return orders
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched the imports in this
+    # file, not this function body. Pre-existing complexity tracked separately.
     def get_order(self, order_id: str) -> OpenOrder | None:
         try:
             response = self._gateway_client.polymarket.GetOrder(
-                gateway_pb2.PolymarketGetOrderRequest(order_id=order_id),
+                polymarket_pb2.PolymarketGetOrderRequest(order_id=order_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -349,7 +357,7 @@ class GatewayPolymarketClient:
         # Normalize the enum -> string before sending; the proto field is a
         # plain string, the SDK accepts either.
         interval_str = interval.value if isinstance(interval, PriceHistoryInterval) else (interval or "")
-        request = gateway_pb2.PolymarketGetPriceHistoryRequest(
+        request = polymarket_pb2.PolymarketGetPriceHistoryRequest(
             token_id=token_id,
             interval=interval_str,
             start_ts=int(start_ts) if start_ts else 0,
@@ -388,7 +396,7 @@ class GatewayPolymarketClient:
         Signature mirrors :meth:`ClobClient.get_trade_tape` so
         :class:`PredictionMarketDataProvider` works unchanged.
         """
-        request = gateway_pb2.PolymarketGetTradeTapeRequest(
+        request = polymarket_pb2.PolymarketGetTradeTapeRequest(
             token_id=token_id or "",
             limit=int(limit),
         )
@@ -426,7 +434,7 @@ class GatewayPolymarketClient:
     def cancel_order(self, order_id: str) -> bool:
         try:
             response = self._gateway_client.polymarket.CancelOrder(
-                gateway_pb2.PolymarketCancelOrderRequest(order_id=order_id),
+                polymarket_pb2.PolymarketCancelOrderRequest(order_id=order_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -446,7 +454,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.GetSimplifiedMarkets(
-                gateway_pb2.PolymarketGetSimplifiedMarketsRequest(next_cursor=next_cursor),
+                polymarket_pb2.PolymarketGetSimplifiedMarketsRequest(next_cursor=next_cursor),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -470,7 +478,7 @@ class GatewayPolymarketClient:
         """Return the midpoint price for ``token_id`` as a Decimal probability."""
         try:
             response = self._gateway_client.polymarket.GetMidpoint(
-                gateway_pb2.PolymarketMidpointRequest(token_id=token_id),
+                polymarket_pb2.PolymarketMidpointRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -493,7 +501,7 @@ class GatewayPolymarketClient:
             raise ValueError(f"Invalid side {side!r}: must be 'BUY' or 'SELL'")
         try:
             response = self._gateway_client.polymarket.GetPrice(
-                gateway_pb2.PolymarketPriceRequest(token_id=token_id, side=normalized),
+                polymarket_pb2.PolymarketPriceRequest(token_id=token_id, side=normalized),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -506,7 +514,7 @@ class GatewayPolymarketClient:
         """Return the bid-ask spread for ``token_id`` as a Decimal."""
         try:
             response = self._gateway_client.polymarket.GetSpread(
-                gateway_pb2.PolymarketSpreadRequest(token_id=token_id),
+                polymarket_pb2.PolymarketSpreadRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -519,7 +527,7 @@ class GatewayPolymarketClient:
         """Return the minimum tick size for ``token_id`` as a Decimal."""
         try:
             response = self._gateway_client.polymarket.GetTickSize(
-                gateway_pb2.PolymarketTickSizeRequest(token_id=token_id),
+                polymarket_pb2.PolymarketTickSizeRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -542,7 +550,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.GetBalanceAllowance(
-                gateway_pb2.PolymarketBalanceAllowanceRequest(
+                polymarket_pb2.PolymarketBalanceAllowanceRequest(
                     asset_type=asset_type,
                     token_id=token_id or "",
                 ),
@@ -566,7 +574,7 @@ class GatewayPolymarketClient:
         executed fills. Mirrors :meth:`ClobClient.get_trades` so callers can
         adopt without shape changes.
         """
-        request = gateway_pb2.PolymarketGetTradesRequest(
+        request = polymarket_pb2.PolymarketGetTradesRequest(
             market_id=filters.market if filters and filters.market else "",
             limit=filters.limit if filters else 0,
         )
@@ -649,7 +657,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.CancelOrders(
-                gateway_pb2.PolymarketCancelOrdersRequest(order_ids=list(order_ids)),
+                polymarket_pb2.PolymarketCancelOrdersRequest(order_ids=list(order_ids)),
                 timeout=self._rpc_timeout(),
             )
         except grpc.RpcError as exc:
@@ -681,7 +689,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.CancelAll(
-                gateway_pb2.PolymarketCancelAllRequest(
+                polymarket_pb2.PolymarketCancelAllRequest(
                     market_id=market_id or "",
                     asset_id=asset_id or "",
                 ),
@@ -727,7 +735,7 @@ class GatewayPolymarketClient:
         """
         try:
             response = self._gateway_client.polymarket.CreateAndPostMarketOrder(
-                gateway_pb2.PolymarketMarketOrderRequest(
+                polymarket_pb2.PolymarketMarketOrderRequest(
                     token_id=token_id,
                     amount=str(amount),
                     side=side,

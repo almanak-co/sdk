@@ -10,6 +10,11 @@ Key Features:
     - Slippage estimation per venue
     - Caching to minimize redundant queries
 
+The set of supported DEXs, the per-chain dispatch table, and the
+per-DEX quote function are all sourced from the gateway-connector
+registry (VIB-4811 / Phase 3). Adding a new DEX is purely a new
+``GatewayDexQuoteCapability`` provider — no edit to this file required.
+
 Example:
     from almanak.gateway.data.price.multi_dex import MultiDexPriceService, Dex
 
@@ -30,6 +35,8 @@ Example:
     )
     print(f"Best venue: {best.dex} with {best.amount_out} WETH")
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -52,25 +59,198 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-class Dex(StrEnum):
-    """Supported DEX protocols."""
+class _LazyDexEnum:
+    """Sentinel that builds the ``Dex`` enum on first attribute access.
 
-    UNISWAP_V3 = "uniswap_v3"
-    CURVE = "curve"
-    ENSO = "enso"
+    Eager construction triggers the standard circular-import problem —
+    the registry pulls in concrete gateway connectors, which pull in
+    ``gateway.services``, which pulls in
+    ``gateway.data.price.__init__`` mid-load. The enum's members must
+    still resolve as ``Dex.UNISWAP_V3`` etc. for any pre-existing
+    caller, so we build it lazily and proxy attribute access.
+    """
+
+    _enum: Any = None
+
+    @classmethod
+    def _ensure_built(cls) -> Any:
+        if cls._enum is None:
+            cls._enum = _build_dex_enum()
+        return cls._enum
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_LazyDexEnum._ensure_built(), name)
+
+    def __iter__(self):
+        return iter(_LazyDexEnum._ensure_built())
+
+    def __call__(self, value: str) -> Any:
+        return _LazyDexEnum._ensure_built()(value)
 
 
-# Supported DEXs list
-SUPPORTED_DEXS: list[str] = [d.value for d in Dex]
+def _build_dex_enum() -> Any:
+    """Build the ``Dex`` ``StrEnum`` from registry providers.
 
-# DEXs available per chain
-DEX_CHAINS: dict[str, list[str]] = {
-    "ethereum": ["uniswap_v3", "curve", "enso"],
-    "arbitrum": ["uniswap_v3", "curve", "enso"],
-    "optimism": ["uniswap_v3", "enso"],
-    "polygon": ["uniswap_v3", "enso"],
-    "base": ["uniswap_v3", "enso"],
-}
+    Returns the dynamically-created enum *class*; callers use it as
+    ``Dex.UNISWAP_V3`` / ``Dex.CURVE`` / etc. just like the legacy
+    hardcoded ``Dex``. Returning ``Any`` keeps mypy happy with the
+    functional ``StrEnum(name, members)`` factory which is an
+    intentional Python idiom but doesn't fit the static return-type
+    signature cleanly.
+
+    Imports are local so this module can be imported without
+    immediately triggering ``almanak.connectors._gateway_registry``
+    loading (see ``coingecko._build_registry_price_ids`` rationale).
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayDexQuoteCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    members: dict[str, str] = {}
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayDexQuoteCapability):  # type: ignore[type-abstract]
+        name = connector.dex_name()
+        members[name.upper()] = name
+    return StrEnum("Dex", members)
+
+
+# ``Dex`` was historically a hardcoded ``StrEnum`` with ``UNISWAP_V3``,
+# ``CURVE``, and ``ENSO`` members. Now derived from registry providers
+# so adding a new DEX requires only a new ``GatewayDexQuoteCapability``
+# implementation.
+Dex: Any = _LazyDexEnum()  # noqa: N816 — matches the legacy enum name.
+
+
+def _build_dex_chains() -> dict[str, list[str]]:
+    """Build the per-chain DEX dispatch table from registry providers.
+
+    Iterates every ``GatewayDexQuoteCapability`` and unions
+    ``supported_chains()`` into ``{chain: [dex_name, ...]}``. Result
+    order matches connector registration order to keep historical
+    output stable.
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayDexQuoteCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    table: dict[str, list[str]] = {}
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayDexQuoteCapability):  # type: ignore[type-abstract]
+        for chain in connector.supported_chains():
+            table.setdefault(chain, []).append(connector.dex_name())
+    return table
+
+
+class _LazyDexChains(dict[str, list[str]]):
+    """``dict`` view of ``_build_dex_chains`` that builds on first access."""
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            super().update(_build_dex_chains())
+            self._built = True
+
+    def __contains__(self, key: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, key: str) -> list[str]:
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        raise TypeError("unhashable type: '_LazyDexChains'")
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+
+class _LazySupportedDexs(list[str]):
+    """``list`` view of registry-provided DEX names, built on first access."""
+
+    __slots__ = ("_built",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._built = False
+
+    def _ensure_built(self) -> None:
+        if not self._built:
+            from almanak.connectors._base.gateway_capabilities import (
+                GatewayDexQuoteCapability,
+            )
+            from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+            for connector in GATEWAY_REGISTRY.capability_providers(GatewayDexQuoteCapability):  # type: ignore[type-abstract]
+                super().append(connector.dex_name())
+            self._built = True
+
+    def __contains__(self, item: object) -> bool:
+        self._ensure_built()
+        return super().__contains__(item)
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        self._ensure_built()
+        return super().__len__()
+
+    def __getitem__(self, index):
+        self._ensure_built()
+        return super().__getitem__(index)
+
+    def __eq__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        self._ensure_built()
+        return super().__ne__(other)
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        raise TypeError("unhashable type: '_LazySupportedDexs'")
+
+
+# Supported DEXs list and per-chain dispatch table — lazily derived
+# from ``GATEWAY_REGISTRY.capability_providers(GatewayDexQuoteCapability)``.
+SUPPORTED_DEXS: list[str] = _LazySupportedDexs()
+DEX_CHAINS: dict[str, list[str]] = _LazyDexChains()
 
 # Common tokens supported by DEXs
 SUPPORTED_TOKENS: dict[str, list[str]] = {
@@ -341,7 +521,7 @@ class MultiDexPriceService:
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         dexs: list[str] | None = None,
         mock_quotes: dict[str, Callable[..., DexQuote]] | None = None,
-        token_resolver: "TokenResolver | None" = None,
+        token_resolver: TokenResolver | None = None,
     ) -> None:
         """Initialize the multi-DEX price service.
 
@@ -363,6 +543,33 @@ class MultiDexPriceService:
             from almanak.framework.data.tokens.resolver import get_token_resolver
 
             self._token_resolver = get_token_resolver()
+
+        # Resolve the per-DEX quote providers once per service instance.
+        # Built from ``GATEWAY_REGISTRY.capability_providers`` so adding a
+        # new DEX is purely a new connector registration — no edit to
+        # this file required. (VIB-4811 / Phase 3.)
+        from almanak.connectors._base.gateway_capabilities import (
+            GatewayDexQuoteCapability,
+        )
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+        # Duplicate ``dex_name()`` across two registered connectors is
+        # a hard error — ``GATEWAY_REGISTRY.register`` only guards
+        # unique ``ProtocolName``, not unique ``dex_name()``. Silent
+        # last-write-wins would flip quote dispatch to whichever
+        # provider registered last. (CodeRabbit code-review.)
+        self._quote_providers: dict[str, GatewayDexQuoteCapability] = {}
+        # mypy: ``@runtime_checkable`` Protocol is the registry contract.
+        for connector in GATEWAY_REGISTRY.capability_providers(GatewayDexQuoteCapability):  # type: ignore[type-abstract]
+            dex_name = connector.dex_name()
+            existing = self._quote_providers.get(dex_name)
+            if existing is not None and existing is not connector:
+                raise RuntimeError(
+                    f"Duplicate DEX quote provider for {dex_name!r}: "
+                    f"{type(existing).__qualname__} vs "
+                    f"{type(connector).__qualname__}"
+                )
+            self._quote_providers[dex_name] = connector
 
         # Validate chain
         if chain not in DEX_CHAINS:
@@ -770,15 +977,17 @@ class MultiDexPriceService:
         if cached:
             return cached
 
+        # Dispatch via the capability registry — the per-DEX simulation
+        # methods (``_get_uniswap_v3_quote`` / ``_get_curve_quote`` /
+        # ``_get_enso_quote``) stay on this service so their shared
+        # state (mock-quote hooks, price-impact / slippage helpers,
+        # default-price fallback) is reachable. (VIB-4811 / Phase 3.)
+        connector = self._quote_providers.get(dex)
+        if connector is None:
+            raise DexNotSupportedError(dex, self._chain)
+
         try:
-            if dex == "uniswap_v3":
-                quote = await self._get_uniswap_v3_quote(token_in, token_out, amount_in)
-            elif dex == "curve":
-                quote = await self._get_curve_quote(token_in, token_out, amount_in)
-            elif dex == "enso":
-                quote = await self._get_enso_quote(token_in, token_out, amount_in)
-            else:
-                raise DexNotSupportedError(dex, self._chain)
+            quote = await connector.quote(self, token_in, token_out, amount_in)
 
             # Cache the quote
             self._cache_quote(cache_key, quote)

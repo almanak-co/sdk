@@ -25,7 +25,7 @@ from almanak.framework.connectors.polymarket.gateway_client import (
 )
 from almanak.framework.connectors.polymarket.models import HistoricalTrade
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.gateway.proto import gateway_pb2
+from almanak.connectors.polymarket.proto import polymarket_pb2
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +52,8 @@ def _make_trade(
     timestamp: int = 1700000000,
     maker: str = "0xMaker",
     taker: str = "0xTaker",
-) -> gateway_pb2.PolymarketHistoricalTrade:
-    return gateway_pb2.PolymarketHistoricalTrade(
+) -> polymarket_pb2.PolymarketHistoricalTrade:
+    return polymarket_pb2.PolymarketHistoricalTrade(
         id=trade_id,
         token_id=token_id,
         side=side,
@@ -68,11 +68,11 @@ def _make_trade(
 
 def _make_response(
     *,
-    trades: list[gateway_pb2.PolymarketHistoricalTrade] | None = None,
+    trades: list[polymarket_pb2.PolymarketHistoricalTrade] | None = None,
     success: bool = True,
     error: str = "",
-) -> gateway_pb2.PolymarketTradeTapeResponse:
-    return gateway_pb2.PolymarketTradeTapeResponse(
+) -> polymarket_pb2.PolymarketTradeTapeResponse:
+    return polymarket_pb2.PolymarketTradeTapeResponse(
         trades=trades if trades is not None else [_make_trade()],
         success=success,
         error=error,
@@ -124,7 +124,7 @@ class TestGetTradeTapeHappyPath:
         client.get_trade_tape(token_id="my-token", limit=42)
 
         request = stub.GetTradeTape.call_args.args[0]
-        assert isinstance(request, gateway_pb2.PolymarketGetTradeTapeRequest)
+        assert isinstance(request, polymarket_pb2.PolymarketGetTradeTapeRequest)
         assert request.token_id == "my-token"
         assert request.limit == 42
 
@@ -159,7 +159,7 @@ class TestGetTradeTapeHappyPath:
         """The proto carries both ``token_id`` and ``asset_id`` (an upstream
         alias). When the upstream populates only ``asset_id`` we must still
         produce a fully-formed ``HistoricalTrade``."""
-        trade = gateway_pb2.PolymarketHistoricalTrade(
+        trade = polymarket_pb2.PolymarketHistoricalTrade(
             id="t1",
             token_id="",  # explicit empty
             asset_id="alias-token",

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from web3 import Web3
 
 from almanak.config.gateway_runtime import parse_gateway_wallets_json
+from almanak.connectors.polymarket.proto import polymarket_pb2, polymarket_pb2_grpc
 from almanak.framework.connectors.polymarket import (
     ApiCredentials,
     ClobClient,
@@ -60,7 +61,6 @@ from almanak.framework.connectors.polymarket.signer import (
     make_remote_signer,
 )
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils.rpc_provider import get_cached_web3, get_rpc_url, is_local_rpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -206,7 +206,7 @@ def _resolve_polymarket_zodiac_entry() -> dict | None:
     return None
 
 
-class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
+class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
     """Implements PolymarketService gRPC interface.
 
     Provides secure proxy to Polymarket CLOB API with credentials held in gateway.
@@ -1459,7 +1459,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     # =========================================================================
 
     @staticmethod
-    def _market_response_from_gamma(data: dict) -> gateway_pb2.PolymarketMarketResponse:
+    def _market_response_from_gamma(data: dict) -> polymarket_pb2.PolymarketMarketResponse:
         outcomes_raw = data.get("outcomes")
         outcome_prices_raw = data.get("outcomePrices")
         token_ids_raw = data.get("clobTokenIds")
@@ -1490,7 +1490,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         except (TypeError, ValueError):
             tags = []
 
-        return gateway_pb2.PolymarketMarketResponse(
+        return polymarket_pb2.PolymarketMarketResponse(
             condition_id=data.get("conditionId", ""),
             question_id=data.get("questionID", data.get("questionId", "")),
             tokens=token_ids,
@@ -1523,11 +1523,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             raw_json=json.dumps(data, separators=(",", ":")),
         )
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetMarket(
         self,
-        request: gateway_pb2.PolymarketGetMarketRequest,
+        request: polymarket_pb2.PolymarketGetMarketRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketMarketResponse:
+    ) -> polymarket_pb2.PolymarketMarketResponse:
         """Get market by slug, market ID, or condition ID."""
         if request.slug:
             success, data, error = await self._request(
@@ -1537,10 +1539,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 params={"slug": request.slug, "limit": "1"},
             )
             if not success:
-                return gateway_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
+                return polymarket_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
             items: list[dict] = data if isinstance(data, list) else []
             if not items:
-                return gateway_pb2.PolymarketMarketResponse(success=False, error="Market not found")
+                return polymarket_pb2.PolymarketMarketResponse(success=False, error="Market not found")
             return self._market_response_from_gamma(items[0])
 
         success, data, error = await self._request(
@@ -1558,20 +1560,22 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             params={"condition_ids": request.condition_id, "limit": "1"},
         )
         if not success:
-            return gateway_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
+            return polymarket_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
         items = data if isinstance(data, list) else []
         if not items:
-            return gateway_pb2.PolymarketMarketResponse(success=False, error="Market not found")
+            return polymarket_pb2.PolymarketMarketResponse(success=False, error="Market not found")
         return self._market_response_from_gamma(items[0])
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetMarkets(
         self,
-        request: gateway_pb2.PolymarketGetMarketsRequest,
+        request: polymarket_pb2.PolymarketGetMarketsRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketMarketsResponse:
+    ) -> polymarket_pb2.PolymarketMarketsResponse:
         """Get list of markets from the Gamma API."""
         if request.next_cursor:
-            return gateway_pb2.PolymarketMarketsResponse(
+            return polymarket_pb2.PolymarketMarketsResponse(
                 success=False,
                 error="Cursor pagination is not yet supported by GetMarkets",
             )
@@ -1580,7 +1584,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             try:
                 raw_filters = json.loads(request.filters_json)
             except json.JSONDecodeError:
-                return gateway_pb2.PolymarketMarketsResponse(success=False, error="Invalid filters_json")
+                return polymarket_pb2.PolymarketMarketsResponse(success=False, error="Invalid filters_json")
             for key, value in raw_filters.items():
                 if value is None:
                     continue
@@ -1594,21 +1598,23 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         success, data, error = await self._request("GET", GAMMA_BASE_URL, "/markets", params=params or None)
 
         if not success:
-            return gateway_pb2.PolymarketMarketsResponse(success=False, error=error or "")
+            return polymarket_pb2.PolymarketMarketsResponse(success=False, error=error or "")
         items: list[dict] = data if isinstance(data, list) else []
         markets = [self._market_response_from_gamma(item) for item in items]
 
-        return gateway_pb2.PolymarketMarketsResponse(
+        return polymarket_pb2.PolymarketMarketsResponse(
             markets=markets,
             next_cursor="",
             success=True,
         )
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetSimplifiedMarkets(
         self,
-        request: gateway_pb2.PolymarketGetSimplifiedMarketsRequest,
+        request: polymarket_pb2.PolymarketGetSimplifiedMarketsRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketSimplifiedMarketsResponse:
+    ) -> polymarket_pb2.PolymarketSimplifiedMarketsResponse:
         """Get simplified market list."""
         params = {}
         if request.next_cursor:
@@ -1617,7 +1623,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         success, data, error = await self._request("GET", CLOB_BASE_URL, "/simplified-markets", params=params)
 
         if not success:
-            return gateway_pb2.PolymarketSimplifiedMarketsResponse(success=False, error=error or "")
+            return polymarket_pb2.PolymarketSimplifiedMarketsResponse(success=False, error=error or "")
 
         # Guard against data being None (e.g., JSON null response)
         if data is None:
@@ -1630,7 +1636,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         markets = []
         for item in items:
             markets.append(
-                gateway_pb2.PolymarketSimplifiedMarket(
+                polymarket_pb2.PolymarketSimplifiedMarket(
                     condition_id=item.get("condition_id", ""),
                     tokens=[str(t) for t in item.get("tokens", [])],
                     min_incentive_size=str(item.get("min_incentive_size", "0")),
@@ -1644,7 +1650,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if isinstance(data, dict):
             next_cursor = data.get("next_cursor", "")
 
-        return gateway_pb2.PolymarketSimplifiedMarketsResponse(
+        return polymarket_pb2.PolymarketSimplifiedMarketsResponse(
             markets=markets,
             next_cursor=next_cursor,
             success=True,
@@ -1656,9 +1662,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def GetOrderBook(
         self,
-        request: gateway_pb2.PolymarketOrderBookRequest,
+        request: polymarket_pb2.PolymarketOrderBookRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketOrderBookResponse:
+    ) -> polymarket_pb2.PolymarketOrderBookResponse:
         """Get order book for a token."""
         success, data, error = await self._request(
             "GET",
@@ -1668,18 +1674,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketOrderBookResponse(success=False, error=error or "Order book not found")
+            return polymarket_pb2.PolymarketOrderBookResponse(success=False, error=error or "Order book not found")
 
         bids = [
-            gateway_pb2.PolymarketOrderBookLevel(price=str(b.get("price", "0")), size=str(b.get("size", "0")))
+            polymarket_pb2.PolymarketOrderBookLevel(price=str(b.get("price", "0")), size=str(b.get("size", "0")))
             for b in data.get("bids", [])
         ]
         asks = [
-            gateway_pb2.PolymarketOrderBookLevel(price=str(a.get("price", "0")), size=str(a.get("size", "0")))
+            polymarket_pb2.PolymarketOrderBookLevel(price=str(a.get("price", "0")), size=str(a.get("size", "0")))
             for a in data.get("asks", [])
         ]
 
-        return gateway_pb2.PolymarketOrderBookResponse(
+        return polymarket_pb2.PolymarketOrderBookResponse(
             market=data.get("market", ""),
             asset_id=data.get("asset_id", ""),
             hash=data.get("hash", ""),
@@ -1691,9 +1697,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def GetMidpoint(
         self,
-        request: gateway_pb2.PolymarketMidpointRequest,
+        request: polymarket_pb2.PolymarketMidpointRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketMidpointResponse:
+    ) -> polymarket_pb2.PolymarketMidpointResponse:
         """Get midpoint price for a token."""
         success, data, error = await self._request(
             "GET",
@@ -1703,18 +1709,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketMidpointResponse(success=False, error=error or "Midpoint not found")
+            return polymarket_pb2.PolymarketMidpointResponse(success=False, error=error or "Midpoint not found")
 
-        return gateway_pb2.PolymarketMidpointResponse(
+        return polymarket_pb2.PolymarketMidpointResponse(
             midpoint=str(data.get("mid", "0")),
             success=True,
         )
 
     async def GetPrice(
         self,
-        request: gateway_pb2.PolymarketPriceRequest,
+        request: polymarket_pb2.PolymarketPriceRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketPriceResponse:
+    ) -> polymarket_pb2.PolymarketPriceResponse:
         """Get price for a token."""
         success, data, error = await self._request(
             "GET",
@@ -1724,18 +1730,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketPriceResponse(success=False, error=error or "Price not found")
+            return polymarket_pb2.PolymarketPriceResponse(success=False, error=error or "Price not found")
 
-        return gateway_pb2.PolymarketPriceResponse(
+        return polymarket_pb2.PolymarketPriceResponse(
             price=str(data.get("price", "0")),
             success=True,
         )
 
     async def GetSpread(
         self,
-        request: gateway_pb2.PolymarketSpreadRequest,
+        request: polymarket_pb2.PolymarketSpreadRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketSpreadResponse:
+    ) -> polymarket_pb2.PolymarketSpreadResponse:
         """Get spread for a token."""
         success, data, error = await self._request(
             "GET",
@@ -1745,18 +1751,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketSpreadResponse(success=False, error=error or "Spread not found")
+            return polymarket_pb2.PolymarketSpreadResponse(success=False, error=error or "Spread not found")
 
-        return gateway_pb2.PolymarketSpreadResponse(
+        return polymarket_pb2.PolymarketSpreadResponse(
             spread=str(data.get("spread", "0")),
             success=True,
         )
 
     async def GetTickSize(
         self,
-        request: gateway_pb2.PolymarketTickSizeRequest,
+        request: polymarket_pb2.PolymarketTickSizeRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketTickSizeResponse:
+    ) -> polymarket_pb2.PolymarketTickSizeResponse:
         """Get tick size for a token."""
         success, data, error = await self._request(
             "GET",
@@ -1766,9 +1772,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketTickSizeResponse(success=False, error=error or "Tick size not found")
+            return polymarket_pb2.PolymarketTickSizeResponse(success=False, error=error or "Tick size not found")
 
-        return gateway_pb2.PolymarketTickSizeResponse(
+        return polymarket_pb2.PolymarketTickSizeResponse(
             tick_size=str(data.get("minimum_tick_size", "0.01")),
             success=True,
         )
@@ -1777,14 +1783,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     # Order Management RPCs
     # =========================================================================
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def CreateAndPostOrder(
         self,
-        request: gateway_pb2.PolymarketCreateOrderRequest,
+        request: polymarket_pb2.PolymarketCreateOrderRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketOrderResponse:
+    ) -> polymarket_pb2.PolymarketOrderResponse:
         """Create and post a limit order via the gateway-owned signer."""
         if not self._available:
-            return gateway_pb2.PolymarketOrderResponse(
+            return polymarket_pb2.PolymarketOrderResponse(
                 success=False,
                 error="Polymarket signer not configured in gateway",
             )
@@ -1794,7 +1802,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             size = Decimal(request.size)
             side = request.side.upper()
             if side not in ("BUY", "SELL"):
-                return gateway_pb2.PolymarketOrderResponse(
+                return polymarket_pb2.PolymarketOrderResponse(
                     success=False,
                     error=f"Invalid side '{request.side}': must be 'BUY' or 'SELL'",
                 )
@@ -1843,7 +1851,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             # this RPC invocation — no shared mutable state to drain, so each
             # order's response carries only the gas it actually paid for.
             setup_txs_proto = [
-                gateway_pb2.PolymarketSetupTx(
+                polymarket_pb2.PolymarketSetupTx(
                     tx_hash=record["tx_hash"],
                     description=record["description"],
                     gas_used=int(record["gas_used"]),
@@ -1862,7 +1870,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             # the strategy-side parser maps "" to None.
             fee_pusd_response = getattr(response, "fee_pusd", None)
             fee_pusd_str = str(fee_pusd_response) if fee_pusd_response is not None else ""
-            return gateway_pb2.PolymarketOrderResponse(
+            return polymarket_pb2.PolymarketOrderResponse(
                 order_id=response.order_id,
                 status=response.status.value,
                 size_matched=str(response.filled_size),
@@ -1879,19 +1887,19 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             # and was either consumed in the response above or is unreferenced
             # if we never reached the success branch. Any setup txs that
             # confirmed before this exception are local to this call only.
-            return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error=str(e))
         except Exception as e:
             # Cache eviction for shape errors happens at the upstream call
             # site (see the inner try around create_and_post_order); this
             # outer handler only translates the exception to a response.
             logger.exception("Failed to create order through gateway Polymarket client")
-            return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error=str(e))
 
     async def CreateAndPostMarketOrder(
         self,
-        request: gateway_pb2.PolymarketMarketOrderRequest,
+        request: polymarket_pb2.PolymarketMarketOrderRequest,
         context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketOrderResponse:
+    ) -> polymarket_pb2.PolymarketOrderResponse:
         """Create and post a market order against the current top-of-book.
 
         V2 NOTE — implemented as an FOK limit order. Polymarket's CLOB has no
@@ -1935,12 +1943,12 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 ``worst_price`` is optional but recommended.
         """
         if not self._available:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Polymarket not configured")
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error="Polymarket not configured")
 
         # Validate side explicitly
         side = request.side.upper() if request.side else ""
         if side not in ("BUY", "SELL"):
-            return gateway_pb2.PolymarketOrderResponse(
+            return polymarket_pb2.PolymarketOrderResponse(
                 success=False, error=f"Invalid side: must be BUY or SELL, got '{request.side}'"
             )
 
@@ -1948,11 +1956,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         try:
             amount = Decimal(request.amount)
         except InvalidOperation:
-            return gateway_pb2.PolymarketOrderResponse(
+            return polymarket_pb2.PolymarketOrderResponse(
                 success=False, error=f"Invalid amount format: '{request.amount}'"
             )
         if amount <= 0:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Amount must be positive")
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error="Amount must be positive")
 
         # Cross-side price sampling. See the docstring: a market BUY needs the
         # ASK, which Polymarket returns from ``/price?side=SELL``. A market
@@ -1968,17 +1976,17 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not price_success or not price_data:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error=price_error or "Could not get price")
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error=price_error or "Could not get price")
 
         # Parse price from API response
         try:
             price = Decimal(str(price_data.get("price", "0")))
         except InvalidOperation:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Invalid price format from API")
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error="Invalid price format from API")
 
         # Validate price is positive before using it for calculations
         if price <= 0:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Invalid price: price must be positive")
+            return polymarket_pb2.PolymarketOrderResponse(success=False, error="Invalid price: price must be positive")
 
         # worst_price guard — submission-time check on the sampled top-of-book
         # price (single-level, NOT depth-aware). Match-time FOK semantics on
@@ -1988,16 +1996,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             try:
                 worst = Decimal(request.worst_price)
             except InvalidOperation:
-                return gateway_pb2.PolymarketOrderResponse(
+                return polymarket_pb2.PolymarketOrderResponse(
                     success=False, error=f"Invalid worst_price format: '{request.worst_price}'"
                 )
             if side == "BUY" and price > worst:
-                return gateway_pb2.PolymarketOrderResponse(
+                return polymarket_pb2.PolymarketOrderResponse(
                     success=False,
                     error=f"Best ask {price} exceeds worst_price {worst} for BUY",
                 )
             if side == "SELL" and price < worst:
-                return gateway_pb2.PolymarketOrderResponse(
+                return polymarket_pb2.PolymarketOrderResponse(
                     success=False,
                     error=f"Best bid {price} below worst_price {worst} for SELL",
                 )
@@ -2018,7 +2026,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # V2: ``fee_rate_bps`` and on-chain ``nonce`` are gone (operator-set
         # fees, ``timestamp`` replaces nonce). Proto fields kept for wire
         # compat but not threaded through.
-        create_request = gateway_pb2.PolymarketCreateOrderRequest(
+        create_request = polymarket_pb2.PolymarketCreateOrderRequest(
             token_id=request.token_id,
             price=str(price),
             size=size_str,
@@ -2031,9 +2039,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def CancelOrder(
         self,
-        request: gateway_pb2.PolymarketCancelOrderRequest,
+        request: polymarket_pb2.PolymarketCancelOrderRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketCancelResponse:
+    ) -> polymarket_pb2.PolymarketCancelResponse:
         """Cancel a single order."""
         try:
             client = await self._build_authenticated_client()
@@ -2041,9 +2049,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 await asyncio.to_thread(client.cancel_order, request.order_id)
             finally:
                 client.close()
-            return gateway_pb2.PolymarketCancelResponse(canceled=[request.order_id], not_canceled=[], success=True)
+            return polymarket_pb2.PolymarketCancelResponse(canceled=[request.order_id], not_canceled=[], success=True)
         except Exception as e:
-            return gateway_pb2.PolymarketCancelResponse(
+            return polymarket_pb2.PolymarketCancelResponse(
                 canceled=[],
                 not_canceled=[request.order_id],
                 success=False,
@@ -2052,9 +2060,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def CancelOrders(
         self,
-        request: gateway_pb2.PolymarketCancelOrdersRequest,
+        request: polymarket_pb2.PolymarketCancelOrdersRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketCancelResponse:
+    ) -> polymarket_pb2.PolymarketCancelResponse:
         """Cancel multiple orders."""
         canceled: list[str] = []
         not_canceled: list[str] = []
@@ -2068,15 +2076,17 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                     not_canceled.append(order_id)
         finally:
             client.close()
-        return gateway_pb2.PolymarketCancelResponse(
+        return polymarket_pb2.PolymarketCancelResponse(
             canceled=canceled, not_canceled=not_canceled, success=not not_canceled
         )
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def CancelAll(
         self,
-        request: gateway_pb2.PolymarketCancelAllRequest,
+        request: polymarket_pb2.PolymarketCancelAllRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketCancelResponse:
+    ) -> polymarket_pb2.PolymarketCancelResponse:
         """Cancel all orders, optionally scoped to market_id and/or asset_id."""
         client = await self._build_authenticated_client()
         try:
@@ -2089,9 +2099,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             order_ids = [order.order_id for order in open_orders]
             if order_ids:
                 await asyncio.to_thread(client.cancel_orders, order_ids)
-            return gateway_pb2.PolymarketCancelResponse(canceled=order_ids, not_canceled=[], success=True)
+            return polymarket_pb2.PolymarketCancelResponse(canceled=order_ids, not_canceled=[], success=True)
         except Exception as e:
-            return gateway_pb2.PolymarketCancelResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketCancelResponse(success=False, error=str(e))
         finally:
             client.close()
 
@@ -2101,9 +2111,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def GetPositions(
         self,
-        _request: gateway_pb2.PolymarketGetPositionsRequest,
+        _request: polymarket_pb2.PolymarketGetPositionsRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketPositionsResponse:
+    ) -> polymarket_pb2.PolymarketPositionsResponse:
         """Get positions for the wallet.
 
         Polymarket's Data API ``/positions`` endpoint is public and keyed by
@@ -2113,7 +2123,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         wallet that had not registered Polymarket API keys (VIB-3769).
         """
         if not self._wallet_address:
-            return gateway_pb2.PolymarketPositionsResponse(
+            return polymarket_pb2.PolymarketPositionsResponse(
                 success=False,
                 error="Polymarket wallet address is not configured on the gateway",
             )
@@ -2124,10 +2134,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             finally:
                 client.close()
         except Exception as e:
-            return gateway_pb2.PolymarketPositionsResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketPositionsResponse(success=False, error=str(e))
 
         positions = [
-            gateway_pb2.PolymarketPosition(
+            polymarket_pb2.PolymarketPosition(
                 asset=p.token_id,
                 condition_id=p.condition_id,
                 size=str(p.size),
@@ -2141,13 +2151,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             )
             for p in data
         ]
-        return gateway_pb2.PolymarketPositionsResponse(positions=positions, success=True)
+        return polymarket_pb2.PolymarketPositionsResponse(positions=positions, success=True)
 
     async def GetOpenOrders(
         self,
-        request: gateway_pb2.PolymarketGetOpenOrdersRequest,
+        request: polymarket_pb2.PolymarketGetOpenOrdersRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketOpenOrdersResponse:
+    ) -> polymarket_pb2.PolymarketOpenOrdersResponse:
         """Get open orders."""
         try:
             client = await self._build_authenticated_client()
@@ -2159,10 +2169,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             finally:
                 client.close()
         except Exception as e:
-            return gateway_pb2.PolymarketOpenOrdersResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketOpenOrdersResponse(success=False, error=str(e))
 
         orders = [
-            gateway_pb2.PolymarketOpenOrder(
+            polymarket_pb2.PolymarketOpenOrder(
                 order_id=o.order_id,
                 market=o.market,
                 side=o.side,
@@ -2174,13 +2184,15 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             )
             for o in data
         ]
-        return gateway_pb2.PolymarketOpenOrdersResponse(orders=orders, success=True)
+        return polymarket_pb2.PolymarketOpenOrdersResponse(orders=orders, success=True)
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetTradesHistory(
         self,
-        request: gateway_pb2.PolymarketGetTradesRequest,
+        request: polymarket_pb2.PolymarketGetTradesRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketTradesResponse:
+    ) -> polymarket_pb2.PolymarketTradesResponse:
         """Get trade history."""
         params = {}
         if request.market_id:
@@ -2203,13 +2215,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success:
-            return gateway_pb2.PolymarketTradesResponse(success=False, error=error or "")
+            return polymarket_pb2.PolymarketTradesResponse(success=False, error=error or "")
 
         trades = []
         trade_list = data if isinstance(data, list) else data.get("data", []) if data else []
         for t in trade_list:
             trades.append(
-                gateway_pb2.PolymarketTrade(
+                polymarket_pb2.PolymarketTrade(
                     trade_id=t.get("id", t.get("trade_id", "")),
                     market=t.get("market", ""),
                     asset_id=t.get("asset_id", ""),
@@ -2228,13 +2240,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if isinstance(data, dict):
             next_cursor = data.get("next_cursor", "")
 
-        return gateway_pb2.PolymarketTradesResponse(trades=trades, next_cursor=next_cursor, success=True)
+        return polymarket_pb2.PolymarketTradesResponse(trades=trades, next_cursor=next_cursor, success=True)
 
     async def GetOrder(
         self,
-        request: gateway_pb2.PolymarketGetOrderRequest,
+        request: polymarket_pb2.PolymarketGetOrderRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketOrderInfoResponse:
+    ) -> polymarket_pb2.PolymarketOrderInfoResponse:
         """Get a specific order by ID."""
         try:
             client = await self._build_authenticated_client()
@@ -2243,10 +2255,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             finally:
                 client.close()
         except Exception as e:
-            return gateway_pb2.PolymarketOrderInfoResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketOrderInfoResponse(success=False, error=str(e))
         if data is None:
-            return gateway_pb2.PolymarketOrderInfoResponse(success=False, error="Order not found")
-        return gateway_pb2.PolymarketOrderInfoResponse(
+            return polymarket_pb2.PolymarketOrderInfoResponse(success=False, error="Order not found")
+        return polymarket_pb2.PolymarketOrderInfoResponse(
             order_id=data.order_id,
             market=data.market,
             side=data.side,
@@ -2264,9 +2276,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def GetPriceHistory(
         self,
-        request: gateway_pb2.PolymarketGetPriceHistoryRequest,
+        request: polymarket_pb2.PolymarketGetPriceHistoryRequest,
         context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketPriceHistoryResponse:
+    ) -> polymarket_pb2.PolymarketPriceHistoryResponse:
         """Proxy ``ClobClient.get_price_history`` (public ``/prices-history``).
 
         Mutual-exclusion of ``interval`` vs ``start_ts``+``end_ts`` is enforced
@@ -2321,16 +2333,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             finally:
                 client.close()
         except Exception as e:
-            return gateway_pb2.PolymarketPriceHistoryResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketPriceHistoryResponse(success=False, error=str(e))
 
         prices = [
-            gateway_pb2.PolymarketHistoricalPrice(
+            polymarket_pb2.PolymarketHistoricalPrice(
                 timestamp=int(p.timestamp.timestamp()),
                 price=str(p.price),
             )
             for p in history.prices
         ]
-        return gateway_pb2.PolymarketPriceHistoryResponse(
+        return polymarket_pb2.PolymarketPriceHistoryResponse(
             token_id=history.token_id,
             interval=history.interval,
             prices=prices,
@@ -2341,9 +2353,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def GetTradeTape(
         self,
-        request: gateway_pb2.PolymarketGetTradeTapeRequest,
+        request: polymarket_pb2.PolymarketGetTradeTapeRequest,
         context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketTradeTapeResponse:
+    ) -> polymarket_pb2.PolymarketTradeTapeResponse:
         """Proxy ``ClobClient.get_trade_tape`` (authenticated ``/data/trades``).
 
         Authenticated upstream path: use ``_build_authenticated_client`` so the
@@ -2374,10 +2386,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             finally:
                 client.close()
         except Exception as e:
-            return gateway_pb2.PolymarketTradeTapeResponse(success=False, error=str(e))
+            return polymarket_pb2.PolymarketTradeTapeResponse(success=False, error=str(e))
 
         proto_trades = [
-            gateway_pb2.PolymarketHistoricalTrade(
+            polymarket_pb2.PolymarketHistoricalTrade(
                 id=t.id,
                 token_id=t.token_id,
                 side=t.side,
@@ -2396,17 +2408,19 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             )
             for t in trades
         ]
-        return gateway_pb2.PolymarketTradeTapeResponse(trades=proto_trades, success=True)
+        return polymarket_pb2.PolymarketTradeTapeResponse(trades=proto_trades, success=True)
 
     # =========================================================================
     # Balance RPCs
     # =========================================================================
 
+    # crap-allowlist: VIB-4819 — proto-relocation PR touched imports here, not the
+    # function body. Underlying complexity is pre-existing; refactor tracked separately.
     async def GetBalanceAllowance(
         self,
-        request: gateway_pb2.PolymarketBalanceAllowanceRequest,
+        request: polymarket_pb2.PolymarketBalanceAllowanceRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.PolymarketBalanceAllowanceResponse:
+    ) -> polymarket_pb2.PolymarketBalanceAllowanceResponse:
         """Get balance and allowance."""
         params = {"asset_type": request.asset_type or "COLLATERAL"}
         if request.token_id:
@@ -2421,9 +2435,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         )
 
         if not success or not data:
-            return gateway_pb2.PolymarketBalanceAllowanceResponse(success=False, error=error or "Could not get balance")
+            return polymarket_pb2.PolymarketBalanceAllowanceResponse(
+                success=False, error=error or "Could not get balance"
+            )
 
-        return gateway_pb2.PolymarketBalanceAllowanceResponse(
+        return polymarket_pb2.PolymarketBalanceAllowanceResponse(
             balance=str(data.get("balance", "0")),
             allowance=str(data.get("allowance", "0")),
             success=True,
