@@ -608,7 +608,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
           ``_build_swap_amounts`` emits ``None`` (NOT ``Decimal(0)``) for
           ``amount_in_decimal`` and ``effective_price`` so downstream
           accounting can distinguish "unmeasured" from "measured zero"
-          (the "Empty != zero" invariant from blueprints/27-accounting.md).
+          (the "Empty != zero" invariant from docs/internal/blueprints/27-accounting.md).
           ``amount_in_decimal_resolved=False`` continues to mark the row.
         """
         decimals_in = self._resolve_decimals(seed.token_in)
@@ -627,7 +627,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         """Assemble the final SwapAmounts, including realized slippage."""
         from almanak.framework.execution.extracted_data import SwapAmounts
 
-        # "Empty != zero" invariant (blueprints/27-accounting.md):
+        # "Empty != zero" invariant (docs/internal/blueprints/27-accounting.md):
         # When input decimals could not be resolved, we cannot compute
         # ``amount_in_decimal`` -- emit ``None`` (unmeasured), NOT
         # ``Decimal(0)`` (measured zero). The raw integer ``amount_in``

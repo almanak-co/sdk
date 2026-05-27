@@ -9,7 +9,7 @@ the compiler to fall back to a heuristic ±50 bin scan around the *current*
 active_id. After price drift the original bins may sit outside that window
 and ``removeLiquidity`` closes only a subset — leaving liquidity stranded
 on-chain while the framework reports success. (See
-``connectors/traderjoe_v2/compiler.py`` and ``blueprints/05-connectors.md``.)
+``connectors/traderjoe_v2/compiler.py`` and ``docs/internal/blueprints/05-connectors.md``.)
 
 Of 17 TJ V2 LP strategies in this repo, 13 forgot to capture / pass
 ``bin_ids``. That is a framework UX failure, not a strategy-author failure.

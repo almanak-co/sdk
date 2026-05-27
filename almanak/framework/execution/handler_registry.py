@@ -63,7 +63,7 @@ After (registry-based):
     result = await handler.execute(bundle)
 
 See Also:
-    - notes/tech-debt/string-based-protocol-detection.md
+    - docs/internal/notes/tech-debt/string-based-protocol-detection.md
     - almanak/framework/execution/clob_handler.py
     - almanak/framework/execution/plan_executor.py
 """

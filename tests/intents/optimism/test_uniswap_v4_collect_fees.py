@@ -323,7 +323,7 @@ def _payload_fee(raw) -> Decimal | None:
 def _assert_fee_contract(payload_raw, parser_human: Decimal | None, *, field: str) -> None:
     """Directional null-contract for a single ``fees*_collected`` leg.
 
-    Per epic VIB-4591 decision #5 / blueprints/27 Empty≠Zero≠None. The V4
+    Per epic VIB-4591 decision #5 / docs/internal/blueprints/27 Empty≠Zero≠None. The V4
     receipt parser sets ``LPCloseData.fees0/fees1 = None`` (Empty): V4
     bundles fees into the withdrawal Transfer, fee separation is V1 work
     (VIB-4482). The LP handler correctly persists an unmeasured ``None``

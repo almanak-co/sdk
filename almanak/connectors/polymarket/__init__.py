@@ -11,7 +11,7 @@ Architecture Overview:
 
 Export Organization:
     This connector exports 103 items across 14 categories due to Polymarket's
-    unique hybrid architecture. See notes/tech-debt/polymarket-export-list.md
+    unique hybrid architecture. See docs/internal/notes/tech-debt/polymarket-export-list.md
     for detailed analysis and justification.
 
     Major categories:

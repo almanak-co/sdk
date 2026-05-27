@@ -91,7 +91,7 @@ def handle_transfer(
     record a usable asset / amount, the event is emitted with
     ``confidence=UNAVAILABLE`` and a populated ``unavailable_reason`` so an
     auditor can distinguish "never measured" from "measured zero" per the
-    "Empty != zero" rule (blueprints/27-accounting.md).
+    "Empty != zero" rule (docs/internal/blueprints/27-accounting.md).
     """
 
     # ── Identity fields ──────────────────────────────────────────────────────

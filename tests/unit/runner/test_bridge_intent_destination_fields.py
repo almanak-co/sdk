@@ -157,7 +157,7 @@ class TestBridgeWaitFailsFastWithoutGateway:
     Prior behaviour constructed a raw ``Web3(HTTPProvider(url))`` and polled
     directly when ``state.gateway_client`` was ``None``. That bypassed the
     gateway-only trust boundary documented in
-    ``blueprints/20-gateway-security-architecture.md``. The fix raises
+    ``docs/internal/blueprints/20-gateway-security-architecture.md``. The fix raises
     ``RuntimeError`` at ``_init_bridge_wait_state`` time so the runner never
     submits a cross-chain source transaction it cannot later verify.
     """

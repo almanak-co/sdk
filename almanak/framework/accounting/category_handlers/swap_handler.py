@@ -115,7 +115,7 @@ def _select_effective_price(
     Order of precedence:
     1. If amounts are unmeasured, force None — a stale or non-empty
        ``effective_price`` field cannot rescue an unmeasured row (Empty
-       != zero, blueprints/27-accounting.md).
+       != zero, docs/internal/blueprints/27-accounting.md).
     2. If the ledger row carries a non-empty ``effective_price``, use it.
     3. Otherwise compute ``amount_out / amount_in`` when both sides are
        measured and ``amount_in > 0``.
@@ -254,7 +254,7 @@ def handle_swap(
     # as unmeasured because computing USD value, FIFO realized PnL, or
     # ``effective_price`` against ``Decimal(0)`` would silently emit a
     # measured-zero row that auditors cannot distinguish from a real
-    # zero-amount swap. Per blueprints/27-accounting.md "Empty != zero" —
+    # zero-amount swap. Per docs/internal/blueprints/27-accounting.md "Empty != zero" —
     # never conflate.
     amounts_unmeasured = parsed_in is None or parsed_out is None
 

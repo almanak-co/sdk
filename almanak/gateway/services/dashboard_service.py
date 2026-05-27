@@ -1869,7 +1869,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             # strategy in this PR's window; warn when hit so operators
             # know aggregation may be partial. The proper fix — a
             # SQL-side aggregation RPC that pushes SUM/COUNT into the
-            # backend — is tracked separately (see notes/audit-pr-*.md).
+            # backend — is tracked separately (see docs/internal/notes/audit-pr-*.md).
             try:
                 ledger_entries = await self._state_manager.get_ledger_entries(
                     deployment_id, limit=_QUANT_HEADER_LEDGER_CAP

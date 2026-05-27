@@ -17,7 +17,7 @@ the merged Aerodrome-Classic Solidly case, PR #2364):
   * ``position_hash`` / ``tick_lower`` / ``tick_upper`` / ``liquidity`` /
     ``current_tick`` / ``in_range`` MUST be ``None`` — the bin model has no
     tick bracket, and fabricating one would be a correctness regression
-    (Empty≠Zero≠None, blueprints/27).
+    (Empty≠Zero≠None, docs/internal/blueprints/27).
   * ``pool_address`` is the position-key tail the LP handler resolves.
     TraderJoe V2 intents carry ``pool="TOKENX/TOKENY/<binStep>"`` whose
     last segment is a bin-step integer (not ``0x…``), so

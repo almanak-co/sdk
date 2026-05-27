@@ -256,7 +256,7 @@ class TestHandleSwapBasic:
         assert event.effective_price is None, (
             "An unmeasured row must NOT propagate a stale ledger "
             "effective_price; the unmeasured contract overrides the upstream "
-            "value. See blueprints/27-accounting.md 'Empty != zero'."
+            "value. See docs/internal/blueprints/27-accounting.md 'Empty != zero'."
         )
         assert event.confidence == AccountingConfidence.ESTIMATED
         assert "unmeasured" in event.unavailable_reason
@@ -520,7 +520,7 @@ class TestSwapPayloadRoundtrip:
         """An unmeasured swap (decimals could not be resolved by the receipt
         parser) MUST roundtrip through to/from_payload_json without
         substituting None back into ``Decimal(0)``. The "Empty != zero"
-        invariant from blueprints/27-accounting.md says ``None`` =
+        invariant from docs/internal/blueprints/27-accounting.md says ``None`` =
         unmeasured and ``Decimal(0)`` = measured zero — persistence cannot
         silently conflate them.
         """
@@ -566,7 +566,7 @@ class TestSwapPayloadRoundtrip:
         # Every nullable measured field MUST come back as None — never Decimal(0).
         assert restored.amount_in is None, (
             "amount_in roundtrip must preserve None (unmeasured); got "
-            f"{restored.amount_in!r}. See blueprints/27-accounting.md "
+            f"{restored.amount_in!r}. See docs/internal/blueprints/27-accounting.md "
             "'Empty != zero'."
         )
         assert restored.amount_out is None

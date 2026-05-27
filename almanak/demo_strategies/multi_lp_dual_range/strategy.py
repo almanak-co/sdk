@@ -4,7 +4,7 @@ Reference template for the multi-position dispatch pattern: two LP positions
 (narrow + wide ranges) on the same Uniswap V3 pool, opened **one Intent per
 ``decide()`` iteration** via an explicit phase machine.
 
-This is the discoverable companion to ``blueprints/04-strategy-layer.md``
+This is the discoverable companion to ``docs/internal/blueprints/04-strategy-layer.md``
 §Multi-position dispatch. The accounting-fixture sibling
 ``strategies/accounting/lp_dual/`` exercises the same pattern with extra
 audit-test scaffolding; this demo strips that down to the dispatch shape

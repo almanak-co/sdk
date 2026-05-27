@@ -94,7 +94,7 @@ RANGE_UPPER = Decimal("1000000")
 #   * ``position_hash`` / ``tick_lower`` / ``tick_upper`` / ``liquidity`` /
 #     ``current_tick`` / ``in_range`` MUST be ``None`` — Solidly has no tick
 #     bracket, and fabricating one would be a correctness regression
-#     (Empty≠Zero≠None, blueprints/27).
+#     (Empty≠Zero≠None, docs/internal/blueprints/27).
 #   * ``pool_address`` is the canonical Solidly descriptor the position key
 #     carries (``token0/token1/volatile|stable``), NOT a ``0x`` address — the
 #     classic Aerodrome receipt layer surfaces no on-chain pool address

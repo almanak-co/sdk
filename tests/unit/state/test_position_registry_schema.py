@@ -8,7 +8,7 @@ Verifies that:
 - The schema bootstrap is idempotent on rerun.
 
 This is a schema-only PR (T05). Writers come in T11 (VIB-4197). The
-schema_contract entry is intentionally deferred — see blueprints/28
+schema_contract entry is intentionally deferred — see docs/internal/blueprints/28
 §5.1 for rationale.
 """
 

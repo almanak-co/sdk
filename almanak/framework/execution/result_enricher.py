@@ -1700,7 +1700,7 @@ class ResultEnricher:
             sa = result.swap_amounts
             # ``amount_*_decimal`` may be None when the receipt parser could
             # not resolve token decimals (Empty != zero invariant —
-            # blueprints/27-accounting.md). Render as "?" rather than the
+            # docs/internal/blueprints/27-accounting.md). Render as "?" rather than the
             # literal "None" to keep logs readable.
             in_str = f"{sa.amount_in_decimal}" if sa.amount_in_decimal is not None else "?"
             out_str = f"{sa.amount_out_decimal}" if sa.amount_out_decimal is not None else "?"

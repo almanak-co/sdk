@@ -4,7 +4,7 @@
   "tx_hash": "0x01a16e7838288d1c0cc5c143390c106dafab1a32651267794deba9ce3cc6f370",
   "block_number": 218000000,
   "physical_identity_hash": "univ3:5468420:0xc36442b4a4522e871399cd717abdd847ab11fe88:arbitrum",
-  "_note_on_pih": "UniV3 identity tuple is (token_id, nft_manager_addr, chain) per blueprints/28-position-registry.md §3.2. Matching the production extract_registry_payload_open shape; specific bytes here are hand-derived for determinism (no fork-block dependency).",
+  "_note_on_pih": "UniV3 identity tuple is (token_id, nft_manager_addr, chain) per docs/internal/blueprints/28-position-registry.md §3.2. Matching the production extract_registry_payload_open shape; specific bytes here are hand-derived for determinism (no fork-block dependency).",
   "registry_payload": {
     "token_id": 5468420,
     "pool_address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",

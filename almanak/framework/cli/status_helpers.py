@@ -27,7 +27,7 @@ Phase 5A.2 scope (pretty-print):
     - _print_timeline                    — recent events block
     - _render_details_pretty             — top-level pretty-print orchestrator
 
-See `blueprints/` and `.claude/plans/phase-5-cli-cc-reduction.md`.
+See `docs/internal/blueprints/` and `.claude/plans/phase-5-cli-cc-reduction.md`.
 """
 
 from __future__ import annotations

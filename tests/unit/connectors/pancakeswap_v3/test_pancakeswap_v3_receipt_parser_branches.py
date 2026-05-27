@@ -14,7 +14,7 @@ direct Uniswap V3 fork, so the test surface is intentionally parallel:
     ``extract_lp_open_data_result`` wrapper
   * ``_strict_parse`` happy/missing/crash paths for the result wrapper
 
-Reference: blueprints/19-receipt-parser-base-infrastructure.md (VIB-3159
+Reference: docs/internal/blueprints/19-receipt-parser-base-infrastructure.md (VIB-3159
 fail-closed semantics), VIB-3887 (current_tick on LP_OPEN), VIB-3893
 (pool_address on LP_OPEN).
 """

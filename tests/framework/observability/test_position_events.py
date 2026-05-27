@@ -338,7 +338,7 @@ class TestPositionEventPersistence:
 # that the Phase 5i extraction (helpers: _seed_event / _apply_lp_open /
 # _apply_lp_close / _apply_swap_fallback / _apply_perp / _apply_protocol_fees)
 # is a provable behavior-preserving refactor.  They exercise the phase map
-# from blueprints/plan: α (dispatch) → β (seed) → γ (lp_open) → δ (lp_close)
+# from docs/internal/blueprints/plan: α (dispatch) → β (seed) → γ (lp_open) → δ (lp_close)
 # → ε (swap fallback) → ζ (perp) → η (protocol fees) → θ (final guard).
 #
 # Issues #1709 (perp position_id silent override) and #1710 (lp_close

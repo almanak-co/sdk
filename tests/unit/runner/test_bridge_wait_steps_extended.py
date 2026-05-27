@@ -269,7 +269,7 @@ class TestBridgeWaitVerifySourceTx:
         """Gateway-only boundary: a missing gateway client must fail loud.
 
         Direct Web3 fallback is forbidden by the gateway-only architecture
-        (see ``blueprints/20-gateway-security-architecture.md``). The helper
+        (see ``docs/internal/blueprints/20-gateway-security-architecture.md``). The helper
         must raise rather than silently fall back to an unmediated egress
         path.
         """

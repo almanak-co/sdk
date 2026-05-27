@@ -349,7 +349,7 @@ rpc SumLedgerGasUsd(SumLedgerGasUsdRequest) returns (SumLedgerGasUsdResponse)
 
 Persist a typed accounting event (Layer 5 accounting). Writers must route through
 the accounting outbox; direct calls from connectors or the runner hot path are
-forbidden (see `blueprints/27-accounting.md`).
+forbidden (see `docs/internal/blueprints/27-accounting.md`).
 
 ```protobuf
 rpc SaveAccountingEvent(SaveAccountingEventRequest) returns (SaveAccountingEventResponse)
@@ -1616,7 +1616,7 @@ rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
 
 ## TeardownService
 
-Hosted teardown state routing for V2 deployments. Splits into two halves: the **request half** (`teardown_requests`) which tracks operator-issued teardown signals through their lifecycle (acknowledged → started → progress → completed / failed / cancelled), and the **adapter half** (`teardown_execution_state` + `teardown_approvals`) which persists the in-flight intent state machine and operator approvals required for risk-elevated teardown steps. See `blueprints/14-teardown-system.md`.
+Hosted teardown state routing for V2 deployments. Splits into two halves: the **request half** (`teardown_requests`) which tracks operator-issued teardown signals through their lifecycle (acknowledged → started → progress → completed / failed / cancelled), and the **adapter half** (`teardown_execution_state` + `teardown_approvals`) which persists the in-flight intent state machine and operator approvals required for risk-elevated teardown steps. See `docs/internal/blueprints/14-teardown-system.md`.
 
 ### CreateTeardownRequest
 

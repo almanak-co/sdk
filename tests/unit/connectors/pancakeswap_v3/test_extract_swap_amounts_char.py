@@ -516,7 +516,7 @@ class TestTokenDecimals:
         ``effective_price`` are ``None`` -- NOT ``Decimal(0)``.
 
         Per the "Empty != zero" invariant in
-        ``blueprints/27-accounting.md``: ``Decimal(0)`` is a measured
+        ``docs/internal/blueprints/27-accounting.md``: ``Decimal(0)`` is a measured
         zero and a literal sentinel here would silently reconcile a
         real swap as 0% slippage in the Accountant Test. The raw integer
         ``amount_in`` is preserved so the row carries the wallet-level

@@ -27,7 +27,7 @@ Schema: ``Token.from_dict`` plus two extra fields per record:
   (some Solana bridged variants are kept importable but excluded to avoid
   duplicate addresses).
 
-See ``blueprints/17-token-resolution.md`` for the full design.
+See ``docs/internal/blueprints/17-token-resolution.md`` for the full design.
 """
 
 from __future__ import annotations

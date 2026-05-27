@@ -16,7 +16,7 @@
 
 These helpers exist so the main ``run`` entry point stays at CC <= 12 and each
 phase is unit-testable in isolation. See
-``blueprints/04-strategy-layer.md`` for the strategy / PaperTrader contract
+``docs/internal/blueprints/04-strategy-layer.md`` for the strategy / PaperTrader contract
 and ``tests/unit/backtesting/paper/test_paper_trader_characterization.py``
 for the byte-for-byte pinning tests.
 """

@@ -9,7 +9,7 @@ the three audit sections.
 
 For multi-position or multi-signal layouts, hand-roll using the section
 helpers and primitive plots directly (see
-``blueprints/23-dashboard-plots-and-templates.md``).
+``docs/internal/blueprints/23-dashboard-plots-and-templates.md``).
 """
 
 from __future__ import annotations

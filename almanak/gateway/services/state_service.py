@@ -1896,7 +1896,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 stripped_position_id = (proto_row.position_id or "").strip()
                 # validate_deployment_id covers character class + length limits
                 # for the canonical deployment id (see
-                # blueprints/06-state-management.md §"Deployment-ID
+                # docs/internal/blueprints/06-state-management.md §"Deployment-ID
                 # conventions"). position_id is intentionally
                 # free-form: the Track-C materializer's fallback id is
                 # ``"{protocol}:{chain}:{label}"`` which can contain spaces

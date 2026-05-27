@@ -21,7 +21,7 @@ IMPORTANT - POLYMARKET-SPECIFIC IMPLEMENTATION:
     (e.g., Augur, Gnosis Conditional Tokens, Zeitgeist).
 
     TODO: Refactor to support multiple prediction market protocols
-    See notes/tech-debt/prediction-provider-coupling.md for detailed analysis
+    See docs/internal/notes/tech-debt/prediction-provider-coupling.md for detailed analysis
     and suggested refactoring approach using factory pattern and abstract
     protocol interfaces.
 
@@ -652,7 +652,7 @@ class PredictionMarketDataProvider:
 
         TODO: Extract a PredictionMarketProtocol interface and create
         protocol-specific implementations (PolymarketProvider, AugurProvider,
-        etc.). See notes/tech-debt/prediction-provider-coupling.md for
+        etc.). See docs/internal/notes/tech-debt/prediction-provider-coupling.md for
         detailed refactoring plan.
 
     Attributes:

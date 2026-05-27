@@ -7,7 +7,7 @@ optional handle mapping in **a single SQLite transaction** — three writes
 land together or none of them do. The hosted-mode equivalent (single Postgres
 transaction inside the gateway) ships separately as T19 / VIB-4205.
 
-Two-mode contract (per `blueprints/28-position-registry.md` §4.1):
+Two-mode contract (per `docs/internal/blueprints/28-position-registry.md` §4.1):
 
 - ``mode='accounting_only'`` (default): writes ``transaction_ledger`` only.
   Backwards-compatible with the legacy ``_write_ledger_entry()`` path. This is
@@ -32,7 +32,7 @@ Calling sites compose:
         state_manager, ledger=L, registry=R, handle=H, mode='registry',
     )
 
-See ``blueprints/28-position-registry.md`` for the full design rationale and
+See ``docs/internal/blueprints/28-position-registry.md`` for the full design rationale and
 ``docs/internal/migration-cutover-position-registry.md`` for the per-primitive
 cutover protocol.
 """

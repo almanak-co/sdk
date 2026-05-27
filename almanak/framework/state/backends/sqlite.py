@@ -714,7 +714,7 @@ ON position_state_snapshots (cycle_id);
 --
 -- Authoritative table for "is this position open?". Columns ratified by
 -- docs/internal/prds/multi-position-tracking.md §Registry Data Shape.
--- Transactional surface specified in blueprints/28-position-registry.md.
+-- Transactional surface specified in docs/internal/blueprints/28-position-registry.md.
 --
 -- T05 lands the schema only. No production code reads or writes this table
 -- yet; T11 (VIB-4197) introduces the atomic save_ledger_and_registry primitive

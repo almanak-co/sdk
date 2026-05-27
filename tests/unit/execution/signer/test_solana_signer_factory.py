@@ -4,7 +4,7 @@ This file pins three things:
 
 1. ``SvmFamily.signer_factory(...)`` returns a module namespace mirroring
    the shape used by :meth:`EvmFamily.signer_factory` — see
-   ``blueprints/05-connectors.md`` and the protocol contract on
+   ``docs/internal/blueprints/05-connectors.md`` and the protocol contract on
    :class:`ChainFamilyAdapter`.
 2. The Solana signer surface exposed via the family adapter is the same
    :class:`SolanaSigner` consumed by the gateway-side

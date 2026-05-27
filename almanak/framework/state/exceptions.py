@@ -15,7 +15,7 @@ class AccountingWriteKind(StrEnum):
     Kept as a ``StrEnum`` so existing callers that still pass the raw string
     values (``"ledger"``, ``"snapshot"``, ``"metrics"``) stay compatible;
     new call sites should prefer the enum for type safety per the project's
-    model-type guidelines (``blueprints/18-model-type-selection.md``).
+    model-type guidelines (``docs/internal/blueprints/18-model-type-selection.md``).
     """
 
     LEDGER = "ledger"

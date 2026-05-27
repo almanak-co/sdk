@@ -4,7 +4,7 @@
     "fixture": "lp",
     "chain": "arbitrum",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/accounting-matrix-post-fix/lp-uniswap_v3-arbitrum/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix-post-fix/lp-uniswap_v3-arbitrum/accountant.json",
     "captured_at": "2026-05-13T10:12:31+00:00",
     "captured_at_commit": "501b8b373b72c9919d15c68def72996f468ba039",
     "post_fix_for": ["VIB-4319 (PR #2259)", "VIB-4318 (PR #2260)"],

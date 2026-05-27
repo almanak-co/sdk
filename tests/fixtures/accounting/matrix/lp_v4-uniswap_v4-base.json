@@ -4,7 +4,7 @@
     "fixture": "lp_v4",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/v4538-rebaseline/lp_v4-uniswap_v4-base/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/v4538-rebaseline/lp_v4-uniswap_v4-base/accountant.json",
     "captured_at": "2026-05-17T15:04:09+00:00",
     "captured_at_commit": "43f6866da (main, post-PRs #2339/#2340/#2341/#2342/#2343)",
     "post_fix_for": [

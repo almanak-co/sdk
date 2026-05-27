@@ -5669,12 +5669,12 @@ class StrategyRunner:
             # configuration defect; fail-fast BEFORE submitting the source
             # transaction so we never leave funds broadcast on-chain with no
             # way to verify them. See
-            # ``blueprints/20-gateway-security-architecture.md``.
+            # ``docs/internal/blueprints/20-gateway-security-architecture.md``.
             if state.gateway_client is None:
                 raise RuntimeError(
                     "Gateway client required for cross-chain bridge source-TX verification; "
                     "direct Web3 fallback is forbidden by gateway-only architecture. "
-                    "See blueprints/20-gateway-security-architecture.md"
+                    "See docs/internal/blueprints/20-gateway-security-architecture.md"
                 )
 
             dest_chain = get_intent_destination_chain(intent)
@@ -5880,7 +5880,7 @@ class StrategyRunner:
                 client is miswired (missing ``execution`` attribute or a
                 non-callable ``GetTransactionStatus``). Direct Web3 fallback
                 is forbidden by the gateway-only architecture (see
-                ``blueprints/20-gateway-security-architecture.md``). This
+                ``docs/internal/blueprints/20-gateway-security-architecture.md``). This
                 must fail loud so misconfigured hosted deployments do not
                 silently fall back to an egress path that has no secrets,
                 rate limits, or auth, and so shape defects surface
@@ -5893,7 +5893,7 @@ class StrategyRunner:
             raise RuntimeError(
                 "Gateway client required for bridge source-TX verification; "
                 "direct Web3 fallback is forbidden by gateway-only architecture. "
-                "See blueprints/20-gateway-security-architecture.md"
+                "See docs/internal/blueprints/20-gateway-security-architecture.md"
             )
 
         # Pre-validate the gateway client shape BEFORE entering the retry loop.

@@ -567,7 +567,7 @@ class _TraderJoeV2CompileImpl:
                         "price drift and can leave liquidity stranded on-chain. Capture "
                         "bin_ids from the LP_OPEN result and pass them on close: "
                         "Intent.lp_close(..., protocol_params={'bin_ids': captured_bin_ids}). "
-                        "See blueprints/05-connectors.md (TraderJoe V2 section).",
+                        "See docs/internal/blueprints/05-connectors.md (TraderJoe V2 section).",
                         intent.pool,
                         self.chain,
                     )
@@ -950,7 +950,7 @@ class _TraderJoeV2CompileImpl:
         Iterates common bin steps (20, 25, 15, 10, 50, 5, 100, 1) and returns
         the first one with a pool that is not fully empty (at least one
         reserve > 0). The liquidity gate (VIB-4374) reflects
-        ``blueprints/05-connectors.md``'s Pool Selection Policy: "do not
+        ``docs/internal/blueprints/05-connectors.md``'s Pool Selection Policy: "do not
         assume a single fee tier has viable liquidity in both directions."
         On arbitrum, several common pairs (e.g. WETH/USDC) have a
         ``(0, 0)`` bin_step=25 pool ahead of a liquid bin_step=15 pool,

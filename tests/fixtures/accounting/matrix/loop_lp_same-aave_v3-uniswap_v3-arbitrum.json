@@ -4,7 +4,7 @@
     "fixture": "loop_lp_same",
     "chain": "arbitrum",
     "primitive": "looping",
-    "captured_from": "notes/.tmp/accounting-matrix-rest-of-10/loop_lp_same-aave_v3-uniswap_v3-arbitrum/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix-rest-of-10/loop_lp_same-aave_v3-uniswap_v3-arbitrum/accountant.json",
     "captured_at": "2026-05-13T13:58:58.191747+00:00",
     "captured_at_commit": "e0b4732a51fd8b5e994477ddbe65bb2bf182fdb5",
     "post_fix_for": [

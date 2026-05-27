@@ -37,7 +37,7 @@ Why the helper takes a ``PrimitiveRecord`` (not raw strings)
 -------------------------------------------------------------
 
 The canonical taxonomy is the only allowed source of ``primitive`` /
-``accounting_category`` strings (see `blueprints/28-position-registry.md`
+``accounting_category`` strings (see `docs/internal/blueprints/28-position-registry.md`
 §Forbidden patterns #11). Constructing the helper input from a
 ``PrimitiveRecord`` enforces that at the type level — callers that
 fabricate strings cannot satisfy the function signature without going
@@ -219,7 +219,7 @@ def build_registry_position_reference(
     registry_row
         A ``position_registry`` row dict with at least the five identity
         fields named above. The full schema is documented in
-        :file:`blueprints/28-position-registry.md` §3.
+        :file:`docs/internal/blueprints/28-position-registry.md` §3.
 
     Returns
     -------

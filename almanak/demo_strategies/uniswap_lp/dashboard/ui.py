@@ -7,7 +7,7 @@ from the strategy's ``config.json``, enrich session state via
 and the three audit sections (PnL / Cost Stack / Trade Tape).
 
 For multi-position or multi-signal layouts, hand-roll using the section
-helpers and primitive plots directly (see ``blueprints/23-dashboard-plots-and-templates.md``).
+helpers and primitive plots directly (see ``docs/internal/blueprints/23-dashboard-plots-and-templates.md``).
 """
 
 from __future__ import annotations

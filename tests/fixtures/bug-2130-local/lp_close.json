@@ -1,5 +1,5 @@
 {
-  "_provenance": "Synthetic close-side payload for the same UniV3 NFT (token_id=5468420). Same physical_identity_hash as lp_open.json — the upsert keys on (deployment_id, chain, primitive, physical_identity_hash) per blueprints/28-position-registry.md §4.2.",
+  "_provenance": "Synthetic close-side payload for the same UniV3 NFT (token_id=5468420). Same physical_identity_hash as lp_open.json — the upsert keys on (deployment_id, chain, primitive, physical_identity_hash) per docs/internal/blueprints/28-position-registry.md §4.2.",
   "intent_type": "LP_CLOSE",
   "tx_hash": "0xclosebug2130",
   "block_number": 218000123,

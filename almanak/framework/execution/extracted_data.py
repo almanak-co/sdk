@@ -54,7 +54,7 @@ class SwapAmounts:
         amount_out: Raw output amount (in token's smallest unit)
         amount_in_decimal: Human-readable input amount, or ``None`` when
             the parser could not resolve ``token_in`` decimals. Per the
-            "Empty != zero" invariant in ``blueprints/27-accounting.md``:
+            "Empty != zero" invariant in ``docs/internal/blueprints/27-accounting.md``:
             ``Decimal(0)`` is a measured zero, ``None`` is unmeasured.
             Never substitute one for the other.
         amount_out_decimal: Human-readable output amount, or ``None`` when

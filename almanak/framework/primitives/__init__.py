@@ -16,7 +16,7 @@ and follow-ups). T1 ships the module foundation only — no consumer behaviour
 changes.
 
 See ``docs/internal/discussions/primitives-refactor-20260508.md`` for the
-ratified design and ``blueprints/27-accounting.md`` for accounting context.
+ratified design and ``docs/internal/blueprints/27-accounting.md`` for accounting context.
 """
 
 from __future__ import annotations

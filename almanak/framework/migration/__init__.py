@@ -3,7 +3,7 @@
 This package is the home of the multi-position-tracking epic's per-primitive
 cutover infrastructure. The shared playbook lives at
 ``docs/internal/migration-cutover-position-registry.md`` and the design at
-``blueprints/28-position-registry.md`` §5.
+``docs/internal/blueprints/28-position-registry.md`` §5.
 
 The shared invariants — idempotent backfill, OPEN/CLOSE fold, boot-guard
 sequencing, and structured ``BackfillReport`` / ``MigrationStateRow``

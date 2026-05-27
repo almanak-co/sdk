@@ -263,7 +263,7 @@ class TestBridgeWaitingDriverSuccess:
 
         # Gateway-only boundary: cross-chain bridge source-TX verification
         # requires a gateway client (direct Web3 fallback is forbidden -- see
-        # blueprints/20-gateway-security-architecture.md). Provide a stub
+        # docs/internal/blueprints/20-gateway-security-architecture.md). Provide a stub
         # gateway client; ``_bridge_wait_cross_chain`` is itself mocked, so
         # the gateway is never actually called.
         gateway_client = MagicMock()
@@ -340,7 +340,7 @@ class TestBridgeWaitingDriverTimeout:
 
         # Gateway-only boundary: cross-chain bridge processing requires a
         # gateway client (fail-fast on None -- see
-        # blueprints/20-gateway-security-architecture.md). Provide a stub;
+        # docs/internal/blueprints/20-gateway-security-architecture.md). Provide a stub;
         # ``_bridge_wait_cross_chain`` is mocked so the client is unused.
         gateway_client = MagicMock()
 

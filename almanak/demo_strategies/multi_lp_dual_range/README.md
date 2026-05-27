@@ -6,7 +6,7 @@ range — and holds them until operator-initiated teardown.
 
 This demo exists to make the correct multi-position pattern discoverable at
 template-discovery time. The full design contract is in
-`blueprints/04-strategy-layer.md` §Multi-position dispatch.
+`docs/internal/blueprints/04-strategy-layer.md` §Multi-position dispatch.
 
 ## What this demo is for
 
@@ -52,7 +52,7 @@ The framework will accept it, but you lose:
 dispatch order within one iteration but still commits both legs to the same
 market snapshot.
 
-See `blueprints/04-strategy-layer.md` §Multi-position dispatch and
+See `docs/internal/blueprints/04-strategy-layer.md` §Multi-position dispatch and
 `docs/internal/dual-intent-blueprint.md` for the full rationale.
 
 ## Running this demo

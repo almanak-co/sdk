@@ -4,7 +4,7 @@
     "fixture": "looping_base",
     "chain": "base",
     "primitive": "looping",
-    "captured_from": "notes/.tmp/matrix-overnight-full/looping-aave_v3-base/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/matrix-overnight-full/looping-aave_v3-base/accountant.json",
     "captured_at": "2026-05-13T21:39:10.254831+00:00",
     "captured_at_commit": "59e9fbed509ce7fb9a3c9086f6b40c84e3a10a25",
     "post_fix_for": [

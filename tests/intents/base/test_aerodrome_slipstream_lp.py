@@ -157,7 +157,7 @@ def _assert_parser_event_equality(payload: dict, lp_close_data, *, dec0: int, de
     VIB-4597), NOT the PancakeSwap-style ``Decimal(payload[...]) == "0"``
     reconciliation which crashes on the legitimately-``None`` payload.
 
-    Directional contract per epic VIB-4591 decision #5 / blueprints/27:
+    Directional contract per epic VIB-4591 decision #5 / docs/internal/blueprints/27:
 
     * parser reading concrete  → payload MUST equal it exactly.
     * parser reading ``None`` (Empty) → payload may be ``None`` (unmeasured)

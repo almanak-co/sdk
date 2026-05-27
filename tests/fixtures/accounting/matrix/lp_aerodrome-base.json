@@ -4,7 +4,7 @@
     "fixture": "lp_aerodrome",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/accounting-matrix-rest-of-10/lp_aerodrome-base/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix-rest-of-10/lp_aerodrome-base/accountant.json",
     "captured_at": "2026-05-13T13:22:35.932217+00:00",
     "captured_at_commit": "e0b4732a51fd8b5e994477ddbe65bb2bf182fdb5",
     "post_fix_for": [

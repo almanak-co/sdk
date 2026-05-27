@@ -448,7 +448,7 @@ class SwapAccountingEvent:
     token_out: str
     # ``None`` when the receipt parser could not resolve token decimals (or the
     # ledger row's amount field is empty / unparsable). ``Decimal(0)`` is a
-    # measured zero. Per blueprints/27-accounting.md "Empty != zero" — never
+    # measured zero. Per docs/internal/blueprints/27-accounting.md "Empty != zero" — never
     # conflate.
     amount_in: Decimal | None
     amount_out: Decimal | None
@@ -458,7 +458,7 @@ class SwapAccountingEvent:
     # by the receipt parser — see ``observability/ledger.py`` and
     # ``connectors/pancakeswap_v3/receipt_parser.py``). ``Decimal(0)`` is a
     # measured zero (e.g. ``amount_in == 0`` and the swap legitimately had a
-    # zero numerator). Per blueprints/27-accounting.md "Empty != zero" — never
+    # zero numerator). Per docs/internal/blueprints/27-accounting.md "Empty != zero" — never
     # conflate.
     effective_price: Decimal | None
     slippage_bps: int | None

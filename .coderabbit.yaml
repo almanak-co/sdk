@@ -13,7 +13,7 @@ reviews:
     - "!*.lock"
     - "!.mypy_cache/**"
     - "!docs/internal/reports/**"
-    - "!notes/**"
+    - "!docs/internal/notes/**"
     - "!scripts/ai-discussion/**"
 
   path_instructions:

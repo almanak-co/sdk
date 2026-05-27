@@ -6,7 +6,7 @@ Background
 ==========
 PR #1653 added a fail-loud guard when ``state.gateway_client`` is ``None``
 (enforces the gateway-only architecture described in
-``blueprints/20-gateway-security-architecture.md``). That closed one hole.
+``docs/internal/blueprints/20-gateway-security-architecture.md``). That closed one hole.
 This test module closes a second hole identified in #1666: if the gateway
 client is non-``None`` but *miswired* (wrong stub bound, ``execution``
 attribute missing, ``GetTransactionStatus`` signature wrong), the previous

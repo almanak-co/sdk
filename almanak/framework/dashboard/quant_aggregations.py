@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # agree on PASS/FAIL.
 _G6_EPSILON_USD = Decimal("0.50")
 
-# All Accountant Test cell IDs. Source: blueprints/27-accounting.md §14.
+# All Accountant Test cell IDs. Source: docs/internal/blueprints/27-accounting.md §14.
 _GENERIC_CELLS = (
     "G1",
     "G2",

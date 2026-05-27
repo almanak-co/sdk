@@ -270,7 +270,7 @@ _teardown_state = TeardownState()
 # db_path=None, so they resolve via TeardownStateManager._resolve_db_path — which
 # honours ALMANAK_STATE_DB. The runner polls the `teardown_approvals` table;
 # API endpoints write responses into the same table so the two channels stay
-# in sync. See blueprints/14-teardown-system.md (Approval Flow).
+# in sync. See docs/internal/blueprints/14-teardown-system.md (Approval Flow).
 _teardown_adapter: TeardownStateAdapter | None = None
 
 

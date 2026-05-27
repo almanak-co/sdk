@@ -327,7 +327,7 @@ Strategies that hold no positions can extend `StatelessStrategy` instead.
 **Execution order** (if multiple position types): PERP -> BORROW -> SUPPLY -> LP -> TOKEN
 
 The generated `strategy.py` includes teardown stubs with TODO comments -- fill them in.
-See `blueprints/14-teardown-system.md` for the full teardown system reference.
+See `docs/internal/blueprints/14-teardown-system.md` for the full teardown system reference.
 
 ## Testing
 

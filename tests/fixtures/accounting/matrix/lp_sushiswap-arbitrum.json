@@ -4,7 +4,7 @@
     "fixture": "lp_sushiswap",
     "chain": "arbitrum",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/accounting-matrix-rest-of-10/lp_sushiswap-arbitrum/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix-rest-of-10/lp_sushiswap-arbitrum/accountant.json",
     "captured_at": "2026-05-13T13:42:26.429545+00:00",
     "captured_at_commit": "e0b4732a51fd8b5e994477ddbe65bb2bf182fdb5",
     "post_fix_for": [

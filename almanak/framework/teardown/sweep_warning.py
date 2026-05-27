@@ -20,7 +20,7 @@ manager flavour, DB locked, payload-JSON garbage) is swallowed — a
 DX guard must never block the unwind.
 
 See ``docs/internal/AccountingLiveMay18.md`` §F5 and
-``blueprints/14-teardown-system.md`` for the design.
+``docs/internal/blueprints/14-teardown-system.md`` for the design.
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def warn_if_sweep_non_strategy_balance(
         "strategies sharing this wallet are included. "
         "Strategy-emitted tokens: %s. "
         "See docs/internal/AccountingLiveMay18.md §F5 and "
-        "blueprints/14-teardown-system.md.",
+        "docs/internal/blueprints/14-teardown-system.md.",
         balance_token,
         balance_value,
         balance_token,

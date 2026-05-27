@@ -4,7 +4,7 @@
     "fixture": "lp_ethereum",
     "chain": "ethereum",
     "primitive": "lp",
-    "captured_from": "notes/.tmp/matrix-overnight-new-rows/lp-uniswap_v3-ethereum/accountant.json",
+    "captured_from": "docs/internal/notes/.tmp/matrix-overnight-new-rows/lp-uniswap_v3-ethereum/accountant.json",
     "captured_at": "2026-05-13T19:37:58.423253+00:00",
     "captured_at_commit": "7df7573c4a55a3950d044aa6c9247d74b41504ee",
     "post_fix_for": [

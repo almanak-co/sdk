@@ -25,7 +25,7 @@ Current state (post-VIB-4835 Phase 2):
   ``receipt_parser.py``, optional ``sdk.py``, optional
   ``permission_hints.py``, and an ``__init__.py`` that wires lazy PEP 562
   exports plus a ``_register_once()`` helper invoked on first attribute
-  access. See ``blueprints/05-connectors.md`` for the canonical pattern.
+  access. See ``docs/internal/blueprints/05-connectors.md`` for the canonical pattern.
 
 ``almanak.framework.connectors`` is no longer a valid import path; the CI
 ratchet ``tests/static/test_legacy_connector_imports.py`` blocks regressions.

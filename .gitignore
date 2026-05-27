@@ -67,7 +67,10 @@ logs/
 scripts/kitchenloop/kitchenloop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
-notes/.tmp/
+docs/internal/notes/.tmp/
+
+# Smoke-test runtime output (scripts/smoke-test-all.sh, smoke-test-batch.sh)
+/results/
 
 # Solana test-validator ledger
 test-ledger/
@@ -75,6 +78,9 @@ test-ledger/
 # Local Claude artifacts
 .claude/worktrees/
 .claude/projects/
+
+# Editor / IDE
+.vscode/
 
 # Video build output
 videos/out/

@@ -1179,7 +1179,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1211,7 +1211,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1272,7 +1272,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1346,7 +1346,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1524,7 +1524,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1632,7 +1632,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1693,7 +1693,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1814,7 +1814,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1883,7 +1883,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1957,7 +1957,7 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -2030,7 +2030,7 @@ def _get_template_teardown(
     # Fallback (should not be reached)
     return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
-    # See: blueprints/14-teardown-system.md
+    # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -3994,7 +3994,7 @@ def _render_teardown_tests(
 class Test{class_name}Teardown:
     """Teardown methods must honour the operator safety contract.
 
-    See: blueprints/14-teardown-system.md
+    See: docs/internal/blueprints/14-teardown-system.md
     """
 
     def test_teardown_methods_exist(self, strategy: {class_name}) -> None:
@@ -4253,7 +4253,7 @@ def generate_test_file(
       * get_persistent_state() / load_persistent_state() round-trip
       * on_intent_executed stores position_id / state updates correctly
 
-    See blueprints/10-testing-quality.md for testing patterns.
+    See docs/internal/blueprints/10-testing-quality.md for testing patterns.
     """
     class_name = to_pascal_case(name) + "Strategy"
 

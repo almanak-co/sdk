@@ -171,8 +171,8 @@ stage65_detect_scope_drift() {
         [ -z "$file" ] && continue
         local file_lower
         file_lower=$(echo "$file" | tr '[:upper:]' '[:lower:]')
-        # Auto-aligned: tests/, docs/, notes/, .gitignore, *.lock, fixtures.
-        if echo "$file_lower" | grep -Eq '^(tests/|docs/|notes/|\.gitignore$|.*\.lock$)'; then
+        # Auto-aligned: tests/, docs/, docs/internal/notes/, .gitignore, *.lock, fixtures.
+        if echo "$file_lower" | grep -Eq '^(tests/|docs/|docs/internal/notes/|\.gitignore$|.*\.lock$)'; then
             continue
         fi
         feature_total=$((feature_total + 1))
@@ -191,7 +191,7 @@ stage65_detect_scope_drift() {
     local threshold=$(( (feature_total + 1) / 2 ))
     if [ "$feature_matched" -lt "$threshold" ]; then
         echo "title-tokens: $(echo "$title_tokens" | tr '\n' ' ')"
-        echo "feature-files: $feature_total (excluding tests/, docs/, notes/)"
+        echo "feature-files: $feature_total (excluding tests/, docs/, docs/internal/notes/)"
         echo "matched: $feature_matched / $feature_total (threshold $threshold)"
         return 0
     fi
