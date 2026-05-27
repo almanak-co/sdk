@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from almanak.connectors.flash_loan.selector import (
+from almanak.connectors.morpho_blue.flash_loan_provider import (
     MORPHO_BLUE_ADDRESSES,
     MORPHO_SUPPORTED_CHAINS,
 )

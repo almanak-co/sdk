@@ -228,7 +228,6 @@ nav:
       - api/connectors/lifi.md
       - api/connectors/across.md
       - api/connectors/stargate.md
-      - api/connectors/flash_loan.md
       - api/connectors/base.md
     - api/services.md
     - api/alerting.md

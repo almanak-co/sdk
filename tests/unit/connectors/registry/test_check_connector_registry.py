@@ -318,4 +318,9 @@ def test_excluded_names_helper_returns_frozen_set() -> None:
     # ``base`` / ``vaults`` foundation moved to ``_strategy_base/`` in
     # VIB-4835 Phase 2 and is excluded by the leading-underscore rule
     # in ``_enumerate_connector_dirs``, so no entry is needed here.
-    assert "flash_loan" in s
+    # At least one experimental connector remains in the exclude list
+    # (e.g. ``beefy``, ``yearn``); the gate's docstring explains why.
+    assert len(s) > 0
+    assert "flash_loan" not in s, (
+        "flash_loan was removed from connectors/; it should no longer be in EXCLUDED_SUPPORT_MODULES"
+    )

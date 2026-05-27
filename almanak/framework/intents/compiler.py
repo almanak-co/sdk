@@ -42,7 +42,6 @@ from almanak.connectors._strategy_base.compiler_registry import get_compiler as 
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
-# Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: MorphoBlueAdapter is imported lazily in _compile_* methods to avoid circular import
 # Note: TokenNotFoundError and get_token_resolver are imported lazily to avoid circular import
 # (compiler -> data/__init__ -> prediction_provider -> connectors/__init__ -> ... -> compiler)

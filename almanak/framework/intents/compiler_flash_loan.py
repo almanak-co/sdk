@@ -12,11 +12,15 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from almanak.connectors.aave_v3.flash_loan import build_aave_flash_loan
+from almanak.connectors.aave_v3.flash_loan_provider import AaveFlashLoanProvider
 from almanak.connectors.balancer_v2.flash_loan import build_balancer_flash_loan
+from almanak.connectors.balancer_v2.flash_loan_provider import BalancerFlashLoanProvider
 from almanak.connectors.morpho_blue.flash_loan import build_morpho_flash_loan
+from almanak.connectors.morpho_blue.flash_loan_provider import MorphoFlashLoanProvider
 
 from ..models.reproduction_bundle import ActionBundle
 from .compiler_models import CompilationResult, CompilationStatus, TransactionData
+from .flash_loan_selector import FlashLoanSelector, NoProviderAvailableError
 from .vocabulary import AnyIntent, Intent, IntentType, SwapIntent
 
 if TYPE_CHECKING:
@@ -25,7 +29,114 @@ if TYPE_CHECKING:
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
-# crap-allowlist: VIB-4835 — pre-existing complexity (cc=27, cov=73%) touched only by ``almanak.connectors.flash_loan`` import rewrite (the lazy ``from almanak.connectors.flash_loan import ...`` inside the function body); function logic unchanged. Refactor tracked in VIB-4139.
+_ZERO_ADDRESS = "0x" + "0" * 40
+_SUPPORTED_FLASH_LOAN_PROVIDERS = ("aave", "balancer", "morpho")
+
+
+def _build_flash_loan_selector(chain: str) -> FlashLoanSelector:
+    """Construct the cross-protocol selector with all known providers.
+
+    Each provider is self-contained inside its protocol connector;
+    adding a new one is a matter of importing it here. Replacing this
+    explicit list with a registry-decorator pattern is tracked under
+    VIB-4837.
+    """
+    return FlashLoanSelector(
+        chain=chain,
+        providers=[
+            AaveFlashLoanProvider(),
+            BalancerFlashLoanProvider(),
+            MorphoFlashLoanProvider(),
+        ],
+    )
+
+
+def _check_wallet_for_flash_loan(
+    compiler,
+    intent: FlashLoanIntent,
+    warnings: list[str],
+) -> CompilationResult | None:
+    """Verify the wallet can receive flash-loan callbacks.
+
+    Flash loans require a contract wallet (e.g. Safe) because the lending
+    protocol calls back into the recipient during the same transaction.
+    EOA wallets have no bytecode and cannot handle the callback. The
+    zero-address sentinel is used by permission-discovery synthetic
+    intents and is skipped.
+
+    Returns:
+        A FAILED ``CompilationResult`` for an EOA wallet, or ``None`` if
+        the wallet is a contract / cannot be verified. Pushes a warning
+        into ``warnings`` when verification is inconclusive.
+    """
+    if compiler.wallet_address == _ZERO_ADDRESS:
+        return None
+    is_contract = compiler._is_wallet_contract()
+    if is_contract is False:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                # VIB-3826: phrasing includes "not supported" so the state machine
+                # classifies this as COMPILATION_PERMANENT (state_machine.py:1007)
+                # and skips pointless retries. EOA-ness will not change between
+                # attempts; retrying always produces the same revert.
+                "Flash loans not supported for EOA wallets — flash-loan providers call back "
+                "into the recipient during the same transaction (Balancer's receiveFlashLoan, "
+                f"Aave's executeOperation), which EOAs cannot handle. Wallet {compiler.wallet_address} "
+                "is an EOA (no bytecode); deploy a compatible flash-loan receiver contract."
+            ),
+            intent_id=intent.intent_id,
+        )
+    if is_contract is None:
+        warnings.append(
+            "Could not verify wallet bytecode (no RPC available). "
+            "Flash loans will revert if the wallet is an EOA (not a contract)."
+        )
+    return None
+
+
+def _resolve_flash_loan_provider(
+    compiler,
+    intent: FlashLoanIntent,
+) -> tuple[str | None, CompilationResult | None]:
+    """Resolve ``intent.provider`` to a concrete provider name.
+
+    Returns ``(provider_name, None)`` on success or ``(None, failed_result)``
+    when the request cannot be fulfilled. Handles ``"auto"`` by invoking
+    the selector with a fee-first priority.
+    """
+    if intent.provider == "auto":
+        try:
+            selector = _build_flash_loan_selector(compiler.chain)
+            selection_result = selector.select_provider(
+                token=intent.token,
+                amount=intent.amount,
+                priority="fee",  # Prefer lower fees (Balancer / Morpho are zero)
+            )
+        except NoProviderAvailableError as e:
+            return None, CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"No flash loan provider available: {e}",
+                intent_id=intent.intent_id,
+            )
+        if selection_result.selection_reasoning:
+            logger.info(f"Flash loan provider auto-selected: {selection_result.selection_reasoning}")
+        effective_provider = selection_result.provider
+    else:
+        effective_provider = intent.provider
+
+    if effective_provider not in _SUPPORTED_FLASH_LOAN_PROVIDERS:
+        return None, CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Unsupported flash loan provider: {intent.provider}. "
+                f"Supported providers: {', '.join(_SUPPORTED_FLASH_LOAN_PROVIDERS)}."
+            ),
+            intent_id=intent.intent_id,
+        )
+    return effective_provider, None
+
+
 def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:  # noqa: C901
     """Compile a FLASH_LOAN intent into an ActionBundle.
 
@@ -56,67 +167,15 @@ def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult: 
 
     try:
         # Step 0: Check wallet can handle flash loan callbacks
-        # Flash loans require a contract wallet (e.g., Safe) because the lending
-        # protocol calls back into the recipient to execute callback operations.
-        # EOA wallets have no bytecode and cannot receive these callbacks.
-        # Skip check for zero-address sentinel (used by permission discovery synthetic intents).
-        _zero_addr = "0x" + "0" * 40
-        is_contract = True if compiler.wallet_address == _zero_addr else compiler._is_wallet_contract()
-        if is_contract is False:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    # VIB-3826: phrasing includes "not supported" so the state machine
-                    # classifies this as COMPILATION_PERMANENT (state_machine.py:1007)
-                    # and skips pointless retries. EOA-ness will not change between
-                    # attempts; retrying always produces the same revert.
-                    "Flash loans not supported for EOA wallets — flash-loan providers call back "
-                    "into the recipient during the same transaction (Balancer's receiveFlashLoan, "
-                    f"Aave's executeOperation), which EOAs cannot handle. Wallet {compiler.wallet_address} "
-                    "is an EOA (no bytecode); deploy a compatible flash-loan receiver contract."
-                ),
-                intent_id=intent.intent_id,
-            )
-        elif is_contract is None:
-            warnings.append(
-                "Could not verify wallet bytecode (no RPC available). "
-                "Flash loans will revert if the wallet is an EOA (not a contract)."
-            )
+        wallet_failure = _check_wallet_for_flash_loan(compiler, intent, warnings)
+        if wallet_failure is not None:
+            return wallet_failure
 
-        # Step 1: Validate and resolve provider
-        if intent.provider == "auto":
-            # Use FlashLoanSelector to find optimal provider
-            # Lazy import to avoid circular dependency
-            from almanak.connectors.flash_loan import (
-                FlashLoanSelector,
-                NoProviderAvailableError,
-            )
-
-            try:
-                selector = FlashLoanSelector(chain=compiler.chain)
-                selection_result = selector.select_provider(
-                    token=intent.token,
-                    amount=intent.amount,
-                    priority="fee",  # Prefer lower fees (Balancer is zero)
-                )
-                effective_provider = selection_result.provider
-                if selection_result.selection_reasoning:
-                    logger.info(f"Flash loan provider auto-selected: {selection_result.selection_reasoning}")
-            except NoProviderAvailableError as e:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No flash loan provider available: {e}",
-                    intent_id=intent.intent_id,
-                )
-        else:
-            effective_provider = intent.provider
-
-        if effective_provider not in ("aave", "balancer", "morpho"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unsupported flash loan provider: {intent.provider}. Supported providers: aave, balancer, morpho.",
-                intent_id=intent.intent_id,
-            )
+        # Step 1: Validate and resolve provider (auto-selects via FlashLoanSelector
+        # when intent.provider == "auto")
+        effective_provider, provider_failure = _resolve_flash_loan_provider(compiler, intent)
+        if provider_failure is not None:
+            return provider_failure
 
         # Step 2: Resolve flash loan token
         token_info = compiler._resolve_token(intent.token)
