@@ -120,21 +120,14 @@ class TestBuildAnvilCommand:
         assert "--silent" in cmd
 
     def test_gas_limit_included_for_mantle(self):
-        """Mantle gets --gas-limit + --disable-block-gas-limit unconditionally
-        (VIB-3666 / VIB-3746 / #2103).
+        """Mantle gets ``--gas-limit 3B`` (VIB-3666 / VIB-3746 / #2103).
 
-        ``--gas-limit`` has been a stable Foundry/Anvil flag since 1.0; the
-        previous ``_get_anvil_supported_flags()`` gate masked CI environments
-        where the help-output probe returned an empty set, silently dropping
-        the override and re-introducing the Mantle "intrinsic gas too high"
-        failure on Foundry 1.7.0 in CI (issue #2103).
-
-        Belt-and-suspenders: ``--disable-block-gas-limit`` removes Anvil's
-        ``tx.gas_limit <= block.gas_limit`` check outright, which is the
-        defense against Mantle's L1-calldata-included gas accounting
-        producing tx-level estimates that exceed even a 1B block override.
+        The numeric ceiling must be high enough to admit the lp_mint per-tx
+        gas_limit (1B compiler estimate × 1.5x framework gas buffer = 1.5B);
+        3B leaves comfortable headroom. ``--disable-block-gas-limit`` is not
+        used because Anvil 1.7.x rejects combining it with ``--gas-limit``
+        and using it alone showed receipt-not-mined hangs in CI.
         """
-        _clear_flags_cache()
         mgr = RollingForkManager(
             rpc_url="https://mantle.example.com",
             chain="mantle",
@@ -142,19 +135,18 @@ class TestBuildAnvilCommand:
             cache_path=None,
         )
         cmd = mgr._build_anvil_command()
+        assert "--disable-block-gas-limit" not in cmd
         assert "--gas-limit" in cmd
         idx = cmd.index("--gas-limit")
-        assert cmd[idx + 1] == "1000000000"
-        assert "--disable-block-gas-limit" in cmd
+        assert cmd[idx + 1] == "3000000000"
 
     def test_block_gas_limit_legacy_flag_never_used(self):
         """Sanity: legacy ``--block-gas-limit`` flag must not appear (VIB-3746).
 
         Anvil does not expose ``--block-gas-limit``; passing it would crash older
-        builds and is silently dropped on newer ones. The override is now wired to
+        builds and is silently dropped on newer ones. The override is wired to
         ``--gas-limit`` instead.
         """
-        _clear_flags_cache()
         mgr = RollingForkManager(
             rpc_url="https://mantle.example.com",
             chain="mantle",

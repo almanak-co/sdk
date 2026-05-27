@@ -115,20 +115,32 @@ def _build_chain_ids() -> Mapping[str, int]:
 
 CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 
-# Per-chain Anvil block gas limit overrides. When set, --gas-limit is passed to
-# the Anvil fork so transactions are never rejected for exceeding the block gas limit.
-# Mantle uses a non-standard gas accounting system (L1 calldata overhead included in
-# tx.gasLimit), so a generous block gas limit prevents false "intrinsic gas too high" errors.
+# Per-chain Anvil block gas limit overrides. When set, ``--gas-limit <X>`` is
+# passed to the Anvil fork so transactions with chain-specific outsized gas
+# limits are not rejected as "intrinsic gas too high".
 #
-# NOTE on flag name: Foundry/Anvil exposes the block-gas-limit override as
-# ``--gas-limit <GAS_LIMIT>`` (per ``anvil --help``). VIB-3666 originally wired
-# ``--block-gas-limit`` here, which Anvil does not advertise — the
-# ``_get_anvil_supported_flags()`` guard then silently dropped the override and
-# Mantle continued to reject APPROVE/SUPPLY transactions with ``intrinsic gas
-# too high -- tx.gas_limit > env.block.gas_limit`` (VIB-3746). The correct flag
-# is ``--gas-limit``.
+# History:
+#  * VIB-3666 (April 2026): first override at 1B for Mantle, wired through the
+#    wrong flag (``--block-gas-limit``) which Anvil silently dropped (VIB-3746).
+#  * VIB-3746 fix: re-wired through ``--gas-limit``. 1B was sufficient for
+#    APPROVE/SUPPLY, the only Mantle ops covered at the time.
+#  * #2103 / VIB-4820 (May 2026): unskipping the Agni LP intent tests
+#    exposed that the lp_mint compiler estimate is 1B, times the 1.5x framework
+#    gas buffer, yields 1.5B per-tx gas_limit. 1B was no longer enough.
+#  * 4ce722bec attempted to keep 1B and dropped the alternative
+#    ``--disable-block-gas-limit`` branch; this re-broke the LP-open tests at
+#    submission with "intrinsic gas too high".
+#  * This entry raises the override to 3B — well above the 1.5B per-tx ceiling
+#    with comfortable headroom for future protocols on Mantle, while keeping
+#    an explicit numeric block ceiling (Anvil 1.7.x rejects combining
+#    ``--disable-block-gas-limit`` with ``--gas-limit``, and the
+#    disable-flag-alone path showed receipt-not-mined hangs in CI).
+#
+# Mantle uses a non-standard gas accounting system (L1 calldata overhead
+# included in tx.gasLimit), so the per-chain override is required; mainstream
+# EVM chains do not need an entry here.
 _CHAIN_BLOCK_GAS_LIMITS: dict[str, int] = {
-    "mantle": 1_000_000_000,  # 1B — Mantle L2 non-standard gas accounting (VIB-3666/VIB-3746)
+    "mantle": 3_000_000_000,  # 3B — Mantle L2 non-standard gas accounting (VIB-3666/VIB-3746/#2103)
 }
 
 
@@ -615,6 +627,25 @@ class RollingForkManager:
 
             self._is_running = True
             self._start_time = time.time()
+
+            # For chains with a block-gas-limit override, mine a single empty
+            # block so the override is baked in BEFORE any pytest fixture
+            # captures an evm_snapshot. Anvil applies ``--gas-limit`` only on
+            # the first mined block after fork creation: if a pristine
+            # snapshot is taken at the raw forked state (gas_limit inherited
+            # from mainnet, e.g. ~60M for Mantle), every subsequent
+            # ``evm_revert`` restores that low ceiling and the override is
+            # silently lost — txs above 60M then fail with "intrinsic gas
+            # too high". Pre-mining here means any later snapshot/revert
+            # cycle preserves the override (VIB-3666 / VIB-3746 / #2103).
+            if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
+                success, _ = await self._rpc_call_raw("evm_mine", [])
+                if not success:
+                    logger.warning(
+                        "evm_mine to bake in --gas-limit override for chain=%s failed; "
+                        "subsequent evm_revert may lose the block-gas-limit ceiling",
+                        self.chain,
+                    )
 
             # Get current block number
             self._current_block = await self._get_block_number()
@@ -1440,28 +1471,13 @@ class RollingForkManager:
         # and was removed in Foundry 1.x. Gas is always fake/free on Anvil forks.
         cmd.extend(["--block-base-fee-per-gas", "0"])
 
-        # Override block gas limit for chains with non-standard gas accounting
-        # (VIB-3666 / VIB-3746). Without this, some chains (e.g. Mantle) cause
-        # "intrinsic gas too high" rejections because the forked block.gas_limit
-        # is too low for the SDK's computed tx.gas_limit.
-        #
-        # Foundry exposes this as ``--gas-limit`` (see ``anvil --help``):
-        # there is no ``--block-gas-limit`` flag — the previous wiring under
-        # VIB-3666 was silently dropped by the supported-flags guard and Mantle
-        # APPROVEs continued to revert (VIB-3746).
-        #
-        # Pass unconditionally for chains in _CHAIN_BLOCK_GAS_LIMITS. The flag
-        # has been stable since Foundry 1.0 and earlier; the previous
-        # _get_anvil_supported_flags() gate masked CI environments where the
-        # probe transiently returned an empty set (issue #2103 — Foundry 1.7.0
-        # in CI silently dropped the override and Mantle Agni LP txs reverted
-        # with "intrinsic gas too high"). If a future Anvil version drops this
-        # flag, surface that as a startup failure rather than silent drop.
-        #
+        # Override the block gas limit for chains with non-standard gas accounting
+        # (VIB-3666 / VIB-3746 / #2103). See ``_CHAIN_BLOCK_GAS_LIMITS`` for the
+        # full history of why an explicit numeric override is preferred over
+        # ``--disable-block-gas-limit`` (Anvil 1.7.x rejects combining the two,
+        # and the disable-flag-alone path observed receipt-not-mined hangs in
+        # the CI matrix).
         if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
-            supported_flags = _get_anvil_supported_flags()
-            if "--disable-block-gas-limit" in supported_flags:
-                cmd.append("--disable-block-gas-limit")
             cmd.extend(["--gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
 
         # Cache upstream RPC responses to reduce Alchemy/RPC calls

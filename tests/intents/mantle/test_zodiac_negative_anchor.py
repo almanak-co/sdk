@@ -23,10 +23,7 @@ load-bearing.
 This anchor closes that gap. The SUPPLY token is USDC — the existing
 ``test_aave_v3_lending.py`` happy-path tests use USDC after #2102 surfaced
 that the WETH reserve is frozen on Mantle (LTV=0, isFrozen=true). The
-SWAP pair (USDT → WETH) mirrors ``test_uniswap_swap.py`` even though
-those tests are skipped under #2104 — the negative anchor only needs
-the manifest to generate a load-bearing target, which is independent of
-whether the underlying swap can actually execute. The harness's
+SWAP pair (USDT → WETH) mirrors ``test_uniswap_swap.py``. The harness's
 ``_auto_derive_load_bearing_selector`` picks the function-scoped,
 non-approve target deterministically from the generated manifest, so the
 anchor stays minimal — no hardcoded selector per pair.
@@ -71,15 +68,6 @@ CHAIN_NAME = "mantle"
 # existing positive intent tests on mantle (USDT/WETH on Uniswap V3,
 # WETH on Aave V3).
 #
-# SWAP carries an xfail marker under PR #2096 — enabling mantle in the CI
-# matrix surfaced that the framework token resolver returns LayerZero
-# USD₮0 for "USDT" on mantle, while `tests/intents/conftest.py` funds the
-# legacy bridged USDT (`0x201EBa5…`). The QuoterV2 returns no amount for
-# the resolved address, so the compile-time price-impact guard fires
-# before authorisation can be exercised. Tracked in #2104; ``strict=True``
-# will surface the resolution as ``XPASS`` once the token alignment is
-# fixed.
-#
 # SUPPLY uses USDC: WETH is frozen on Mantle Aave V3 (#2102), so supplying
 # WETH reverts at the Aave layer for reasons unrelated to authorisation.
 # USDC is active and non-frozen, which gives the harness a clean
@@ -91,13 +79,6 @@ _CASES: list = [
             protocol="uniswap_v3",
             intent_type="SWAP",
             config={"from_token": "USDT", "to_token": "WETH", "amount": "100"},
-        ),
-        marks=pytest.mark.xfail(
-            reason="#2104: framework token resolver returns LayerZero USD₮0 for 'USDT' on "
-            "mantle but the test conftest funds the legacy bridged USDT — pool address "
-            "mismatch, compile-time quote returns no amount (as of 2026-05-05). Strict "
-            "so the resolver/conftest alignment surfaces as XPASS.",
-            strict=True,
         ),
         id="uniswap_v3-SWAP",
     ),

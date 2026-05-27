@@ -26,6 +26,7 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
     format_token_amount,
+    fund_erc20_token,
     get_token_balance,
     get_token_decimals,
 )
@@ -60,18 +61,6 @@ class TestUniswapV3SwapIntent:
     """
 
     @pytest.mark.intent(IntentType.SWAP)
-    @pytest.mark.skip(
-        reason="#2104: token resolver returns LayerZero USD₮0 "
-        "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
-        "bridged USDT (0x201EBa5C…). Verified on-chain 2026-05-06 against "
-        "the canonical Uniswap V3 factory (0x0d922Fb1…): no USD₮0/WETH "
-        "pool exists at any fee tier; only the bridged-USDT/WETH @ fee=500 "
-        "pool (0x076eb72E…) has a quote-able route, and switching the "
-        "test to bridged USDT requires either a chain-specific symbol "
-        "alias (e.g. 'USDT_BRIDGED') or aligning tokens.json with the "
-        "Uniswap V3 deployment — both wider changes than the in-scope "
-        "matrix-shard cleanup."
-    )
     @pytest.mark.asyncio
     async def test_swap_usdt_to_weth_using_intent(
         self,
@@ -117,7 +106,7 @@ class TestUniswapV3SwapIntent:
             rpc_url=orchestrator.rpc_url,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS"
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
         # Execute
@@ -154,18 +143,6 @@ class TestUniswapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.intent(IntentType.SWAP)
-    @pytest.mark.skip(
-        reason="#2104: token resolver returns LayerZero USD₮0 "
-        "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
-        "bridged USDT (0x201EBa5C…). Verified on-chain 2026-05-06 against "
-        "the canonical Uniswap V3 factory (0x0d922Fb1…): no USD₮0/WETH "
-        "pool exists at any fee tier; only the bridged-USDT/WETH @ fee=500 "
-        "pool (0x076eb72E…) has a quote-able route, and switching the "
-        "test to bridged USDT requires either a chain-specific symbol "
-        "alias (e.g. 'USDT_BRIDGED') or aligning tokens.json with the "
-        "Uniswap V3 deployment — both wider changes than the in-scope "
-        "matrix-shard cleanup."
-    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdt_using_intent(
         self,
@@ -211,7 +188,7 @@ class TestUniswapV3SwapIntent:
             rpc_url=orchestrator.rpc_url,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS"
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
         # Execute
@@ -248,11 +225,6 @@ class TestUniswapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.intent(IntentType.SWAP)
-    @pytest.mark.skip(
-        reason="#2104: token resolver / conftest USDT mismatch; compile-time "
-        "pool quote fails. See test_swap_usdt_to_weth_using_intent for the "
-        "full on-chain diagnosis."
-    )
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,
@@ -272,21 +244,22 @@ class TestUniswapV3SwapIntent:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdt_balance) / Decimal(10**in_decimals)
 
-        # Exceed balance by 2x so execution fails on-chain with insufficient balance,
-        # but stay inside the compiler's price-impact guard (default 30%) so this path
-        # exercises execution-level failure rather than compile-time rejection.
-        excessive_amount = balance_decimal * Decimal("2")
+        # Compile a normal-size route first, then drain the token on the fork
+        # before execution. Using amount > balance on Mantle hits the compiler's
+        # price-impact guard before it reaches the intended insufficient-balance
+        # execution path.
+        swap_amount = Decimal("100")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance (Uniswap V3)")
         print(f"{'='*80}")
         print(f"Balance:   {balance_decimal} USDT")
-        print(f"Trying:    {excessive_amount} USDT")
+        print(f"Trying:    {swap_amount} USDT after draining balance")
 
         intent = SwapIntent(
             from_token="USDT",
             to_token="WETH",
-            amount=excessive_amount,
+            amount=swap_amount,
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
@@ -296,10 +269,15 @@ class TestUniswapV3SwapIntent:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
+            rpc_url=orchestrator.rpc_url,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS"
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+
+        fund_erc20_token(funded_wallet, token_in, 0, CHAIN_CONFIGS[CHAIN_NAME]["balance_slots"]["USDT"], orchestrator.rpc_url)
+        usdt_before_execute = get_token_balance(web3, token_in, funded_wallet)
+        assert usdt_before_execute == 0, "USDT balance must be drained before execution"
 
         # Try to execute - should fail
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
@@ -310,7 +288,7 @@ class TestUniswapV3SwapIntent:
         # Verify balances unchanged (bilateral conservation check)
         usdt_after = get_token_balance(web3, token_in, funded_wallet)
         weth_after = get_token_balance(web3, token_out, funded_wallet)
-        assert usdt_after == usdt_balance, "Input token balance must be unchanged after failed swap"
+        assert usdt_after == usdt_before_execute, "Input token balance must be unchanged after failed swap"
         assert weth_after == weth_before, "Output token balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED")
