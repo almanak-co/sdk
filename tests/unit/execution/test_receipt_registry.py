@@ -565,3 +565,285 @@ class TestExceptions:
         error = ReceiptParserError("test error")
         assert isinstance(error, Exception)
         assert str(error) == "test error"
+
+
+# =============================================================================
+# extract_position_id() Tests (VIB-4854 / W2)
+# =============================================================================
+
+
+class _FakeTxResult:
+    """Object-style transaction-result fixture (mirrors ExecutionResult shape)."""
+
+    def __init__(self, success: bool, receipt: Any) -> None:
+        self.success = success
+        self.receipt = receipt
+
+
+class _FakeExecutionResult:
+    """Object-style execution-result fixture (mirrors ExecutionResult shape)."""
+
+    def __init__(self, transaction_results: list[_FakeTxResult]) -> None:
+        self.transaction_results = transaction_results
+
+
+class _ToDictReceipt:
+    """Receipt-like object exposing a ``to_dict()`` coercion path."""
+
+    def __init__(self, logs: list[dict[str, Any]]) -> None:
+        self._logs = logs
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"logs": self._logs}
+
+
+class _LogsAttrReceipt:
+    """Receipt-like object exposing a ``.logs`` attribute (no to_dict)."""
+
+    def __init__(self, logs: list[dict[str, Any]]) -> None:
+        self.logs = logs
+
+
+class _PositionParser:
+    """Parser stub recording every receipt it sees.
+
+    Accepts ``**kwargs`` so the ``get_parser(..., chain=...)`` call site
+    (which threads chain into the constructor) doesn't blow up.
+    """
+
+    def __init__(self, position_id: Any = 42, **_kwargs: Any) -> None:
+        self.position_id = position_id
+        self.calls: list[dict[str, Any]] = []
+
+    def parse_receipt(self, receipt: dict[str, Any]) -> Any:  # pragma: no cover
+        return None
+
+    def extract_position_id(self, receipt: dict[str, Any]) -> Any:
+        self.calls.append(receipt)
+        return self.position_id
+
+
+class _ParserWithoutExtract:
+    """Parser stub lacking ``extract_position_id``."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    def parse_receipt(self, receipt: dict[str, Any]) -> Any:  # pragma: no cover
+        return None
+
+
+class TestExtractPositionId:
+    """Tests for the module-level extract_position_id() helper."""
+
+    def setup_method(self) -> None:
+        # Use a custom protocol name we register at runtime to keep tests
+        # isolated from real connector parsers (and their per-chain kwargs).
+        from almanak.framework.execution.receipt_registry import (
+            _default_registry,
+        )
+
+        self._registry = _default_registry
+        self._protocol = "test_extract_position_id_protocol"
+
+    def teardown_method(self) -> None:
+        self._registry.unregister(self._protocol)
+
+    def _install(self, parser_cls: type) -> None:
+        from almanak.framework.execution.receipt_registry import register_parser
+
+        register_parser(self._protocol, parser_cls)
+
+    def test_returns_none_when_parser_unknown(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        # No registration → ValueError → swallowed → None.
+        assert (
+            extract_position_id({"logs": []}, protocol="never_registered", chain="arbitrum")
+            is None
+        )
+
+    def test_returns_none_when_parser_missing_extract_method(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_ParserWithoutExtract)
+        assert (
+            extract_position_id({"logs": []}, protocol=self._protocol, chain="arbitrum")
+            is None
+        )
+
+    def test_chain_defaults_to_arbitrum_with_warning(self, caplog: Any) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        with caplog.at_level("WARNING"):
+            result = extract_position_id({"logs": []}, protocol=self._protocol)
+        assert result == 42
+        assert any("defaulting to 'arbitrum'" in m for m in caplog.messages)
+
+    def test_extracts_from_raw_receipt_dict(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        result = extract_position_id(
+            {"logs": [{"data": "0x"}]}, protocol=self._protocol, chain="arbitrum"
+        )
+        assert result == 42
+
+    def test_extracts_from_bare_log_list(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        logs = [{"data": "0x"}, {"data": "0x01"}]
+        assert (
+            extract_position_id(logs, protocol=self._protocol, chain="arbitrum") == 42
+        )
+
+    def test_extracts_from_execution_result_object(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        exec_result = _FakeExecutionResult(
+            [_FakeTxResult(success=True, receipt={"logs": [{"data": "0x"}]})]
+        )
+        assert (
+            extract_position_id(exec_result, protocol=self._protocol, chain="arbitrum")
+            == 42
+        )
+
+    def test_extracts_from_execution_result_with_to_dict_receipt(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        exec_result = _FakeExecutionResult(
+            [_FakeTxResult(success=True, receipt=_ToDictReceipt(logs=[{"data": "0x"}]))]
+        )
+        assert (
+            extract_position_id(exec_result, protocol=self._protocol, chain="arbitrum")
+            == 42
+        )
+
+    def test_extracts_from_execution_result_with_logs_attr_receipt(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        exec_result = _FakeExecutionResult(
+            [_FakeTxResult(success=True, receipt=_LogsAttrReceipt(logs=[{"data": "0x"}]))]
+        )
+        assert (
+            extract_position_id(exec_result, protocol=self._protocol, chain="arbitrum")
+            == 42
+        )
+
+    def test_skips_failed_or_empty_transaction_results(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        exec_result = _FakeExecutionResult(
+            [
+                _FakeTxResult(success=False, receipt={"logs": []}),  # filtered
+                _FakeTxResult(success=True, receipt=None),  # filtered
+                _FakeTxResult(success=True, receipt={"logs": [{"data": "0x"}]}),
+            ]
+        )
+        assert (
+            extract_position_id(exec_result, protocol=self._protocol, chain="arbitrum")
+            == 42
+        )
+
+    def test_extracts_from_dict_with_transaction_results(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        result = {
+            "transaction_results": [
+                {"success": True, "receipt": {"logs": [{"data": "0x"}]}},
+                {"success": False, "receipt": {"logs": []}},  # filtered
+                {"success": True, "receipt": None},  # filtered
+            ]
+        }
+        assert (
+            extract_position_id(result, protocol=self._protocol, chain="arbitrum") == 42
+        )
+
+    def test_iterates_until_position_id_found(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        class _MaybeParser:
+            calls = 0
+
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            def parse_receipt(self, receipt: dict[str, Any]) -> Any:  # pragma: no cover
+                return None
+
+            def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+                _MaybeParser.calls += 1
+                # First receipt returns None, second returns the id.
+                return None if _MaybeParser.calls == 1 else 99
+
+        self._install(_MaybeParser)
+        result = {
+            "transaction_results": [
+                {"success": True, "receipt": {"logs": [{"data": "0x01"}]}},
+                {"success": True, "receipt": {"logs": [{"data": "0x02"}]}},
+            ]
+        }
+        assert (
+            extract_position_id(result, protocol=self._protocol, chain="arbitrum") == 99
+        )
+
+    def test_returns_none_when_no_receipts_extracted(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        self._install(_PositionParser)
+        # An unsupported shape (e.g. a bare int) → no receipts → None.
+        assert extract_position_id(123, protocol=self._protocol, chain="arbitrum") is None
+
+    def test_returns_none_when_parser_raises(self) -> None:
+        from almanak.framework.execution.receipt_registry import (
+            extract_position_id,
+        )
+
+        class _RaisingParser:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            def parse_receipt(self, receipt: dict[str, Any]) -> Any:  # pragma: no cover
+                return None
+
+            def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+                raise RuntimeError("parser blew up")
+
+        self._install(_RaisingParser)
+        # The function catches the exception and returns None (the contract is
+        # observability, not load-bearing — broken parser must not crash callers).
+        assert (
+            extract_position_id({"logs": []}, protocol=self._protocol, chain="arbitrum")
+            is None
+        )

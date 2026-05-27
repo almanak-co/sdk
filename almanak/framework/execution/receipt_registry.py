@@ -1,406 +1,186 @@
-"""Receipt Parser Registry.
+"""Receipt Parser Registry — thin façade over the strategy-side connector registry.
 
-This module provides a centralized registry for protocol receipt parsers,
-enabling automatic parser lookup based on protocol name.
+Historically this module hardcoded a per-protocol dispatch table
+(``_BUILTIN_LOADERS``) mapping every protocol key + alias to a
+``(module_path, class_name)`` tuple. The framework loaded each parser
+class lazily via ``importlib.import_module``. That table was the largest
+single source of per-protocol coupling outside the connector layer —
+~45 findings in the 2026-05-27 chain/protocol coupling audit.
 
-The registry uses lazy loading to avoid circular imports and reduce startup time.
-Parser classes are imported and instantiated only when requested.
+VIB-4854 (W2) lifts the dispatch onto each connector:
 
-Example:
-    from almanak.framework.execution.receipt_registry import get_parser, ReceiptParserRegistry
+* Every connector with a ``receipt_parser.py`` ships a sibling
+  ``receipt_parser_provider.py`` that defines a
+  ``<Protocol>ReceiptParserConnector`` class implementing
+  ``ReceiptParserCapability`` (see
+  ``almanak/connectors/_strategy_base/receipt_parser_registry.py``).
+* ``almanak/connectors/_strategy_receipt_registry.py`` registers every
+  provider into ``STRATEGY_RECEIPT_PARSER_REGISTRY`` at import time —
+  the single registration site that mirrors
+  ``_gateway_registry.py``'s shape.
+* This module is now a thin façade: it consumes
+  ``STRATEGY_RECEIPT_PARSER_REGISTRY.classes_by_key()`` for the
+  protocol → class map, then layers the same caching / alias
+  normalisation / custom-registration semantics consumers (notably
+  ``ResultEnricher``) have always relied on.
 
-    # Get a parser for a protocol
-    parser = get_parser("spark")
-    result = parser.parse_receipt(receipt)
+Public API is **byte-equivalent** with the pre-W2 module:
 
-    # Use the registry class for more control
-    registry = ReceiptParserRegistry()
-    registry.register("custom", MyCustomParser)
-    parser = registry.get("custom")
+* :class:`ReceiptParser` — structural Protocol for a parser instance.
+* :class:`ReceiptParserRegistry` — registry façade with the same
+  ``get`` / ``register`` / ``unregister`` / ``list_protocols`` /
+  ``is_registered`` / ``clear_cache`` surface.
+* :func:`get_parser`, :func:`register_parser`, :func:`list_parsers`,
+  :func:`is_parser_available` — module-level convenience functions
+  backed by a shared default registry instance.
+* :func:`extract_position_id` — high-level NFT / LP-position-id
+  extractor that picks the right parser by ``protocol`` + ``chain``.
+* :class:`ReceiptParserError`, :class:`ParserNotFoundError` — exception
+  types.
 
-Registered Protocols:
-    DEX/AMM:
-    - uniswap_v3: UniswapV3ReceiptParser
-    - uniswap_v4: UniswapV4ReceiptParser (V4 PoolManager singleton)
-    - pancakeswap_v3: PancakeSwapV3ReceiptParser (Uniswap V3 fork on BSC)
-    - sushiswap_v3: SushiSwapV3ReceiptParser (Uniswap V3 fork)
-    - aerodrome: AerodromeReceiptParser (Base DEX)
-    - traderjoe_v2: TraderJoeV2ReceiptParser (Avalanche DEX)
-    - curve: CurveReceiptParser (Stablecoin DEX)
+The legacy ``_BUILTIN_LOADERS`` class attribute is removed; the
+completeness guard at
+``tests/unit/core/test_receipt_parser_registry_completeness.py`` now
+walks the new strategy-side registry directly.
 
-    Lending:
-    - aave_v3: AaveV3ReceiptParser
-    - spark: SparkReceiptParser (Aave V3 fork for DAI)
-    - morpho_blue / morpho: MorphoBlueReceiptParser
-    - compound_v3: CompoundV3ReceiptParser
-    - benqi: BenqiReceiptParser (Compound V2 fork on Avalanche)
-    - joelend: JoeLendReceiptParser — DORMANT, kept only to parse historical
-      receipts; protocol wound down on-chain (VIB-3960)
-    - euler_v2: EulerV2ReceiptParser (ERC-4626 vaults + EVC on Avalanche)
-    - silo_v2: SiloV2ReceiptParser (Isolated lending on Avalanche)
+Aliases (``"morpho"`` → ``MorphoBlueReceiptParser``, ``"agni"`` →
+``UniswapV3ReceiptParser``, …) come from two sources:
 
-    Perpetuals:
-    - gmx_v2: GMXv2ReceiptParser (Arbitrum perps)
+* Connector-level aliases (``receipt_parser_keys`` may declare
+  multiple keys) — e.g. ``morpho_blue`` publishes both
+  ``"morpho_blue"`` and ``"morpho"``.
+* ``protocol_aliases.normalize_protocol`` — chain-scoped renames
+  (e.g. ``("mantle", "uniswap_v3")`` → ``"agni_finance"``) applied
+  before lookup.
 
-    Staking:
-    - lido: LidoReceiptParser (ETH liquid staking)
-    - ethena: EthenaReceiptParser (USDe/sUSDe yield)
-
-    Aggregators:
-    - enso: EnsoReceiptParser (Enso intent-based routing)
-
-    Solana Lending:
-    - kamino: KaminoReceiptParser (Kamino Finance lending)
-
-    Solana LP:
-    - raydium_clmm / raydium: RaydiumReceiptParser (Raydium CLMM LP)
-
-    Yield / Structured Products:
-    - pendle: PendleReceiptParser (Pendle yield trading)
-
-    Prediction Markets:
-    - polymarket: PolymarketReceiptParser (Polygon prediction markets)
-
-    Vault Protocols:
-    - lagoon: LagoonReceiptParser (Lagoon ERC-7540 vault settlements)
+Both mechanisms predate W2 and are preserved verbatim.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    pass
+from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+from almanak.connectors._strategy_base.receipt_parser_registry import (
+    STRATEGY_RECEIPT_PARSER_REGISTRY,
+)
+
+# Importing the registration site is what populates
+# ``STRATEGY_RECEIPT_PARSER_REGISTRY``. The import is performed for its
+# side-effects (``_register_all`` runs at module import); the imported
+# symbol is re-exposed for callers that want a direct reference.
+from almanak.connectors._strategy_receipt_registry import (  # noqa: F401
+    STRATEGY_RECEIPT_PARSER_REGISTRY as _BOOTED_REGISTRY,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Protocol for Receipt Parsers
+# Public Protocol for receipt parsers
 # =============================================================================
 
 
 class ReceiptParser(Protocol):
-    """Protocol defining the receipt parser interface.
+    """Structural Protocol every receipt parser implements.
 
-    All receipt parsers must implement this interface to be compatible
-    with the registry.
+    Preserved from the pre-W2 module so consumer type hints
+    (``ResultEnricher``, ``copy_signal_engine``, …) stay unchanged.
     """
 
     def parse_receipt(self, receipt: dict[str, Any]) -> Any:
         """Parse a transaction receipt.
 
         Args:
-            receipt: Transaction receipt dict containing 'logs', 'transactionHash',
-                     'blockNumber', etc.
+            receipt: Transaction receipt dict containing ``logs``,
+                ``transactionHash``, ``blockNumber``, etc.
 
         Returns:
-            ParseResult with extracted events and data (protocol-specific type)
+            ParseResult with extracted events and data (protocol-specific
+            type).
         """
         ...
 
 
 # =============================================================================
-# Receipt Parser Registry
+# Receipt Parser Registry façade
 # =============================================================================
 
 
 class ReceiptParserRegistry:
-    """Registry for protocol receipt parsers.
+    """Façade over ``STRATEGY_RECEIPT_PARSER_REGISTRY``.
 
-    The registry provides lazy loading of parser classes and supports
-    both built-in parsers and custom parser registration.
+    Adds the caching + custom-registration semantics consumers rely on
+    on top of the strategy-side connector registry's
+    ``classes_by_key()`` resolution:
 
-    Built-in parsers are loaded from the connectors package when first
-    requested. Custom parsers can be registered at any time.
+    * **Per-protocol cache** — ``get(protocol)`` (no kwargs) caches the
+      instantiated parser. ``register(custom)`` evicts that entry.
+    * **Custom registration** — ``register(protocol, cls)`` injects a
+      user-supplied parser class that takes precedence over the
+      connector-provided one. Used by tests and by strategy-side
+      consumers that need to substitute a parser at runtime.
+    * **Alias normalisation** — ``protocol`` is run through
+      :func:`almanak.connectors._strategy_base.protocol_aliases.normalize_protocol`
+      before lookup, so chain-scoped renames
+      (e.g. ``("mantle", "uniswap_v3")`` → ``"agni_finance"``) resolve
+      identically to the pre-W2 behaviour.
 
-    Example:
-        registry = ReceiptParserRegistry()
-
-        # Get a built-in parser
-        spark_parser = registry.get("spark")
-
-        # Register a custom parser
-        registry.register("my_protocol", MyProtocolReceiptParser)
-
-        # Check available protocols
-        protocols = registry.list_protocols()
+    The class is intentionally instantiable so each consumer can hold
+    its own cache scope (``ResultEnricher`` historically constructs one
+    per execution context). The module-level convenience functions
+    (``get_parser`` / ``list_parsers`` / …) share a single default
+    instance.
     """
 
-    # Mapping of protocol names to lazy loader functions
-    _BUILTIN_LOADERS: dict[str, tuple[str, str]] = {
-        # Format: protocol_name -> (module_path, class_name)
-        # DEX / AMM Protocols
-        "uniswap_v3": (
-            "almanak.connectors.uniswap_v3.receipt_parser",
-            "UniswapV3ReceiptParser",
-        ),
-        "agni_finance": (
-            "almanak.connectors.uniswap_v3.receipt_parser",
-            "UniswapV3ReceiptParser",
-        ),
-        "uniswap_v4": (
-            "almanak.connectors.uniswap_v4.receipt_parser",
-            "UniswapV4ReceiptParser",
-        ),
-        "pancakeswap_v3": (
-            "almanak.connectors.pancakeswap_v3.receipt_parser",
-            "PancakeSwapV3ReceiptParser",
-        ),
-        "aerodrome": (
-            "almanak.connectors.aerodrome.receipt_parser",
-            "AerodromeReceiptParser",
-        ),
-        "aerodrome_slipstream": (
-            "almanak.connectors.aerodrome.receipt_parser",
-            "AerodromeSlipstreamReceiptParser",
-        ),
-        "traderjoe_v2": (
-            "almanak.connectors.traderjoe_v2.receipt_parser",
-            "TraderJoeV2ReceiptParser",
-        ),
-        "fluid": (
-            "almanak.connectors.fluid.receipt_parser",
-            "FluidReceiptParser",
-        ),
-        "sushiswap_v3": (
-            "almanak.connectors.sushiswap_v3.receipt_parser",
-            "SushiSwapV3ReceiptParser",
-        ),
-        "curve": (
-            "almanak.connectors.curve.receipt_parser",
-            "CurveReceiptParser",
-        ),
-        # Lending Protocols
-        "aave_v3": (
-            "almanak.connectors.aave_v3.receipt_parser",
-            "AaveV3ReceiptParser",
-        ),
-        "radiant_v2": (
-            "almanak.connectors.radiant_v2.receipt_parser",
-            "RadiantV2ReceiptParser",
-        ),
-        "spark": (
-            "almanak.connectors.spark.receipt_parser",
-            "SparkReceiptParser",
-        ),
-        "morpho_blue": (
-            "almanak.connectors.morpho_blue.receipt_parser",
-            "MorphoBlueReceiptParser",
-        ),
-        "morpho": (
-            "almanak.connectors.morpho_blue.receipt_parser",
-            "MorphoBlueReceiptParser",
-        ),  # Alias for morpho_blue
-        "curvance": (
-            "almanak.connectors.curvance.receipt_parser",
-            "CurvanceReceiptParser",
-        ),
-        "compound_v3": (
-            "almanak.connectors.compound_v3.receipt_parser",
-            "CompoundV3ReceiptParser",
-        ),
-        "benqi": (
-            "almanak.connectors.benqi.receipt_parser",
-            "BenqiReceiptParser",
-        ),
-        "joelend": (
-            "almanak.connectors.joelend.receipt_parser",
-            "JoeLendReceiptParser",
-        ),
-        "euler_v2": (
-            "almanak.connectors.euler_v2.receipt_parser",
-            "EulerV2ReceiptParser",
-        ),
-        "silo_v2": (
-            "almanak.connectors.silo_v2.receipt_parser",
-            "SiloV2ReceiptParser",
-        ),
-        # Perpetuals
-        "drift": (
-            "almanak.connectors.drift.receipt_parser",
-            "DriftReceiptParser",
-        ),
-        "gmx_v2": (
-            "almanak.connectors.gmx_v2.receipt_parser",
-            "GMXv2ReceiptParser",
-        ),
-        # Aster Perps is canonical; pancakeswap_perps is a shim that routes to
-        # the same parser class. Both keys are registered so protocol="pancakeswap_perps"
-        # legacy intents and protocol="aster_perps" new intents both resolve.
-        # The pancakeswap_perps key intentionally points at the shim submodule
-        # (which re-exports the Aster parser under the legacy class name) so
-        # the registry-completeness invariant — "every receipt_parser.py gets
-        # a matching registry entry" — still holds after the extraction.
-        "aster_perps": (
-            "almanak.connectors.aster_perps.receipt_parser",
-            "AsterPerpsReceiptParser",
-        ),
-        "pancakeswap_perps": (
-            "almanak.connectors.pancakeswap_perps.receipt_parser",
-            "PancakeSwapPerpsReceiptParser",
-        ),
-        # Staking Protocols
-        "lido": (
-            "almanak.connectors.lido.receipt_parser",
-            "LidoReceiptParser",
-        ),
-        "ethena": (
-            "almanak.connectors.ethena.receipt_parser",
-            "EthenaReceiptParser",
-        ),
-        "gimo": (
-            "almanak.connectors.gimo.receipt_parser",
-            "GimoReceiptParser",
-        ),
-        # Aggregators
-        "enso": (
-            "almanak.connectors.enso.receipt_parser",
-            "EnsoReceiptParser",
-        ),
-        "lifi": (
-            "almanak.connectors.lifi.receipt_parser",
-            "LiFiReceiptParser",
-        ),
-        # Cross-Chain Bridges (VIB-3226)
-        "across": (
-            "almanak.connectors.across.receipt_parser",
-            "AcrossReceiptParser",
-        ),
-        "stargate": (
-            "almanak.connectors.stargate.receipt_parser",
-            "StargateReceiptParser",
-        ),
-        # Yield / Structured Products
-        "pendle": (
-            "almanak.connectors.pendle.receipt_parser",
-            "PendleReceiptParser",
-        ),
-        # Prediction Markets
-        "polymarket": (
-            "almanak.connectors.polymarket.receipt_parser",
-            "PolymarketReceiptParser",
-        ),
-        # Vault Protocols
-        "lagoon": (
-            "almanak.connectors.lagoon.receipt_parser",
-            "LagoonReceiptParser",
-        ),
-        "metamorpho": (
-            "almanak.connectors.morpho_vault.receipt_parser",
-            "MetaMorphoReceiptParser",
-        ),
-        # Solana Aggregators
-        "jupiter": (
-            "almanak.connectors.jupiter.receipt_parser",
-            "JupiterReceiptParser",
-        ),
-        # Solana Lending
-        "kamino": (
-            "almanak.connectors.kamino.receipt_parser",
-            "KaminoReceiptParser",
-        ),
-        "kamino_klend": (
-            "almanak.connectors.kamino.receipt_parser",
-            "KaminoReceiptParser",
-        ),  # Alias for kamino
-        "jupiter_lend": (
-            "almanak.connectors.jupiter_lend.receipt_parser",
-            "JupiterLendReceiptParser",
-        ),
-        # Solana LP
-        "raydium_clmm": (
-            "almanak.connectors.raydium.receipt_parser",
-            "RaydiumReceiptParser",
-        ),
-        "raydium": (
-            "almanak.connectors.raydium.receipt_parser",
-            "RaydiumReceiptParser",
-        ),  # Alias for raydium_clmm
-        # Solana DLMM LP
-        "meteora_dlmm": (
-            "almanak.connectors.meteora.receipt_parser",
-            "MeteoraReceiptParser",
-        ),
-        "meteora": (
-            "almanak.connectors.meteora.receipt_parser",
-            "MeteoraReceiptParser",
-        ),  # Alias for meteora_dlmm
-        # Solana CLMM LP (Orca Whirlpools)
-        "orca_whirlpools": (
-            "almanak.connectors.orca.receipt_parser",
-            "OrcaReceiptParser",
-        ),
-        "orca": (
-            "almanak.connectors.orca.receipt_parser",
-            "OrcaReceiptParser",
-        ),  # Alias for orca_whirlpools
-    }
-
     def __init__(self) -> None:
-        """Initialize the registry."""
-        # Cache for instantiated parsers
         self._parsers: dict[str, ReceiptParser] = {}
-        # Custom registered parser classes
         self._custom_classes: dict[str, type[ReceiptParser]] = {}
 
-    def get(
-        self,
-        protocol: str,
-        **kwargs: Any,
-    ) -> ReceiptParser:
-        """Get a receipt parser for a protocol.
+    # ---- lookup -----------------------------------------------------------
 
-        Args:
-            protocol: Protocol name (e.g., "spark", "lido", "ethena", "pancakeswap_v3")
-            **kwargs: Additional arguments to pass to parser constructor
+    def get(self, protocol: str, **kwargs: Any) -> ReceiptParser:
+        """Resolve ``protocol`` to a parser instance.
 
-        Returns:
-            Receipt parser instance
-
-        Raises:
-            ValueError: If protocol is not registered
+        See class docstring for cache / alias semantics. Raises
+        :class:`ValueError` if the protocol isn't known.
         """
-        # Normalize protocol name (resolve aliases like "agni" -> "uniswap_v3")
-        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
-
         protocol_lower = normalize_protocol(kwargs.get("chain", ""), protocol)
 
-        # Check cache first (only for parsers without custom kwargs)
+        # Cache hit: only valid when caller passed no constructor kwargs.
         if not kwargs and protocol_lower in self._parsers:
             return self._parsers[protocol_lower]
 
-        # Try custom registered parser
+        # Custom registration takes precedence over connector-provided
+        # classes (matches the pre-W2 ordering).
         if protocol_lower in self._custom_classes:
             parser = self._custom_classes[protocol_lower](**kwargs)
             if not kwargs:
                 self._parsers[protocol_lower] = parser
             return parser
 
-        # Try built-in parser
-        if protocol_lower in self._BUILTIN_LOADERS:
-            parser = self._load_builtin(protocol_lower, **kwargs)
+        connector_classes = STRATEGY_RECEIPT_PARSER_REGISTRY.classes_by_key()
+        if protocol_lower in connector_classes:
+            try:
+                parser_class = connector_classes[protocol_lower]
+                parser = parser_class(**kwargs)
+            except ImportError as exc:
+                raise ValueError(f"Failed to import parser for protocol {protocol}: {exc}") from exc
             if not kwargs:
                 self._parsers[protocol_lower] = parser
             return parser
 
         raise ValueError(f"Unknown protocol: {protocol}. Available protocols: {', '.join(self.list_protocols())}")
 
+    # ---- mutation ---------------------------------------------------------
+
     def register(
         self,
         protocol: str,
         parser_class: type[ReceiptParser],
     ) -> None:
-        """Register a custom receipt parser.
-
-        Args:
-            protocol: Protocol name
-            parser_class: Parser class (not instance)
-
-        Raises:
-            TypeError: If parser_class is not a class
-        """
+        """Register a custom parser class. Evicts the cached instance."""
         if not isinstance(parser_class, type):
             raise TypeError(
                 f"Expected a class, got {type(parser_class).__name__}. "
@@ -410,199 +190,156 @@ class ReceiptParserRegistry:
         protocol_lower = protocol.lower()
         self._custom_classes[protocol_lower] = parser_class
 
-        # Clear cached instance if exists
+        # Drop the cached instance so the next ``get`` reflects the new class.
         if protocol_lower in self._parsers:
             del self._parsers[protocol_lower]
 
         logger.debug(f"Registered custom receipt parser for protocol: {protocol}")
 
     def unregister(self, protocol: str) -> bool:
-        """Unregister a custom receipt parser.
-
-        Args:
-            protocol: Protocol name
-
-        Returns:
-            True if parser was unregistered, False if not found
-        """
+        """Remove a custom parser registration. Returns True if removed."""
         protocol_lower = protocol.lower()
         removed = protocol_lower in self._custom_classes
 
         if protocol_lower in self._custom_classes:
             del self._custom_classes[protocol_lower]
-
         if protocol_lower in self._parsers:
             del self._parsers[protocol_lower]
 
         return removed
 
-    def list_protocols(self) -> list[str]:
-        """List all available protocol names.
+    def clear_cache(self) -> None:
+        """Drop every cached parser instance (custom classes survive)."""
+        self._parsers.clear()
 
-        Returns:
-            List of registered protocol names
-        """
-        protocols = set(self._BUILTIN_LOADERS.keys())
+    # ---- introspection ----------------------------------------------------
+
+    def list_protocols(self) -> list[str]:
+        """Return every protocol key resolvable by this registry."""
+        protocols: set[str] = set(STRATEGY_RECEIPT_PARSER_REGISTRY.classes_by_key().keys())
         protocols.update(self._custom_classes.keys())
         return sorted(protocols)
 
     def is_registered(self, protocol: str) -> bool:
-        """Check if a protocol is registered.
-
-        Args:
-            protocol: Protocol name
-
-        Returns:
-            True if protocol is registered
-        """
+        """Whether ``protocol`` resolves to a parser (built-in or custom)."""
         protocol_lower = protocol.lower()
-        return protocol_lower in self._BUILTIN_LOADERS or protocol_lower in self._custom_classes
-
-    def clear_cache(self) -> None:
-        """Clear the parser instance cache.
-
-        Useful for testing or when parser configuration changes.
-        """
-        self._parsers.clear()
-
-    def _load_builtin(self, protocol: str, **kwargs: Any) -> ReceiptParser:
-        """Load a built-in parser class.
-
-        Args:
-            protocol: Protocol name (must be in _BUILTIN_LOADERS)
-            **kwargs: Arguments to pass to parser constructor
-
-        Returns:
-            Parser instance
-        """
-        import importlib
-
-        module_path, class_name = self._BUILTIN_LOADERS[protocol]
-
-        try:
-            module = importlib.import_module(module_path)
-            parser_class = getattr(module, class_name)
-            return parser_class(**kwargs)
-        except ImportError as e:
-            raise ValueError(f"Failed to import parser for protocol {protocol}: {e}") from e
-        except AttributeError as e:
-            raise ValueError(f"Parser class {class_name} not found in {module_path}: {e}") from e
+        if protocol_lower in self._custom_classes:
+            return True
+        return protocol_lower in STRATEGY_RECEIPT_PARSER_REGISTRY.classes_by_key()
 
 
 # =============================================================================
 # Module-Level Convenience Functions
 # =============================================================================
 
-# Global registry instance
+# Shared default instance — the module-level convenience functions
+# delegate here so callers that don't need their own cache scope
+# (``get_parser("spark")``) interact with one consistent cache.
 _default_registry = ReceiptParserRegistry()
 
 
-def get_parser(
-    protocol: str,
-    **kwargs: Any,
-) -> ReceiptParser:
-    """Get a receipt parser for a protocol.
-
-    This is a convenience function that uses the default registry.
-
-    Args:
-        protocol: Protocol name (e.g., "spark", "lido", "ethena", "pancakeswap_v3")
-        **kwargs: Additional arguments to pass to parser constructor
-
-    Returns:
-        Receipt parser instance
-
-    Raises:
-        ValueError: If protocol is not registered
-
-    Example:
-        parser = get_parser("spark")
-        result = parser.parse_receipt(receipt)
-
-        # With custom configuration
-        parser = get_parser("spark", pool_addresses={"0x..."})
-    """
+def get_parser(protocol: str, **kwargs: Any) -> ReceiptParser:
+    """Convenience wrapper around the default registry's ``get``."""
     return _default_registry.get(protocol, **kwargs)
 
 
-def register_parser(
-    protocol: str,
-    parser_class: type[ReceiptParser],
-) -> None:
-    """Register a custom receipt parser in the default registry.
-
-    Args:
-        protocol: Protocol name
-        parser_class: Parser class (not instance)
-
-    Example:
-        register_parser("my_protocol", MyProtocolReceiptParser)
-    """
+def register_parser(protocol: str, parser_class: type[ReceiptParser]) -> None:
+    """Register a custom parser in the default registry."""
     _default_registry.register(protocol, parser_class)
 
 
 def list_parsers() -> list[str]:
-    """List all available protocol names in the default registry.
-
-    Returns:
-        List of registered protocol names
-
-    Example:
-        protocols = list_parsers()
-        # ['ethena', 'lido', 'pancakeswap_v3', 'spark']
-    """
+    """List every protocol key resolvable by the default registry."""
     return _default_registry.list_protocols()
 
 
 def is_parser_available(protocol: str) -> bool:
-    """Check if a parser is available for a protocol.
-
-    Args:
-        protocol: Protocol name
-
-    Returns:
-        True if parser is available
-    """
+    """Whether ``protocol`` resolves to a parser in the default registry."""
     return _default_registry.is_registered(protocol)
 
 
-def extract_position_id(  # noqa: C901
+# =============================================================================
+# High-level helpers
+# =============================================================================
+
+
+def _normalise_tx_receipt(receipt: Any) -> dict[str, Any]:
+    """Coerce a tx-receipt-shaped object into the dict shape parsers expect.
+
+    ``ExecutionResult.transaction_results[i].receipt`` can be one of three
+    shapes depending on how the orchestrator constructed the result:
+
+    * A dict already in parser shape (returned as-is).
+    * An object with ``.to_dict()`` (Pydantic / dataclass receipt).
+    * An object with a ``.logs`` attribute (bare receipt-like).
+
+    Falling back to ``{"logs": receipt.logs}`` for the third shape mirrors
+    the long-standing pre-W2 behaviour the parsers rely on.
+    """
+    if hasattr(receipt, "to_dict"):
+        return receipt.to_dict()
+    if hasattr(receipt, "logs"):
+        return {"logs": receipt.logs}
+    return receipt
+
+
+def _collect_receipts_from_execution_result(result: Any) -> list[dict[str, Any]]:
+    """Pull tx-receipt dicts out of an ``ExecutionResult`` (or shaped dict).
+
+    Both the object-style ``ExecutionResult`` (has
+    ``transaction_results`` attribute) and the dict-style
+    ``{"transaction_results": [...]}`` shape are accepted. Only
+    ``success`` results with a non-empty ``receipt`` survive — parsers
+    fail noisily on missing logs, so filtering at this layer avoids
+    burying the real signal.
+    """
+    receipts: list[dict[str, Any]] = []
+    if hasattr(result, "transaction_results"):
+        for tx_result in result.transaction_results:
+            if tx_result.success and tx_result.receipt:
+                receipts.append(_normalise_tx_receipt(tx_result.receipt))
+    elif isinstance(result, dict) and "transaction_results" in result:
+        for tx_result in result["transaction_results"]:
+            if tx_result.get("success") and tx_result.get("receipt"):
+                receipts.append(tx_result["receipt"])
+    return receipts
+
+
+def _coerce_to_receipts(result: Any) -> list[dict[str, Any]]:
+    """Map ``result`` to a list of receipt-shaped dicts.
+
+    Four input shapes are accepted (matching pre-W2 behaviour):
+
+    1. ``ExecutionResult`` / dict with ``transaction_results``.
+    2. Raw receipt dict carrying ``logs``.
+    3. Bare list of log dicts.
+    4. Anything else → empty list (the caller's loop just no-ops).
+    """
+    if hasattr(result, "transaction_results") or (isinstance(result, dict) and "transaction_results" in result):
+        return _collect_receipts_from_execution_result(result)
+    if isinstance(result, dict) and "logs" in result:
+        return [result]
+    if isinstance(result, list):
+        return [{"logs": result}]
+    return []
+
+
+def extract_position_id(
     result: Any,
     protocol: str,
     chain: str | None = None,
 ) -> int | str | None:
-    """Extract LP position ID from an execution result.
+    """Extract an LP-position id from an execution result.
 
-    This is a high-level utility that automatically selects the right parser
-    based on the protocol and extracts the position ID from transaction receipts.
+    Picks the right parser via :func:`get_parser` and calls its
+    ``extract_position_id`` method on each receipt embedded in
+    ``result`` until one returns a non-``None`` id.
 
-    Supports protocols that create NFT positions:
-        - uniswap_v3: Extracts tokenId from NonfungiblePositionManager Transfer events
-        - pancakeswap_v3: Same as uniswap_v3 (Uniswap V3 fork)
+    Supported result shapes are documented on :func:`_coerce_to_receipts`.
 
-    Supports pool-based LP protocols (no NFT):
-        - curve: Returns LP token amount as decimal string (e.g., "99.5")
-
-    Args:
-        result: ExecutionResult from orchestrator, or a dict with 'transaction_results'
-                or 'logs' field, or a raw receipt dict
-        protocol: Protocol name (e.g., "uniswap_v3", "pancakeswap_v3", "curve")
-        chain: Chain name for protocol-specific address lookups. Required for
-               correct behavior; omitting it defaults to "arbitrum" with a warning.
-
-    Returns:
-        Position ID (int NFT tokenId for NFT protocols, str decimal amount for pool-based protocols like Curve) if found, None otherwise
-
-    Example:
-        # From ExecutionResult (in on_intent_executed callback)
-        def on_intent_executed(self, intent, success, result):
-            if success and intent.intent_type.value == "LP_OPEN":
-                position_id = extract_position_id(result, protocol="uniswap_v3", chain="arbitrum")
-                if position_id:
-                    self.current_position_id = position_id
-
-        # From raw receipt
-        position_id = extract_position_id(receipt, protocol="uniswap_v3", chain="base")
+    ``chain`` is required for correctness — the parser's per-chain
+    address tables key on it. Omitting it defaults to ``"arbitrum"``
+    with a warning, matching the pre-W2 behaviour.
     """
     if chain is None:
         logger.warning(
@@ -610,60 +347,27 @@ def extract_position_id(  # noqa: C901
             "defaulting to 'arbitrum'. Pass chain= explicitly to silence this warning."
         )
         chain = "arbitrum"
+
     try:
-        # Get the parser
         parser = get_parser(protocol, chain=chain)
+    except ValueError as exc:
+        logger.warning(f"Cannot extract position ID: {exc}")
+        return None
 
-        # Check if parser supports position ID extraction
-        if not hasattr(parser, "extract_position_id"):
-            logger.warning(f"Parser for {protocol} does not support position ID extraction")
-            return None
+    if not hasattr(parser, "extract_position_id"):
+        logger.warning(f"Parser for {protocol} does not support position ID extraction")
+        return None
 
-        # Handle different input types
-        receipts_to_check: list[dict[str, Any]] = []
-
-        # Case 1: ExecutionResult with transaction_results
-        if hasattr(result, "transaction_results"):
-            for tx_result in result.transaction_results:
-                if tx_result.success and tx_result.receipt:
-                    # Convert receipt to dict if needed
-                    receipt = tx_result.receipt
-                    if hasattr(receipt, "to_dict"):
-                        receipt = receipt.to_dict()
-                    elif hasattr(receipt, "logs"):
-                        # Receipt object with logs attribute
-                        receipt = {"logs": receipt.logs}
-                    receipts_to_check.append(receipt)
-
-        # Case 2: Dict with transaction_results
-        elif isinstance(result, dict) and "transaction_results" in result:
-            for tx_result in result["transaction_results"]:
-                if tx_result.get("success") and tx_result.get("receipt"):
-                    receipts_to_check.append(tx_result["receipt"])
-
-        # Case 3: Dict with logs (raw receipt)
-        elif isinstance(result, dict) and "logs" in result:
-            receipts_to_check.append(result)
-
-        # Case 4: List of logs directly
-        elif isinstance(result, list):
-            receipts_to_check.append({"logs": result})
-
-        # Try to extract position ID from each receipt
-        for receipt in receipts_to_check:
+    try:
+        for receipt in _coerce_to_receipts(result):
             position_id = parser.extract_position_id(receipt)
             if position_id is not None:
                 return position_id
-
+    except Exception as exc:
+        logger.warning(f"Failed to extract position ID: {exc}")
         return None
 
-    except ValueError as e:
-        # Parser not found
-        logger.warning(f"Cannot extract position ID: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to extract position ID: {e}")
-        return None
+    return None
 
 
 # =============================================================================
@@ -673,8 +377,6 @@ def extract_position_id(  # noqa: C901
 
 class ReceiptParserError(Exception):
     """Base exception for receipt parser errors."""
-
-    pass
 
 
 class ParserNotFoundError(ReceiptParserError):
@@ -691,17 +393,13 @@ class ParserNotFoundError(ReceiptParserError):
 # =============================================================================
 
 __all__ = [
-    # Registry class
     "ReceiptParserRegistry",
-    # Protocol type
     "ReceiptParser",
-    # Convenience functions
     "get_parser",
     "register_parser",
     "list_parsers",
     "is_parser_available",
     "extract_position_id",
-    # Exceptions
     "ReceiptParserError",
     "ParserNotFoundError",
 ]

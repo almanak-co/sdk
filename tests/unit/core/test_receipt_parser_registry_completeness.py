@@ -1,21 +1,34 @@
 """Guard test: every connector with a receipt_parser.py must be in the registry.
 
 This test catches the recurring pattern where a new protocol connector adds a
-receipt_parser.py but forgets to register it in ReceiptParserRegistry._BUILTIN_LOADERS.
-Without a registry entry, the ResultEnricher silently skips enrichment and strategy
-authors get None where they expected parsed data.
+receipt_parser.py but forgets to register it. Without a registry entry, the
+ResultEnricher silently skips enrichment and strategy authors get None where
+they expected parsed data.
 
 Discovered in Kitchen Loop iter 167: silo_v2, joelend, euler_v2 all had parser
 implementations but no registry entries. All 3 external reviewers flagged this.
 
 VIB-2750: turns a recurring enrichment-skip bug into a P0 CI failure.
+
+VIB-4854 (W2): the registry source-of-truth moved from
+``ReceiptParserRegistry._BUILTIN_LOADERS`` (a central protocol → module-path
+dict) onto each connector's ``receipt_parser_provider.py`` module. The
+strategy-side ``STRATEGY_RECEIPT_PARSER_REGISTRY`` aggregates them. This test
+now checks that every connector with a ``receipt_parser.py`` file ALSO has a
+sibling ``receipt_parser_provider.py`` registered into the strategy registry —
+the structural invariant the old ``_BUILTIN_LOADERS`` check was a proxy for.
 """
 
 from pathlib import Path
 
 import pytest
 
-from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
+from almanak.connectors._strategy_base.receipt_parser_registry import (
+    ReceiptParserCapability,
+)
+from almanak.connectors._strategy_receipt_registry import (
+    STRATEGY_RECEIPT_PARSER_REGISTRY,
+)
 
 # ---------------------------------------------------------------------------
 # Discovery
@@ -50,82 +63,113 @@ def _discover_connector_parsers() -> list[tuple[str, ...]]:
 
 CONNECTOR_PARSERS = _discover_connector_parsers()
 
-# Build the set of module paths referenced by the registry.
-# Each _BUILTIN_LOADERS value is (module_path, class_name).
-_REGISTERED_MODULE_PATHS = {
-    module_path for module_path, _class_name in ReceiptParserRegistry._BUILTIN_LOADERS.values()
-}
+
+def _registered_provider_modules() -> set[str]:
+    """Return the set of provider module paths registered into the registry.
+
+    A connector's ``receipt_parser_provider.py`` is "registered" iff it
+    contributed a connector instance to
+    ``STRATEGY_RECEIPT_PARSER_REGISTRY``. We key on the provider's
+    ``__module__`` (e.g. ``"almanak.connectors.uniswap_v3.receipt_parser_provider"``)
+    because that's the structural invariant: every ``receipt_parser.py``
+    file under a connector folder MUST have a sibling
+    ``receipt_parser_provider.py`` instantiated and registered.
+
+    Resolving via the provider's module — not via the resolved parser
+    class's ``__module__`` — correctly handles shims like
+    ``pancakeswap_perps``, whose provider returns the canonical
+    ``AsterPerpsReceiptParser`` class (so the class's ``__module__``
+    is ``aster_perps.receipt_parser``, not ``pancakeswap_perps``…). The
+    pancakeswap_perps provider file still exists and is still registered;
+    the shim is the legitimate way to keep the legacy key alive.
+    """
+    return {
+        type(connector).__module__
+        for connector in STRATEGY_RECEIPT_PARSER_REGISTRY.all()
+        if isinstance(connector, ReceiptParserCapability)
+    }
+
+
+_REGISTERED_PROVIDER_MODULES = _registered_provider_modules()
 
 
 # ---------------------------------------------------------------------------
-# Forward check: every parser file must have a registry entry
+# Forward check: every parser file must have a sibling provider registered
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("connector_parts", CONNECTOR_PARSERS, ids=lambda c: "/".join(c))
 def test_connector_parser_registered(connector_parts: tuple[str, ...]):
-    """Every connectors/{...}/receipt_parser.py must have a _BUILTIN_LOADERS entry.
+    """Every connectors/{...}/receipt_parser.py must have a sibling provider.
 
-    The registry entry's module_path must point to the connector's receipt_parser
-    module. This ensures the ResultEnricher can find the parser at runtime.
+    The sibling ``receipt_parser_provider.py`` must be registered into
+    ``STRATEGY_RECEIPT_PARSER_REGISTRY`` so the ``ResultEnricher`` can
+    find the parser at runtime.
 
     Handles both flat layouts (``connectors/aerodrome/receipt_parser.py``) and
     nested families (``connectors/<family>/<connector>/receipt_parser.py``).
     """
     connector_id = "/".join(connector_parts)
     suffix = ".".join(connector_parts)
-    expected_module = f"almanak.connectors.{suffix}.receipt_parser"
-    assert expected_module in _REGISTERED_MODULE_PATHS, (
-        f"Connector '{connector_id}' has a receipt_parser.py but no entry in "
-        f"ReceiptParserRegistry._BUILTIN_LOADERS points to "
-        f"'{expected_module}'. Add an entry like:\n"
-        f'    "{connector_parts[-1]}": (\n'
-        f'        "{expected_module}",\n'
-        f'        "<ParserClassName>",\n'
-        f"    ),"
+    expected_provider_module = f"almanak.connectors.{suffix}.receipt_parser_provider"
+    assert expected_provider_module in _REGISTERED_PROVIDER_MODULES, (
+        f"Connector '{connector_id}' has a receipt_parser.py but no "
+        f"matching sibling receipt_parser_provider.py is registered into "
+        f"STRATEGY_RECEIPT_PARSER_REGISTRY (looked for module "
+        f"'{expected_provider_module}'). Either add the sibling provider:\n"
+        f"  almanak/connectors/{connector_id}/receipt_parser_provider.py\n"
+        f"and register it in almanak/connectors/_strategy_receipt_registry.py, "
+        f"or — if the parser module is intentionally unused — delete it."
     )
 
 
 # ---------------------------------------------------------------------------
-# Reverse check: every registry entry must point to an existing module
+# Reverse check: every registered provider must point to an existing parser
 # ---------------------------------------------------------------------------
 
 
 def test_no_stale_registry_entries():
-    """Every _BUILTIN_LOADERS entry must point to a connector that still exists.
+    """Every registered provider must have a real ``receipt_parser.py`` sibling.
 
     Catches stale entries left behind when connectors are removed or renamed.
 
     Accepts two path shapes so nested connector families (if any remain) can
     register their receipt parsers:
 
-      1. ``almanak.connectors.<connector>.receipt_parser`` (4 parts)
-      2. ``almanak.connectors.<family>.<connector>.receipt_parser``
+      1. ``almanak.connectors.<connector>.receipt_parser_provider`` (4 parts)
+      2. ``almanak.connectors.<family>.<connector>.receipt_parser_provider``
          (5 parts, one level of nesting)
     """
     stale = []
     expected_prefix = ("almanak", "connectors")
-    for protocol, (module_path, class_name) in ReceiptParserRegistry._BUILTIN_LOADERS.items():
-        parts = module_path.split(".")
+    for connector in STRATEGY_RECEIPT_PARSER_REGISTRY.all():
+        if not isinstance(connector, ReceiptParserCapability):
+            continue
+        provider_module = type(connector).__module__
+        cls_name = type(connector).__name__
+        parts = provider_module.split(".")
         if (
             len(parts) not in (4, 5)
             or tuple(parts[:2]) != expected_prefix
-            or parts[-1] != "receipt_parser"
+            or parts[-1] != "receipt_parser_provider"
         ):
             stale.append(
-                f"  {protocol} -> invalid module path format: {module_path}::{class_name}"
+                f"  {connector.protocol} -> invalid module path format: "
+                f"{provider_module}::{cls_name}"
             )
             continue
 
-        # Walk the intermediate dirs between ``connectors`` and ``receipt_parser``.
         connector_dir = CONNECTORS_DIR.joinpath(*parts[2:-1])
         parser_file = connector_dir / "receipt_parser.py"
         if not parser_file.is_file():
-            stale.append(f"  {protocol} -> {module_path}::{class_name}")
+            stale.append(
+                f"  {connector.protocol} -> {provider_module}::{cls_name} "
+                f"(no sibling receipt_parser.py)"
+            )
 
     assert not stale, (
-        "Stale entries in ReceiptParserRegistry._BUILTIN_LOADERS "
-        "(module files no longer exist):\n" + "\n".join(stale)
+        "Stale entries in STRATEGY_RECEIPT_PARSER_REGISTRY "
+        "(parser modules no longer exist):\n" + "\n".join(stale)
     )
 
 
