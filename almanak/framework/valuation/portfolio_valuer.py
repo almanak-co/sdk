@@ -886,65 +886,46 @@ class PortfolioValuer:
            position types that discovery can't detect (perps, stakes, etc.)
            and LP token IDs that discovery uses for scanning.
 
-        Positions from both sources are deduplicated by position_id.
+        Positions from both sources are deduplicated by *canonical identity*
+        (VIB-4838), not by raw ``position_id``. Lending discovery emits
+        ``aave-{supply,borrow}-{symbol}-{chain}`` ids while strategies pick
+        their own (``aave-wbtc-collateral`` etc.); raw-string dedup let a
+        strategy stub and the discovery position for the *same* on-chain
+        reserve both survive, poisoning ``value_confidence`` and risking a NAV
+        double-count. See ``_merge_position_sources``.
         All positions are re-priced with on-chain data when possible.
 
         Returns:
             (positions, total_position_value, positions_unavailable)
         """
-        all_position_infos: dict[str, PositionInfo] = {}
-        strategy_failed = False
-
         # Source 1: Strategy-reported positions (get_open_positions)
         strategy_positions, strategy_failed = self._get_strategy_positions(strategy)
-        for p in strategy_positions:
-            all_position_infos[p.position_id] = p
 
         # Source 2: Framework discovery (on-chain scanning)
+        discovered_positions: list[PositionInfo] = []
         discovery_had_errors = False
         discovery_config = self._build_discovery_config(strategy, strategy_positions)
         if discovery_config:
             discovered = self._discovery.discover(discovery_config)
             if discovered.errors:
                 discovery_had_errors = True
-            # Track which (protocol, position_type) combos the strategy reported.
-            # For perps, strategy-reported positions take priority since
-            # discovery and strategy use different ID formats.
-            from almanak.framework.teardown.models import PositionType as _PT
+            discovered_positions = list(discovered.positions)
 
-            strategy_protocol_types = {(sp.protocol, sp.position_type) for sp in strategy_positions}
-
-            for p in discovered.positions:
-                # Skip discovered perps if strategy already reported perps
-                # for the same protocol (avoids double-counting from ID mismatch)
-                if p.position_type == _PT.PERP and (p.protocol, _PT.PERP) in strategy_protocol_types:
-                    continue
-
-                if p.position_id not in all_position_infos:
-                    all_position_infos[p.position_id] = p
-                else:
-                    # Discovery found the same position — merge:
-                    # strategy has domain knowledge (position_type, value hint),
-                    # discovery has fresh on-chain details (asset_address, wallet etc.)
-                    existing = all_position_infos[p.position_id]
-                    merged_details = {**existing.details, **p.details}
-                    all_position_infos[p.position_id] = PositionInfo(
-                        position_type=existing.position_type,  # Strategy knows best
-                        position_id=p.position_id,
-                        chain=p.chain,
-                        protocol=p.protocol,
-                        value_usd=existing.value_usd,  # Keep strategy value as hint
-                        details=merged_details,
-                    )
+        # Merge the two sources by canonical identity (VIB-4838): discovery is
+        # authoritative for value + on-chain details, the strategy for
+        # position_type + domain hints. Degenerate strategy stubs that merely
+        # duplicate a discovered position are dropped here so they cannot reach
+        # the repricer and trip ``no_path``.
+        merged_positions = self._merge_position_sources(strategy_positions, discovered_positions, strategy.chain)
 
         positions_incomplete = strategy_failed or discovery_had_errors
-        if not all_position_infos:
+        if not merged_positions:
             return [], Decimal("0"), positions_incomplete
 
         # Re-price all positions and enrich details with valuer breakdown
         positions: list[PositionValue] = []
         any_unrepriced = False
-        for p in all_position_infos.values():
+        for p in merged_positions:
             value_usd, enriched_details, repriced = self._reprice_position_enriched(p, strategy.chain, market)
             if not repriced:
                 any_unrepriced = True
@@ -1055,6 +1036,194 @@ class PortfolioValuer:
         except Exception:
             logger.debug("Could not build discovery config", exc_info=True)
             return None
+
+    def _resolve_position_asset_address(self, position: "PositionInfo", chain: str) -> str | None:
+        """Best-effort underlying-asset address for a position (VIB-4838).
+
+        Tries the on-chain address already in ``details`` first, then resolves
+        the ``asset`` symbol through the token registry. Returns a lowercased
+        address or ``None`` when no identity can be derived. Mirrors the
+        resolution order in ``_reprice_lending_on_chain_enriched`` so the
+        dedup key and the repricer agree on identity.
+        """
+        addr = self._extract_asset_address(position)
+        if not addr:
+            asset_symbol = position.details.get("asset")
+            if asset_symbol:
+                try:
+                    from almanak.framework.data.tokens import get_token_resolver
+
+                    resolved = get_token_resolver().resolve(asset_symbol, chain)
+                    if resolved and resolved.address:
+                        addr = resolved.address
+                except Exception:
+                    addr = None
+        return addr.lower() if addr else None
+
+    def _canonical_position_key(self, position: "PositionInfo", chain: str) -> tuple | None:
+        """Identity tuple used to dedup strategy + discovery positions (VIB-4838).
+
+        Address beats symbol for lending so ETH/WETH ambiguity and custom-token
+        symbol collisions cannot collapse distinct reserves. Returns ``None``
+        when no stable identity is derivable (e.g. an identity-less strategy
+        stub), which forces the degenerate-stub guard to decide its fate
+        instead of letting it masquerade as its own position.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        chain_l = (chain or position.chain or "").lower()
+        protocol_l = (position.protocol or "").lower()
+
+        if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
+            asset_address = self._resolve_position_asset_address(position, chain)
+            if not asset_address:
+                return None
+            return (position.position_type, protocol_l, chain_l, asset_address)
+
+        if position.position_type == PositionType.LP:
+            token_id = self._extract_token_id(position)
+            if token_id is None:
+                return None
+            return (PositionType.LP, protocol_l, chain_l, token_id)
+
+        if position.position_type == PositionType.PERP:
+            market = position.details.get("market") or position.details.get("market_address")
+            if not market:
+                return None
+            direction = str(position.direction or position.details.get("direction") or "").upper()
+            is_long = direction in ("LONG", "BUY") or position.details.get("is_long") is True
+            return (PositionType.PERP, protocol_l, chain_l, str(market).lower(), is_long)
+
+        return None
+
+    def _is_degenerate_stub(
+        self,
+        stub: "PositionInfo",
+        discovery_positions: list["PositionInfo"],
+        chain: str,
+    ) -> bool:
+        """Decide whether a strategy stub is a phantom duplicate to drop (VIB-4838).
+
+        Drop ONLY when the stub is truly identity-less (no resolvable asset
+        address, no wallet hint) AND carries no value (``value_usd == 0``) AND
+        discovery returned ≥1 position for the same
+        ``(protocol, position_type, chain)`` — i.e. discovery already accounts
+        for whatever the stub gestured at. All three conditions are
+        load-bearing.
+
+        KEEP the stub (let it reprice / flag ``no_path`` and degrade
+        confidence) when it carries an ``asset`` hint that resolves to an
+        address disagreeing with every discovery position in that group — the
+        disagreement is real signal, not a phantom (VIB-4584 false-positive
+        guard). Canonical-key matches are handled by the merge before this is
+        called, so this only sees stubs whose key is ``None``.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if stub.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
+            return False
+
+        has_wallet = bool(stub.details.get("wallet") or stub.details.get("wallet_address") or stub.details.get("owner"))
+        stub_address = self._resolve_position_asset_address(stub, chain)
+        # Identity-bearing stub (resolvable address or wallet) is never a
+        # phantom here — if it matched discovery the merge already collapsed
+        # it; reaching this point means it is a distinct position.
+        if stub_address or has_wallet:
+            return False
+        if stub.value_usd != Decimal("0"):
+            return False
+
+        protocol_l = (stub.protocol or "").lower()
+        chain_l = (chain or stub.chain or "").lower()
+        same_group = [
+            d
+            for d in discovery_positions
+            if d.position_type == stub.position_type
+            and (d.protocol or "").lower() == protocol_l
+            and (chain or d.chain or "").lower() == chain_l
+        ]
+        return bool(same_group)
+
+    def _merge_position_sources(
+        self,
+        strategy_positions: list["PositionInfo"],
+        discovered_positions: list["PositionInfo"],
+        chain: str,
+    ) -> list["PositionInfo"]:
+        """Dedup strategy + discovery positions by canonical identity (VIB-4838).
+
+        Discovery is authoritative for value + on-chain details; the strategy
+        is authoritative for ``position_type`` + domain hints. The legacy
+        merge (raw ``position_id`` keyed) kept the *strategy's* value on a
+        collision, which under-valued or double-counted lending positions
+        whenever the strategy's id did not byte-match discovery's internal
+        scheme. Re-keying on canonical identity fixes both the
+        confidence-poisoning and the latent NAV double-count described in the
+        VIB-4838 brief. See ``blueprints/27-accounting.md`` §7 (Layer 2
+        snapshots) and the §3.4 S9 no-double-count invariant.
+        """
+        from almanak.framework.teardown.models import PositionType as _PT
+
+        # Index discovery by canonical key (discovery wins on collision).
+        discovery_by_key: dict[tuple, PositionInfo] = {}
+        for d in discovered_positions:
+            key = self._canonical_position_key(d, chain)
+            if key is not None:
+                discovery_by_key[key] = d
+
+        strategy_protocol_types = {(sp.protocol, sp.position_type) for sp in strategy_positions}
+
+        merged: list[PositionInfo] = []
+        consumed_discovery: set[int] = set()
+
+        # 1. Fold strategy positions, collapsing onto discovery where keys match.
+        for sp in strategy_positions:
+            key = self._canonical_position_key(sp, chain)
+            disc = discovery_by_key.get(key) if key is not None else None
+            if disc is not None and id(disc) in consumed_discovery:
+                # A prior strategy position already collapsed onto this
+                # discovery row; this one is a redundant self-report.
+                continue
+            if disc is not None:
+                # Collapse: take discovery's value + on-chain details (truth),
+                # keep the strategy's position_type + domain hints.
+                merged.append(
+                    PositionInfo(
+                        position_type=sp.position_type,
+                        position_id=disc.position_id,
+                        chain=disc.chain,
+                        protocol=disc.protocol,
+                        value_usd=disc.value_usd,  # discovery is authoritative
+                        details={**sp.details, **disc.details},
+                    )
+                )
+                consumed_discovery.add(id(disc))
+                continue
+            # No canonical match. Drop only true phantom duplicates.
+            if self._is_degenerate_stub(sp, discovered_positions, chain):
+                logger.debug(
+                    "VIB-4838: dropping degenerate %s stub (position_id=%s) — "
+                    "discovery already covers protocol=%s on %s",
+                    sp.position_type.value,
+                    sp.position_id,
+                    sp.protocol,
+                    chain,
+                )
+                continue
+            merged.append(sp)
+
+        # 2. Add discovery positions the strategy did not already collapse onto.
+        for d in discovered_positions:
+            if id(d) in consumed_discovery:
+                continue
+            # Preserve the legacy perp precedence: if the strategy reported a
+            # perp for the same protocol, skip the discovered one (the two use
+            # different id formats and the strategy read its own on-chain size).
+            if d.position_type == _PT.PERP and (d.protocol, _PT.PERP) in strategy_protocol_types:
+                continue
+            merged.append(d)
+
+        return merged
 
     def _reprice_position(
         self,

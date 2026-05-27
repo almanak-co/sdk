@@ -150,6 +150,12 @@ class PositionInfo:
 
     def __post_init__(self) -> None:
         """Validate and normalize fields."""
+        # ``details`` is typed ``dict`` (default_factory=dict), but nothing
+        # stops a strategy's ``get_open_positions`` from handing us ``None``.
+        # Coerce here so every consumer (valuation dedup, repricing, teardown)
+        # can rely on a dict without per-call guards (VIB-4838).
+        if self.details is None:
+            self.details = {}
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
         if self.health_factor is not None and isinstance(self.health_factor, int | float | str):
