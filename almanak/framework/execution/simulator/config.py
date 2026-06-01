@@ -29,10 +29,12 @@ Example:
 
 import logging
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from almanak.config import load_config
 from almanak.config.simulation import simulation_config_from_env
 from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.execution.gas.constants import DEFAULT_SIMULATION_BUFFER
 
 logger = logging.getLogger(__name__)
@@ -122,39 +124,48 @@ def is_local_rpc(rpc_url: str | None) -> bool:
 # =============================================================================
 
 
+# Per-chain Tenderly / Alchemy SIMULATION-API support is owned by
+# ``ChainDescriptor.simulation`` (``SimulationProfile``) under
+# ``almanak/core/chains/`` (VIB-4851). The maps below derive from the
+# chain registry instead of hardcoding chain-name literals, mirroring the
+# derive-from-registry pattern in
+# ``almanak/framework/execution/gas/constants.py``.
+#
+# The Tenderly network-id VALUE is always ``str(descriptor.chain_id)`` — it
+# is NOT stored on the descriptor, which kills the historical chain-id drift
+# (1648-vs-9745). Solana is excluded: simulation is EVM-only.
+_SIM_DESCRIPTORS = [d for d in ChainRegistry.all() if d.family is ChainFamily.EVM]
+
+
+def _alchemy_networks() -> dict[str, str]:
+    """Build the chain→Alchemy-network map with a clean ``str`` value type.
+
+    An explicit loop (rather than a dict comprehension) lets mypy narrow
+    ``alchemy_network`` from ``str | None`` to ``str`` via the local guard.
+    """
+    networks: dict[str, str] = {}
+    for d in _SIM_DESCRIPTORS:
+        network = d.simulation.alchemy_network
+        if network is not None:
+            networks[d.name] = network
+    return networks
+
+
 # Tenderly network IDs for supported chains
 # https://docs.tenderly.co/simulations-and-forks/simulation-api
-TENDERLY_NETWORK_IDS: dict[str, str] = {
-    "ethereum": "1",
-    "arbitrum": "42161",
-    "optimism": "10",
-    "polygon": "137",
-    "base": "8453",
-    "avalanche": "43114",
-    "bsc": "56",
-    "linea": "59144",
-    "plasma": "9745",
-    "sonic": "146",
-    "blast": "81457",
-    "mantle": "5000",
-    "berachain": "80094",
-    "monad": "143",
-}
+TENDERLY_NETWORK_IDS: MappingProxyType[str, str] = MappingProxyType(
+    {d.name: str(d.chain_id) for d in _SIM_DESCRIPTORS if d.simulation.tenderly_supported}
+)
 
 # Alchemy network names for supported chains
 # https://docs.alchemy.com/reference/simulateexecutionbundle
-ALCHEMY_NETWORKS: dict[str, str] = {
-    "ethereum": "eth-mainnet",
-    "arbitrum": "arb-mainnet",
-    "optimism": "opt-mainnet",
-    "base": "base-mainnet",
-}
+ALCHEMY_NETWORKS: MappingProxyType[str, str] = MappingProxyType(_alchemy_networks())
 
 # Chains that support Alchemy simulation
-ALCHEMY_SUPPORTED_CHAINS: set[str] = set(ALCHEMY_NETWORKS.keys())
+ALCHEMY_SUPPORTED_CHAINS: frozenset[str] = frozenset(ALCHEMY_NETWORKS)
 
 # Chains that support Tenderly simulation
-TENDERLY_SUPPORTED_CHAINS: set[str] = set(TENDERLY_NETWORK_IDS.keys())
+TENDERLY_SUPPORTED_CHAINS: frozenset[str] = frozenset(TENDERLY_NETWORK_IDS)
 
 # Maximum transactions per Alchemy bundle
 ALCHEMY_MAX_BUNDLE_SIZE: int = 3

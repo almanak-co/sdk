@@ -8,7 +8,15 @@ still picks up the framework default.
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    Explorer,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -63,6 +71,7 @@ DESCRIPTOR = register_chain(
             "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
             "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
         },
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=("bnb", "binance"),
     )
 )

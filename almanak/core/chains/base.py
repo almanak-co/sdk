@@ -2,7 +2,15 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    Explorer,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -45,6 +53,7 @@ DESCRIPTOR = register_chain(
             "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "weth": "0x4200000000000000000000000000000000000006",
         },
+        simulation=SimulationProfile(tenderly_supported=True, alchemy_network="base-mainnet"),
         aliases=(),
     )
 )

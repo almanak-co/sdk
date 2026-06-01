@@ -206,6 +206,25 @@ class Explorer:
 
 
 @dataclass(frozen=True)
+class SimulationProfile:
+    """Tenderly / Alchemy transaction-SIMULATION-API support for this chain (VIB-4851).
+
+    Distinct from RpcProfile.{tenderly_subdomain,alchemy_prefix}, which model READ
+    routing through provider RPC gateways — this models SIMULATION-API membership.
+    The Tenderly network-id VALUE is NOT stored here; it is always
+    str(ChainDescriptor.chain_id) (kills the historical 1648-vs-9745 drift).
+
+    Attributes:
+        tenderly_supported: Whether Tenderly's Transaction Simulator covers this chain.
+        alchemy_network: Alchemy simulateExecutionBundle network name (e.g.
+            "eth-mainnet"), or None when Alchemy simulation is unsupported.
+    """
+
+    tenderly_supported: bool = False
+    alchemy_network: str | None = None
+
+
+@dataclass(frozen=True)
 class ChainDescriptor:
     """Single source of truth for per-chain configuration.
 
@@ -230,6 +249,12 @@ class ChainDescriptor:
             env-var name. Default-empty for chains without an Etherscan-
             compatible explorer (e.g. Solana, Berachain).
             VIB-4857 (W5).
+        simulation: ``SimulationProfile`` — Tenderly / Alchemy
+            transaction-SIMULATION-API membership. Default-empty
+            (``tenderly_supported=False``, ``alchemy_network=None``) for
+            chains the simulators do not cover. The framework
+            ``simulator/config.py`` maps derive from this field instead of
+            hardcoding chain-name literals. VIB-4851.
         tokens: Mapping from lowercase token symbol (e.g. ``"usdc"``,
             ``"weth"``) to its chain-canonical ERC-20 address. Mirrors the
             chain half of the legacy
@@ -254,6 +279,7 @@ class ChainDescriptor:
     timeouts: Timeouts = field(default_factory=Timeouts)
     rpc: RpcProfile = field(default_factory=RpcProfile)
     explorer: Explorer = field(default_factory=Explorer)
+    simulation: SimulationProfile = field(default_factory=SimulationProfile)
     tokens: Mapping[str, str] | None = None
     aliases: tuple[str, ...] = ()
 

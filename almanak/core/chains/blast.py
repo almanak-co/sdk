@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -27,6 +27,7 @@ DESCRIPTOR = register_chain(
             tx_confirmation=None,  # legacy: not in CHAIN_TX_TIMEOUTS
             grpc_execute=None,  # legacy: not in CHAIN_GRPC_EXECUTE_TIMEOUTS
         ),
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=(),
     )
 )

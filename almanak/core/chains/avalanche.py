@@ -2,7 +2,15 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    Explorer,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -55,6 +63,7 @@ DESCRIPTOR = register_chain(
             "usdt": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
             "wavax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
         },
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=("avax",),
     )
 )

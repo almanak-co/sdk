@@ -10,7 +10,14 @@ the dict now formally contains an entry.
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -50,6 +57,7 @@ DESCRIPTOR = register_chain(
             "weth": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
             "ws": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
         },
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=(),
     )
 )

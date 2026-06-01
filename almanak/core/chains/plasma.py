@@ -2,7 +2,14 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -33,6 +40,7 @@ DESCRIPTOR = register_chain(
             tenderly_subdomain="plasma",
             anvil_port=8554,
         ),
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=(),
     )
 )

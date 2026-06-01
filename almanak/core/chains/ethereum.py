@@ -7,7 +7,15 @@ chain_id is the on-the-wire identifier owned by ``metrics-database``.
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    Explorer,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -61,6 +69,7 @@ DESCRIPTOR = register_chain(
             "wbtc": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
             "dai": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
         },
+        simulation=SimulationProfile(tenderly_supported=True, alchemy_network="eth-mainnet"),
         aliases=("eth", "mainnet"),
     )
 )

@@ -2,7 +2,14 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    GasProfile,
+    NativeToken,
+    RpcProfile,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -67,6 +74,7 @@ DESCRIPTOR = register_chain(
             "weth": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
             "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
         },
+        simulation=SimulationProfile(tenderly_supported=True),
         aliases=(),
     )
 )
