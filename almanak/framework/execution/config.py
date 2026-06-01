@@ -86,60 +86,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Supported protocols and which chains they are available on
-SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
-    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "xlayer"},
-    "uniswap_v3": {
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "avalanche",
-        "bsc",
-        "linea",
-        "blast",
-        "monad",
-        "xlayer",
-        "zerog",  # JAINE DEX (Uniswap V3 fork on 0G Chain)
-    },
-    "agni_finance": {"mantle"},  # Agni Finance (Uniswap V3 fork, primary DEX on Mantle)
-    "gmx_v2": {"arbitrum", "avalanche"},
-    "hyperliquid": {"arbitrum"},  # Hyperliquid is on its own L1 but accessed via Arbitrum
-    "enso": {
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "avalanche",
-        "bsc",
-        "linea",
-        "plasma",
-        "blast",
-        "berachain",
-        "sonic",
-    },  # Aggregator (Mantle excluded: Enso client CHAIN_MAPPING does not support it)
-    "traderjoe_v2": {"avalanche"},  # TraderJoe Liquidity Book V2 on Avalanche
-    "spark": {"ethereum"},  # Spark is an Aave V3 fork on Ethereum
-    "pancakeswap_v3": {"bsc", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX
-    "lido": {"ethereum", "arbitrum", "optimism", "polygon"},  # Lido liquid staking
-    "ethena": {"ethereum"},  # Ethena synthetic dollar (USDe/sUSDe)
-    "radiant_v2": {"ethereum"},  # Radiant V2 (Aave V2 fork) — Arbitrum pool frozen post-hack
-    "sushiswap_v3": {
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "bsc",
-    },  # SushiSwap V3 DEX — avalanche excluded: zero usable liquidity (VIB-2069)
-    "benqi": {"avalanche"},  # BENQI (Compound V2 fork) on Avalanche
-    # joelend removed — Joe Lend (Banker Joe) was wound down by governance; VIB-3960
-    "euler_v2": {"avalanche", "ethereum"},  # Euler V2 (ERC-4626 vaults + EVC)
-    "silo_v2": {"avalanche"},  # Silo V2 isolated lending on Avalanche
-    "gimo": {"zerog"},  # Gimo Finance liquid staking on 0G Chain
-}
+# Supported protocols and which chains they are available on.
+#
+# VIB-4857 (W5): this ``protocol -> {chains}`` matrix is no longer hand-
+# maintained here. "Which chains does protocol X run on" is *connector*
+# knowledge: each connector declares its own chain coverage in its folder
+# (``almanak/connectors/<proto>/supported_chains.py``), and the strategy-side
+# ``SupportedChainsRegistry`` aggregates those declarations. This module
+# derives the legacy dict-of-sets view from that registry so consumers
+# (``almanak.config.runtime`` validation, ``MultiChainRuntimeConfig.
+# _validate_protocols``) keep their exact shape, while adding a connector is
+# one folder and adding a chain to a connector is one line — the matrix
+# cannot drift.
+#
+# Import boundary: ``SupportedChainsRegistry`` is strategy-side
+# (``almanak/connectors/_strategy_base``). It pulls in NO gateway-side
+# capability code, so this strategy-container module stays clean of
+# ``almanak/connectors/_base/gateway_capabilities.py`` (enforced by
+# ``tests/static/test_strategy_import_boundary.py``).
+from almanak.connectors._strategy_base.supported_chains_registry import supported_protocols_matrix
+
+SUPPORTED_PROTOCOLS: dict[str, set[str]] = supported_protocols_matrix()
 
 
 # =============================================================================
