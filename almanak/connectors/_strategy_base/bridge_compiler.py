@@ -192,15 +192,13 @@ class BridgeCompiler(BaseBridgeCompiler):
         return Decimal(balance_wei) / Decimal(10**token_info.decimals)
 
     def _build_selector(self, ctx: BaseCompilerContext) -> BridgeSelector:
-        from almanak.connectors.across.adapter import AcrossBridgeAdapter
-        from almanak.connectors.stargate.adapter import StargateBridgeAdapter
-        from almanak.framework.intents.bridge_selector import BridgeSelector
+        # Names no connector — bridge adapters self-register via
+        # BRIDGE_PROVIDER_REGISTRY (populated in
+        # almanak/connectors/_strategy_bridge_registry.py). Adding a bridge is
+        # one registration line in that boot file, with no edit here. (VIB-4837.)
+        from almanak.framework.intents.bridge_selector import build_default_bridge_selector
 
-        bridges = [
-            AcrossBridgeAdapter(token_resolver=ctx.token_resolver),
-            StargateBridgeAdapter(token_resolver=ctx.token_resolver),
-        ]
-        return BridgeSelector(bridges=bridges)
+        return build_default_bridge_selector(ctx.token_resolver)
 
     def _select_bridge(
         self,

@@ -666,6 +666,49 @@ class BridgeSelector:
 
 
 # =============================================================================
+# Default selector factory (VIB-4837)
+# =============================================================================
+
+
+def build_default_bridge_selector(token_resolver: Any) -> "BridgeSelector":
+    """Construct a :class:`BridgeSelector` over every registered bridge adapter.
+
+    Each bridge adapter is self-contained inside its protocol connector and opts
+    in via ``BRIDGE_PROVIDER_REGISTRY`` (populated in
+    ``almanak/connectors/_strategy_bridge_registry.py``). This function names no
+    connector — adding one is a registration line in that boot file, with no
+    edit here. (VIB-4837 — the cross-protocol-selector analogue of
+    ``compiler_flash_loan._build_flash_loan_selector``.)
+
+    The boot-file import is deferred to call time on purpose: ``bridge_selector``
+    is imported early and widely, so importing connectors at *its* module load
+    would risk an import cycle. Importing the boot file here (rather than the
+    adapters directly) also keeps this module ignorant of which connectors exist.
+
+    Args:
+        token_resolver: The compiler context's token resolver, threaded through
+            to each adapter factory (bridge adapters are not zero-arg).
+
+    Returns:
+        A :class:`BridgeSelector` whose ``bridges`` are fresh adapter instances
+        in registration order (across, then stargate).
+    """
+    from almanak.connectors._strategy_bridge_registry import BRIDGE_PROVIDER_REGISTRY
+
+    bridges = BRIDGE_PROVIDER_REGISTRY.build_all(token_resolver)
+    if not bridges:
+        # The boot file always registers Across + Stargate at import, so an empty
+        # registry means it failed to populate (import error / misconfiguration).
+        # Surface that here rather than as a downstream generic "no bridge
+        # available for <route>" error that hides the real cause.
+        logger.warning(
+            "build_default_bridge_selector: BRIDGE_PROVIDER_REGISTRY is empty — no bridge providers "
+            "registered (check almanak/connectors/_strategy_bridge_registry.py); bridge intents will fail."
+        )
+    return BridgeSelector(bridges=bridges)
+
+
+# =============================================================================
 # Exports
 # =============================================================================
 
@@ -673,6 +716,8 @@ class BridgeSelector:
 __all__ = [
     # Main class
     "BridgeSelector",
+    # Default selector factory (VIB-4837)
+    "build_default_bridge_selector",
     # Data classes
     "BridgeScore",
     "BridgeSelectionResult",
