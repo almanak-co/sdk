@@ -11,12 +11,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.connectors.aave_v3.flash_loan import build_aave_flash_loan
-from almanak.connectors.aave_v3.flash_loan_provider import AaveFlashLoanProvider
-from almanak.connectors.balancer_v2.flash_loan import build_balancer_flash_loan
-from almanak.connectors.balancer_v2.flash_loan_provider import BalancerFlashLoanProvider
-from almanak.connectors.morpho_blue.flash_loan import build_morpho_flash_loan
-from almanak.connectors.morpho_blue.flash_loan_provider import MorphoFlashLoanProvider
+from almanak.connectors._strategy_flash_loan_registry import FLASH_LOAN_PROVIDER_REGISTRY
 
 from ..models.reproduction_bundle import ActionBundle
 from .compiler_models import CompilationResult, CompilationStatus, TransactionData
@@ -30,24 +25,20 @@ logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 _ZERO_ADDRESS = "0x" + "0" * 40
-_SUPPORTED_FLASH_LOAN_PROVIDERS = ("aave", "balancer", "morpho")
 
 
 def _build_flash_loan_selector(chain: str) -> FlashLoanSelector:
-    """Construct the cross-protocol selector with all known providers.
+    """Construct the cross-protocol selector with all registered providers.
 
-    Each provider is self-contained inside its protocol connector;
-    adding a new one is a matter of importing it here. Replacing this
-    explicit list with a registry-decorator pattern is tracked under
-    VIB-4837.
+    Each provider is self-contained inside its protocol connector and opts
+    in via ``FLASH_LOAN_PROVIDER_REGISTRY`` (populated in
+    ``almanak/connectors/_strategy_flash_loan_registry.py``). This function
+    names no connector — adding one is a registration line in that boot file,
+    with no edit here. (VIB-4837.)
     """
     return FlashLoanSelector(
         chain=chain,
-        providers=[
-            AaveFlashLoanProvider(),
-            BalancerFlashLoanProvider(),
-            MorphoFlashLoanProvider(),
-        ],
+        providers=FLASH_LOAN_PROVIDER_REGISTRY.providers(),
     )
 
 
@@ -125,12 +116,16 @@ def _resolve_flash_loan_provider(
     else:
         effective_provider = intent.provider
 
-    if effective_provider not in _SUPPORTED_FLASH_LOAN_PROVIDERS:
+    # ``effective_provider`` is ``str | None`` (the selector's ``provider`` is
+    # optional); a ``None`` falls into the same "unsupported" path it did under
+    # the legacy ``not in`` tuple check, and the ``or`` short-circuit narrows the
+    # ``has`` argument (and the success return) to ``str``.
+    if effective_provider is None or not FLASH_LOAN_PROVIDER_REGISTRY.has(effective_provider):
         return None, CompilationResult(
             status=CompilationStatus.FAILED,
             error=(
                 f"Unsupported flash loan provider: {intent.provider}. "
-                f"Supported providers: {', '.join(_SUPPORTED_FLASH_LOAN_PROVIDERS)}."
+                f"Supported providers: {', '.join(FLASH_LOAN_PROVIDER_REGISTRY.names())}."
             ),
             intent_id=intent.intent_id,
         )
@@ -176,6 +171,9 @@ def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult: 
         effective_provider, provider_failure = _resolve_flash_loan_provider(compiler, intent)
         if provider_failure is not None:
             return provider_failure
+        # Contract of _resolve_flash_loan_provider: a None failure means a
+        # concrete provider name was resolved. Narrow for the build dispatch.
+        assert effective_provider is not None
 
         # Step 2: Resolve flash loan token
         token_info = compiler._resolve_token(intent.token)
@@ -253,34 +251,17 @@ def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult: 
         # Step 5: Encode callback transactions as params
         callback_params = encode_flash_loan_callbacks(callback_transactions)
 
-        # Step 6: Build flash loan transaction based on provider
-        if effective_provider == "balancer":
-            # Use Balancer Vault for flash loans (zero fees!)
-            flash_loan_result = build_balancer_flash_loan(
-                compiler,
-                token_info=token_info,
-                amount_wei=amount_wei,
-                callback_params=callback_params,
-                callback_gas_total=callback_gas_total,
-            )
-        elif effective_provider == "morpho":
-            # Use Morpho Blue for flash loans (zero fees!)
-            flash_loan_result = build_morpho_flash_loan(
-                compiler,
-                token_info=token_info,
-                amount_wei=amount_wei,
-                callback_params=callback_params,
-                callback_gas_total=callback_gas_total,
-            )
-        else:
-            # Use Aave V3 for flash loans (0.09% fee)
-            flash_loan_result = build_aave_flash_loan(
-                compiler,
-                token_info=token_info,
-                amount_wei=amount_wei,
-                callback_params=callback_params,
-                callback_gas_total=callback_gas_total,
-            )
+        # Step 6: Build flash loan transaction via the registered provider.
+        # The provider's connector owns the build (Balancer/Morpho zero-fee,
+        # Aave V3 0.09%); this dispatch names none of them.
+        flash_loan_result = FLASH_LOAN_PROVIDER_REGISTRY.build(
+            effective_provider,
+            compiler,
+            token_info=token_info,
+            amount_wei=amount_wei,
+            callback_params=callback_params,
+            callback_gas_total=callback_gas_total,
+        )
 
         if flash_loan_result.get("error"):
             return CompilationResult(
