@@ -23,9 +23,9 @@ Coverage focus:
                                  ``close`` releases.
 
 The two backend simulators (`_simulate_tenderly` / `_simulate_alchemy`) are
-HTTP-based; their response-parsing branches are out of scope for this PR
-and are stubbed out via patching for the dispatch tests. A follow-up will
-cover them with aiohttp mock-server tests.
+HTTP-based; their response-parsing branches are stubbed out via patching for
+the dispatch tests here, and covered with aiohttp-mocked tests in the sibling
+``test_simulation_service_egress_characterization.py`` (VIB-4079).
 
 Brings ``simulation_service.py`` from 12% → ~80% on the unit-scope.
 """
