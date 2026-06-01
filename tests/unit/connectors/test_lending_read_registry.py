@@ -104,6 +104,32 @@ def test_non_lending_or_unknown_protocols_not_recognised(protocol: str):
     assert not LendingReadRegistry.has(protocol)
 
 
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [
+        ("aave_v3", "aave_v3"),
+        ("AAVE_V3", "aave_v3"),
+        ("aave", "aave_v3"),  # alias resolves to canonical key
+        ("radiant-v2", "radiant_v2"),  # hyphen normalises to underscore
+        ("spark", "spark"),
+    ],
+)
+def test_canonical_resolves_supported_protocols(protocol: str, expected: str):
+    assert LendingReadRegistry.canonical(protocol) == expected
+
+
+@pytest.mark.parametrize("protocol", ["compound_v3", "morpho_blue", "uniswap_v3", "unknown"])
+def test_canonical_returns_none_for_protocols_without_a_lending_read(protocol: str):
+    assert LendingReadRegistry.canonical(protocol) is None
+
+
+@pytest.mark.parametrize("protocol", [None, 123, "", b"aave_v3", 3.14])
+def test_canonical_is_total_for_invalid_input(protocol):
+    # Loosely typed / missing strategy metadata must never crash canonical();
+    # it returns None so callers can use ``canonical(p) or fallback`` directly.
+    assert LendingReadRegistry.canonical(protocol) is None
+
+
 def test_aave_alias_normalises_to_aave_v3():
     plan_alias = LendingReadRegistry.resolve("aave", "arbitrum", "0xAsset", "0xWallet")
     plan_canon = LendingReadRegistry.resolve("aave_v3", "arbitrum", "0xAsset", "0xWallet")

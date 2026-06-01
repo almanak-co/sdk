@@ -49,7 +49,10 @@ from almanak.framework.teardown.models import (
     TeardownPositionSummary,
 )
 from almanak.framework.valuation.lending_position_reader import LendingPositionOnChain
-from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+from almanak.framework.valuation.portfolio_valuer import (
+    PortfolioValuer,
+    _normalize_protocol_for_dedup,
+)
 from almanak.framework.valuation.position_discovery import DiscoveryResult
 
 # Mirrors the production run in the brief: WBTC collateral + USDC debt on
@@ -180,7 +183,7 @@ def _discovery_supply_and_borrow():
     )
 
 
-def _fake_read_position(*, chain, asset_address, wallet_address):  # noqa: ARG001
+def _fake_read_position(*, chain, asset_address, wallet_address, protocol=None):  # noqa: ARG001
     """Return on-chain lending state keyed by asset address."""
     low = asset_address.lower()
     if low == WBTC_ADDR.lower():
@@ -334,6 +337,65 @@ def test_case2_positive_value_stub_no_double_count():
     )
     # Value came from discovery (on-chain truth), not the strategy self-report.
     assert supplies[0].details.get("valuation_source") == "on_chain"
+
+
+def test_aave_alias_stub_collapses_onto_canonical_discovery():
+    """PR #2536 review (alias normalisation): a strategy stub reporting the
+    ``"aave"`` alias must collapse onto discovery's canonical ``"aave_v3"``
+    supply, not survive as a second leg.
+
+    Discovery stamps the registry-canonical protocol (``"aave_v3"``). A strategy
+    that declares the ``"aave"`` alias for the same reserve would, under raw
+    ``(protocol or "").lower()`` keying, get a distinct dedup key
+    (``"aave"`` != ``"aave_v3"``) → the same on-chain supply counted twice. The
+    dedup key now normalises both through ``LendingReadRegistry.canonical`` so
+    they collapse to one. Mirrors Case 2 but with the alias on the strategy leg.
+    """
+    valuer = PortfolioValuer(gateway_client=None)
+    stub = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="aave-wbtc-collateral",
+        chain=CHAIN,
+        protocol="aave",  # alias — discovery stamps the canonical "aave_v3"
+        value_usd=EXPECTED_SUPPLY_USD,
+        details={"asset": "WBTC"},  # resolves to WBTC address → matches discovery
+    )
+    strategy = _make_strategy([stub])
+    market = _make_market()
+
+    positions, total, unavailable = _drive_get_positions(valuer, strategy, market)
+
+    supplies = [p for p in positions if p.position_type == PositionType.SUPPLY]
+    assert len(supplies) == 1, "alias stub + canonical discovery supply must collapse to one"
+    positive_total = sum((p.value_usd for p in positions if p.value_usd > 0), Decimal("0"))
+    assert positive_total == EXPECTED_SUPPLY_USD, (
+        f"alias mismatch must not double-count: got {positive_total}, expected {EXPECTED_SUPPLY_USD}"
+    )
+    assert supplies[0].details.get("valuation_source") == "on_chain"
+    # Surviving leg carries discovery's canonical protocol (not the "aave" alias)
+    # so downstream routing / accounting key on the canonical identifier.
+    assert supplies[0].protocol == "aave_v3"
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [
+        ("aave", "aave_v3"),  # alias collapses to canonical
+        ("AAVE_V3", "aave_v3"),  # case-insensitive
+        ("spark", "spark"),
+        ("uniswap_v3", "uniswap_v3"),  # non-lending → lowercased passthrough
+        ("UniSwap_V3", "uniswap_v3"),
+        (None, ""),  # loosely typed metadata must not crash
+        (123, ""),  # truthy non-str must not crash on .lower() (PR #2536 review)
+        (3.14, ""),
+        ("", ""),
+    ],
+)
+def test_normalize_protocol_for_dedup_is_total(protocol, expected):
+    """The dedup-key normaliser must never raise on loosely typed
+    ``PositionInfo.protocol`` — a truthy non-str (e.g. ``123``) previously hit
+    ``(protocol or "").lower()`` and crashed (PR #2536 review)."""
+    assert _normalize_protocol_for_dedup(protocol) == expected
 
 
 # ---------------------------------------------------------------------------

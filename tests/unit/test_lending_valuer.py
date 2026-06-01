@@ -6,7 +6,9 @@ Covers:
 - portfolio_valuer.py: lending position repricing integration
 """
 
+import json
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -699,3 +701,99 @@ class TestDashboardMigrationRemoval:
         from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 
         assert not hasattr(DashboardServiceServicer, "_extract_portfolio_value_from_state")
+
+
+# =============================================================================
+# TestLendingValuationProtocolRouting — Spark / Radiant data-provider routing
+# =============================================================================
+
+# Ethereum single-reserve data providers, sourced from each connector's
+# addresses.py. DISTINCT per protocol — repricing must query the SAME protocol
+# the position belongs to, never silently default Spark/Radiant to Aave V3.
+_ETH_AAVE_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
+_ETH_SPARK_DATA_PROVIDER = "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
+_ETH_RADIANT_DATA_PROVIDER = "0x362f3BB63Cff83bd169aE1793979E9e537993813"
+
+
+def _gateway_capturing_eth_call_target(captured: list[str], supply_wei: int = 1_000_000):
+    """Fake gateway whose ``_rpc_stub.Call`` records each eth_call target.
+
+    Records ``params[0]["to"]`` (the contract queried) and returns a valid
+    9-word ``getUserReserveData`` response so the repricing path runs through
+    the real ``LendingPositionReader``.
+    """
+
+    def _call(request, timeout=None):
+        params = json.loads(request.params)
+        captured.append(params[0]["to"])
+        hex_payload = "0x" + f"{supply_wei:064x}" + "0" * (64 * 8)
+        resp = MagicMock()
+        resp.success = True
+        resp.result = json.dumps(hex_payload)
+        return resp
+
+    stub = MagicMock()
+    stub.Call.side_effect = _call
+    gw = MagicMock()
+    gw._rpc_stub = stub
+    gw.config = SimpleNamespace(timeout=7)
+    return gw
+
+
+class TestLendingValuationProtocolRouting:
+    """Regression (follow-up to PR #2533): both lending repricing paths must
+    thread ``position.protocol`` to the on-chain read so a Spark/Radiant
+    position is priced against ITS data provider, not Aave V3's.
+
+    Exercises the real ``PortfolioValuer`` -> ``LendingPositionReader`` ->
+    ``LendingReadRegistry`` -> ``AddressRegistry`` chain for BOTH valuation
+    call sites (``_reprice_lending_on_chain_enriched`` and
+    ``_reprice_lending_on_chain``).
+    """
+
+    _WALLET = "0x" + "1" * 40
+    _USDC = "0x" + "a" * 40
+    _METHODS = ("_reprice_lending_on_chain_enriched", "_reprice_lending_on_chain")
+
+    def _position(self, protocol):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        return PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="lending-routing-test",
+            chain="ethereum",
+            protocol=protocol,
+            value_usd=Decimal("0"),
+            details={"asset_address": self._USDC, "wallet": self._WALLET, "asset": "USDC"},
+        )
+
+    def _captured_target(self, method, protocol):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        captured: list[str] = []
+        valuer = PortfolioValuer(gateway_client=_gateway_capturing_eth_call_target(captured))
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        getattr(valuer, method)(self._position(protocol), "ethereum", market)
+        return captured
+
+    @pytest.mark.parametrize("method", _METHODS)
+    def test_spark_position_queries_spark_provider_not_aave(self, method):
+        captured = self._captured_target(method, "spark")
+        assert captured, f"{method} made no eth_call"
+        assert captured[0].lower() == _ETH_SPARK_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_AAVE_DATA_PROVIDER.lower()
+
+    @pytest.mark.parametrize("method", _METHODS)
+    def test_aave_position_queries_aave_provider(self, method):
+        captured = self._captured_target(method, "aave_v3")
+        assert captured, f"{method} made no eth_call"
+        assert captured[0].lower() == _ETH_AAVE_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_SPARK_DATA_PROVIDER.lower()
+
+    @pytest.mark.parametrize("method", _METHODS)
+    def test_radiant_position_queries_radiant_provider(self, method):
+        captured = self._captured_target(method, "radiant_v2")
+        assert captured, f"{method} made no eth_call"
+        assert captured[0].lower() == _ETH_RADIANT_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_AAVE_DATA_PROVIDER.lower()

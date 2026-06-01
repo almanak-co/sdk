@@ -5,7 +5,9 @@ Covers:
 - portfolio_valuer.py: two-source position merging and discovery integration
 """
 
+import json
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ from almanak.framework.valuation.position_discovery import (
     PositionDiscoveryService,
     _has_lending_protocol,
     _has_lp_protocol,
+    _lending_protocols_to_scan,
     _lending_to_position_infos,
 )
 from almanak.framework.valuation.lending_position_reader import LendingPositionOnChain
@@ -31,12 +34,16 @@ class TestHasLendingProtocol:
     def test_aave_v3(self):
         assert _has_lending_protocol(["aave_v3"]) is True
 
-    def test_spark_not_supported(self):
-        """Spark uses different contracts — not routed through Aave reader."""
-        assert _has_lending_protocol(["spark"]) is False
+    def test_spark_supported(self):
+        """Spark has its own connector-owned lending read — now discoverable."""
+        assert _has_lending_protocol(["spark"]) is True
+
+    def test_radiant_v2_supported(self):
+        """Radiant V2 (Aave V2 fork) has its own connector-owned lending read."""
+        assert _has_lending_protocol(["radiant_v2"]) is True
 
     def test_compound_v3_not_supported(self):
-        """Compound V3 uses different contracts — not routed through Aave reader."""
+        """Compound V3 has no connector-owned single-reserve lending read."""
         assert _has_lending_protocol(["compound_v3"]) is False
 
     def test_case_insensitive(self):
@@ -84,10 +91,11 @@ class TestLendingToPositionInfos:
             liquidity_rate=0,
             usage_as_collateral_enabled=True,
         )
-        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum", "0xwallet123")
+        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum", "0xwallet123", protocol="aave_v3")
         assert len(positions) == 1
         assert positions[0].position_type == PositionType.SUPPLY
-        assert positions[0].position_id == "aave-supply-USDC-arbitrum"
+        assert positions[0].position_id == "aave_v3-supply-USDC-arbitrum"
+        assert positions[0].protocol == "aave_v3"
         assert positions[0].details["asset"] == "USDC"
         assert positions[0].details["asset_address"] == on_chain.asset_address
         assert positions[0].details["wallet_address"] == "0xwallet123"
@@ -102,7 +110,7 @@ class TestLendingToPositionInfos:
             liquidity_rate=0,
             usage_as_collateral_enabled=False,
         )
-        positions = _lending_to_position_infos(on_chain, "WETH", "arbitrum")
+        positions = _lending_to_position_infos(on_chain, "WETH", "arbitrum", protocol="aave_v3")
         assert len(positions) == 1
         assert positions[0].position_type == PositionType.BORROW
         assert positions[0].details["variable_debt_raw"] == "500000000000000000"
@@ -116,7 +124,7 @@ class TestLendingToPositionInfos:
             liquidity_rate=0,
             usage_as_collateral_enabled=True,
         )
-        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum")
+        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum", protocol="aave_v3")
         assert len(positions) == 2
         types = {p.position_type for p in positions}
         assert types == {PositionType.SUPPLY, PositionType.BORROW}
@@ -130,7 +138,7 @@ class TestLendingToPositionInfos:
             liquidity_rate=0,
             usage_as_collateral_enabled=False,
         )
-        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum")
+        positions = _lending_to_position_infos(on_chain, "USDC", "arbitrum", protocol="aave_v3")
         assert len(positions) == 0
 
 
@@ -254,7 +262,7 @@ class TestPositionDiscoveryService:
         assert result.has_positions is True
         assert len(result.positions) == 1
         assert result.positions[0].position_type == PositionType.SUPPLY
-        assert result.positions[0].position_id == "aave-supply-USDC-arbitrum"
+        assert result.positions[0].position_id == "aave_v3-supply-USDC-arbitrum"
         assert result.positions[0].details["asset_address"] == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert result.lending_assets_scanned == 1
 
@@ -315,7 +323,7 @@ class TestPositionDiscoveryService:
             tracked_tokens=["USDC", "WETH"],
         )
 
-        def mock_read(chain, asset_address, wallet_address):
+        def mock_read(chain, asset_address, wallet_address, protocol=None):
             if "usdc" in asset_address.lower():
                 return active
             return inactive
@@ -817,3 +825,139 @@ class TestPortfolioValuerFullIntegration:
         assert snapshot.available_cash_usd == Decimal("100")
         assert snapshot.wallet_total_value_usd == Decimal("100")
         assert snapshot.deployment_id == "test-lending"
+
+
+# =============================================================================
+# Aave-fork protocol routing (Spark / Radiant data providers) — regression
+# =============================================================================
+
+# Ethereum single-reserve data providers, sourced from each connector's
+# addresses.py. DISTINCT per protocol — discovery must query each protocol's
+# OWN contract, never silently default Spark/Radiant to Aave V3.
+# Intentionally duplicated from the connector address tables for test isolation
+# (the routing assertion fails closed if a wrong provider is queried); keep
+# these in sync by hand if a connector's pool_data_provider ever changes.
+_ETH_AAVE_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
+_ETH_SPARK_DATA_PROVIDER = "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
+_ETH_RADIANT_DATA_PROVIDER = "0x362f3BB63Cff83bd169aE1793979E9e537993813"
+
+
+def _gateway_capturing_eth_call_target(captured: list[str], supply_wei: int = 1_000_000):
+    """Fake gateway whose ``_rpc_stub.Call`` records each eth_call target.
+
+    Records ``params[0]["to"]`` (the contract the reader queries) into
+    ``captured`` and returns a valid 9-word ``getUserReserveData`` response
+    (word 0 = currentATokenBalance = ``supply_wei``) so a discovery scan runs
+    end-to-end and yields an active SUPPLY position.
+    """
+
+    def _call(request, timeout=None):
+        params = json.loads(request.params)
+        captured.append(params[0]["to"])
+        hex_payload = "0x" + f"{supply_wei:064x}" + "0" * (64 * 8)
+        resp = MagicMock()
+        resp.success = True
+        resp.result = json.dumps(hex_payload)
+        return resp
+
+    stub = MagicMock()
+    stub.Call.side_effect = _call
+    gw = MagicMock()
+    gw._rpc_stub = stub
+    gw.config = SimpleNamespace(timeout=7)
+    return gw
+
+
+class TestLendingDiscoveryProtocolRouting:
+    """Regression (follow-up to PR #2533): discovery must scan EACH declared
+    lending protocol against its OWN data provider and stamp the real protocol.
+
+    Before ``read_position`` was threaded a ``protocol``, every discovered
+    reserve defaulted to the registry's default (aave_v3) and silently queried
+    Aave's ``pool_data_provider`` — wrong balances for Spark/Radiant on every
+    chain where the addresses differ. These tests drive the real
+    ``LendingReadRegistry`` -> ``AddressRegistry`` -> connector address tables,
+    so they fail closed if the routing regresses to Aave-by-default.
+    """
+
+    _WALLET = "0x" + "1" * 40
+    _USDC = "0x" + "a" * 40
+
+    def _discover(self, protocols, captured):
+        gw = _gateway_capturing_eth_call_target(captured)
+        service = PositionDiscoveryService(gateway_client=gw)
+        config = DiscoveryConfig(
+            chain="ethereum",
+            wallet_address=self._WALLET,
+            protocols=protocols,
+            tracked_tokens=["USDC"],
+        )
+        with patch.object(service, "_resolve_token_addresses", return_value={"USDC": self._USDC}):
+            return service.discover(config)
+
+    def test_spark_discovery_queries_spark_provider_not_aave(self):
+        captured: list[str] = []
+        result = self._discover(["spark"], captured)
+        assert captured, "Spark discovery made no eth_call"
+        assert captured[0].lower() == _ETH_SPARK_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_AAVE_DATA_PROVIDER.lower()
+        # The discovered position is stamped with the REAL protocol + id.
+        assert result.has_positions
+        assert all(p.protocol == "spark" for p in result.positions)
+        assert result.positions[0].position_id == "spark-supply-USDC-ethereum"
+
+    def test_aave_discovery_queries_aave_provider(self):
+        """Control: aave_v3 still routes to Aave's provider — routing is
+        protocol-sensitive, not hardcoded to either fork."""
+        captured: list[str] = []
+        self._discover(["aave_v3"], captured)
+        assert captured
+        assert captured[0].lower() == _ETH_AAVE_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_SPARK_DATA_PROVIDER.lower()
+
+    def test_radiant_discovery_queries_radiant_provider(self):
+        captured: list[str] = []
+        self._discover(["radiant_v2"], captured)
+        assert captured
+        assert captured[0].lower() == _ETH_RADIANT_DATA_PROVIDER.lower()
+        assert captured[0].lower() != _ETH_AAVE_DATA_PROVIDER.lower()
+
+    def test_multi_protocol_fans_out_to_each_provider(self):
+        """A strategy declaring two lending markets scans BOTH, each routed to
+        its own data provider, each position stamped with its own protocol."""
+        captured: list[str] = []
+        result = self._discover(["spark", "aave_v3"], captured)
+        targets = {c.lower() for c in captured}
+        assert _ETH_AAVE_DATA_PROVIDER.lower() in targets
+        assert _ETH_SPARK_DATA_PROVIDER.lower() in targets
+        # Two protocols x one token = two reserve reads.
+        assert result.lending_assets_scanned == 2
+        assert {p.protocol for p in result.positions} == {"aave_v3", "spark"}
+
+    def test_undeclared_lending_protocol_not_scanned(self):
+        """compound_v3 has no connector-owned single-reserve read — discovery
+        must not query any Aave-fork provider on its behalf."""
+        captured: list[str] = []
+        result = self._discover(["compound_v3"], captured)
+        assert captured == []
+        assert result.lending_assets_scanned == 0
+
+
+class TestLendingProtocolsToScan:
+    """Unit coverage for the registry-driven scan-set computation."""
+
+    def test_intersection_with_declared(self):
+        assert _lending_protocols_to_scan(["aave_v3", "uniswap_v3"]) == ["aave_v3"]
+
+    def test_alias_resolves_to_canonical(self):
+        assert _lending_protocols_to_scan(["aave"]) == ["aave_v3"]
+
+    def test_deterministic_registry_order(self):
+        # supported_protocols() order is sorted; declaration order must not leak.
+        assert _lending_protocols_to_scan(["spark", "aave_v3"]) == ["aave_v3", "spark"]
+
+    def test_unsupported_dropped(self):
+        assert _lending_protocols_to_scan(["compound_v3", "morpho_blue"]) == []
+
+    def test_empty(self):
+        assert _lending_protocols_to_scan([]) == []

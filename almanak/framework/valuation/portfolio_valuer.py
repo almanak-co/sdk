@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.framework.portfolio.models import (
     PortfolioSnapshot,
     PositionValue,
@@ -249,6 +250,25 @@ class StrategyLike(Protocol):
     def wallet_address(self) -> str: ...
 
     def _get_tracked_tokens(self) -> list[str]: ...
+
+
+def _normalize_protocol_for_dedup(protocol: str | None) -> str:
+    """Normalise a protocol identifier for position-dedup identity keys.
+
+    Collapses known lending-fork aliases onto their registry-canonical key
+    (e.g. ``"aave"`` -> ``"aave_v3"``) so a strategy-reported alias and a
+    discovery-stamped canonical name dedup as ONE position instead of
+    double-counting. Non-lending or unknown protocols (LP / perp / vault) have
+    no lending-read canonical form, so they pass through lowercased — preserving
+    existing keying for every non-lending position type.
+    """
+    canonical = LendingReadRegistry.canonical(protocol)
+    if canonical:
+        return canonical
+    # canonical() already rejected None / non-str, but a *truthy* non-str
+    # protocol (loosely typed PositionInfo.protocol) must still degrade safely
+    # rather than crash on ``.lower()``.
+    return protocol.lower() if isinstance(protocol, str) else ""
 
 
 class PortfolioValuer:
@@ -1225,7 +1245,7 @@ class PortfolioValuer:
         from almanak.framework.teardown.models import PositionType
 
         chain_l = (chain or position.chain or "").lower()
-        protocol_l = (position.protocol or "").lower()
+        protocol_l = _normalize_protocol_for_dedup(position.protocol)
 
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
             asset_address = self._resolve_position_asset_address(position, chain)
@@ -1286,13 +1306,13 @@ class PortfolioValuer:
         if stub.value_usd != Decimal("0"):
             return False
 
-        protocol_l = (stub.protocol or "").lower()
+        protocol_l = _normalize_protocol_for_dedup(stub.protocol)
         chain_l = (chain or stub.chain or "").lower()
         same_group = [
             d
             for d in discovery_positions
             if d.position_type == stub.position_type
-            and (d.protocol or "").lower() == protocol_l
+            and _normalize_protocol_for_dedup(d.protocol) == protocol_l
             and (chain or d.chain or "").lower() == chain_l
         ]
         return bool(same_group)
@@ -1637,7 +1657,10 @@ class PortfolioValuer:
                 return None
 
             on_chain = self._lending_reader.read_position(
-                chain=chain, asset_address=asset_address, wallet_address=wallet_address
+                chain=chain,
+                asset_address=asset_address,
+                wallet_address=wallet_address,
+                protocol=position.protocol,
             )
             if on_chain is None:
                 return None
@@ -2004,6 +2027,7 @@ class PortfolioValuer:
                 chain=chain,
                 asset_address=asset_address,
                 wallet_address=wallet_address,
+                protocol=position.protocol,
             )
             if on_chain is None:
                 return None

@@ -119,6 +119,26 @@ class LendingReadRegistry:
         return tuple(sorted(cls._SPEC_LOADERS))
 
     @classmethod
+    def canonical(cls, protocol: str | None) -> str | None:
+        """Return the canonical key for ``protocol`` if it has a lending read.
+
+        Resolves case and aliases (e.g. ``"aave"`` -> ``"aave_v3"``) and returns
+        the canonical ``_SPEC_LOADERS`` key, or ``None`` when the protocol has no
+        connector-owned lending read. Lets a strategy-side caller map a declared
+        / loosely-spelled protocol identifier onto the registry's canonical key
+        without reaching into ``_normalize`` or duplicating the alias table — so
+        protocol-identity knowledge stays owned here, in the registry.
+
+        Total by design: ``None`` / non-``str`` input (loosely typed strategy
+        metadata) returns ``None`` rather than raising, so callers can use it
+        directly in a ``canonical(p) or fallback`` normalisation.
+        """
+        if not isinstance(protocol, str) or not protocol:
+            return None
+        key = cls._normalize(protocol)
+        return key if key in cls._SPEC_LOADERS else None
+
+    @classmethod
     def _load_spec(cls, protocol: str) -> LendingReadSpec | None:
         """Resolve and cache one protocol's read spec.
 
