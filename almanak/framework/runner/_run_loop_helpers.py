@@ -506,6 +506,62 @@ async def capture_snapshot_with_accounting(
     if not runner.config.enable_state_persistence:
         return result
 
+    # VIB-4926: on trade iterations, re-open the per-iteration MarketSnapshot
+    # scope with a FRESH token before the post-execution snapshot capture so
+    # the balance cache rebuilds against POST-trade on-chain state. Without
+    # this, capture_portfolio_snapshot reads loose-wallet balances through the
+    # cache warmed during decide() (PRE-execution) while LP positions are
+    # re-priced fresh — the swapped tokens get counted in both lanes (mainnet
+    # repro: iter-1 NAV $31.40 vs true ~$25.4; corrupts G6 wallet PnL to
+    # exactly final − stale-snapshot1). This is the iteration-lane twin of the
+    # teardown fix (VIB-4906, see capture_teardown_snapshot_with_accounting).
+    #
+    # The gate is _iteration_had_trade ALONE — it must MATCH the force-snapshot
+    # condition (``_capture_portfolio_snapshot`` forces a snapshot on exactly
+    # this flag, strategy_runner.py:6852). Gating any stricter — e.g. also
+    # requiring ``result.execution_result is not None`` — would skip the
+    # re-stamp on a partially-executed multi-intent iteration where an earlier
+    # intent traded (flag set) but a later intent failed before producing an
+    # execution_result: the snapshot is STILL force-captured, so it would
+    # persist the stale pre-trade balances this fix exists to prevent. Idle
+    # iterations leave the flag False and keep VIB-4843's warm price cache (no
+    # needless re-fetch on cold forks). The :post-exec suffix guarantees a
+    # different token than the iteration-start stamp (strategy_runner.py:878,
+    # bare cycle_id) so begin_market_snapshot_iteration is not a no-op and
+    # genuinely rebuilds the cache.
+    #
+    # SCOPE: this covers the single-chain PortfolioValuer lane — the one the
+    # double-count was reproduced on. The multi-chain lane values via a
+    # different path (_value_via_strategy_fallback) and does not set
+    # _iteration_had_trade; whether it shares the staleness is tracked by
+    # VIB-4950.
+    #
+    # FRESHNESS DEPENDENCY: the rebuilt snapshot reads balances via
+    # MarketSnapshot.balance() WITHOUT force_refresh, so it relies on
+    # reconcile_post_execution_balances (strategy_runner.py:4783, force_refresh
+    # =True for the executed intent's tokens) having run earlier in the same
+    # iteration to bust the gateway's server-side balance cache. That ordering
+    # is structural today (reconcile during execution precedes this snapshot);
+    # if a refactor moves or guards it, the double-count can silently return.
+    if getattr(runner, "_iteration_had_trade", False):
+        try:
+            # _last_cycle_id is set every iteration (strategy_runner.py:871)
+            # before execution, so it is always present when the trade flag is
+            # set in production; getattr keeps the call crash-safe under
+            # mocking / partially-constructed runners (consistent with the
+            # _iteration_had_trade getattr above). Any value still yields a
+            # token distinct from the bare iteration-start cycle_id.
+            last_cycle_id = getattr(runner, "_last_cycle_id", None)
+            runner._begin_market_snapshot_iteration(strategy, f"{last_cycle_id}:post-exec")
+        except Exception:  # noqa: BLE001 — never propagate; degrade to stale snapshot
+            logger.warning(
+                "capture_snapshot_with_accounting: market snapshot cache "
+                "invalidation failed for %s — post-exec snapshot may carry "
+                "stale balances",
+                deployment_id,
+                exc_info=True,
+            )
+
     try:
         await runner._capture_portfolio_snapshot(
             strategy=strategy,
