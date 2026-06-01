@@ -1,71 +1,53 @@
-"""On-chain Aave V3 lending position reader via gateway RPC.
+"""On-chain lending-position reader via gateway RPC.
 
-Queries the Aave V3 PoolDataProvider's getUserReserveData for each asset
-to get current supply (aToken balance) and debt (stable + variable).
+Queries a wallet's current supply (aToken balance) and debt for a single
+reserve so valuation, position discovery, and ``amount="all"`` resolution can
+reprice lending positions. *How* the read is performed — which contract holds
+the per-user reserve data, the function selector, the calldata layout, and the
+return decoding — is **connector knowledge** resolved through the strategy-side
+:class:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry`.
+This module names no connector and no protocol-specific contract kind: it owns
+only the gateway-routed ``eth_call`` that executes a read plan and the dispatch
+to the registry.
 
-Uses the gateway's generic Call RPC -- no proto changes needed.
-Same pattern as lp_position_reader.py.
+Uses the gateway's generic Call RPC — no proto changes needed. Same pattern as
+``lp_position_reader.py``.
 """
 
 import json
 import logging
-from dataclasses import dataclass
 
-from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.lending_read_base import (
+    LendingPositionOnChain,
+    decode_uint_hex,
+    pad_address,
+    parse_user_reserve_data_hex,
+)
+from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
 logger = logging.getLogger(__name__)
 
-# Aave V3 Pool Data Provider addresses — resolved through the strategy-side
-# ``AddressRegistry`` (W1 / VIB-4853), which brokers the connector-owned
-# address table in almanak/connectors/aave_v3/addresses.py. Built once at
-# import. ``address_supported_chains("aave_v3")`` is the canonical
-# supported-chain list, so a chain that declares aave_v3 support but omits
-# ``pool_data_provider`` is registry drift, not a silent opt-out: we fail
-# loudly here rather than letting ``read_position(...)`` return ``None`` and
-# mask a live position during valuation/teardown.
-AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {}
-for _chain in AddressRegistry.address_supported_chains("aave_v3"):
-    _provider = AddressRegistry.addresses_for("aave_v3", _chain).get("pool_data_provider")
-    if not _provider:
-        msg = f"aave_v3 is missing pool_data_provider for supported chain {_chain!r}"
-        raise ValueError(msg)
-    AAVE_V3_POOL_DATA_PROVIDER[_chain] = _provider
-del _chain, _provider
+# Backward-compatibility re-exports of the strategy-side foundation symbols.
+# ``LendingPositionOnChain`` is the canonical decoded result; the underscore-
+# prefixed ABI helpers preserve the import surface existing call sites and tests
+# depend on after the Aave-fork read logic moved into ``_strategy_base``.
+_pad_address = pad_address
+_decode_uint_hex = decode_uint_hex
+_parse_user_reserve_data_hex = parse_user_reserve_data_hex
 
-# Function selector for getUserReserveData(address asset, address user)
-GET_USER_RESERVE_DATA_SELECTOR = "0x28dd2d01"
-
-
-@dataclass
-class LendingPositionOnChain:
-    """On-chain state of an Aave V3 lending position for a single asset.
-
-    Decoded from PoolDataProvider.getUserReserveData(asset, user).
-    """
-
-    asset_address: str
-    current_atoken_balance: int  # Supply + accrued interest (wei)
-    current_stable_debt: int  # Stable rate debt (wei)
-    current_variable_debt: int  # Variable rate debt (wei)
-    liquidity_rate: int  # Supply APY in ray (1e27)
-    usage_as_collateral_enabled: bool
-
-    @property
-    def is_active(self) -> bool:
-        """Position has any supply or debt."""
-        return self.current_atoken_balance > 0 or self.total_debt > 0
-
-    @property
-    def total_debt(self) -> int:
-        """Total debt = stable + variable."""
-        return self.current_stable_debt + self.current_variable_debt
+__all__ = [
+    "LendingPositionOnChain",
+    "LendingPositionReader",
+]
 
 
 class LendingPositionReader:
-    """Reads Aave V3 lending positions via gateway RPC.
+    """Reads single-reserve lending positions via gateway RPC.
 
-    Queries getUserReserveData for specified assets and decodes
-    the ABI-encoded response client-side.
+    Resolves the read (target contract + calldata + decoder) for a protocol
+    through :class:`LendingReadRegistry`, executes the gateway-routed
+    ``eth_call``, and decodes the response with the connector's decoder. The
+    reader holds no protocol-specific knowledge of its own.
     """
 
     def __init__(self, gateway_client: object | None = None) -> None:
@@ -76,13 +58,18 @@ class LendingPositionReader:
         chain: str,
         asset_address: str,
         wallet_address: str,
+        protocol: str | None = None,
     ) -> LendingPositionOnChain | None:
         """Query a single asset's lending position for a wallet.
 
         Args:
-            chain: Chain identifier (e.g., "arbitrum", "base")
-            asset_address: Underlying asset contract address
-            wallet_address: User wallet address
+            chain: Chain identifier (e.g., "arbitrum", "base").
+            asset_address: Underlying asset contract address.
+            wallet_address: User wallet address.
+            protocol: Lending protocol identifier (e.g. "aave_v3", "spark",
+                "radiant_v2"). When ``None``, the registry's default lending
+                protocol is used — preserving the legacy single-reserve read
+                path for callers that do not track the protocol.
 
         Returns:
             LendingPositionOnChain with supply/debt data, or None on failure.
@@ -90,43 +77,51 @@ class LendingPositionReader:
         if self._gateway is None:
             return None
 
-        data_provider = AAVE_V3_POOL_DATA_PROVIDER.get(chain)
-        if not data_provider:
-            logger.debug("No Aave V3 data provider for chain %s", chain)
+        resolved_protocol = LendingReadRegistry.default_protocol() if protocol is None else protocol
+        plan = LendingReadRegistry.resolve(
+            protocol=resolved_protocol,
+            chain=chain,
+            asset_address=asset_address,
+            wallet_address=wallet_address,
+        )
+        if plan is None:
+            logger.debug(
+                "No lending read available for protocol %s on chain %s",
+                resolved_protocol,
+                chain,
+            )
             return None
 
-        # Build calldata: getUserReserveData(address asset, address user)
-        asset_padded = _pad_address(asset_address)
-        wallet_padded = _pad_address(wallet_address)
-        calldata = GET_USER_RESERVE_DATA_SELECTOR + asset_padded + wallet_padded
-
-        result_hex = self._eth_call(chain, data_provider, calldata)
+        result_hex = self._eth_call(chain, plan.target_address, plan.calldata)
         if not result_hex:
             return None
 
-        return _parse_user_reserve_data_hex(result_hex, asset_address)
+        return plan.parse_result(result_hex, asset_address)
 
     def read_positions(
         self,
         chain: str,
         asset_addresses: list[str],
         wallet_address: str,
+        protocol: str | None = None,
     ) -> list[LendingPositionOnChain]:
         """Query multiple assets' lending positions for a wallet.
 
         Returns only active positions (non-zero supply or debt).
 
         Args:
-            chain: Chain identifier
-            asset_addresses: List of underlying asset addresses to check
-            wallet_address: User wallet address
+            chain: Chain identifier.
+            asset_addresses: List of underlying asset addresses to check.
+            wallet_address: User wallet address.
+            protocol: Lending protocol identifier; ``None`` uses the registry
+                default (see :meth:`read_position`).
 
         Returns:
             List of active LendingPositionOnChain entries.
         """
         positions = []
         for asset in asset_addresses:
-            pos = self.read_position(chain, asset, wallet_address)
+            pos = self.read_position(chain, asset, wallet_address, protocol=protocol)
             if pos is not None and pos.is_active:
                 positions.append(pos)
         return positions
@@ -163,60 +158,3 @@ class LendingPositionReader:
         except Exception:
             logger.debug("Failed to make eth_call for lending position", exc_info=True)
             return None
-
-
-def _pad_address(address: str) -> str:
-    """Left-pad an address to 32 bytes (64 hex chars)."""
-    addr = address.lower().replace("0x", "")
-    return addr.zfill(64)
-
-
-def _parse_user_reserve_data_hex(
-    hex_data: str,
-    asset_address: str,
-) -> LendingPositionOnChain | None:
-    """Parse hex response from getUserReserveData.
-
-    Expected ABI layout (9 words * 32 bytes = 576 hex chars):
-    [0] currentATokenBalance (uint256)
-    [1] currentStableDebt (uint256)
-    [2] currentVariableDebt (uint256)
-    [3] principalStableDebt (uint256) -- not used
-    [4] scaledVariableDebt (uint256)  -- not used
-    [5] stableBorrowRate (uint256)    -- not used
-    [6] liquidityRate (uint256)
-    [7] stableRateLastUpdated (uint40 padded) -- not used
-    [8] usageAsCollateralEnabled (bool padded)
-    """
-    # Strip 0x prefix
-    data = hex_data.replace("0x", "")
-
-    # 9 words * 64 hex chars = 576 minimum
-    if len(data) < 576:
-        logger.warning("Aave getUserReserveData response too short: %d chars", len(data))
-        return None
-
-    try:
-        atoken_balance = _decode_uint_hex(data, 0)
-        stable_debt = _decode_uint_hex(data, 1)
-        variable_debt = _decode_uint_hex(data, 2)
-        liquidity_rate = _decode_uint_hex(data, 6)
-        collateral_enabled = _decode_uint_hex(data, 8) != 0
-
-        return LendingPositionOnChain(
-            asset_address=asset_address,
-            current_atoken_balance=atoken_balance,
-            current_stable_debt=stable_debt,
-            current_variable_debt=variable_debt,
-            liquidity_rate=liquidity_rate,
-            usage_as_collateral_enabled=collateral_enabled,
-        )
-    except Exception:
-        logger.debug("Failed to parse Aave user reserve data hex", exc_info=True)
-        return None
-
-
-def _decode_uint_hex(hex_data: str, word_index: int) -> int:
-    """Decode a uint256 from ABI-encoded hex at the given word index."""
-    start = word_index * 64
-    return int(hex_data[start : start + 64], 16)
