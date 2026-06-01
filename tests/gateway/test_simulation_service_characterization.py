@@ -19,15 +19,15 @@ Coverage focus:
                                  → INVALID_ARGUMENT, unexpected exception →
                                  INTERNAL.
 
-  TestSessionLifecycle        — ``_get_session`` lazy-initialises and reuses,
-                                 ``close`` releases.
+  TestCloseContract           — ``close()`` is an awaitable no-op (the servicer
+                                 no longer owns an aiohttp session).
 
-The two backend simulators (`_simulate_tenderly` / `_simulate_alchemy`) are
-HTTP-based; their response-parsing branches are stubbed out via patching for
-the dispatch tests here, and covered with aiohttp-mocked tests in the sibling
-``test_simulation_service_egress_characterization.py`` (VIB-4079).
-
-Brings ``simulation_service.py`` from 12% → ~80% on the unit-scope.
+Since VIB-4851 the service delegates egress to the framework simulator
+hierarchy. The dispatch tests patch the delegation seam
+(``_framework_simulator_for``) with a fake simulator whose ``.simulate`` is an
+AsyncMock; the real HTTP egress is covered (with aiohttp mocked at the framework
+layer) in the sibling ``test_simulation_service_egress_characterization.py``
+(VIB-4079).
 """
 
 from __future__ import annotations
@@ -37,15 +37,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
-import pytest_asyncio
 
 from almanak.config.env import gateway_config_from_env
+from almanak.framework.execution.interfaces import SimulationResult
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
 from tests.gateway.grpc_harness import (
     assert_grpc_error,
     make_grpc_context,
 )
+
+
+def _fake_simulator(result: SimulationResult | None = None) -> MagicMock:
+    """A stand-in framework simulator whose ``.simulate`` is an AsyncMock.
+
+    Returned by patching ``_framework_simulator_for`` — this is the delegation
+    seam the gateway crosses after VIB-4851 (it no longer owns HTTP egress).
+    """
+    sim = MagicMock()
+    sim.simulate = AsyncMock(return_value=result or SimulationResult(success=True, simulated=True, gas_estimates=[]))
+    return sim
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -298,34 +309,37 @@ class TestSimulateBundleOrchestration:
 
     @pytest.mark.asyncio
     async def test_chain_lowercased_before_dispatch(self, context):
-        # Capital-cased chain in the request must still match TENDERLY_NETWORK_IDS["ethereum"].
+        # Capital-cased chain in the request must still resolve to "ethereum"
+        # when threaded through delegation (selector + simulate() call).
         svc = _tenderly_only()
-        with patch.object(svc, "_simulate_tenderly", new=AsyncMock(return_value=gateway_pb2.SimulateBundleResponse(success=True))) as fake:
+        sim = _fake_simulator()
+        with patch.object(svc, "_framework_simulator_for", return_value=sim):
             request = _make_request(chain="ETHEREUM", txs=1)
             await svc.SimulateBundle(request, context)
-            fake.assert_awaited_once()
-            args, _ = fake.call_args
-            assert args[0] == "ethereum"  # lowercased
+            sim.simulate.assert_awaited_once()
+            # simulate(txs, chain, state_overrides=...) — chain is the 2nd positional arg.
+            args, _ = sim.simulate.call_args
+            assert args[1] == "ethereum"  # lowercased
 
     @pytest.mark.asyncio
     async def test_dispatches_to_tenderly_when_selected(self, context):
         svc = _both_configured()
-        with patch.object(svc, "_simulate_tenderly", new=AsyncMock(return_value=gateway_pb2.SimulateBundleResponse(success=True, simulator_used="tenderly"))) as t, \
-             patch.object(svc, "_simulate_alchemy", new=AsyncMock()) as a:
+        sim = _fake_simulator()
+        with patch.object(svc, "_framework_simulator_for", return_value=sim) as build:
             response = await svc.SimulateBundle(_make_request(), context)
             assert response.simulator_used == "tenderly"
-            t.assert_awaited_once()
-            a.assert_not_awaited()
+            build.assert_called_once_with("tenderly")
+            sim.simulate.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_dispatches_to_alchemy_when_selected(self, context):
         svc = _alchemy_only()
-        with patch.object(svc, "_simulate_alchemy", new=AsyncMock(return_value=gateway_pb2.SimulateBundleResponse(success=True, simulator_used="alchemy"))) as a, \
-             patch.object(svc, "_simulate_tenderly", new=AsyncMock()) as t:
+        sim = _fake_simulator()
+        with patch.object(svc, "_framework_simulator_for", return_value=sim) as build:
             response = await svc.SimulateBundle(_make_request(chain="base"), context)
             assert response.simulator_used == "alchemy"
-            a.assert_awaited_once()
-            t.assert_not_awaited()
+            build.assert_called_once_with("alchemy")
+            sim.simulate.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_value_error_from_selector_returns_invalid_argument(self, context):
@@ -341,11 +355,12 @@ class TestSimulateBundleOrchestration:
 
     @pytest.mark.asyncio
     async def test_unexpected_exception_returns_internal(self, context):
+        # Framework infra failures surface as exceptions out of simulate();
+        # SimulateBundle's broad-exception guard maps them to INTERNAL.
         svc = _both_configured()
-        with patch.object(
-            svc, "_simulate_tenderly",
-            new=AsyncMock(side_effect=RuntimeError("network broke")),
-        ):
+        sim = MagicMock()
+        sim.simulate = AsyncMock(side_effect=RuntimeError("network broke"))
+        with patch.object(svc, "_framework_simulator_for", return_value=sim):
             response = await svc.SimulateBundle(_make_request(), context)
         assert_grpc_error(
             context, response,
@@ -357,55 +372,33 @@ class TestSimulateBundleOrchestration:
     @pytest.mark.asyncio
     async def test_explicit_simulator_preference_lowercased(self, context):
         svc = _both_configured()
-        with patch.object(svc, "_simulate_alchemy", new=AsyncMock(return_value=gateway_pb2.SimulateBundleResponse(success=True))) as a:
+        sim = _fake_simulator()
+        with patch.object(svc, "_framework_simulator_for", return_value=sim) as build:
             request = _make_request(chain="base", simulator="ALCHEMY")  # capital
             await svc.SimulateBundle(request, context)
-            a.assert_awaited_once()
+            build.assert_called_once_with("alchemy")
+            sim.simulate.assert_awaited_once()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Session lifecycle
+# Shutdown contract
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest_asyncio.fixture
-async def lifecycle_svc():
-    """Yield a fully-configured SimulationServiceServicer, guaranteeing
-    ``close()`` is awaited even if a test assertion fails. Prevents
-    aiohttp ClientSession leaks (and the noisy unclosed-session warnings
-    they produce in the test runner).
+class TestCloseContract:
+    """After VIB-4851 the servicer holds no aiohttp session — the framework
+    simulators own (and close) their own per-request sessions. ``close()`` is
+    retained as an awaitable no-op so ``server.py`` shutdown, which calls
+    ``close()`` on every gateway-owned servicer, keeps working.
     """
-    svc = _both_configured()
-    try:
-        yield svc
-    finally:
+
+    @pytest.mark.asyncio
+    async def test_close_is_awaitable_noop(self):
+        svc = _both_configured()
+        assert await svc.close() is None
+
+    @pytest.mark.asyncio
+    async def test_close_idempotent(self):
+        svc = _both_configured()
         await svc.close()
-
-
-class TestSessionLifecycle:
-    @pytest.mark.asyncio
-    async def test_get_session_lazy_initialises(self, lifecycle_svc):
-        assert lifecycle_svc._http_session is None
-        session = await lifecycle_svc._get_session()
-        assert session is not None
-        assert lifecycle_svc._http_session is session
-
-    @pytest.mark.asyncio
-    async def test_get_session_reuses_existing(self, lifecycle_svc):
-        first = await lifecycle_svc._get_session()
-        second = await lifecycle_svc._get_session()
-        assert first is second
-
-    @pytest.mark.asyncio
-    async def test_close_idempotent_when_never_opened(self, lifecycle_svc):
-        # Fixture's finally-block close will be the first close call;
-        # explicitly calling close here verifies idempotency.
-        await lifecycle_svc.close()
-        assert lifecycle_svc._http_session is None
-
-    @pytest.mark.asyncio
-    async def test_close_releases_session(self, lifecycle_svc):
-        session = await lifecycle_svc._get_session()
-        await lifecycle_svc.close()
-        assert lifecycle_svc._http_session is None
-        assert session.closed is True
+        assert await svc.close() is None

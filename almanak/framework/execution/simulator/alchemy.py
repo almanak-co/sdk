@@ -30,6 +30,7 @@ Example:
 
 import json
 import logging
+import ssl
 from typing import Any
 
 import aiohttp
@@ -86,6 +87,7 @@ class AlchemySimulator(Simulator):
         api_key: str,
         timeout_seconds: float = 10.0,
         name: str = "alchemy",
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         """Initialize the AlchemySimulator.
 
@@ -93,6 +95,11 @@ class AlchemySimulator(Simulator):
             api_key: Alchemy API key
             timeout_seconds: Request timeout (default 10s)
             name: Simulator name for logging (default "alchemy")
+            ssl_context: Optional SSL context for outbound HTTPS. When provided
+                (e.g. the gateway threads in its certifi-backed context), the
+                aiohttp session uses a ``TCPConnector(ssl=ssl_context)``. When
+                ``None`` (operator CLI / other framework callers), a bare
+                ``aiohttp.ClientSession()`` is used, preserving prior behaviour.
 
         Raises:
             ValueError: If api_key is missing
@@ -103,6 +110,7 @@ class AlchemySimulator(Simulator):
         self._api_key = api_key
         self._timeout = timeout_seconds
         self._name = name
+        self._ssl_context = ssl_context
 
         logger.info(
             f"AlchemySimulator initialized: timeout={timeout_seconds}s, "
@@ -265,7 +273,8 @@ class AlchemySimulator(Simulator):
         logger.debug(f"Alchemy request URL: {url[:50]}...")
         logger.debug(f"Alchemy payload: {json.dumps(payload, indent=2)}")
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=self._ssl_context) if self._ssl_context is not None else None
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(
                 url,
                 headers=headers,
@@ -388,7 +397,13 @@ class AlchemySimulator(Simulator):
             for call in calls:
                 if "error" in call:
                     error_msg = call.get("error", "Unknown error")
-                    revert_reason = call.get("revertReason", error_msg)
+                    # ``.get(key, default)`` returns the default only when the key is
+                    # ABSENT — Alchemy can emit ``"revertReason": null`` (key present,
+                    # value None) alongside an ``error``. ``or error_msg`` covers both
+                    # the absent and explicit-null/empty cases, so a real revert reason
+                    # is preferred but a null one falls back to the error string instead
+                    # of becoming ``None`` (which then crashed ``_is_token_balance_error``).
+                    revert_reason = call.get("revertReason") or error_msg
 
                     # Check if this is a token balance error (common with SAFE wallets)
                     is_balance_error = self._is_token_balance_error(error_msg, revert_reason)

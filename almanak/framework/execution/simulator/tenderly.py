@@ -34,6 +34,7 @@ Example:
 
 import json
 import logging
+import ssl
 from typing import Any
 
 import aiohttp
@@ -97,6 +98,7 @@ class TenderlySimulator(Simulator):
         access_key: str,
         timeout_seconds: float = 10.0,
         name: str = "tenderly",
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         """Initialize the TenderlySimulator.
 
@@ -106,6 +108,11 @@ class TenderlySimulator(Simulator):
             access_key: Tenderly API access key
             timeout_seconds: Request timeout (default 10s)
             name: Simulator name for logging (default "tenderly")
+            ssl_context: Optional SSL context for outbound HTTPS. When provided
+                (e.g. the gateway threads in its certifi-backed context), the
+                aiohttp session uses a ``TCPConnector(ssl=ssl_context)``. When
+                ``None`` (operator CLI / other framework callers), a bare
+                ``aiohttp.ClientSession()`` is used, preserving prior behaviour.
 
         Raises:
             ValueError: If any required parameter is missing
@@ -122,6 +129,7 @@ class TenderlySimulator(Simulator):
         self._access_key = access_key
         self._timeout = timeout_seconds
         self._name = name
+        self._ssl_context = ssl_context
 
         self._base_url = f"https://api.tenderly.co/api/v1/account/{account_slug}/project/{project_slug}"
 
@@ -275,7 +283,8 @@ class TenderlySimulator(Simulator):
         logger.debug(f"Tenderly request URL: {url}")
         logger.debug(f"Tenderly payload: {json.dumps(payload, indent=2)}")
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=self._ssl_context) if self._ssl_context is not None else None
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(
                 url,
                 headers=headers,
