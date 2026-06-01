@@ -7,12 +7,13 @@ V3 / V4 split inside the LP primitive family:
 
   * :attr:`Primitive.LP` continues to cover V3, Aerodrome, TraderJoe,
     Curve, PancakeSwap V3, SushiSwap V3, etc. (``primitive_version=1``,
-    ``matching_policy_version=5`` — bumped 3->4 by VIB-4275 when the
+    ``matching_policy_version=6`` — bumped 3->4 by VIB-4275 when the
     LP_CLOSE->LP_OPEN lot-matching algorithm changed to discriminator-based
     resolution, then 4->5 by VIB-4848 when the LP attribution formula
     grew the T8 fee-separation taxonomy, T9 fee-adjusted IL, and T12
-    mid-life COLLECT_FEES folding; the V3/V4 isolation below still
-    holds across that bump).
+    mid-life COLLECT_FEES folding, then 5->6 by VIB-4264 when the
+    LP_CLOSE wallet-basis distribution became value-weighted; the V3/V4
+    isolation below still holds across that bump).
   * :attr:`Primitive.LP_V4` is a parallel slot for Uniswap V4 only
     (``primitive_version=1``, ``matching_policy_version=2`` — bumped
     1->2 by VIB-4848 to track the same attribution-formula change on
@@ -94,8 +95,9 @@ class TestVersionAccessorIsolation:
 
     def test_matching_policy_v3_at_4(self):
         # V3 lane bumped 3 -> 4 by VIB-4275 (discriminator-based LP_CLOSE matching),
-        # then 4 -> 5 by VIB-4848 (T8/T9/T12 attribution-formula change).
-        assert MatchingPolicy.for_primitive(Primitive.LP) == 5
+        # 4 -> 5 by VIB-4848 (T8/T9/T12 attribution-formula change),
+        # then 5 -> 6 by VIB-4264 (value-weighted LP_CLOSE wallet-basis distribution).
+        assert MatchingPolicy.for_primitive(Primitive.LP) == 6
 
     def test_matching_policy_v4_at_1(self):
         """V4's lot-matching version: bumped 1 -> 2 by VIB-4848 to mirror
@@ -201,9 +203,9 @@ class TestNoSilentMigration:
         isolation — VIB-4162 contract preserved across the V3/V4 split."""
         monkeypatch.setitem(MATCHING_POLICY_VERSIONS, Primitive.LP_V4, 7)
         assert MatchingPolicy.for_primitive(Primitive.LP_V4) == 7
-        # LP stays at its own real version (5 post-VIB-4848) — a V4 bump must
+        # LP stays at its own real version (6 post-VIB-4264) — a V4 bump must
         # not bleed into the V3 lane. Isolation is the invariant, not the literal.
-        assert MatchingPolicy.for_primitive(Primitive.LP) == 5
+        assert MatchingPolicy.for_primitive(Primitive.LP) == 6
 
 
 # =============================================================================

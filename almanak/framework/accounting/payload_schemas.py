@@ -112,7 +112,13 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     # close→open resolver still filters same-``position_key`` candidates
     # by a per-position discriminator (NFT token id) and FAILS CLOSED to
     # ``None`` when it cannot uniquely identify the closing leg's open.
-    Primitive.LP: 5,
+    # VIB-4264 (v5→v6): LP_CLOSE / LP_COLLECT_FEES wallet-basis distribution
+    # is now VALUE-WEIGHTED across legs (leg_amount × close-time price) with an
+    # exact Σ-residual, replacing the equal split that over-based the smaller
+    # leg and inflated the closing SWAP's ``realized_pnl_usd_matched``. The
+    # algorithm that seeds wallet-basis lots changed, so the per-primitive
+    # lot-matching slot advances.
+    Primitive.LP: 6,
     # VIB-4848: v1→v2. V4 is the canonical BUNDLED-fees protocol so the
     # taxonomy + IL-adjustment behaviour applies symmetrically; the
     # parallel slot keeps V4 fixtures from regressing on the V3 stream.

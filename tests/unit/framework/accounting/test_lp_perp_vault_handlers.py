@@ -1943,6 +1943,21 @@ class TestHandleLpWalletBasisHooks:
             start=Decimal("0"),
         )
 
+    def _wallet_lot_cost(
+        self, basis: FIFOBasisStore, deployment_id: str, chain: str, wallet: str, token: str
+    ) -> Decimal | None:
+        """Return the ``cost_usd`` of the single most-recent lot for the token.
+
+        Used by VIB-4264 tests to inspect the per-leg basis stamped on the
+        LP_CLOSE-minted acquisition lot directly (Empty ≠ Zero: ``None`` is a
+        first-class measured-unmeasured value, distinct from ``Decimal("0")``).
+        """
+        swap_wallet_key = f"swap:{chain.lower()}:{wallet.lower()}"
+        key = basis._key(deployment_id, swap_wallet_key, token)
+        lots = basis._lots.get(key, [])
+        assert lots, f"no lots recorded for {token}"
+        return lots[-1].get("cost_usd")
+
     def test_lp_open_drains_wallet_basis_for_both_tokens(self) -> None:
         """LP_OPEN must call match_swap_disposal for token0 + token1.
 
@@ -2161,13 +2176,165 @@ class TestHandleLpWalletBasisHooks:
         assert unmatched == Decimal("0"), (
             f"Follow-up SWAP could not match LP-returned WETH; unmatched={unmatched}"
         )
-        # LP_CLOSE wrote a 0.02 WETH lot at per-leg-basis = $50 (cost_basis_usd
-        # $100 / 2 active legs). The disposal of the full 0.02 must consume
-        # exactly that lot at exactly that basis — proves the LP_CLOSE record
-        # actually fired and stamped the right cost.
+        # LP_CLOSE wrote a 0.02 WETH lot at per-leg-basis = $50. With
+        # VIB-4264 value-weighting this is the symmetric case: USDC leg =
+        # 50 × $1 = $50, WETH leg = 0.02 × $2500 = $50, total $100 ⇒ each leg
+        # weights to exactly 50% ⇒ $100 × $50/$100 = $50 (degenerates to the
+        # old equal split). The disposal of the full 0.02 must consume exactly
+        # that lot at exactly that basis — proves the LP_CLOSE record actually
+        # fired and stamped the right cost, and that value-weighting preserves
+        # the symmetric result.
         assert cost_basis_consumed == Decimal("50"), (
             f"LP_CLOSE-minted lot basis was {cost_basis_consumed}; expected $50"
         )
+
+    def test_lp_close_value_weights_asymmetric_legs(self) -> None:
+        """VIB-4264: LP_CLOSE basis splits by VALUE, not by leg count.
+
+        Close returns 100 USDC + 0.01 WETH at prices {USDC:1, WETH:2000} ⇒
+        leg values $100 and $20, total_val_usd $120. Value-weighting must stamp
+        the USDC lot at $100 (= $120 × 100/120) and the WETH lot at $20
+        (= residual). On ``main`` the equal split stamped $60 on EACH leg,
+        over-basing the WETH leg by +$40 — exactly the over-basis that inflated
+        the mainnet close SWAP's realized_pnl_usd_matched to −$0.2507 vs true
+        ≈ −$0.02. This test FAILS on main (WETH lot would be $60).
+        """
+        basis = FIFOBasisStore()
+        close_id = str(uuid.uuid4())
+        prior_open = {"cost_basis_usd": "120", "tick_lower": -1000, "tick_upper": 1000}
+        prices_json = json.dumps({"USDC": "1.00", "WETH": "2000.00"})
+        handle_lp(
+            _make_outbox_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+                market_id="0x1111111111111111111111111111111111111111",
+            ),
+            _make_ledger_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                protocol="uniswap_v3",
+                chain="arbitrum",
+                token_in="",
+                token_out="",
+                amount_in="100",
+                amount_out="0.01",
+                price_inputs_json=prices_json,
+            ),
+            prior_open_payload=prior_open,
+            basis_store=basis,
+        )
+
+        # USDC leg (index 0) takes the value-weighted share; WETH (last leg)
+        # takes the residual. Σ == $120 exactly.
+        usdc_cost = self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        weth_cost = self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
+        assert usdc_cost == Decimal("100"), f"USDC lot basis {usdc_cost}; expected $100"
+        assert weth_cost == Decimal("20"), f"WETH lot basis {weth_cost}; expected $20 (was $60 on main)"
+        assert usdc_cost + weth_cost == Decimal("120"), "Σ per-leg basis must equal total_val_usd exactly"
+
+        # End-to-end: disposing the full 0.01 WETH consumes the lot at exactly $20.
+        cost_basis_consumed, unmatched = basis.match_swap_disposal(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="WETH",
+            amount=Decimal("0.01"),
+        )
+        assert unmatched == Decimal("0")
+        assert cost_basis_consumed == Decimal("20"), (
+            f"WETH disposal consumed basis {cost_basis_consumed}; expected $20 (over-based to $60 on main)"
+        )
+
+    def test_lp_close_missing_leg_price_leaves_basis_none_for_all_legs(self) -> None:
+        """VIB-4264: one unpriced leg ⇒ whole-hook None (Empty ≠ Zero, Option a).
+
+        The weight is a RATIO across legs; a single missing price makes the
+        denominator (Σ leg_value) unmeasurable for EVERY leg. Both lots are
+        still RECORDED (neither leg dropped) but BOTH carry cost_usd=None —
+        the USDC leg is unpriced-by-association, NOT stamped total/2. On main
+        the equal split would stamp a concrete per-leg basis on both legs.
+        """
+        basis = FIFOBasisStore()
+        close_id = str(uuid.uuid4())
+        prior_open = {"cost_basis_usd": "100", "tick_lower": -1000, "tick_upper": 1000}
+        # WETH price omitted entirely ⇒ WETH leg is unpriced.
+        prices_json = json.dumps({"USDC": "1.00"})
+        result = handle_lp(
+            _make_outbox_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+                market_id="0x1111111111111111111111111111111111111111",
+            ),
+            _make_ledger_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                protocol="uniswap_v3",
+                chain="arbitrum",
+                token_in="",
+                token_out="",
+                amount_in="50",
+                amount_out="0.02",
+                price_inputs_json=prices_json,
+            ),
+            prior_open_payload=prior_open,
+            basis_store=basis,
+        )
+        assert result is not None
+
+        # Both lots recorded (neither leg dropped)...
+        assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC") == Decimal("50")
+        assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH") == Decimal("0.02")
+        # ...but BOTH carry cost_usd=None — the priced USDC leg is NOT stamped
+        # total/2 (that would fabricate the unmeasurable denominator).
+        assert self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "USDC") is None, (
+            "USDC lot must be cost_usd=None (whole-hook None); main would stamp total/2"
+        )
+        assert self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "WETH") is None
+
+        # Disposing the WETH leg yields a None cost basis (fail-closed).
+        cost_basis_consumed, _ = basis.match_swap_disposal(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="WETH",
+            amount=Decimal("0.02"),
+        )
+        assert cost_basis_consumed is None
+
+    def test_lp_close_single_sided_gets_full_basis(self) -> None:
+        """VIB-4264: a single active leg takes the FULL basis (residual).
+
+        One-sided exit (only USDC returned), total_val_usd $80, priced ⇒ the
+        sole leg is the last leg and absorbs the full residual = $80. Invariant
+        lock: value-weighting must not shrink single-sided basis.
+        """
+        basis = FIFOBasisStore()
+        close_id = str(uuid.uuid4())
+        prior_open = {"cost_basis_usd": "80", "tick_lower": -1000, "tick_upper": 1000}
+        prices_json = json.dumps({"USDC": "1.00", "WETH": "2000.00"})
+        handle_lp(
+            _make_outbox_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+                market_id="0x1111111111111111111111111111111111111111",
+            ),
+            _make_ledger_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                protocol="uniswap_v3",
+                chain="arbitrum",
+                token_in="",
+                token_out="",
+                amount_in="80",
+                amount_out="0",  # WETH leg returns 0 ⇒ single active leg (USDC)
+                price_inputs_json=prices_json,
+            ),
+            prior_open_payload=prior_open,
+            basis_store=basis,
+        )
+        usdc_cost = self._wallet_lot_cost(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        assert usdc_cost == Decimal("80"), f"single-sided USDC lot basis {usdc_cost}; expected full $80"
 
     def test_basis_store_none_is_a_no_op(self) -> None:
         """`basis_store=None` (paper / dry-run) MUST NOT raise — fallthrough."""

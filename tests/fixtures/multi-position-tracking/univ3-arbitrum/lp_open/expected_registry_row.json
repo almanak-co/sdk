@@ -1,5 +1,5 @@
 {
-  "_comment": "16-column position_registry row per PRD §Registry Data Shape (multi-position-tracking.md line 119). Constructed from receipt facts only: physical_identity_hash from (chain, nft_manager_addr, token_id); semantic_grouping_key from (chain, pool_address). Canonical taxonomy values from record_for('LP_OPEN').primitive.value and .accounting_category.value. matching_policy_version from MATCHING_POLICY_VERSIONS[Primitive.LP] == 5 (bumped 3->4 by VIB-4275, then 4->5 by VIB-4848: fee-separation taxonomy + fee-adjusted IL + mid-life COLLECT_FEES folding).",
+  "_comment": "16-column position_registry row per PRD §Registry Data Shape (multi-position-tracking.md line 119). Constructed from receipt facts only: physical_identity_hash from (chain, nft_manager_addr, token_id); semantic_grouping_key from (chain, pool_address). Canonical taxonomy values from record_for('LP_OPEN').primitive.value and .accounting_category.value. matching_policy_version from MATCHING_POLICY_VERSIONS[Primitive.LP] == 6 (bumped 3->4 by VIB-4275, 4->5 by VIB-4848: fee-separation taxonomy + fee-adjusted IL + mid-life COLLECT_FEES folding, 5->6 by VIB-4264: value-weighted LP_CLOSE wallet-basis distribution).",
   "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
   "chain": "arbitrum",
   "primitive": "lp",
@@ -27,5 +27,5 @@
   "closed_at_block": null,
   "closed_tx": null,
   "last_reconciled_at_block": null,
-  "matching_policy_version": 5
+  "matching_policy_version": 6
 }

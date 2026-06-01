@@ -9,7 +9,7 @@
   "category": "lp",
   "primitive": "lp",
   "event_type": "LP_OPEN",
-  "matching_policy_version": 5,
+  "matching_policy_version": 6,
   "schema_version": 1,
   "formula_version": 1,
   "primitive_version": 1,

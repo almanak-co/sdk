@@ -34,9 +34,11 @@ def test_baseline_versions() -> None:
     """MATCHING_POLICY_VERSIONS exposes the declared per-primitive defaults."""
     # VIB-4275 bumped LP v3→v4 (co-pool close→open discriminator resolution).
     # VIB-4848 bumped LP v4→v5 (T8 fee-separation taxonomy + T9 fee-adjusted
-    # IL + T12 mid-life COLLECT_FEES folded into net_pnl_usd).  Lending /
-    # Perp are untouched — per-primitive isolation contract.
-    assert MATCHING_POLICY_VERSIONS[Primitive.LP] == 5
+    # IL + T12 mid-life COLLECT_FEES folded into net_pnl_usd).
+    # VIB-4264 bumped LP v5→v6 (value-weighted LP_CLOSE wallet-basis
+    # distribution replacing the equal split).  Lending / Perp are
+    # untouched — per-primitive isolation contract.
+    assert MATCHING_POLICY_VERSIONS[Primitive.LP] == 6
     assert MATCHING_POLICY_VERSIONS[Primitive.LENDING] == 3
     assert MATCHING_POLICY_VERSIONS[Primitive.PERP] == 1
     # Every Primitive has an entry — no KeyError on writer lookup.

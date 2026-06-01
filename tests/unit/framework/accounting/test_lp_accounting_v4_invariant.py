@@ -365,7 +365,7 @@ def test_v4_payload_carries_protocol_for_primitive_for_override():
     augmented = json.loads(augment_accounting_payload(v4_event.to_payload_json(), is_live=False))
     # V4 lane: matching_policy_version comes from PRIMITIVE_VERSIONS[Primitive.LP_V4]
     # (today: 2 after VIB-4848). If the override is dead code, this would be
-    # PRIMITIVE_VERSIONS[Primitive.LP] (today: 5).
+    # PRIMITIVE_VERSIONS[Primitive.LP] (today: 6 after VIB-4264).
     assert augmented["matching_policy_version"] == 2, (
         f"V4 LP event must stamp matching_policy_version=2 (LP_V4 lane); "
         f"got {augmented['matching_policy_version']} — V4 override is dead code"

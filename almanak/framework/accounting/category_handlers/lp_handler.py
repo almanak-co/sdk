@@ -817,6 +817,63 @@ def _compute_lp_realized_pnl_and_fees(
     return realized_pnl_usd, fees_total_usd
 
 
+def _value_weighted_leg_basis(
+    active_legs: list[tuple[str, Decimal]],
+    total_val_usd: Decimal | None,
+    price_oracle: dict[str, Decimal],
+) -> list[Decimal | None]:
+    """Split ``total_val_usd`` across legs by close-time USD value (VIB-4264).
+
+    Returns a ``cost_usd`` per leg, keyed BY INDEX (not by token symbol) so the
+    degenerate ``token0 == token1`` case keeps two independent slots. Replaces
+    the prior equal-split which over-based the smaller-value leg and inflated
+    the closing SWAP's ``realized_pnl_usd_matched`` (mainnet repro −$0.2507 vs
+    true ≈ −$0.02).
+
+    Empty ≠ Zero (CLAUDE.md), Option (a) — whole-hook None: the weight is a
+    RATIO across legs, so ``total_val_usd is None`` OR ANY leg with a missing /
+    non-finite price ⇒ ``None`` for ALL legs (the denominator Σ leg_value is
+    unmeasurable; assigning a concrete basis to the priced leg would fabricate
+    it). The LAST leg takes the residual so Σ(result) == ``total_val_usd``
+    EXACTLY — no basis created/destroyed to Decimal rounding (same residual
+    technique as ``swap_handler._split_proceeds``).
+    """
+    n = len(active_legs)
+    if total_val_usd is None:
+        return [None] * n
+
+    leg_value_usd: list[Decimal] = []
+    for leg_token, leg_amount in active_legs:
+        price = price_oracle.get((leg_token or "").upper())
+        if price is None or not price.is_finite():
+            return [None] * n  # whole-hook None: unmeasurable cross-leg ratio
+        leg_value_usd.append(leg_amount * price)
+
+    total_value = sum(leg_value_usd, Decimal("0"))
+    if total_value <= 0:
+        # Degenerate (leg values net to ≤ 0, e.g. a zero-priced leg): fall back
+        # to an equal split, last leg taking the residual so Σ stays exact —
+        # basis neither dropped nor fabricated, same invariant as the weighted
+        # path below.
+        even = total_val_usd / Decimal(n)
+        fallback: list[Decimal | None] = [even] * (n - 1)
+        fallback.append(total_val_usd - even * Decimal(n - 1))
+        return fallback
+
+    per_leg_basis: list[Decimal | None] = [None] * n
+    running = Decimal("0")
+    last = n - 1
+    for i in range(n):
+        if i < last:
+            share = total_val_usd * (leg_value_usd[i] / total_value)
+            per_leg_basis[i] = share
+            running += share
+        else:
+            # Last leg absorbs the residual ⇒ Σ == total_val_usd exactly.
+            per_leg_basis[i] = total_val_usd - running
+    return per_leg_basis
+
+
 # crap-allowlist: VIB-4262 — _apply_lp_wallet_basis_hooks branches per
 # (intent_type × token leg × skip-condition) which is the irreducible shape
 # of LP semantics: LP_OPEN drains both tokens, LP_CLOSE / LP_COLLECT_FEES
@@ -843,6 +900,7 @@ def _apply_lp_wallet_basis_hooks(
     fees1: Decimal | None,
     cost_basis_usd: Decimal | None,
     fees_total_usd: Decimal | None,
+    price_oracle: dict[str, Decimal],  # NEW (VIB-4264)
     timestamp: datetime,
     tx_hash: str,
     ledger_entry_id: str,
@@ -902,7 +960,7 @@ def _apply_lp_wallet_basis_hooks(
     # Mirror as wallet-basis acquisition so a follow-up SWAP that disposes
     # the returned tokens has a basis lot to match against.
     #
-    # Cost-basis distribution (gemini-code-assist 2026-05-11):
+    # Cost-basis distribution (gemini-code-assist 2026-05-11; VIB-4264):
     #
     # 1. Per-leg amount = principal + accumulated fees. LP_COLLECT_FEES has
     #    amount0/amount1 == 0 by design; without summing fees the hook would
@@ -912,8 +970,26 @@ def _apply_lp_wallet_basis_hooks(
     #    the cost lot — without them, a follow-up SWAP that disposes the
     #    fee portion mis-computes realized PnL.
     # 3. Active legs only. Single-sided exits (one token amount==0) get the
-    #    full per-leg basis; otherwise it's split equally. A 50/50 fixed
-    #    split would silently drop half the basis on single-sided returns.
+    #    full per-leg basis.
+    # 4. VIB-4264 — VALUE-WEIGHTED distribution. The whole-position
+    #    ``total_val_usd`` is split across legs in proportion to each leg's
+    #    USD value (leg_amount × close-time price), NOT equally by leg count.
+    #    The prior equal split over-based the smaller-value leg: a 100 USDC +
+    #    0.01 WETH close (USDC:1, WETH:2000 ⇒ $100 vs $20, total $120) stamped
+    #    $60 on EACH leg, over-basing WETH by +$40. That over-based lot
+    #    re-enters the swap FIFO pool and inflates the closing SWAP's
+    #    ``realized_pnl_usd_matched`` (= matched_proceeds − cost_basis_consumed
+    #    in ``swap_handler.py``). Mainnet repro: −$0.2507 vs true ≈ −$0.02.
+    #    The split keeps the Σ-invariant EXACTLY — the LAST leg takes the
+    #    residual (``total_val_usd − Σ(previous)``) so no basis is created or
+    #    destroyed to Decimal rounding, mirroring ``swap_handler._split_proceeds``.
+    #    Empty ≠ Zero (CLAUDE.md), Option (a) — whole-hook None: the weight is
+    #    a RATIO across legs, so a single missing/non-finite leg price makes the
+    #    denominator (Σ leg_value) unmeasurable for EVERY leg. Assigning a
+    #    concrete basis to the priced leg would fabricate that denominator, so
+    #    ALL legs fall back to ``cost_usd = None`` (lots still recorded; neither
+    #    leg dropped). Fail-closed (swap emits realized_pnl = None) beats
+    #    fail-wrong.
     if intent_type_str in {"LP_CLOSE", "LP_COLLECT_FEES"}:
         t0_total = (amount0 if amount0 is not None else Decimal("0")) + (fees0 if fees0 is not None else Decimal("0"))
         t1_total = (amount1 if amount1 is not None else Decimal("0")) + (fees1 if fees1 is not None else Decimal("0"))
@@ -943,15 +1019,17 @@ def _apply_lp_wallet_basis_hooks(
                 total_val_usd += cost_basis_usd
             if fees_total_usd is not None:
                 total_val_usd += fees_total_usd
-        per_leg_basis = total_val_usd / Decimal(len(active_legs)) if total_val_usd is not None else None
+        # VIB-4264: value-weight ``total_val_usd`` across legs by close-time
+        # USD value (see ``_value_weighted_leg_basis``). Keyed BY INDEX.
+        per_leg_basis = _value_weighted_leg_basis(active_legs, total_val_usd, price_oracle)
 
-        for leg_token, leg_amount in active_legs:
+        for idx, (leg_token, leg_amount) in enumerate(active_legs):
             basis_store.record_swap_acquisition(
                 deployment_id=deployment_id,
                 position_key=swap_wallet_key,
                 token=leg_token,
                 amount=leg_amount,
-                cost_usd=per_leg_basis,
+                cost_usd=per_leg_basis[idx],
                 timestamp=timestamp,
                 lot_id=(
                     make_accounting_event_id(deployment_id, cycle_id, "LP_CLOSE_WALLET_LOT", _seed, leg_token)
@@ -1126,6 +1204,7 @@ def handle_lp(
         fees1=fees1,
         cost_basis_usd=cost_basis_usd,
         fees_total_usd=fees_total_usd,
+        price_oracle=price_oracle,
         timestamp=timestamp,
         tx_hash=tx_hash,
         ledger_entry_id=ledger_entry_id,
