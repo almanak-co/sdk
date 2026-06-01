@@ -50,6 +50,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.accounting.policy import MatchingPolicy
+from almanak.framework.intents.compiler_constants import (
+    PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
+    SLIPSTREAM_NFT_POSITION_MANAGERS,
+    UNIV3_LP_GROUPING_PROTOCOLS,
+    UNIV3_NFT_POSITION_MANAGERS,
+)
 from almanak.framework.primitives.types import AccountingCategory, Primitive
 
 if TYPE_CHECKING:
@@ -502,15 +508,13 @@ def fold_position_events_for_univ3(  # noqa: C901 — explicit identity-anchor c
 # =============================================================================
 
 
-_UNIV3_LP_PROTOCOLS: frozenset[str] = frozenset(
-    {
-        "uniswap_v3",
-        "sushiswap_v3",
-        "pancakeswap_v3",
-        "aerodrome_slipstream",
-        "velodrome_slipstream",
-    }
-)
+# Protocols using the Uniswap-V3-shape LP grouping policy. VIB-4864
+# (W2-followup): derived from each UniV3-shape DEX connector's
+# ``lp_constants.UNIV3_LP_GROUPING_PROTOCOLS`` declaration via the
+# framework's ``compiler_constants`` aggregation point — no longer a
+# hardcoded list of protocol slugs in this module. Byte-equivalent to the
+# pre-VIB-4864 frozenset (mirrors the VIB-4872 ``AAVE_V2_FORKS`` pattern).
+_UNIV3_LP_PROTOCOLS: frozenset[str] = UNIV3_LP_GROUPING_PROTOCOLS
 
 
 _UNIV3_GROUPING_POLICY_VERSION: str = "univ3_lp@v1"
@@ -592,27 +596,44 @@ def _nft_manager_for_chain(chain: str) -> str | None:
     1. Lowercase addresses fail the EIP-55 checksum invariant
        enforced by ``tests/unit/core/test_eip55_checksum.py``.
     2. A second copy of the same chain → NPM map is a drift hazard
-       — the connector's ``POSITION_MANAGER_ADDRESSES`` already
-       carries the EIP-55-correct values and stays in sync as new
-       chains land.
+       — the connector's published addresses already carry the
+       EIP-55-correct values and stay in sync as new chains land.
 
-    The canonical UniV3 NPM map lives in
-    ``almanak.connectors.uniswap_v3.receipt_parser``. We
-    import it here as the single source of truth — the backfill is
-    explicitly scoped to UniV3 LP, so depending on the parser's map
-    is appropriate. Returning ``None`` on an unrecognized chain keeps
-    the backfill from silently synthesizing a row with a fabricated
-    address (Empty ≠ zero, per the broader cutover rule).
+    The canonical UniV3-family NPM map is derived in
+    ``almanak.framework.intents.compiler_constants`` from each
+    connector's self-contained ``addresses.py`` (W1 / VIB-4853). VIB-4864
+    (W2-followup) routes this lookup through that derived view instead of
+    reaching into the connector's ``receipt_parser`` module — the address
+    is value-bearing (the emitter component of an LP position's
+    ``physical_identity_hash``), so the view is byte-equivalent to the
+    pre-VIB-4864 parser map (curated chain subset, ``bnb`` alias, and the
+    Agni-Finance overlay on Mantle all preserved). Returning ``None`` on
+    an unrecognized chain keeps the backfill from silently synthesizing a
+    row with a fabricated address (Empty ≠ zero, per the broader cutover
+    rule).
 
     For protocol-aware lookup (Slipstream forks and PancakeSwap V3 ship
     their own NPM at a different address than canonical UniV3 on the
     same chain), use :func:`_nft_manager_for_protocol_chain` instead.
     """
-    from almanak.connectors.uniswap_v3.receipt_parser import (
-        POSITION_MANAGER_ADDRESSES,
-    )
+    return UNIV3_NFT_POSITION_MANAGERS.get((chain or "").strip().lower())
 
-    return POSITION_MANAGER_ADDRESSES.get((chain or "").strip().lower())
+
+# Per-protocol NPM-address maps for forks that deploy their own
+# NonfungiblePositionManager at a different address than canonical Uniswap
+# V3 on the same chain. VIB-4864 (W2-followup): these derived views live in
+# ``compiler_constants`` and are sourced from each connector's
+# self-contained ``addresses.py`` (W1 / VIB-4853) — the migration backfill
+# no longer imports connector ``receipt_parser`` modules. Each view is
+# byte-equivalent to the parser map it replaces (lowercased addresses,
+# ``bnb`` alias preserved). Protocols absent from this map fall through to
+# the canonical UniV3-family lookup (``uniswap_v3`` / ``sushiswap_v3`` share
+# the canonical NPM on the chains they support today).
+_NPM_ADDRESSES_BY_PROTOCOL: dict[str, dict[str, str]] = {
+    "aerodrome_slipstream": SLIPSTREAM_NFT_POSITION_MANAGERS,
+    "velodrome_slipstream": SLIPSTREAM_NFT_POSITION_MANAGERS,
+    "pancakeswap_v3": PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
+}
 
 
 def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
@@ -627,16 +648,12 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
     on-chain NPM emitter, and ``position_registry`` lookups would
     consistently miss (VIB-4305).
 
-    - ``aerodrome_slipstream`` / ``velodrome_slipstream`` → read from
-      ``AERODROME[<chain>]['cl_nft']`` via the parser's
-      ``_SLIPSTREAM_NPM_ADDRESSES`` map (built at import time from
-      ``almanak.core.contracts.AERODROME`` — the single source of
-      truth shared with the parser address-filter).
-    - ``pancakeswap_v3`` → read from
-      ``PANCAKESWAP_V3[<chain>]['nft']`` via the parser's
-      ``POSITION_MANAGER_ADDRESSES`` map (built at import time from
-      ``almanak.core.contracts.PANCAKESWAP_V3`` — the single source of
-      truth shared with the parser address-filter).
+    - Forks with their own NPM (``aerodrome_slipstream`` /
+      ``velodrome_slipstream`` → Slipstream ``cl_nft``; ``pancakeswap_v3``
+      → PancakeSwap V3 ``nft``) resolve through
+      :data:`_NPM_ADDRESSES_BY_PROTOCOL`, whose entries are the derived
+      views in ``compiler_constants`` built from each connector's
+      ``addresses.py`` (W1 / VIB-4853).
     - Anything else (``uniswap_v3`` / ``sushiswap_v3`` / unrecognized /
       empty) → delegate to :func:`_nft_manager_for_chain` (UniV3 family
       lookup; Sushi V3 uses the same NPM as Uniswap V3 on the chains it
@@ -645,20 +662,10 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
     Returns ``None`` (NOT ``""``) on unrecognized chains, so the caller
     can distinguish "no NPM registered" from "NPM is the empty string".
     """
-    protocol_norm = (protocol or "").strip().lower()
     chain_norm = (chain or "").strip().lower()
-    if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
-        from almanak.connectors.aerodrome.receipt_parser import (
-            _SLIPSTREAM_NPM_ADDRESSES,
-        )
-
-        return _SLIPSTREAM_NPM_ADDRESSES.get(chain_norm) or None
-    if protocol_norm == "pancakeswap_v3":
-        from almanak.connectors.pancakeswap_v3.receipt_parser import (
-            POSITION_MANAGER_ADDRESSES as PCS_POSITION_MANAGER_ADDRESSES,
-        )
-
-        return PCS_POSITION_MANAGER_ADDRESSES.get(chain_norm) or None
+    fork_map = _NPM_ADDRESSES_BY_PROTOCOL.get((protocol or "").strip().lower())
+    if fork_map is not None:
+        return fork_map.get(chain_norm) or None
     return _nft_manager_for_chain(chain_norm)
 
 

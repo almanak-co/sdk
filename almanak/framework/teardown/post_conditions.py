@@ -365,17 +365,31 @@ register_teardown_post_condition("traderjoe_v2", _traderjoe_v2_post_condition)
 # registers under each protocol slug.
 
 # Map protocol slug -> contracts registry key. Only protocols whose
-# ``almanak.core.contracts`` registry actually carries a
-# ``position_manager`` address are listed here — registering a slug
-# without an NPM would cause every teardown of that protocol to
-# fail-closed with "no NPM registered". PancakeSwap V3 has connector
-# coverage for swaps but no NPM entry today; if/when an NPM lands in
-# ``contracts.py`` add it here in the same line.
-_V3_PROTOCOL_TO_REGISTRY = {
-    "uniswap_v3": "UNISWAP_V3",
-    "agni_finance": "AGNI_FINANCE",
-    "sushiswap_v3": "SUSHISWAP_V3",
+# connector ``addresses.py`` registry actually carries an NPM address are
+# listed here — registering a slug without an NPM would cause every teardown
+# of that protocol to fail-closed with "no NPM registered".
+#
+# Post W1 (VIB-4853) each protocol's address table is owned by its
+# connector folder. The registry name encodes ``(module, attribute)``
+# tuples so the lookup can ``importlib.import_module`` lazily — the
+# dispatch table itself stays free of import-time side effects.
+#
+# PancakeSwap V3 records its NPM under the ``nft`` key (its receipt parser and
+# intent compiler standardise on ``nft``); the others use ``position_manager``.
+# ``_resolve_v3_position_manager`` accepts both so this stays a single per-fork
+# NPM source — the connector's ``addresses.py`` — without a key rename that
+# would ripple through every Pancake reader (VIB-4902).
+_V3_PROTOCOL_TO_REGISTRY: dict[str, tuple[str, str]] = {
+    "uniswap_v3": ("almanak.connectors.uniswap_v3.addresses", "UNISWAP_V3"),
+    "agni_finance": ("almanak.connectors.uniswap_v3.addresses", "AGNI_FINANCE"),
+    "pancakeswap_v3": ("almanak.connectors.pancakeswap_v3.addresses", "PANCAKESWAP_V3"),
+    "sushiswap_v3": ("almanak.connectors.sushiswap_v3.addresses", "SUSHISWAP_V3"),
 }
+
+# Connectors record the NPM under ``position_manager`` (uniswap / agni / sushi)
+# or ``nft`` (pancakeswap). Try both so a single per-fork ``addresses.py`` entry
+# satisfies every reader (VIB-4902).
+_NPM_ADDRESS_KEYS = ("position_manager", "nft")
 
 
 def _resolve_v3_position_manager(protocol: str, chain: str) -> str | None:
@@ -384,17 +398,23 @@ def _resolve_v3_position_manager(protocol: str, chain: str) -> str | None:
     Returns ``None`` when the protocol is not registered or the chain has
     no deployment. Callers fail-closed on ``None``.
     """
-    registry_name = _V3_PROTOCOL_TO_REGISTRY.get(protocol.lower())
-    if registry_name is None:
+    entry = _V3_PROTOCOL_TO_REGISTRY.get(protocol.lower())
+    if entry is None:
         return None
+    module_name, attr_name = entry
     try:
-        from almanak.core import contracts as _contracts
+        import importlib
+
+        mod = importlib.import_module(module_name)
     except Exception:  # noqa: BLE001 — defensive
         return None
-    registry: dict[str, dict[str, str]] = getattr(_contracts, registry_name, None) or {}
+    registry: dict[str, dict[str, str]] = getattr(mod, attr_name, None) or {}
     chain_entry = registry.get(chain.lower()) or registry.get(chain) or {}
-    npm = chain_entry.get("position_manager")
-    return npm or None
+    for key in _NPM_ADDRESS_KEYS:
+        npm = chain_entry.get(key)
+        if npm:
+            return npm
+    return None
 
 
 def _uniswap_v3_post_condition(

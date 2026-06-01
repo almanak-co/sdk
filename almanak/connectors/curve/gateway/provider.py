@@ -13,6 +13,16 @@ Contributes:
 * ``GatewaySubgraphCapability`` (VIB-4817) — TheGraph subgraph URLs
   for Curve, moved verbatim out of the ``_PENDING_SUBGRAPHS`` dict in
   ``almanak.gateway.integrations.thegraph``.
+
+W7-followup (VIB-4870) adds:
+
+* ``GatewayDexVolumeCapability`` — daily trading-volume history via
+  Messari's standardised DEX schema (``liquidityPoolDailySnapshots``).
+  Migrates ``framework/backtesting/pnl/providers/dex/curve_volume.py``.
+  Messari keys daily rows by ``day`` (days since the Unix epoch) rather
+  than a unix-second ``date``; the shared helper's ``time_unit="days"``
+  handles the conversion. Curve StableSwap has no Uniswap-style
+  ``observe()`` TWAP primitive, so it implements volume only.
 """
 
 from __future__ import annotations
@@ -21,6 +31,7 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayDexQuoteCapability,
+    GatewayDexVolumeCapability,
     GatewaySubgraphCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
@@ -35,11 +46,23 @@ _CURVE_SUBGRAPHS: dict[str, str] = {
     "curve-arbitrum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-arbitrum",
 }
 
+# W7-followup / VIB-4870 — Curve daily-volume subgraph IDs (Messari
+# standardised DEX schema). Migrated verbatim from
+# ``framework/backtesting/pnl/providers/dex/curve_volume.py``. Note the
+# volume coverage (Ethereum, Optimism) differs from the quote coverage
+# (Ethereum, Arbitrum) above — the Messari volume subgraphs are deployed
+# on a different chain set than the Convex quote subgraphs.
+_CURVE_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
+    "ethereum": "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
+    "optimism": "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
+}
+
 
 class CurveGatewayConnector(
     GatewayConnector,
     GatewayDexQuoteCapability,
     GatewaySubgraphCapability,
+    GatewayDexVolumeCapability,
 ):
     """Gateway-side connector for Curve."""
 
@@ -71,6 +94,56 @@ class CurveGatewayConnector(
     def subgraph_endpoints(self) -> dict[str, str]:
         """TheGraph subgraph URLs for Curve (Ethereum, Arbitrum)."""
         return dict(_CURVE_SUBGRAPHS)
+
+    # ---------------------------------------------------------------------
+    # GatewayDexVolumeCapability (VIB-4870 / W7-followup)
+    # ---------------------------------------------------------------------
+
+    def volume_supported_chains(self) -> frozenset[str]:
+        """Chains with a registered Curve volume subgraph (Ethereum, Optimism)."""
+        return frozenset(_CURVE_VOLUME_SUBGRAPH_IDS)
+
+    async def fetch_volume_history(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any:
+        """Daily trading-volume history via Messari ``liquidityPoolDailySnapshots``.
+
+        Migrated from
+        ``framework/backtesting/pnl/providers/dex/curve_volume.py``.
+        Messari snapshots key on ``day`` (days since epoch) → the shared
+        helper's ``time_unit="days"`` converts the request window to/from
+        unix seconds.
+        """
+        from almanak.gateway.services._dex_volume_subgraph import (
+            DexVolumeSubgraphSpec,
+            fetch_dex_volume_history,
+        )
+
+        return await fetch_dex_volume_history(
+            servicer,
+            DexVolumeSubgraphSpec(
+                dex_name="curve",
+                subgraph_ids=dict(_CURVE_VOLUME_SUBGRAPH_IDS),
+                entity="liquidityPoolDailySnapshots",
+                id_field="pool",
+                volume_field="dailyVolumeUSD",
+                source="curve_messari_subgraph",
+                time_field="day",
+                time_unit="days",
+            ),
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+        )
 
 
 __all__ = ["CurveGatewayConnector"]

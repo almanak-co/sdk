@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.core.contracts import AERODROME
+from almanak.connectors.aerodrome.addresses import AERODROME
 from almanak.connectors.aerodrome.adapter import (
     AerodromeAdapter,
     AerodromeConfig,

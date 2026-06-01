@@ -1,6 +1,6 @@
 {
     "market": "BTC/USD",
-    "price_symbol": "WBTC",
+    "price_symbol": "BTCB",
     "collateral_token": "BNB",
     "collateral_amount": "0.3",
     "size_usd": "500",

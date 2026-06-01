@@ -461,6 +461,12 @@ class MarketSnapshot:
         self._price_cache: dict[str, PriceData] = {}
         self._rsi_cache: dict[tuple[str, str, int], RSIData] = {}
         self._balance_cache: dict[str, TokenBalance] = {}
+        # VIB-4843 (Empty≠Zero): cache keys whose ``balance_usd`` is the
+        # *unmeasured* coerced sentinel (provider returned a bare balance with
+        # no USD). Only these may be (re)filled from a price; a provider that
+        # MEASURED ``balance_usd`` — including a measured ``Decimal("0")`` — is
+        # authoritative and must never be overwritten.
+        self._balance_usd_unmeasured: set[str] = set()
         # Critical data failures observed while strategies queried this
         # snapshot. Runner can use this to avoid treating "HOLD forever because
         # market data is broken" as healthy behavior.
@@ -1495,6 +1501,7 @@ class MarketSnapshot:
         protocol: str | None = None,
         *,
         chain: str | None = None,
+        price: Decimal | None = None,
     ) -> TokenBalance:
         """Get wallet balance for a token.
 
@@ -1511,9 +1518,18 @@ class MarketSnapshot:
             chain: Optional chain override (keyword-only, PRD §4.2 R1). Required
                 on multi-chain snapshots; on single-chain it must match
                 ``self.chain`` or be ``None``.
+            price: Optional already-known USD price (keyword-only, VIB-4843
+                FR-5003). When supplied, ``balance_usd`` is computed as
+                ``balance * price`` WITHOUT a re-fetch. When omitted, the warm
+                ``_price_cache`` is consulted (still no oracle call); only when
+                neither is available is ``balance_usd`` left as the coerced
+                ``Decimal("0")`` for callers to fill via ``price()``. This
+                removes the redundant price re-fetch the portfolio valuation
+                lane previously incurred per token.
 
         Returns:
-            TokenBalance with current balance
+            TokenBalance with current balance (and ``balance_usd`` filled from
+            ``price`` / ``_price_cache`` when derivable).
 
         Raises:
             ChainNotConfiguredError / AmbiguousChainError: same rules as :meth:`price`.
@@ -1528,15 +1544,30 @@ class MarketSnapshot:
         # otherwise the chain-agnostic ``_balances`` map can shadow a different
         # chain's pre-populated balance and silently return the wrong number.
         if cache_key in self._balance_cache:
-            return self._balance_cache[cache_key]
+            filled = self._fill_balance_usd(
+                self._balance_cache[cache_key], resolved, requested_chain, price, cache_key=cache_key
+            )
+            # Persist the filled USD back into the cache. _fill_balance_usd
+            # discards cache_key from _balance_usd_unmeasured once it measures
+            # USD, so without this write-back a later cache hit would treat USD
+            # as measured yet return the original, still-unfilled balance.
+            self._balance_cache[cache_key] = filled
+            return filled
 
         # Check pre-populated balances (chain-agnostic for back-compat).
         if resolved in self._balances:
-            return self._balances[resolved]
+            # Pre-populated balances are MEASURED by the caller (set_balance);
+            # no cache_key provenance → treated as measured, never overwritten.
+            return self._fill_balance_usd(self._balances[resolved], resolved, requested_chain, price)
 
         # Symbol-only cache fallback for legacy callers.
         if resolved in self._balance_cache:
-            return self._balance_cache[resolved]
+            filled = self._fill_balance_usd(
+                self._balance_cache[resolved], resolved, requested_chain, price, cache_key=resolved
+            )
+            # Same write-back as the per-chain branch (cache_key=resolved here).
+            self._balance_cache[resolved] = filled
+            return filled
 
         # Use provider if available. Two protocols are supported:
         #   1. Legacy aggregator object: ``provider.get_balance(token)`` returns
@@ -1560,11 +1591,17 @@ class MarketSnapshot:
                         result = self._run_async_bridged(coro)
                     else:
                         result = coro
-                    balance_data = self._coerce_balance_result(resolved, result)
                 elif _balance_provider_supports_chain_arg(bp):
-                    balance_data = bp(resolved, chain=requested_chain)  # type: ignore[call-arg]
+                    result = bp(resolved, chain=requested_chain)  # type: ignore[call-arg]
                 else:
-                    balance_data = bp(resolved)
+                    result = bp(resolved)
+                # Classify provider provenance uniformly: a provider-supplied
+                # ``TokenBalance`` MEASURED ``balance_usd`` (Empty≠Zero — even a
+                # measured ``Decimal("0")`` is authoritative); legacy / bare
+                # shapes leave the unmeasured sentinel.
+                balance_data, usd_measured = self._coerce_balance_result(resolved, result)
+                if not usd_measured:
+                    self._balance_usd_unmeasured.add(cache_key)
                 # VIB-2364 silent-zero guard: if the resolved token is an
                 # address-form (0x..., 42 chars) and balance is zero, log a
                 # warning so unregistered LST addresses are visible without
@@ -1596,6 +1633,14 @@ class MarketSnapshot:
                             resolved,
                             self._chain,
                         )
+                balance_data = self._fill_balance_usd(
+                    balance_data,
+                    resolved,
+                    requested_chain,
+                    price,
+                    cache_key=cache_key,
+                    usd_measured=usd_measured,
+                )
                 self._balance_cache[cache_key] = balance_data
                 self._critical_data_failures.pop(("balance", cache_key), None)
                 return balance_data
@@ -1707,7 +1752,89 @@ class MarketSnapshot:
             chunks.append(f"... and {remaining} more")
         return "; ".join(chunks)
 
-    def _coerce_balance_result(self, token: str, raw: Any) -> TokenBalance:
+    def _fill_balance_usd(
+        self,
+        tb: TokenBalance,
+        resolved: str,
+        requested_chain: str,
+        price: Decimal | None,
+        *,
+        cache_key: str | None = None,
+        usd_measured: bool | None = None,
+    ) -> TokenBalance:
+        """Fill ``balance_usd`` from a supplied or already-cached price (FR-5003).
+
+        Never issues an oracle call. Resolution order:
+
+        1. The caller-supplied ``price`` (authoritative, no fetch).
+        2. A warm ``_price_cache`` / pre-populated ``_prices`` entry for the
+           token on this chain (still no fetch).
+
+        Empty≠Zero: USD is (re)computed ONLY when the current ``balance_usd``
+        is the *unmeasured* coerced sentinel. "Unmeasured" is determined by
+        ``usd_measured`` when the caller knows it (fresh provider path), else
+        by membership in ``self._balance_usd_unmeasured`` keyed by
+        ``cache_key`` (cache-hit paths). A provider that MEASURED
+        ``balance_usd`` — including a measured ``Decimal("0")`` — is
+        authoritative and is returned unchanged. When no price is available the
+        input is returned unchanged so callers can still fill USD via
+        ``price()`` themselves.
+        """
+        # Decide whether this balance's USD is still unmeasured.
+        if usd_measured is not None:
+            unmeasured = not usd_measured
+        elif cache_key is not None:
+            unmeasured = cache_key in self._balance_usd_unmeasured
+        else:
+            # No provenance available (pre-populated balances reach this
+            # branch); their USD is measured by the caller, so leave untouched.
+            unmeasured = False
+        if not unmeasured:
+            return tb
+        usd_price = price if price is not None else self._cached_price_for(resolved, requested_chain)
+        if usd_price is None:
+            return tb
+        filled = TokenBalance(
+            symbol=tb.symbol,
+            balance=tb.balance,
+            balance_usd=tb.balance * usd_price,
+            address=getattr(tb, "address", "") or "",
+        )
+        # USD is now measured for this key — stop treating it as unmeasured so
+        # later reads don't recompute against a different cached price.
+        if cache_key is not None:
+            self._balance_usd_unmeasured.discard(cache_key)
+        return filled
+
+    def _cached_price_for(self, token: str, requested_chain: str) -> Decimal | None:
+        """Return an already-known USD price for ``token`` WITHOUT a fetch.
+
+        Consults the pre-populated ``_prices`` map and the warm
+        ``_price_cache`` (the same cache ``price()`` writes). Returns ``None``
+        when no cached price exists — the caller must NOT trigger an oracle
+        call from a balance lookup.
+        """
+        if requested_chain == self._chain:
+            # ``_prices`` is populated by ``set_price()`` without case
+            # normalization, so a mixed-case token (cbBTC, wstETH, cbETH, ...)
+            # seeded under one case must still resolve a lookup under another,
+            # or its balance USD is silently left unmeasured. Exact key first
+            # (the common path, O(1)), then a case-insensitive fallback that
+            # mirrors get_price_oracle_dict()'s upper-casing convention.
+            exact = self._prices.get(token)
+            if exact is not None:
+                return exact
+            token_upper = token.upper()
+            for key, val in self._prices.items():
+                if key.upper() == token_upper:
+                    return val
+        cache_key = f"{token}/USD@{requested_chain}"
+        cached = self._price_cache.get(cache_key)
+        if cached is not None:
+            return cached.price
+        return None
+
+    def _coerce_balance_result(self, token: str, raw: Any) -> tuple[TokenBalance, bool]:
         """Normalize a balance-provider return value into a ``TokenBalance``.
 
         Accepts:
@@ -1715,18 +1842,38 @@ class MarketSnapshot:
           * a ``BalanceResult`` with ``.balance`` (legacy async protocol),
           * a bare ``Decimal`` (very old data-layer shape).
 
-        Returns a ``TokenBalance`` with ``balance_usd=Decimal("0")`` when not
-        derivable — callers can recompute via ``price()`` if they need USD.
+        Returns ``(TokenBalance, usd_measured)``. ``usd_measured`` is ``True``
+        only when the provider itself supplied a real ``balance_usd`` (the
+        modern ``TokenBalance`` shape) — including a MEASURED ``Decimal("0")``
+        on a zero holding, which Empty≠Zero forbids overwriting. The legacy /
+        bare-Decimal shapes carry no USD, so they return ``Decimal("0")`` as
+        the *unmeasured* sentinel (``usd_measured=False``) which callers may
+        later fill via ``price()``.
+
+        VIB-4843 couldn't-price sentinel (Codex re-audit): a provider may hand
+        back a ``TokenBalance`` whose ``balance_usd`` is ``Decimal("0")`` not
+        because the holding is worth $0 but because it FAILED to price the
+        token (e.g. ``create_sync_balance_func`` in ``cli/run.py`` swallows a
+        price-oracle error and falls back to ``balance_usd=0``). A genuine
+        measured zero is only trustworthy when the holding itself is zero
+        (``0 * price == 0`` regardless of price). So a ``balance_usd == 0`` is
+        treated as MEASURED only when ``balance == 0``; a non-zero holding with
+        ``balance_usd == 0`` is treated as UNMEASURED so ``_fill_balance_usd``
+        can recompute from an available price instead of reporting a wrong $0.
         """
         if isinstance(raw, TokenBalance):
-            return raw
+            # Distinguish a genuine measured zero (zero holding) from a
+            # couldn't-price zero on a non-zero holding (see docstring).
+            if raw.balance_usd == Decimal("0") and raw.balance != Decimal("0"):
+                return raw, False
+            return raw, True
         balance = getattr(raw, "balance", raw)
         if isinstance(balance, Decimal):
-            return TokenBalance(symbol=token, balance=balance, balance_usd=Decimal("0"))
+            return TokenBalance(symbol=token, balance=balance, balance_usd=Decimal("0")), False
         try:
-            return TokenBalance(symbol=token, balance=Decimal(str(balance)), balance_usd=Decimal("0"))
+            return TokenBalance(symbol=token, balance=Decimal(str(balance)), balance_usd=Decimal("0")), False
         except Exception:  # noqa: BLE001
-            return TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0"))
+            return TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0")), False
 
     def _resolve_protocol_variant(self, token: str, protocol: str | None) -> str:
         """Translate a generic symbol to the protocol's preferred variant.
@@ -1915,6 +2062,14 @@ class MarketSnapshot:
             tb = balance_data_or_chain
             self._balances[token] = tb
             self._balance_cache[f"{token}@{self._chain}"] = tb
+            # VIB-4843 (Codex re-audit): a caller-supplied balance is MEASURED.
+            # If an earlier unpriced provider read marked this key as the
+            # unmeasured sentinel, clear it so a later ``price=``/warm-cache
+            # read does not recompute and clobber the measured value (incl. a
+            # measured ``Decimal("0")``). Discard both the ``@chain`` key and
+            # the bare-symbol legacy key.
+            self._balance_usd_unmeasured.discard(f"{token}@{self._chain}")
+            self._balance_usd_unmeasured.discard(token)
             return
         chain = str(balance_data_or_chain)
         if not isinstance(balance_data, TokenBalance):
@@ -1925,6 +2080,10 @@ class MarketSnapshot:
         if chain == self._chain:
             self._balances[token] = balance_data
         self._balance_cache[f"{token}@{chain}"] = balance_data
+        # VIB-4843 (Codex re-audit): clear any stale unmeasured marker for the
+        # key we just overwrote with a MEASURED value (see canonical path).
+        self._balance_usd_unmeasured.discard(f"{token}@{chain}")
+        self._balance_usd_unmeasured.discard(token)
 
     def set_rsi(self, token: str, rsi_data: RSIData, timeframe: str | None = None) -> None:
         """Pre-populate RSI for a token.
@@ -2125,92 +2284,260 @@ class MarketSnapshot:
         protocol: str,
         token: str,
         side: str = "supply",
+        *,
+        chain: str | None = None,
     ) -> Any:
         """Get the lending rate for a specific protocol and token.
 
-        Fetches the current supply or borrow APY from the specified lending
-        protocol. Rates are cached for efficiency (typically 12s = ~1 block).
+        **Canonical strategy-side accessor for live lending rates** (VIB-4859 / W7).
+        Delegates to the gateway's ``RateHistoryService.GetLendingRateCurrent``
+        RPC via :class:`almanak.framework.data.rates.RateMonitor` — all HTTP /
+        Web3 egress for rate lookups happens server-side via
+        :class:`GatewayLendingRateHistoryCapability` implementations on the
+        corresponding connectors.
+
+        Use this in preference to the deprecated
+        :class:`almanak.framework.data.rates.RateMonitor` direct surface
+        (caller migration tracked in **VIB-4869**).
+
+        Resolution order:
+
+        1. Pre-populated cache (``set_lending_rate(...)``) — hit first for
+           strategies that inject rates synthetically (backtests / tests).
+        2. The constructor-injected ``rate_monitor`` (legacy path), if set.
+        3. A lazily-constructed default ``RateMonitor`` (calls the gateway).
 
         Args:
-            protocol: Protocol identifier (aave_v3, morpho_blue, compound_v3)
-            token: Token symbol (e.g., "USDC", "WETH")
-            side: Rate side - "supply" or "borrow" (default "supply")
+            protocol: Protocol identifier (``"aave_v3"``, ``"compound_v3"``,
+                ``"morpho_blue"``). Must be registered with
+                ``GatewayLendingRateHistoryCapability`` on the gateway side.
+            token: Token symbol (e.g. ``"USDC"``, ``"WETH"``).
+            side: Rate side — ``"supply"`` (default) or ``"borrow"``.
+            chain: Optional chain override (keyword-only, PRD §4.2 R1). When
+                omitted the snapshot's resolved chain is used.
 
         Returns:
-            LendingRate dataclass with apy_percent, apy_ray, utilization_percent, etc.
+            :class:`LendingRate` dataclass with ``apy_percent``, ``apy_ray``,
+            ``utilization_percent``, etc.
 
         Raises:
-            ValueError: If no rate monitor is configured
+            ChainNotConfiguredError / AmbiguousChainError: same rules as :meth:`price`.
+            ValueError: If the gateway returns no rate and no fallback is configured.
 
         Example:
             rate = market.lending_rate("aave_v3", "USDC", "supply")
             print(f"Aave USDC Supply APY: {rate.apy_percent:.2f}%")
         """
-        # Check pre-populated rates first
-        cache_key = self._lending_cache_key(protocol, token, side)
+        from almanak.framework.data.rates import RateSide
+
+        # Normalize ``side`` once, up front, so every downstream consumer
+        # (cache key, legacy RateMonitor path, gateway path) sees the same
+        # canonical lowercase value. Without this a caller passing "SUPPLY"
+        # would build a lowercased cache key here but then crash on
+        # ``RateSide("SUPPLY")`` (StrEnum lookup is case-sensitive), and the
+        # gateway path would forward the raw mixed-case string — an
+        # inconsistency between the two lanes (VIB-4859 re-review).
+        side_str = (side.value if isinstance(side, RateSide) else str(side)).strip().lower()
+        rate_side = RateSide(side_str)
+
+        # Check pre-populated rates first.
+        cache_key = self._lending_cache_key(protocol, token, side_str)
         if cache_key in self._lending_rate_cache:
             return self._lending_rate_cache[cache_key]
 
-        if self._rate_monitor is None:
-            raise ValueError(
-                "No rate monitor configured for MarketSnapshot. "
-                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() to pre-populate rates."
-            )
+        # Use the constructor-injected RateMonitor if present (legacy path
+        # — preserves test surfaces that mock the monitor).
+        if self._rate_monitor is not None:
+            try:
+                result = self._run_async_bridged(self._rate_monitor.get_lending_rate(protocol, token, rate_side))
+                self._lending_rate_cache[cache_key] = result
+                return result
+            except ValueError:
+                raise
+            except Exception as e:
+                raise ValueError(f"Failed to get lending rate for {protocol}/{token}/{side_str}: {e}") from e
 
-        from almanak.framework.data.rates import RateSide
+        # No monitor injected — construct a default gateway-backed one and
+        # try it via the gateway lane only (no placeholder-rate fallback).
+        # The default RateMonitor is a thin gRPC client of the gateway's
+        # RateHistoryService.GetLendingRateCurrent.
+        #
+        # When the gateway is unreachable AND no monitor was injected, we
+        # preserve the pre-W7 contract that the caller sees a ``ValueError``
+        # mentioning "rate monitor" (matches
+        # ``tests/unit/data/test_market_snapshot_strategy_api.py::
+        # TestProviderlessMethodsRaiseValueError::test_raises_value_error``).
+        # The strategy must explicitly inject a ``RateMonitor`` or run a
+        # gateway to get a real rate — the auto-placeholder fallback that
+        # ``RateMonitor.get_lending_rate`` does on its own is intentionally
+        # NOT surfaced here, since silently substituting hardcoded numbers
+        # for a strategy that asked for a live rate is a bigger footgun than
+        # raising loudly.
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+        from almanak.framework.data.rates.monitor import RateMonitor
+
+        requested_chain = chain if chain is not None else (self._chain if self._chain is not None else "ethereum")
+
+        # ``_internal=True``: this IS the canonical lending-rate lane, not a
+        # deprecated strategy-side bypass (VIB-4869 disposition). The monitor
+        # is the framework-internal gateway gRPC client backing this method.
+        monitor = RateMonitor(chain=requested_chain, _internal=True)
+
+        async def _fetch_via_gateway() -> Any:
+            # Bypass the monitor's placeholder-fallback wrapper so an
+            # unreachable gateway raises rather than silently returning a
+            # hardcoded number. Forward the normalized ``side_str`` so the
+            # gateway lane matches the legacy lane and the cache key.
+            return await monitor._fetch_lending_rate_via_gateway(protocol, token, side_str)
 
         try:
-            rate_side = RateSide(side)
-            result = self._run_async_bridged(self._rate_monitor.get_lending_rate(protocol, token, rate_side))
-            self._lending_rate_cache[cache_key] = result
-            return result
+            result = self._run_async_bridged(_fetch_via_gateway())
+        except DataSourceUnavailable as exc:
+            raise ValueError(
+                f"No rate monitor configured for MarketSnapshot and the gateway is "
+                f"unavailable for {protocol}/{token}/{side_str}: {exc}. "
+                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() "
+                "to pre-populate rates."
+            ) from exc
         except ValueError:
             raise
         except Exception as e:
-            raise ValueError(f"Failed to get lending rate for {protocol}/{token}/{side}: {e}") from e
+            raise ValueError(f"Failed to get lending rate for {protocol}/{token}/{side_str}: {e}") from e
+
+        self._lending_rate_cache[cache_key] = result
+        return result
 
     def best_lending_rate(
         self,
         token: str,
         side: str = "supply",
         protocols: list[str] | None = None,
+        *,
+        chain: str | None = None,
     ) -> Any:
         """Get the best lending rate for a token across protocols.
 
-        For supply rates, returns highest APY. For borrow rates, returns lowest APY.
+        **Canonical strategy-side accessor** for the best live lending rate
+        (VIB-4869), symmetric with :meth:`lending_rate`. For supply rates,
+        returns highest APY; for borrow rates, returns lowest APY.
+
+        Resolution order mirrors :meth:`lending_rate`:
+
+        1. The constructor-injected ``rate_monitor`` (legacy path), if set —
+           preserves test surfaces that mock the monitor.
+        2. A lazily-constructed framework-internal ``RateMonitor``
+           (``_internal=True``) that fans out to the gateway. This keeps
+           direct instantiations (README-style flows, unit / backtest
+           harnesses calling ``create_market_snapshot()`` directly) working
+           without an injected monitor, instead of unconditionally raising.
+
+        As with :meth:`lending_rate`, the lazy lane queries the gateway
+        directly and **raises loudly** when the gateway is unreachable rather
+        than silently substituting placeholder rates — surfacing hardcoded
+        numbers for a strategy that asked for the best live rate is a bigger
+        footgun than raising.
 
         Args:
             token: Token symbol (e.g., "USDC", "WETH")
             side: Rate side - "supply" or "borrow" (default "supply")
             protocols: Protocols to compare (default: all available on chain)
+            chain: Optional chain override (keyword-only). When omitted the
+                snapshot's resolved chain is used.
 
         Returns:
             BestRateResult with best_rate, all_rates, etc.
 
         Raises:
-            ValueError: If no rate monitor is configured
+            ValueError: If no monitor is injected and the gateway is
+                unavailable, or if the best-rate lookup otherwise fails.
 
         Example:
             result = market.best_lending_rate("USDC", "supply")
             if result.best_rate:
                 print(f"Best: {result.best_rate.protocol} at {result.best_rate.apy_percent:.2f}%")
         """
-        if self._rate_monitor is None:
-            raise ValueError(
-                "No rate monitor configured for MarketSnapshot. "
-                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() to pre-populate rates."
-            )
-
         from almanak.framework.data.rates import RateSide
 
+        # Normalize ``side`` once so both lanes (legacy injected monitor and
+        # the lazily-constructed gateway monitor) see the same canonical
+        # lowercase value, mirroring :meth:`lending_rate`.
+        side_str = (side.value if isinstance(side, RateSide) else str(side)).strip().lower()
+
         try:
-            rate_side = RateSide(side)
-            result = self._run_async_bridged(self._rate_monitor.get_best_lending_rate(token, rate_side, protocols))
-            return result
+            rate_side = RateSide(side_str)
+        except ValueError as exc:
+            raise ValueError(f"Invalid lending rate side {side!r}: expected 'supply' or 'borrow'") from exc
+
+        # Use the constructor-injected RateMonitor if present (legacy path —
+        # preserves test surfaces that mock the monitor and any placeholder
+        # behaviour those callers relied on).
+        if self._rate_monitor is not None:
+            try:
+                result = self._run_async_bridged(self._rate_monitor.get_best_lending_rate(token, rate_side, protocols))
+                return result
+            except ValueError:
+                raise
+            except Exception as e:
+                raise ValueError(f"Failed to get best lending rate for {token}/{side_str}: {e}") from e
+
+        # No monitor injected — construct a default framework-internal one and
+        # fan out to the gateway directly. ``_internal=True`` marks this as the
+        # canonical lending-rate lane (VIB-4869), not a deprecated strategy-side
+        # bypass. We bypass ``get_best_lending_rate``'s per-protocol placeholder
+        # fallback so an unreachable gateway raises rather than silently
+        # returning hardcoded numbers — matching :meth:`lending_rate`.
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+        from almanak.framework.data.rates.monitor import BestRateResult, RateMonitor
+
+        requested_chain = chain if chain is not None else (self._chain if self._chain is not None else "ethereum")
+        monitor = RateMonitor(chain=requested_chain, _internal=True)
+        target_protocols = protocols if protocols else monitor.protocols
+
+        async def _best_via_gateway() -> Any:
+            # Tolerate per-protocol gateway failures (one protocol with no
+            # data shouldn't sink the whole comparison), but if *every*
+            # protocol is unavailable surface the first failure so the caller
+            # raises rather than returning an empty result. Mirrors
+            # ``RateMonitor._safe_get_rate``'s per-protocol resilience while
+            # keeping :meth:`lending_rate`'s no-placeholder contract.
+            settled = await asyncio.gather(
+                *(monitor._fetch_lending_rate_via_gateway(protocol, token, side_str) for protocol in target_protocols),
+                return_exceptions=True,
+            )
+            all_rates = [r for r in settled if not isinstance(r, BaseException)]
+            if not all_rates:
+                first_error = next(
+                    (r for r in settled if isinstance(r, BaseException)),
+                    None,
+                )
+                if first_error is not None:
+                    raise first_error
+            if side_str == RateSide.SUPPLY.value:
+                # For supply, higher APY is better.
+                best_rate = max(all_rates, key=lambda r: r.apy_percent) if all_rates else None
+            else:
+                # For borrow, lower APY is better.
+                best_rate = min(all_rates, key=lambda r: r.apy_percent) if all_rates else None
+            return BestRateResult(
+                token=token,
+                side=side_str,
+                best_rate=best_rate,
+                all_rates=all_rates,
+            )
+
+        try:
+            return self._run_async_bridged(_best_via_gateway())
+        except DataSourceUnavailable as exc:
+            raise ValueError(
+                f"No rate monitor configured for MarketSnapshot and the gateway is "
+                f"unavailable for best {side_str} rate on {token}: {exc}. "
+                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() "
+                "to pre-populate rates."
+            ) from exc
         except ValueError:
             raise
         except Exception as e:
-            raise ValueError(f"Failed to get best lending rate for {token}/{side}: {e}") from e
+            raise ValueError(f"Failed to get best lending rate for {token}/{side_str}: {e}") from e
 
     def set_lending_rate(self, protocol: str, token: str, side: str, rate: Any) -> None:
         """Pre-populate a lending rate for a protocol/token/side.
@@ -2555,6 +2882,16 @@ class MarketSnapshot:
 
         target_chain = (chain or self._chain).lower()
         if getattr(self, "_gas_oracle", None) is None:
+            # T3-A (VIB-4844): keep the Decimal("0") return — switching to None
+            # is signature-breaking because callers do arithmetic on the result
+            # (e.g. ``est + slippage``) — but make the silent fail-open
+            # observable. This is a stopgap; T3-E wires a real gas oracle so
+            # this branch stops being hit on the live path.
+            logger.warning(
+                "gas oracle unconfigured; returning Decimal('0') swap gas estimate "
+                "for chain '%s' — gas accounting is unavailable for this MarketSnapshot",
+                target_chain,
+            )
             return Decimal("0")
 
         gp = self.gas_price(target_chain)
@@ -2583,11 +2920,26 @@ class MarketSnapshot:
             return False
         if max_gas_ratio <= 0:
             return False
+        target_chain = (chain or self._chain).lower()
         try:
-            gas_cost_usd = self.estimate_swap_gas_cost_usd(chain)
+            gas_cost_usd = self.estimate_swap_gas_cost_usd(target_chain)
         except GasUnavailableError:
+            # T3-A (VIB-4844): fail-open is intentional (don't halt the
+            # strategy on a transient infra issue) but must be observable.
+            logger.warning(
+                "trade-worthwhile check defaulting to True: gas cost unavailable (GasUnavailableError) for chain '%s'",
+                target_chain,
+            )
             return True
         if gas_cost_usd <= 0:
+            # Reached when the gas oracle is unconfigured (estimate returns
+            # Decimal("0")) or the underlying estimate is zero. The
+            # unconfigured path already warned in estimate_swap_gas_cost_usd;
+            # warn here too so the worthwhile decision itself is traceable.
+            logger.warning(
+                "trade-worthwhile check defaulting to True: gas cost unavailable (estimate <= 0) for chain '%s'",
+                target_chain,
+            )
             return True
         return (gas_cost_usd / amount_usd) < max_gas_ratio
 
@@ -2942,6 +3294,8 @@ class MarketSnapshot:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         resolution: str = "1h",
+        *,
+        protocol: str,
     ) -> DataEnvelope[list[PoolSnapshot]]:
         """Get historical pool state snapshots for backtesting and analytics.
 
@@ -2955,6 +3309,15 @@ class MarketSnapshot:
                 paper runs, and historical snapshots stay deterministic and
                 never leak future data.
             resolution: "1h" / "4h" / "1d". Default "1h".
+            protocol: REQUIRED keyword-only. Protocol slug — e.g.
+                ``"uniswap_v3"``, ``"aerodrome"``. NO default — closes the
+                silent cross-protocol surface flagged by VIB-4755 Phase 0b
+                Round-4: a defaulted ``protocol="uniswap_v3"`` would let a
+                caller on a Base Aerodrome pool address get GeckoTerminal-
+                served Aerodrome data labelled as ``uniswap_v3`` in any
+                audit log. Forgetting this kwarg raises ``TypeError`` at
+                the framework boundary BEFORE any gateway round-trip. See
+                ``docs/internal/uat-cards/VIB-4755.md`` §D-2.
 
         Returns:
             DataEnvelope[list[PoolSnapshot]] with INFORMATIONAL classification.
@@ -2962,6 +3325,8 @@ class MarketSnapshot:
         Raises:
             ValueError: If no pool history reader is configured.
             PoolHistoryUnavailableError: If historical data cannot be retrieved.
+            TypeError: If ``protocol`` is omitted (Python's missing-required-
+                keyword-only signal).
         """
         from datetime import timedelta as _timedelta
 
@@ -2986,6 +3351,7 @@ class MarketSnapshot:
                 start_date=effective_start,
                 end_date=effective_end,
                 resolution=resolution,
+                protocol=protocol,
             )
         except Exception as e:  # noqa: BLE001
             raise PoolHistoryUnavailableError(

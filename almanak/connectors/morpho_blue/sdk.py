@@ -33,9 +33,10 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 from web3.types import HexStr
 
-from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
-from almanak.core.contracts import MORPHO_BLUE_ADDRESS
 from almanak.framework.utils.rpc_provider import get_rpc_url, is_poa_chain
+
+from .addresses import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
+from .addresses import MORPHO_BLUE_ADDRESS
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -370,7 +371,7 @@ class MorphoBlueSDK:
             # UnsupportedChainError.chain (which is expected to hold just the name).
             raise MorphoBlueSDKError(
                 f"Morpho Blue address registry has no entry for supported chain '{self.chain}'. "
-                "Add it to MORPHO_BLUE in almanak/core/contracts.py."
+                "Add it to MORPHO_BLUE in almanak/connectors/morpho_blue/addresses.py."
             )
         self.morpho_address = Web3.to_checksum_address(chain_entry["morpho"])
 

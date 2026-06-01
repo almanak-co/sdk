@@ -46,10 +46,9 @@ docker-compose.backtest.yml
 # --- Core SDK package ---
 almanak/
 
-# --- Examples, skills, config ---
+# --- Examples, skills ---
 examples/
 skills/
-config/
 
 # --- Tests (tests/reports/ intentionally NOT listed) ---
 tests/__init__.py

@@ -279,7 +279,7 @@ def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dic
         AssertionError: if the Anvil fork is not in a state where impersonation
             can succeed, or if the fulfill TX reverts.
     """
-    from almanak.core.contracts import PANCAKESWAP_PERPS
+    from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
     from almanak.connectors.pancakeswap_perps.sdk import (
         _check_address as _addr_ok,  # noqa: F401 (sanity import)
     )

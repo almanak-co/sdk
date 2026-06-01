@@ -87,10 +87,11 @@ EVENT_NAME_TO_TYPE: dict[str, PancakeSwapV3EventType] = {
 
 
 # PancakeSwap V3 NonfungiblePositionManager addresses, sourced from the
-# canonical contracts registry (single source of truth — ``PANCAKESWAP_V3``
-# in ``almanak/core/contracts.py``). Mirrors the Aerodrome Slipstream
-# pattern (``_build_slipstream_npm_addresses``) — adding a new chain is a
-# one-line change in ``contracts.py`` and this dict rebuilds automatically.
+# connector-local registry (single source of truth — ``PANCAKESWAP_V3``
+# in ``almanak/connectors/pancakeswap_v3/addresses.py``). Mirrors the
+# Aerodrome Slipstream pattern (``_build_slipstream_npm_addresses``) —
+# adding a new chain is a one-line change in ``addresses.py`` and this
+# dict rebuilds automatically.
 #
 # Historical note: this dict used to be hand-maintained as a flat
 # ``{chain: addr}`` mapping. PancakeSwap V3 happens to use the same NPM
@@ -106,7 +107,7 @@ def _build_pancakeswap_v3_npm_addresses() -> dict[str, str]:
     don't need case-handling at the call site. The ``bnb`` alias for
     ``bsc`` is preserved (some callers historically passed it).
     """
-    from almanak.core.contracts import PANCAKESWAP_V3
+    from .addresses import PANCAKESWAP_V3
 
     out: dict[str, str] = {}
     for chain, entry in PANCAKESWAP_V3.items():
@@ -1105,7 +1106,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # trap that bit early Uniswap V3 multi-chain expansion).
             logger.warning(
                 "PancakeSwap V3 NPM not registered for chain %r — extend "
-                "almanak.core.contracts.PANCAKESWAP_V3[<chain>]['nft']",
+                "almanak.connectors.pancakeswap_v3.addresses.PANCAKESWAP_V3[<chain>]['nft']",
                 chain_key,
             )
             return None

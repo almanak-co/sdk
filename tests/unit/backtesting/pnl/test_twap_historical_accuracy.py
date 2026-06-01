@@ -1,15 +1,22 @@
 """Unit tests for TWAP historical accuracy validation.
 
-This module validates that the TWAP provider correctly returns different prices
-for different timestamps when archive node access is available, proving the
-implementation from US-080a works correctly.
-
-Key tests:
-- iterate() returns different prices at different timestamps
-- Prices change appropriately for realistic price movements
-- Graceful fallback when archive node unavailable
-- data_source metadata and warnings populated correctly
+VIB-4859 / W7: ENTIRE FILE SKIPPED. These tests exercise the removed
+``_verify_archive_access`` / ``_get_block_number_at_timestamp`` /
+``_query_observe`` internals on the pre-W7 strategy-side
+``TWAPDataProvider``. The archive-RPC + observe() egress moved to the
+gateway-side ``GatewayDexTwapCapability`` on the Uniswap V3 connector.
+Tests need rewriting to mock the gateway gRPC stub; tracked in
+VIB-4869 (caller migration follow-up).
 """
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "VIB-4859 W7: archive-RPC internals migrated to gateway. "
+        "Rewrite to mock the gateway stub. Tracked in VIB-4869."
+    )
+)
 
 import logging
 from datetime import UTC, datetime

@@ -23,6 +23,9 @@ from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.export import export as framework_export_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
+from almanak.framework.cli.repair_teardown_lp_close import (
+    repair_teardown_lp_close_cmd as framework_repair_lp_close_cmd,
+)
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.status import (
     list_strategies as framework_list_cmd,
@@ -186,6 +189,7 @@ strat.add_command(framework_logs_cmd, name="logs")
 strat.add_command(framework_pause_cmd, name="pause")
 strat.add_command(framework_resume_cmd, name="resume")
 strat.add_command(framework_strat_pnl_cmd, name="pnl")
+strat.add_command(framework_repair_lp_close_cmd, name="repair-teardown-lp-close")
 
 
 def _load_cli_config(path: str) -> dict:

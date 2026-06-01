@@ -40,13 +40,14 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.core.contracts import TRADERJOE_V2_LBPAIRS
 from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
 from almanak.framework.permissions.hints import (
     DiscoveryContext,
     PermissionHints,
     StaticPermissionEntry,
 )
+
+from .addresses import TRADERJOE_V2_LBPAIRS
 
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent

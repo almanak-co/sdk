@@ -51,6 +51,7 @@ BINANCE_SYMBOL_MAP: dict[str, str] = {
     "ETH": "ETHUSDT",
     "BTC": "BTCUSDT",
     "WBTC": "BTCUSDT",
+    "BTCB": "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
     # Stablecoins (use USDC as proxy)
     "USDC": "USDCUSDT",
     "USDT": "USDCUSDT",  # USDT/USDT doesn't exist, use USDC
@@ -69,13 +70,18 @@ BINANCE_SYMBOL_MAP: dict[str, str] = {
     # L2 tokens
     "ARB": "ARBUSDT",
     "OP": "OPUSDT",
-    "MATIC": "MATICUSDT",
-    "POL": "MATICUSDT",  # Polygon rebranding
+    # Polygon renamed MATIC -> POL (Sept 2024). Binance delisted MATICUSDT;
+    # the live pair is POLUSDT. MATICUSDT still answers but with stale klines
+    # (caught by the ALM-2697 staleness guard, which then drops the whole
+    # provider) — so point every Polygon-native symbol at the live POLUSDT pair.
+    "MATIC": "POLUSDT",
+    "POL": "POLUSDT",
     # Wrapped native tokens (chain-specific)
     "WBNB": "BNBUSDT",
     "BNB": "BNBUSDT",
     "WAVAX": "AVAXUSDT",
-    "WMATIC": "MATICUSDT",
+    "WMATIC": "POLUSDT",
+    "WPOL": "POLUSDT",
     "S": "SUSDT",
     "WS": "SUSDT",
     # Other popular tokens

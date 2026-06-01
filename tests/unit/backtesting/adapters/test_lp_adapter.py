@@ -16,11 +16,13 @@ from decimal import Decimal
 import pytest
 
 from almanak.framework.backtesting.adapters.lp_adapter import (
+    HeuristicValidationSample,
     LPBacktestAdapter,
     LPBacktestConfig,
     RangeStatus,
     RangeStatusResult,
 )
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPosition,
@@ -568,6 +570,8 @@ class TestLPStrategyAccuracy:
         config = LPBacktestConfig(
             strategy_type="lp",
             fee_tracking_enabled=True,
+            # VIB-4849: no subgraph/explicit volume here -> opt into the heuristic.
+            allow_volume_fallback=True,
         )
         adapter = LPBacktestAdapter(config)
 
@@ -584,7 +588,11 @@ class TestLPStrategyAccuracy:
 
     def test_update_position_updates_token_amounts(self) -> None:
         """Test that update_position updates token amounts based on price."""
-        adapter = LPBacktestAdapter()
+        # VIB-4849: this test checks token-amount math, not fees. Disable fee
+        # tracking so it does not require a volume source.
+        adapter = LPBacktestAdapter(
+            LPBacktestConfig(strategy_type="lp", fee_tracking_enabled=False)
+        )
 
         position = create_lp_position(
             entry_price=Decimal("2000"),
@@ -1519,32 +1527,60 @@ class TestHistoricalVolumeIntegration:
         # Token pair format doesn't provide a pool address
         assert fill.position_delta.metadata["pool_address"] is None
 
-    def test_fee_accrual_uses_estimated_volume_without_provider(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Test fee accrual uses estimated volume when provider not available."""
-        import logging
-
+    def test_fee_accrual_raises_without_volume_source_or_optin(self) -> None:
+        """VIB-4849: no volume source + no opt-in must fail loud, not fabricate."""
         config = LPBacktestConfig(
             strategy_type="lp",
-            use_historical_volume=False,  # Disable historical volume
+            use_historical_volume=False,  # No historical volume
             fee_tracking_enabled=True,
+            # allow_volume_fallback defaults to False -> must raise
         )
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position()
-
         market = MockMarketStateWithTimestamp(
             prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
             timestamp=datetime.now(),
         )
 
-        with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+        with pytest.raises(DataSourceUnavailableError) as exc_info:
             adapter.update_position(position, market, elapsed_seconds=86400)
 
-        # Should have used estimated volume (look for "estimated" in log)
-        assert position.accumulated_fees_usd > Decimal("0")
+        # Error must tell the user exactly what to provide.
+        message = str(exc_info.value)
+        assert "use_historical_volume" in message
+        assert "explicit_pool_volume_usd_daily" in message
+        assert "allow_volume_fallback" in message
+        # And it must NOT have fabricated any fees.
+        assert position.accumulated_fees_usd == Decimal("0")
 
-    def test_fee_accrual_falls_back_to_estimated_on_error(self) -> None:
-        """Test fee accrual falls back to estimated when historical lookup fails."""
+    def test_fee_accrual_uses_estimated_volume_with_optin(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Fee accrual uses the heuristic when the caller explicitly opts in."""
+        import logging
+
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,  # No historical volume
+            fee_tracking_enabled=True,
+            allow_volume_fallback=True,  # Explicit opt-in to the heuristic
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position()
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            adapter.update_position(position, market, elapsed_seconds=86400)
+
+        assert position.accumulated_fees_usd > Decimal("0")
+        # Heuristic use must be loudly flagged.
+        assert any("OPT-IN fallback volume multiplier" in r.message for r in caplog.records)
+
+    def test_fee_accrual_raises_when_historical_lookup_fails_without_optin(self) -> None:
+        """VIB-4849: failed historical lookup + no opt-in must raise, not fabricate."""
         config = LPBacktestConfig(
             strategy_type="lp",
             use_historical_volume=True,
@@ -1553,7 +1589,7 @@ class TestHistoricalVolumeIntegration:
         adapter = LPBacktestAdapter(config)
 
         position = create_lp_position()
-        # Set a pool address that will fail lookup
+        # Set a pool address that will fail lookup (returns LOW-confidence None)
         position.metadata["pool_address"] = "0x0000000000000000000000000000000000000000"
 
         market = MockMarketStateWithTimestamp(
@@ -1561,11 +1597,32 @@ class TestHistoricalVolumeIntegration:
             timestamp=datetime.now(),
         )
 
-        # Should not raise, should fall back to estimated
-        adapter.update_position(position, market, elapsed_seconds=86400)
+        with pytest.raises(DataSourceUnavailableError):
+            adapter.update_position(position, market, elapsed_seconds=86400)
+        assert position.accumulated_fees_usd == Decimal("0")
 
-        # Fees should still be accrued using fallback
+    def test_fee_accrual_uses_explicit_volume_without_subgraph(self) -> None:
+        """VIB-4849: explicit caller-provided volume works without any subgraph."""
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=Decimal("5000000"),  # $5M/day
+            explicit_pool_liquidity_usd=Decimal("2000000"),  # $2M TVL
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position()
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        # Should not raise; uses explicit volume directly.
+        adapter.update_position(position, market, elapsed_seconds=86400)
         assert position.accumulated_fees_usd > Decimal("0")
+        # Explicit volume is a trusted source -> not LOW confidence.
+        assert position.fee_confidence != "low"
 
     def test_adapter_caches_volume_lookups(self) -> None:
         """Test that volume lookups are cached."""
@@ -1628,3 +1685,240 @@ class TestHistoricalVolumeIntegration:
         assert restored.chain == original.chain
         assert restored.subgraph_api_key == original.subgraph_api_key
         assert restored.volume_multiplier == original.volume_multiplier
+
+    def test_config_roundtrip_preserves_vib4849_fields(self) -> None:
+        """Roundtrip serialization preserves the VIB-4849 explicit/opt-in fields."""
+        original = LPBacktestConfig(
+            strategy_type="lp",
+            allow_volume_fallback=True,
+            explicit_pool_volume_usd_daily=Decimal("1234567"),
+            explicit_pool_liquidity_usd=Decimal("9876543"),
+        )
+
+        restored = LPBacktestConfig.from_dict(original.to_dict())
+
+        assert restored.allow_volume_fallback is True
+        assert restored.explicit_pool_volume_usd_daily == Decimal("1234567")
+        assert restored.explicit_pool_liquidity_usd == Decimal("9876543")
+
+    def test_config_default_vib4849_fields(self) -> None:
+        """New VIB-4849 config fields default to safe (non-fabricating) values."""
+        config = LPBacktestConfig(strategy_type="lp")
+        assert config.allow_volume_fallback is False
+        assert config.explicit_pool_volume_usd_daily is None
+        assert config.explicit_pool_liquidity_usd is None
+
+
+class TestValidateHeuristics:
+    """Tests for LPBacktestAdapter.validate_heuristics (VIB-4849)."""
+
+    def _adapter(self) -> LPBacktestAdapter:
+        return LPBacktestAdapter(
+            LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True)
+        )
+
+    def test_validate_heuristics_warns_on_large_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A sample whose observed fees are >50% off the heuristic warns and flags."""
+        import logging
+
+        adapter = self._adapter()
+        # Heuristic for this sample is non-trivial; observed is deliberately tiny so
+        # the relative error far exceeds 50%.
+        sample = HeuristicValidationSample(
+            position_value_usd=Decimal("10000"),
+            liquidity=Decimal("1000000"),
+            fee_tier=Decimal("0.003"),
+            elapsed_seconds=86400,
+            observed_fees_usd=Decimal("0.01"),
+            label="WETH/USDC 0.3% 2024-01-15",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            results = adapter.validate_heuristics([sample])
+
+        assert len(results) == 1
+        assert results[0].exceeds_threshold is True
+        assert results[0].error_pct > Decimal("0.5")
+        assert any("heuristic validation FAILED" in r.message for r in caplog.records)
+
+    def test_validate_heuristics_ok_when_close(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A sample whose observed fees match the heuristic does not warn."""
+        import logging
+
+        adapter = self._adapter()
+        sample = HeuristicValidationSample(
+            position_value_usd=Decimal("10000"),
+            liquidity=Decimal("1000000"),
+            fee_tier=Decimal("0.003"),
+            elapsed_seconds=86400,
+            observed_fees_usd=Decimal("0"),  # placeholder; replaced below
+            label="close-match",
+        )
+        # Make observed exactly equal to the heuristic estimate.
+        estimate = adapter._estimate_heuristic_fees(sample)
+        sample.observed_fees_usd = estimate
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            results = adapter.validate_heuristics([sample])
+
+        assert results[0].exceeds_threshold is False
+        assert results[0].error_pct == Decimal("0")
+        assert not any("heuristic validation FAILED" in r.message for r in caplog.records)
+
+    def test_validate_heuristics_empty_samples(self) -> None:
+        """Empty sample list returns an empty result without error."""
+        adapter = self._adapter()
+        assert adapter.validate_heuristics([]) == []
+
+    def test_validate_heuristics_custom_threshold(self) -> None:
+        """A stricter threshold flags an otherwise-acceptable sample."""
+        adapter = self._adapter()
+        sample = HeuristicValidationSample(
+            position_value_usd=Decimal("10000"),
+            liquidity=Decimal("1000000"),
+            fee_tier=Decimal("0.003"),
+            elapsed_seconds=86400,
+            observed_fees_usd=Decimal("0"),
+            label="threshold",
+        )
+        estimate = adapter._estimate_heuristic_fees(sample)
+        # Observed 20% below the estimate.
+        sample.observed_fees_usd = estimate * Decimal("0.8")
+
+        # 25% relative error -> OK under default 50%, FAIL under 10%.
+        assert adapter.validate_heuristics([sample], warn_threshold_pct=Decimal("0.5"))[0].exceeds_threshold is False
+        assert adapter.validate_heuristics([sample], warn_threshold_pct=Decimal("0.1"))[0].exceeds_threshold is True
+
+
+class TestMeasuredZeroVolume:
+    """VIB-4849 (P2): Empty != Zero -- a measured zero volume is a valid source.
+
+    A real ``0`` daily volume (explicit or observed) must produce zero fees, NOT
+    trigger the missing-source ``DataSourceUnavailableError``. Only an *absent*
+    (unmeasured) source raises.
+    """
+
+    def test_explicit_zero_volume_is_accepted_and_yields_zero_fees(self) -> None:
+        """An explicit measured-zero daily volume is valid and accrues zero fees."""
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=Decimal("0"),  # measured zero, not absent
+            explicit_pool_liquidity_usd=Decimal("2000000"),
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position()
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        # Must NOT raise: zero is a valid measured volume.
+        adapter.update_position(position, market, elapsed_seconds=86400)
+
+        # Zero volume -> zero fees, but the source is trusted (HIGH), not "low".
+        assert position.accumulated_fees_usd == Decimal("0")
+        assert position.fee_confidence == "high"
+
+    def test_negative_explicit_volume_is_rejected(self) -> None:
+        """A negative explicit volume is nonsensical and must raise ValueError."""
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=Decimal("-1"),
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position()
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        with pytest.raises(ValueError, match="must be >= 0"):
+            adapter.update_position(position, market, elapsed_seconds=86400)
+
+    def test_resolver_accepts_explicit_zero_without_raising(self) -> None:
+        """Directly exercise the resolver: explicit zero -> 'explicit' source, no raise."""
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,
+            explicit_pool_volume_usd_daily=Decimal("0"),
+        )
+        adapter = LPBacktestAdapter(config)
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.source == "explicit"
+        assert resolution.volume_usd == Decimal("0")
+
+    def test_historical_measured_zero_volume_is_accepted(self) -> None:
+        """A non-LOW-confidence measured-zero historical volume is used (zero fees)."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=True,
+            fee_tracking_enabled=True,
+        )
+        adapter = LPBacktestAdapter(config)
+
+        # Subgraph genuinely observed zero volume that day (HIGH confidence).
+        def _fake_volume(pool_address, timestamp, protocol=None):  # noqa: ANN001, ANN202
+            return Decimal("0"), DataConfidence.HIGH
+
+        adapter._get_historical_volume = _fake_volume  # type: ignore[method-assign]
+
+        position = create_lp_position()
+        position.metadata["pool_address"] = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=datetime.now(),
+            pool_address=position.metadata["pool_address"],
+            protocol="uniswap_v3",
+        )
+
+        # Measured zero from the subgraph is used directly -- not a fall-through.
+        assert resolution.source == "historical"
+        assert resolution.volume_usd == Decimal("0")
+        assert resolution.confidence == DataConfidence.HIGH
+
+    def test_absent_historical_volume_still_raises(self) -> None:
+        """An *absent* (None) historical volume + no opt-in must still raise."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=True,
+            fee_tracking_enabled=True,
+        )
+        adapter = LPBacktestAdapter(config)
+
+        def _absent_volume(pool_address, timestamp, protocol=None):  # noqa: ANN001, ANN202
+            return None, DataConfidence.LOW
+
+        adapter._get_historical_volume = _absent_volume  # type: ignore[method-assign]
+
+        position = create_lp_position()
+        position.metadata["pool_address"] = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+
+        with pytest.raises(DataSourceUnavailableError):
+            adapter._resolve_pool_volume(
+                position=position,
+                position_value_usd=Decimal("10000"),
+                timestamp=datetime.now(),
+                pool_address=position.metadata["pool_address"],
+                protocol="uniswap_v3",
+            )

@@ -73,16 +73,17 @@ class PancakeSwapPerpsTrendStrategy(IntentStrategy):
     # Token tracking — override the default config-derived tracker.
     # Without this, the framework auto-detects 'market: BTC/USD' and tries to
     # pre-warm prices for 'BTC' and 'USD', neither of which is a registered
-    # BSC token (BSC has WBTC/BTCB, no synthetic 'BTC' symbol). The pre-warm
-    # then times out per token at 30s, blocking decide() for >60s on every
-    # tick. We track the actual on-chain margin + price-lookup symbols.
+    # BSC token (BSC has BTCB — Binance-Peg BTC at 0x7130d2A1…; "BTC" and
+    # "WBTC" still resolve via alias to the same record). The pre-warm then
+    # times out per token at 30s, blocking decide() for >60s on every tick.
+    # We track the actual on-chain margin + price-lookup symbols.
     # -----------------------------------------------------------------
 
     def _get_tracked_tokens(self) -> list[str]:
         margin = self.config.get("collateral_token", "BNB")
         # Native BNB price comes from BNB symbol; for ERC20 margin track that.
         margin_lookup = "BNB" if margin.upper() in ("BNB", "NATIVE") else margin
-        price_symbol = self.config.get("price_symbol", "WBTC")
+        price_symbol = self.config.get("price_symbol", "BTCB")
         # Deduplicate while preserving order
         seen = set()
         out = []
@@ -107,10 +108,11 @@ class PancakeSwapPerpsTrendStrategy(IntentStrategy):
         threshold_bps = int(self.config.get("momentum_threshold_bps", 50))
         # Symbol used for the gateway price lookup — must be a token registered
         # in the gateway's token registry for this chain. PCS Perps trades
-        # BTC/USD as a synthetic perp; on BSC the closest registered base is
-        # WBTC (resolves to the BTCB ERC-20 at 0x7130d2A1...). Strategies can
+        # BTC/USD as a synthetic perp; on BSC the registered base is BTCB
+        # (Binance-Peg BTC at 0x7130d2A1…, 18 decimals). "BTC" and "WBTC"
+        # remain accepted via aliases for legacy callers. Strategies can
         # override via the price_symbol config field.
-        price_symbol = self.config.get("price_symbol", "WBTC")
+        price_symbol = self.config.get("price_symbol", "BTCB")
 
         # --- Current price ---
         try:

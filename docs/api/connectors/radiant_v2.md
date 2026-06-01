@@ -1,6 +1,6 @@
 # Radiant V2
 
-Connector for Radiant V2 lending (Aave V2 fork on Arbitrum / BNB).
+Connector for Radiant V2 lending (Aave V2 fork) on Ethereum.
 
 ::: almanak.connectors.radiant_v2
     options:

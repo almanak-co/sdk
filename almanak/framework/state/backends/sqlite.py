@@ -2201,6 +2201,57 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
+    async def get_recent_snapshots(
+        self,
+        deployment_id: str,
+        limit: int = 2,
+    ) -> list["PortfolioSnapshot"]:
+        """Get the N most-recent portfolio snapshots ordered **oldest-first**.
+
+        The oldest-first ordering matches what the F4 / VIB-4907 SWAP-class
+        fallback detector expects (it compares the last two entries as
+        ``pre`` / ``post``), and is also the natural ordering for any
+        consumer that wants to walk the window forward in time.
+
+        Use this when you need a fixed-size window of the latest snapshots
+        without computing a ``since`` timestamp upfront — for unbounded /
+        chart use cases ``get_snapshots_since`` remains the right call.
+
+        Args:
+            deployment_id: Deployment identifier.
+            limit: Maximum number of snapshots to return.  ``1`` is
+                equivalent to ``get_latest_snapshot`` wrapped in a list.
+
+        Returns:
+            Up to ``limit`` snapshots, oldest-first.  Empty list when the
+            deployment has no snapshots; never raises.
+        """
+        if limit <= 0:
+            return []
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list["PortfolioSnapshot"]:
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
+                FROM portfolio_snapshots
+                WHERE deployment_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (deployment_id, limit),
+            )
+            # SELECT DESC then reverse, so the caller gets oldest-first.
+            return list(reversed([self._row_to_portfolio_snapshot(row) for row in cursor.fetchall()]))
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
     async def get_snapshots_since(
         self,
         deployment_id: str,

@@ -40,19 +40,40 @@ def _extract_addresses_from_module(module) -> list[tuple[str, str, str]]:
     return results
 
 
-def test_contracts_py_all_addresses_are_eip55():
-    """Every address in almanak/core/contracts.py must be a valid EIP-55 checksum."""
-    from almanak.core import contracts
+def test_connector_addresses_are_eip55():
+    """Every address published by a connector's ``addresses.py`` must be EIP-55.
 
-    entries = _extract_addresses_from_module(contracts)
-    assert len(entries) > 400, f"Expected 400+ addresses, found {len(entries)} — extraction may be broken"
+    Replaces the historical ``test_contracts_py_all_addresses_are_eip55`` —
+    each protocol's address table now lives in its own connector folder
+    (W1 / VIB-4853). This test walks ``almanak/connectors/<protocol>/addresses.py``
+    for every connector that ships one and validates each address.
+    """
+    import importlib
 
-    failures = []
-    for dict_name, key_path, addr in entries:
-        expected = Web3.to_checksum_address(addr)
-        if addr != expected:
-            loc = f"{dict_name}[{key_path}]" if key_path else dict_name
-            failures.append(f"  {loc}: {addr} should be {expected}")
+    repo_root = Path(__file__).resolve().parents[3]
+    connectors_dir = repo_root / "almanak" / "connectors"
+
+    failures: list[str] = []
+    total_entries = 0
+    modules_scanned = 0
+    for addresses_file in sorted(connectors_dir.glob("*/addresses.py")):
+        protocol = addresses_file.parent.name
+        module_name = f"almanak.connectors.{protocol}.addresses"
+        try:
+            mod = importlib.import_module(module_name)
+        except ImportError as exc:  # pragma: no cover — import surface bug
+            failures.append(f"  failed to import {module_name}: {exc}")
+            continue
+        modules_scanned += 1
+        for dict_name, key_path, addr in _extract_addresses_from_module(mod):
+            total_entries += 1
+            expected = Web3.to_checksum_address(addr)
+            if addr != expected:
+                loc = f"{module_name}.{dict_name}[{key_path}]" if key_path else f"{module_name}.{dict_name}"
+                failures.append(f"  {loc}: {addr} should be {expected}")
+
+    assert modules_scanned >= 8, f"Expected to scan 8+ connector addresses.py files, scanned {modules_scanned}"
+    assert total_entries > 400, f"Expected 400+ addresses across all connectors, found {total_entries} — extraction may be broken"
 
     if failures:
         msg = f"Found {len(failures)} addresses with invalid EIP-55 checksums:\n" + "\n".join(failures)

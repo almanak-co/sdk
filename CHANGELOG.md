@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Ratchet `fail_under` coverage floor 75 → 77 (main HEAD ec259bf measured 77.73% in CI)
+
 ## [2.16.0] - 2026-05-22
 
 ### BREAKING — VIB-4281 Retired PAUSE / RESUME lifecycle commands

@@ -98,7 +98,7 @@ class TestPancakeSwapPerpsOpenIntent:
           4. Balance delta: BNB decreased by exactly margin + gas; pending trade
              exists on-chain
         """
-        from almanak.core.contracts import PANCAKESWAP_PERPS
+        from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
 
         router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]
         # ApolloX enforces a minimum position notional (TradingCheckerFacet:

@@ -27,7 +27,7 @@ import pytest
 from pydantic import ValidationError
 from web3 import Web3
 
-from almanak.core.contracts import ASTER_PERPS
+from almanak.connectors.aster_perps.addresses import ASTER_PERPS
 from almanak.connectors.aster_perps import (
     ASTER_BROKER_RAW,
     AsterPerpsReceiptParser,

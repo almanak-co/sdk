@@ -8,7 +8,6 @@ identity hash, idempotent backfill, OPEN/CLOSE pair, and the
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from almanak.framework.migration import (
     semantic_grouping_key_univ3,
 )
 from almanak.framework.migration.backfill import (
+    _UNIV3_LP_PROTOCOLS,
     UniV3LPCutoverReader,
     fold_position_events_for_univ3,
 )
@@ -37,9 +37,7 @@ def _make_state_manager(tmp_path: Path) -> StateManager:
     return StateManager(StateManagerConfig(), warm_backend=sqlite)
 
 
-def _open_event(
-    *, deployment_id: str, position_id: str, chain: str = "arbitrum"
-) -> dict:
+def _open_event(*, deployment_id: str, position_id: str, chain: str = "arbitrum") -> dict:
     return {
         "id": f"evt-open-{position_id}",
         "deployment_id": deployment_id,
@@ -59,9 +57,7 @@ def _open_event(
     }
 
 
-def _close_event(
-    *, deployment_id: str, position_id: str, chain: str = "arbitrum"
-) -> dict:
+def _close_event(*, deployment_id: str, position_id: str, chain: str = "arbitrum") -> dict:
     return {
         "id": f"evt-close-{position_id}",
         "deployment_id": deployment_id,
@@ -82,16 +78,10 @@ def _close_event(
 
 
 def test_hash_is_deterministic_and_chain_aware() -> None:
-    h1 = physical_identity_hash_univ3(
-        chain="arbitrum", nft_manager_addr=NPM_ARB, token_id=5467895
-    )
-    h2 = physical_identity_hash_univ3(
-        chain="arbitrum", nft_manager_addr=NPM_ARB, token_id=5467895
-    )
+    h1 = physical_identity_hash_univ3(chain="arbitrum", nft_manager_addr=NPM_ARB, token_id=5467895)
+    h2 = physical_identity_hash_univ3(chain="arbitrum", nft_manager_addr=NPM_ARB, token_id=5467895)
     assert h1 == h2  # deterministic
-    h3 = physical_identity_hash_univ3(
-        chain="ethereum", nft_manager_addr=NPM_ARB, token_id=5467895
-    )
+    h3 = physical_identity_hash_univ3(chain="ethereum", nft_manager_addr=NPM_ARB, token_id=5467895)
     assert h1 != h3  # chain-aware
 
 
@@ -167,6 +157,51 @@ def test_fold_skips_non_univ3_protocol() -> None:
     assert row is None
 
 
+# VIB-4864: ``_UNIV3_LP_PROTOCOLS`` is no longer a hardcoded literal — it is
+# the ``UNIV3_LP_GROUPING_PROTOCOLS`` union derived in ``compiler_constants``
+# from each UniV3-shape connector's ``lp_constants``. These tests pin the
+# expected membership so a regression in any per-connector contribution (a
+# dropped slug, a typo'd alias) fails loudly here rather than silently making
+# the backfill skip a family's LP ``position_events``.
+@pytest.mark.parametrize(
+    "protocol",
+    [
+        "uniswap_v3",
+        "sushiswap_v3",
+        "pancakeswap_v3",
+        "aerodrome_slipstream",
+        "velodrome_slipstream",
+    ],
+)
+def test_univ3_lp_protocols_includes_expected_family_member(protocol: str) -> None:
+    """Every UniV3-shape LP family slug must be in the derived inclusion set."""
+    assert protocol in _UNIV3_LP_PROTOCOLS
+
+
+def test_univ3_lp_protocols_membership_is_exact() -> None:
+    """The derived union must equal exactly the UniV3-shape LP family — no
+    accidental widening (e.g. picking up a non-LP slug) or narrowing."""
+    assert _UNIV3_LP_PROTOCOLS == frozenset(
+        {
+            "uniswap_v3",
+            "sushiswap_v3",
+            "pancakeswap_v3",
+            "aerodrome_slipstream",
+            "velodrome_slipstream",
+        }
+    )
+    # frozenset so a downstream ``protocol in _UNIV3_LP_PROTOCOLS`` consumer
+    # cannot mutate-widen the family.
+    assert isinstance(_UNIV3_LP_PROTOCOLS, frozenset)
+
+
+@pytest.mark.parametrize("protocol", ["pendle", "gmx_v2", "aave_v3", "uniswap_v2", "", "unknown"])
+def test_univ3_lp_protocols_excludes_non_family(protocol: str) -> None:
+    """Non-UniV3-shape protocols must NOT be in the inclusion set, so the
+    backfill leaves their ``position_events`` tracker-driven."""
+    assert protocol not in _UNIV3_LP_PROTOCOLS
+
+
 def test_fold_skips_when_pool_address_missing() -> None:
     """Per CLAUDE.md "Empty ≠ zero": missing pool_address → skip, no fabrication."""
     ev = _open_event(deployment_id="dep:1", position_id="42")
@@ -213,11 +248,21 @@ async def test_backfill_O_N_streaming_bound(tmp_path) -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ev["id"], ev["deployment_id"], ev["position_id"],
-                        ev["position_type"], ev["event_type"], ev["timestamp"],
-                        ev["protocol"], ev["chain"], ev["tick_lower"],
-                        ev["tick_upper"], ev["liquidity"], ev["amount0"],
-                        ev["amount1"], ev["tx_hash"], ev["attribution_json"],
+                        ev["id"],
+                        ev["deployment_id"],
+                        ev["position_id"],
+                        ev["position_type"],
+                        ev["event_type"],
+                        ev["timestamp"],
+                        ev["protocol"],
+                        ev["chain"],
+                        ev["tick_lower"],
+                        ev["tick_upper"],
+                        ev["liquidity"],
+                        ev["amount0"],
+                        ev["amount1"],
+                        ev["tx_hash"],
+                        ev["attribution_json"],
                     ),
                 )
             warm._conn.commit()  # type: ignore[union-attr]
@@ -228,9 +273,7 @@ async def test_backfill_O_N_streaming_bound(tmp_path) -> None:
         assert report.rows_skipped_already_present == 0
         assert not report.already_complete
 
-        rows = await sm.get_position_registry_open_rows(
-            deployment_id, primitive="lp", accounting_category="lp"
-        )
+        rows = await sm.get_position_registry_open_rows(deployment_id, primitive="lp", accounting_category="lp")
         assert len(rows) == 10
     finally:
         await sm.close()
@@ -260,11 +303,21 @@ async def test_backfill_idempotent_under_rerun(tmp_path) -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    ev["id"], ev["deployment_id"], ev["position_id"],
-                    ev["position_type"], ev["event_type"], ev["timestamp"],
-                    ev["protocol"], ev["chain"], ev["tick_lower"],
-                    ev["tick_upper"], ev["liquidity"], ev["amount0"],
-                    ev["amount1"], ev["tx_hash"], ev["attribution_json"],
+                    ev["id"],
+                    ev["deployment_id"],
+                    ev["position_id"],
+                    ev["position_type"],
+                    ev["event_type"],
+                    ev["timestamp"],
+                    ev["protocol"],
+                    ev["chain"],
+                    ev["tick_lower"],
+                    ev["tick_upper"],
+                    ev["liquidity"],
+                    ev["amount0"],
+                    ev["amount1"],
+                    ev["tx_hash"],
+                    ev["attribution_json"],
                 ),
             )
             warm._conn.commit()  # type: ignore[union-attr]
@@ -300,9 +353,7 @@ async def test_backfill_insert_or_ignore_does_not_overwrite(tmp_path) -> None:
             physical_identity_hash=physical_identity_hash_univ3(
                 chain="arbitrum", nft_manager_addr=NPM_ARB, token_id=42
             ),
-            semantic_grouping_key=semantic_grouping_key_univ3(
-                chain="arbitrum", pool_address=POOL_ADDR
-            ),
+            semantic_grouping_key=semantic_grouping_key_univ3(chain="arbitrum", pool_address=POOL_ADDR),
             grouping_policy_version="univ3_lp@v1",
             handle="runtime-handle",
             status="open",
@@ -333,11 +384,21 @@ async def test_backfill_insert_or_ignore_does_not_overwrite(tmp_path) -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    ev["id"], ev["deployment_id"], ev["position_id"],
-                    ev["position_type"], ev["event_type"], ev["timestamp"],
-                    ev["protocol"], ev["chain"], ev["tick_lower"],
-                    ev["tick_upper"], ev["liquidity"], ev["amount0"],
-                    ev["amount1"], ev["tx_hash"], ev["attribution_json"],
+                    ev["id"],
+                    ev["deployment_id"],
+                    ev["position_id"],
+                    ev["position_type"],
+                    ev["event_type"],
+                    ev["timestamp"],
+                    ev["protocol"],
+                    ev["chain"],
+                    ev["tick_lower"],
+                    ev["tick_upper"],
+                    ev["liquidity"],
+                    ev["amount0"],
+                    ev["amount1"],
+                    ev["tx_hash"],
+                    ev["attribution_json"],
                 ),
             )
             warm._conn.commit()  # type: ignore[union-attr]
@@ -349,14 +410,10 @@ async def test_backfill_insert_or_ignore_does_not_overwrite(tmp_path) -> None:
         assert report.rows_skipped_already_present == 1
 
         # The runtime row's payload survives unchanged (DO NOTHING).
-        rows = await sm.get_position_registry_open_rows(
-            deployment_id, primitive="lp", accounting_category="lp"
-        )
+        rows = await sm.get_position_registry_open_rows(deployment_id, primitive="lp", accounting_category="lp")
         assert len(rows) == 1
         payload = rows[0]["payload"]
-        assert payload.get("_runtime_marker") is True, (
-            "DO NOTHING should preserve the existing runtime row's payload"
-        )
+        assert payload.get("_runtime_marker") is True, "DO NOTHING should preserve the existing runtime row's payload"
     finally:
         await sm.close()
 
@@ -373,9 +430,7 @@ async def test_backfill_clean_anvil_db_marks_complete(tmp_path) -> None:
         report = await reader.run(deployment_id=deployment_id)
         assert report.rows_synthesized == 0
         # State row must show complete=1.
-        state = await sm.get_migration_state(
-            deployment_id=deployment_id, primitive="lp", cutover_key="lp"
-        )
+        state = await sm.get_migration_state(deployment_id=deployment_id, primitive="lp", cutover_key="lp")
         assert state is not None
         assert state.position_registry_backfill_complete is True
         assert state.backfill_completed_at is not None
@@ -408,23 +463,29 @@ async def test_backfill_does_not_touch_non_univ3_lp_rows(tmp_path) -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ev["id"], ev["deployment_id"], ev["position_id"],
-                        ev["position_type"], ev["event_type"], ev["timestamp"],
-                        ev["protocol"], ev["chain"], ev["tick_lower"],
-                        ev["tick_upper"], ev["liquidity"], ev["amount0"],
-                        ev["amount1"], ev["tx_hash"], ev["attribution_json"],
+                        ev["id"],
+                        ev["deployment_id"],
+                        ev["position_id"],
+                        ev["position_type"],
+                        ev["event_type"],
+                        ev["timestamp"],
+                        ev["protocol"],
+                        ev["chain"],
+                        ev["tick_lower"],
+                        ev["tick_upper"],
+                        ev["liquidity"],
+                        ev["amount0"],
+                        ev["amount1"],
+                        ev["tx_hash"],
+                        ev["attribution_json"],
                     ),
                 )
             warm._conn.commit()  # type: ignore[union-attr]
 
         reader = UniV3LPCutoverReader(state_manager=sm)
         report = await reader.run(deployment_id=deployment_id)
-        assert report.rows_synthesized == 1, (
-            "Pendle row must NOT be folded by the UniV3 backfill"
-        )
-        rows = await sm.get_position_registry_open_rows(
-            deployment_id, primitive="lp", accounting_category="lp"
-        )
+        assert report.rows_synthesized == 1, "Pendle row must NOT be folded by the UniV3 backfill"
+        rows = await sm.get_position_registry_open_rows(deployment_id, primitive="lp", accounting_category="lp")
         assert len(rows) == 1
         assert rows[0]["payload"]["token_id"] == "500"
     finally:
@@ -454,12 +515,21 @@ async def test_backfill_handles_open_close_pair_as_closed(tmp_path) -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ev["id"], ev["deployment_id"], ev["position_id"],
-                        ev["position_type"], ev["event_type"], ev["timestamp"],
-                        ev["protocol"], ev["chain"],
-                        ev.get("tick_lower"), ev.get("tick_upper"),
-                        ev.get("liquidity"), ev.get("amount0"), ev.get("amount1"),
-                        ev["tx_hash"], ev["attribution_json"],
+                        ev["id"],
+                        ev["deployment_id"],
+                        ev["position_id"],
+                        ev["position_type"],
+                        ev["event_type"],
+                        ev["timestamp"],
+                        ev["protocol"],
+                        ev["chain"],
+                        ev.get("tick_lower"),
+                        ev.get("tick_upper"),
+                        ev.get("liquidity"),
+                        ev.get("amount0"),
+                        ev.get("amount1"),
+                        ev["tx_hash"],
+                        ev["attribution_json"],
                     ),
                 )
             warm._conn.commit()  # type: ignore[union-attr]
@@ -468,9 +538,7 @@ async def test_backfill_handles_open_close_pair_as_closed(tmp_path) -> None:
         report = await reader.run(deployment_id=deployment_id)
         assert report.rows_synthesized == 1
         # OPEN-set is empty (the row landed as 'closed').
-        rows = await sm.get_position_registry_open_rows(
-            deployment_id, primitive="lp", accounting_category="lp"
-        )
+        rows = await sm.get_position_registry_open_rows(deployment_id, primitive="lp", accounting_category="lp")
         assert len(rows) == 0
     finally:
         await sm.close()
@@ -506,9 +574,7 @@ async def test_backfill_wraps_exceptions_as_BackfillFailedError(tmp_path) -> Non
 
         # The migration_state flag stays at 0 — a restart re-enters the
         # backfill (idempotent ON CONFLICT DO NOTHING).
-        state = await sm.get_migration_state(
-            deployment_id=deployment_id, primitive="lp", cutover_key="lp"
-        )
+        state = await sm.get_migration_state(deployment_id=deployment_id, primitive="lp", cutover_key="lp")
         assert state is not None
         assert state.position_registry_backfill_complete is False
     finally:

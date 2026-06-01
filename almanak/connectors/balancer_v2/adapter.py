@@ -29,6 +29,8 @@ Contract addresses:
 import logging
 from dataclasses import dataclass, field
 
+from almanak.connectors.balancer_v2.addresses import BALANCER_V2
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,14 +38,20 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# Balancer Vault addresses (same on all chains)
+# Balancer Vault addresses (same on all chains).
+#
+# VIB-4872: data now lives in ``almanak.connectors.balancer_v2.addresses``
+# (kind=``vault``). This module-level dict is a derived read-only view so
+# legacy importers from ``adapter`` (e.g.
+# ``balancer_v2/__init__.py`` re-export) keep working without behaviour
+# change. The Balancer V2 Vault is a CREATE2 deterministic deployment so
+# the per-chain map has the same address on every chain. The
+# ``if "vault" in kinds`` guard mirrors the
+# ``compiler_constants._build_balancer_vault_addresses`` helper — adding a
+# chain to ``BALANCER_V2`` without a ``vault`` key (e.g. a future entry
+# scaffolded with only a non-vault kind) must not raise on import.
 BALANCER_VAULT_ADDRESSES: dict[str, str] = {
-    "ethereum": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "arbitrum": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "optimism": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "polygon": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "base": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "avalanche": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+    chain: kinds["vault"] for chain, kinds in BALANCER_V2.items() if "vault" in kinds
 }
 
 # Function selector for flashLoan(address,address[],uint256[],bytes)

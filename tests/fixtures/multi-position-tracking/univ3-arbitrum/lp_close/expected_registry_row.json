@@ -1,5 +1,5 @@
 {
-  "_comment": "16-column position_registry row for LP_CLOSE — SAME physical_identity_hash as the LP_OPEN row (same NFT, same identity tuple). status flips to 'closed', closed_at_block + closed_tx populated. opened_at_block + opened_tx preserve the LP_OPEN values (per blueprint 28 §4.3 ON CONFLICT clause: open anchors are NEVER overwritten on close). matching_policy_version stays 3 (Primitive.LP).",
+  "_comment": "16-column position_registry row for LP_CLOSE — SAME physical_identity_hash as the LP_OPEN row (same NFT, same identity tuple). status flips to 'closed', closed_at_block + closed_tx populated. opened_at_block + opened_tx preserve the LP_OPEN values (per blueprint 28 §4.3 ON CONFLICT clause: open anchors are NEVER overwritten on close). matching_policy_version is 5 (Primitive.LP; bumped 3->4 by VIB-4275, then 4->5 by VIB-4848).",
   "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
   "chain": "arbitrum",
   "primitive": "lp",
@@ -31,5 +31,5 @@
   "closed_at_block": 459405353,
   "closed_tx": "0xea2bc0637faf4b987a5df37069ea2bb02b7305a6f533f58ace3597c7173830a2",
   "last_reconciled_at_block": null,
-  "matching_policy_version": 3
+  "matching_policy_version": 5
 }

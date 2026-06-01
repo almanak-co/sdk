@@ -80,7 +80,11 @@ class AsterPerpsBasicStrategy(IntentStrategy):
     # has no price feed — skip it.
     # -----------------------------------------------------------------
 
-    _WRAP_MAP = {"BNB": "WBNB", "ETH": "WETH", "BTC": "WBTC"}
+    # Aster Perps is BSC-only; BTC on BSC resolves to BTCB (Binance-Peg BTC,
+    # 0x7130d2A1…, 18 decimals). WBTC still works through the legacy alias
+    # but the canonical registered symbol is BTCB — match it here so the
+    # pre-warm hits the canonical entry directly.
+    _WRAP_MAP = {"BNB": "WBNB", "ETH": "WETH", "BTC": "BTCB"}
 
     def _get_tracked_tokens(self) -> list[str]:
         market = str(self.config.get("market", "BNB/USD"))

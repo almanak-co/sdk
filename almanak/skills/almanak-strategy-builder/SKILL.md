@@ -848,7 +848,12 @@ df = market.ohlcv("WETH", timeframe="1h", limit=100)  # pd.DataFrame
 pool = market.pool_price("0x...")                   # DataEnvelope[PoolPrice]
 pool = market.pool_price_by_pair("WETH", "USDC")   # DataEnvelope[PoolPrice]
 reserves = market.pool_reserves("0x...")            # PoolReserves
-history = market.pool_history("0x...", resolution="1h")  # DataEnvelope[list[PoolSnapshot]]
+history = market.pool_history("0x...", resolution="1h", protocol="uniswap_v3")  # DataEnvelope[list[PoolSnapshot]]
+# `protocol` is REQUIRED keyword-only (VIB-4755 D-2 — closes silent cross-protocol surface).
+# Must match the pool's actual protocol slug: "uniswap_v3", "aerodrome", "pancakeswap_v3", etc.
+# A defaulted protocol on a non-uniswap_v3 pool address would have routed through
+# GeckoTerminal (which does not filter on protocol slug) and silently labelled the
+# served data with the wrong protocol — see docs/internal/uat-cards/VIB-4755.md §D-2.
 analytics = market.pool_analytics("0x...")          # DataEnvelope[PoolAnalytics]
 best = market.best_pool("WETH", "USDC", metric="fee_apr")  # DataEnvelope[PoolAnalyticsResult]
 ```

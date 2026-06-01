@@ -863,11 +863,19 @@ def _apply_runtime_gas_risk_overrides(
     """Apply explicit env-var gas/risk overrides on top of the chain default.
 
     Mirrors the legacy presence-check ladder: when the operator has
-    explicitly set ``ALMANAK_MAX_GAS_PRICE_GWEI`` (or the legacy
-    unprefixed ``MAX_GAS_PRICE_GWEI``), the resolved
-    ``LocalRuntimeConfig`` value wins over the chain-specific default.
-    Otherwise the chain default selected by ``TransactionRiskConfig.for_chain``
-    is preserved verbatim.
+    explicitly set ``ALMANAK_MAX_GAS_COST_NATIVE`` / ``ALMANAK_MAX_GAS_COST_USD``
+    / ``ALMANAK_MAX_SLIPPAGE_BPS`` (or the legacy unprefixed shapes), the
+    resolved ``LocalRuntimeConfig`` value wins over the chain-specific
+    default. Otherwise the chain default selected by
+    ``TransactionRiskConfig.for_chain`` is preserved verbatim.
+
+    VIB-4879: ``ALMANAK_MAX_GAS_PRICE_GWEI`` (and the unprefixed legacy
+    form) is **deprecated and ignored** on mainnet. The deprecation
+    warning fires at the ``LocalRuntimeConfig`` layer via
+    ``_gas_cap_for_chain``; this helper no longer applies the value. The
+    chain descriptor default (or the chain-scoped
+    ``ALMANAK_MAX_GAS_PRICE_GWEI_<CHAIN>`` override added by VIB-4879)
+    is the only path that sets ``max_gas_price_gwei``.
 
     The presence-check is sourced from the typed CLI-runtime config so
     the boundary lint stays clean during the config-service cutover.
@@ -875,17 +883,47 @@ def _apply_runtime_gas_risk_overrides(
     from decimal import Decimal as _Decimal
     from decimal import InvalidOperation as _InvalidOperation
 
-    from almanak.config.cli_runtime import gas_risk_override_presence, max_value_usd_override
+    from almanak.config.cli_runtime import (
+        chain_scoped_gwei_override,
+        gas_risk_override_presence,
+        max_value_usd_override,
+    )
 
     presence = gas_risk_override_presence()
-    if presence["max_gas_price_gwei"]:
-        tx_risk_config.max_gas_price_gwei = config.max_gas_price_gwei
+    # VIB-4879: presence["max_gas_price_gwei"] is deliberately NOT consumed
+    # here. The deprecation warning is emitted upstream in
+    # almanak.config.runtime._gas_cap_for_chain. Keeping the presence check
+    # in the dict (rather than removing it) preserves typed-config
+    # observability for the ``ALMANAK_MAX_GAS_PRICE_GWEI`` env in case any
+    # future operator-diagnostics tool wants to surface it.
     if presence["max_gas_cost_native"]:
         tx_risk_config.max_gas_cost_native = config.max_gas_cost_native
     if presence["max_gas_cost_usd"]:
         tx_risk_config.max_gas_cost_usd = config.max_gas_cost_usd
     if presence["max_slippage_bps"]:
         tx_risk_config.max_slippage_bps = config.max_slippage_bps
+
+    # VIB-4879: chain-scoped escape hatch.
+    # ALMANAK_MAX_GAS_PRICE_GWEI_<CHAIN> wins over the chain descriptor
+    # default — but only for the chain it names. Applied here (and not in
+    # `_gas_cap_for_chain`) so the env-read stays in the config-service
+    # layer rather than leaking into the framework runtime config.
+    chain_scoped = chain_scoped_gwei_override(chain=config.chain)
+    if chain_scoped is not None:
+        tx_risk_config.max_gas_price_gwei = chain_scoped
+
+    # VIB-4879: belt-and-suspenders WARNING when the resolved effective
+    # cap is below typical live gas for this chain. The CI sanity test
+    # catches descriptor drift before merge; this runtime check catches
+    # stale-SDK or misconfigured-custom-cap cases for operators in the
+    # field. Zero I/O — reads only the in-repo snapshot.
+    from almanak.framework.execution.gas.constants import warn_if_effective_cap_below_typical_gas
+
+    warn_if_effective_cap_below_typical_gas(
+        chain=config.chain,
+        effective_cap_gwei=tx_risk_config.max_gas_price_gwei,
+        logger=logger,
+    )
 
     # Per-tx USD cap. The CLI path hydrates native_token_price_usd via
     # StrategyRunner before each execute(), so it's safe to enable a default

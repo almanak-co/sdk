@@ -44,6 +44,7 @@ Strategy-side code MUST NOT import this module.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -344,6 +345,56 @@ class GatewayDexQuoteCapability(Protocol):
 
 
 @runtime_checkable
+class GatewayAddressCapability(Protocol):
+    """Connector owns its on-chain contract addresses per chain.
+
+    Replaces the centralised
+    ``almanak.core.contracts`` registry (W1 / VIB-4853 / epic VIB-4851).
+    Each connector folder now publishes its own ``addresses.py`` module
+    holding the protocol → contract-kind → address mapping; the
+    capability is the gateway-side adapter that lets non-connector
+    callers ask "what's Aave V3's pool address on Arbitrum?" without
+    importing ``almanak.connectors.aave_v3`` by name.
+
+    Contract:
+
+    * ``addresses_for(chain) -> Mapping[contract_kind, address]`` —
+      return the ``{contract_kind: address}`` mapping for ``chain``,
+      keyed by the connector's own internal contract-kind vocabulary
+      (e.g. ``"swap_router"``, ``"position_manager"``, ``"pool"``,
+      ``"morpho"``). Return an empty mapping when the connector
+      doesn't support the chain. Callers must NOT assume any specific
+      key is present — the kind vocabulary is per-connector and may
+      grow over time.
+    * ``address_supported_chains() -> frozenset[str]`` — the chains
+      for which ``addresses_for`` returns a non-empty mapping.
+      Provided so callers can enumerate without speculatively asking
+      for every registered chain. Returning an empty frozenset is
+      legal (and means the connector currently ships no addresses —
+      e.g. a Solana-native connector that resolves accounts at runtime).
+      The name is namespaced (vs. plain ``supported_chains``) because
+      several connectors already implement ``GatewayDexQuoteCapability``
+      whose ``supported_chains`` carries different semantics (chains
+      where the DEX is queryable for quotes); collapsing the two would
+      silently bind the wrong list to one of the capabilities.
+
+    The connector's protocol name is read by the dispatcher from the
+    base ``GatewayConnector.protocol`` ClassVar; this Protocol only
+    contributes the per-chain address tables.
+
+    The strategy-side ``ContractRegistry`` reads through this
+    capability via
+    ``GATEWAY_REGISTRY.capability_providers(GatewayAddressCapability)``
+    rather than importing each connector's dict by name — the
+    cross-cutting knowledge it used to require disappears.
+    """
+
+    def addresses_for(self, chain: str) -> Mapping[str, str]: ...
+
+    def address_supported_chains(self) -> frozenset[str]: ...
+
+
+@runtime_checkable
 class GatewayPriceIdCapability(Protocol):
     """Connector publishes its protocol token's price-source identifiers.
 
@@ -383,3 +434,296 @@ class GatewayPriceIdCapability(Protocol):
     def coingecko_ids(self) -> dict[str, str]: ...
 
     def dexscreener_ids(self) -> dict[str, dict[str, str]]: ...
+
+
+# ``SupportedAction`` / ``SupportedActionsCapability`` lived here during an
+# earlier W4 iteration that planned to consume matrix data from the gateway
+# registry. The strategy-side import boundary
+# (``tests/static/test_strategy_import_boundary.py``) forbids the matrix CLI
+# (under ``almanak/framework/cli/``) from reading anything in this module, so
+# the gateway-side capability was unreachable from the only consumer that
+# needed it. Matrix data now lives strategy-side on
+# :class:`almanak.connectors._strategy_base.registry.MatrixEntry` and
+# ``ConnectorManifest.matrix_entries``; see
+# ``almanak/framework/cli/support_matrix.py`` for the consumer.
+
+
+# =============================================================================
+# W7 / VIB-4859 — RateHistoryCapability cluster
+# =============================================================================
+#
+# Three sibling capabilities + one complementary capability collapse the
+# per-protocol ``if protocol == "aave_v3" elif "compound_v3" elif ...``
+# dispatch in ``framework/data/rates/{monitor,history}.py`` and
+# ``framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}.py`` and
+# move the HTTP / Web3 egress out of the strategy container into the
+# gateway sidecar (where egress is the correct layer per
+# ``AGENTS.md`` §"Gateway boundary").
+#
+# Plan PR #2473 §3 picked three sibling Protocols over one
+# kind-discriminated Protocol because the three data shapes don't share
+# an addressing scheme:
+#
+# * lending is keyed by ``(chain, asset_symbol, side, window)``
+# * perp funding is keyed by ``(venue, market, window)``
+# * DEX TWAP is keyed by ``(chain, pool_address, window)``
+#
+# Forcing all three through one Protocol with a ``kind`` enum hides
+# not-applicable parameters and pushes runtime validation into each
+# connector. Three sibling Protocols + three matching gRPC RPCs let
+# every connector declare only what it actually serves; a DEX connector
+# never sees lending-shaped requests and a lending connector never
+# sees DEX-TWAP-shaped requests.
+#
+# ``GatewayDexVolumeCapability`` is the complementary fourth capability
+# that lives alongside ``GatewayDexTwapCapability`` because both fan
+# out across the same DEX connectors. Pulling it in together avoids a
+# second round of touching every DEX connector to add volume support
+# later (per the decision recorded on VIB-4859 2026-05-27).
+#
+# "No silent zeros" rule (matching ``PoolHistoryService`` / VIB-4727):
+# any "no data" path raises (gateway side) or surfaces as
+# ``success=false`` on the proto envelope (wire), which the framework
+# reader translates to :class:`DataSourceUnavailable`. Never substitute
+# ``Decimal("0")`` for "unmeasured", never substitute a default value
+# for "upstream returned empty".
+
+
+@runtime_checkable
+class GatewayLendingRateHistoryCapability(Protocol):
+    """Lending connector publishes APY / utilisation history + live rate.
+
+    Replaces the hardcoded
+    ``if protocol == "aave_v3" elif "compound_v3" elif "morpho_blue":``
+    dispatch in:
+
+    * ``almanak/framework/data/rates/monitor.py`` (live, on-chain
+      ``eth_call`` against ``AaveProtocolDataProvider`` / Comet).
+    * ``almanak/framework/data/rates/history.py`` (TheGraph subgraph
+      crawl, with DefiLlama fallback).
+    * ``almanak/framework/backtesting/pnl/providers/lending_apy.py`` (and
+      its sibling sub-package ``pnl/providers/lending/``).
+
+    Live + historical live on the same Protocol because every connector
+    that knows the historical data source for an ``(asset, chain)`` also
+    knows the live one. Splitting them per Alt C in the plan PR would
+    force two registrations for one underlying knowledge.
+
+    Contract:
+
+    * ``lending_supported_chains() -> frozenset[str]`` — the chains the
+      connector serves. Empty set is legal (connector registered for a
+      sibling capability while lending coverage is staged in).
+    * ``fetch_lending_current(*, servicer, chain, asset_symbol, side)
+      -> LendingRatePoint`` — single-point live rate. ``servicer``
+      carries the gateway-side HTTP session, web3 cache, settings; the
+      connector body stays free of gateway plumbing.
+    * ``fetch_lending_history(*, servicer, chain, asset_symbol, side,
+      start_ts, end_ts) -> list[LendingRatePoint]`` — time-series
+      history, ascending timestamps, NEVER fake-success with an empty
+      list (raise from the connector when the window has no upstream
+      data; the dispatcher converts to a ``success=false`` envelope).
+
+    ``side`` is the literal ``"supply"`` or ``"borrow"`` string a
+    strategy submits via ``RateMonitor.get_lending_rate`` — same
+    vocabulary the existing framework consumers already use.
+
+    The ``LendingRatePoint`` return type is the dataclass declared in
+    ``almanak.gateway.services._rate_history_models`` (gateway-side, so
+    it can carry validator + serializer plumbing without polluting
+    ``_base/``). The connector receives it via the ``servicer`` argument
+    rather than importing it directly to keep ``_base/`` clean of
+    gateway internals.
+
+    The connector's protocol name is read by the dispatcher from the
+    base ``GatewayConnector.protocol`` ClassVar; this Protocol only
+    contributes the chain list + the two fetch methods.
+    """
+
+    def lending_supported_chains(self) -> frozenset[str]: ...
+
+    async def fetch_lending_current(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        asset_symbol: str,
+        side: str,
+    ) -> Any: ...
+
+    async def fetch_lending_history(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        asset_symbol: str,
+        side: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> Any: ...
+
+
+@runtime_checkable
+class GatewayFundingHistoryCapability(Protocol):
+    """Perp connector publishes historical funding-rate series.
+
+    Sibling of the existing :class:`GatewayFundingRateCapability` (which
+    publishes the *live* rate). Replaces the hardcoded
+    ``if venue in ("hyperliquid", "gmx_v2"):`` dispatch in
+    ``almanak/framework/data/rates/history.py`` and the duplicated
+    egress in ``almanak/framework/backtesting/pnl/providers/perp/``.
+
+    Contract:
+
+    * ``funding_venue() -> str`` — the venue identifier matching
+      :meth:`GatewayFundingRateCapability.venue` so both capabilities on
+      the same connector agree on identity.
+    * ``funding_supported_markets() -> frozenset[str]`` — markets the
+      connector serves for the historical lane (e.g. ``"ETH-USD"``,
+      ``"BTC-USD"``). Empty set is legal.
+    * ``fetch_funding_history(*, servicer, market, chain, start_ts,
+      end_ts) -> list[FundingRatePoint]`` — ascending timestamps,
+      never fake-success with empty (raise from the connector when the
+      upstream window is empty).
+
+    Cross-venue fallback (GMX V2 historical funding is served by
+    Hyperliquid since GMX has no historical API) is handled by the
+    dispatcher in ``RateHistoryService``, not by the capability — the
+    GMX connector declares an empty market set for its own historical
+    endpoint and the dispatcher fans out to siblings on
+    ``DataSourceUnavailable``.
+    """
+
+    def funding_venue(self) -> str: ...
+
+    def funding_supported_markets(self) -> frozenset[str]: ...
+
+    async def fetch_funding_history(
+        self,
+        servicer: Any,
+        *,
+        market: str,
+        chain: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> Any: ...
+
+
+@runtime_checkable
+class GatewayDexTwapCapability(Protocol):
+    """DEX connector publishes TWAP price + TWAP series (natively-supported only).
+
+    Replaces the hardcoded pool-table dispatch in
+    ``almanak/framework/backtesting/pnl/providers/twap.py``. Today twap.py
+    only supports Uniswap V3 ``observe()``; the W7 fan-out adds the V3-style
+    DEX forks (PancakeSwap V3, SushiSwap V3, Aerodrome Slipstream) which
+    expose the same ``observe()`` ABI.
+
+    **Natively-supported only.** Connectors whose underlying AMM has no
+    TWAP primitive (Curve StableSwap, Balancer V2 weighted, TraderJoe V2
+    Liquidity Book) MUST NOT implement this capability — fabricating TWAP
+    via event-log reconstruction is out of scope for W7 (VIB-4859 §2.2).
+
+    Contract:
+
+    * ``dex_name() -> str`` — the DEX identifier (e.g. ``"uniswap_v3"``,
+      ``"sushiswap_v3"``). This is the routing key ``RateHistoryService``
+      uses to dispatch ``GetDexTwap`` / ``GetDexTwapSeries`` by
+      ``request.dex``; it MUST match the string callers pass and the
+      ``GatewayDexQuoteCapability.dex_name()`` for the same DEX. Declared
+      here (not just on the quote capability) so the registry's structural
+      Protocol check enforces it — otherwise a TWAP provider missing the
+      method would slip through registration and ``AttributeError`` at
+      dispatch-table build time.
+    * ``twap_supported_chains() -> frozenset[str]`` — chains where the
+      DEX exposes TWAP. Empty set is legal during fan-out staging.
+    * ``fetch_twap(*, servicer, chain, pool_address, secs_ago_start,
+      secs_ago_end, as_of_block) -> DexTwapPoint`` — single TWAP
+      observation over the requested window.
+    * ``fetch_twap_series(*, servicer, chain, pool_address, start_ts,
+      end_ts, interval_secs) -> list[DexTwapPoint]`` — TWAP samples at
+      ``interval_secs`` spacing. Connectors may down-sample upstream and
+      return at the requested resolution.
+
+    The connector receives ``servicer`` so the DEX-specific archive-RPC
+    cache and web3 helpers stay on the service and the capability body
+    holds only protocol-specific encoding (function selectors, return
+    decoding, sqrtPriceX96 → price math).
+    """
+
+    def dex_name(self) -> str: ...
+
+    def twap_supported_chains(self) -> frozenset[str]: ...
+
+    async def fetch_twap(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        secs_ago_start: int,
+        secs_ago_end: int,
+        as_of_block: int | None = None,
+    ) -> Any: ...
+
+    async def fetch_twap_series(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any: ...
+
+
+@runtime_checkable
+class GatewayDexVolumeCapability(Protocol):
+    """DEX connector publishes historical trading-volume series.
+
+    Replaces the per-DEX duplicate egress in
+    ``almanak/framework/backtesting/pnl/providers/dex/`` — eight files
+    (one per DEX) that each open their own aiohttp session and hit
+    their own subgraph for ``volume_24h_usd``.
+
+    Pulled into the W7 wave (alongside ``GatewayDexTwapCapability``) so
+    every DEX connector is touched exactly once for read-side data
+    capabilities. The shape matches ``GatewayDexTwapCapability``'s
+    ``fetch_*_series`` so DEX connectors stay symmetric.
+
+    Contract:
+
+    * ``dex_name() -> str`` — the DEX identifier (e.g. ``"uniswap_v3"``).
+      The routing key ``RateHistoryService`` uses to dispatch
+      ``GetDexVolumeHistory`` by ``request.dex``; MUST match the
+      ``GatewayDexQuoteCapability.dex_name()`` for the same DEX. Declared
+      here so the registry's structural Protocol check enforces it (a
+      volume provider missing the method would otherwise slip through
+      registration and ``AttributeError`` at dispatch-table build time).
+    * ``volume_supported_chains() -> frozenset[str]`` — chains where the
+      DEX exposes trading-volume history (almost always = the connector's
+      subgraph coverage).
+    * ``fetch_volume_history(*, servicer, chain, pool_address, start_ts,
+      end_ts, interval_secs) -> list[DexVolumePoint]`` — ascending
+      timestamps, never fake-success with empty.
+
+    A DEX MAY implement only TWAP, only volume, or both. Connectors that
+    implement neither (e.g. an EVM connector whose backtest providers
+    haven't been migrated yet) simply do not declare either capability.
+    """
+
+    def dex_name(self) -> str: ...
+
+    def volume_supported_chains(self) -> frozenset[str]: ...
+
+    async def fetch_volume_history(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any: ...

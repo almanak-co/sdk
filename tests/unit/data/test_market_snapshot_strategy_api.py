@@ -253,7 +253,7 @@ class TestProviderlessMethodsRaiseValueError:
             ("pool_reserves", ("0xpool",), {}, "pool reader"),
             ("twap", ("WETH/USDC",), {}, "price aggregator"),
             ("lwap", ("WETH/USDC",), {}, "price aggregator"),
-            ("pool_history", ("0xpool",), {}, "pool history reader"),
+            ("pool_history", ("0xpool",), {"protocol": "uniswap_v3"}, "pool history reader"),
             ("liquidity_depth", ("0xpool",), {}, "liquidity depth reader"),
             (
                 "estimate_slippage",
@@ -621,7 +621,7 @@ class TestPoolHistoryDefaultBoundsAreSnapshotTimestamp:
             timestamp=snapshot_ts,
             pool_history_reader=reader,
         )
-        ms.pool_history("0xpool")
+        ms.pool_history("0xpool", protocol="uniswap_v3")
 
         assert reader.last_kwargs is not None
         assert reader.last_kwargs["end_date"] == snapshot_ts, (
@@ -645,7 +645,7 @@ class TestPoolHistoryDefaultBoundsAreSnapshotTimestamp:
             timestamp=snapshot_ts,
             pool_history_reader=reader,
         )
-        ms.pool_history("0xpool", end_date=explicit_end)
+        ms.pool_history("0xpool", end_date=explicit_end, protocol="uniswap_v3")
 
         assert reader.last_kwargs is not None
         assert reader.last_kwargs["end_date"] == explicit_end

@@ -39,7 +39,11 @@ V3_POOL_ADDR_20_BYTE = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 V3_POOL_REGEX = re.compile(r"^0x[0-9a-f]{40}$")
 
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
-POSITION_MANAGER = "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24"
+# Real Ethereum V4 PositionManager (VIB-4874: was a garbled non-contract
+# 0xBd2165...e83b24). Paired with Ethereum's POOL_MANAGER above so the
+# fixture mocks a real V4 deployment; the parser matches the configured
+# address exactly, independent of CHAIN.
+POSITION_MANAGER = "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
 USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
@@ -328,10 +332,13 @@ def test_v4_payload_carries_protocol_for_primitive_for_override():
     The override reads ``d.get("protocol")`` from the decoded payload — so
     ``LPAccountingEvent.to_payload_json`` MUST emit ``"protocol"`` or the
     override silently falls back to ``Primitive.LP`` and V4 rows get
-    ``matching_policy_version=3`` (the V3 value) instead of ``1`` (the V4 value).
+    the V3 ``matching_policy_version`` (today: 5) instead of the V4 value
+    (today: 2).
 
-    The two MATCHING_POLICY_VERSIONS entries differ (LP=3, LP_V4=1), so this
-    test asserts on the V4 value to prove the override actually fired.
+    VIB-4848 bumped both lanes together — LP 4→5, LP_V4 1→2 — to track the
+    fee-separation taxonomy + fee-adjusted IL change. The two
+    MATCHING_POLICY_VERSIONS entries still differ, so the assertion on the
+    V4 lane keeps proving the override actually fired.
     """
     v4_event = LPAccountingEvent(
         identity=_identity("0xv4stamp"),
@@ -356,10 +363,11 @@ def test_v4_payload_carries_protocol_for_primitive_for_override():
     )
 
     augmented = json.loads(augment_accounting_payload(v4_event.to_payload_json(), is_live=False))
-    # V4 lane: matching_policy_version comes from PRIMITIVE_VERSIONS[Primitive.LP_V4] = 1.
-    # If the override is dead code, this would be PRIMITIVE_VERSIONS[Primitive.LP] = 3.
-    assert augmented["matching_policy_version"] == 1, (
-        f"V4 LP event must stamp matching_policy_version=1 (LP_V4 lane); "
+    # V4 lane: matching_policy_version comes from PRIMITIVE_VERSIONS[Primitive.LP_V4]
+    # (today: 2 after VIB-4848). If the override is dead code, this would be
+    # PRIMITIVE_VERSIONS[Primitive.LP] (today: 5).
+    assert augmented["matching_policy_version"] == 2, (
+        f"V4 LP event must stamp matching_policy_version=2 (LP_V4 lane); "
         f"got {augmented['matching_policy_version']} — V4 override is dead code"
     )
 

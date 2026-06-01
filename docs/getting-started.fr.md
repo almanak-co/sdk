@@ -48,7 +48,7 @@ Cela détecte automatiquement votre plateforme (Claude Code, Codex, Cursor, Copi
 almanak strat demo
 ```
 
-Cela affiche un menu interactif de 13 stratégies de démonstration fonctionnelles. Choisissez-en une et elle est copiée dans votre répertoire courant, prête à être exécutée. Vous pouvez aussi ignorer le menu :
+Cela affiche un menu interactif de stratégies de démonstration fonctionnelles. Choisissez-en une et elle est copiée dans votre répertoire courant, prête à être exécutée. Vous pouvez aussi ignorer le menu :
 
 ```bash
 almanak strat demo --name uniswap_rsi

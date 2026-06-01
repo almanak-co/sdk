@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.contracts import AERODROME_TOKENS as TOKEN_ADDRESSES
+from almanak.connectors.aerodrome.addresses import AERODROME_TOKENS as TOKEN_ADDRESSES
 
 from almanak.connectors.aerodrome.receipt_parser import (
     BURN_EVENT_TOPIC,

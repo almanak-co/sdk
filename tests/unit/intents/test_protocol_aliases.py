@@ -275,7 +275,7 @@ class TestVelodromeCompilerIntegration:
 
     def test_base_aerodrome_defaults_to_cl(self, base_compiler):
         """On Base, Aerodrome swap should default to CL routing (has cl_router)."""
-        from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+        from almanak.connectors.aerodrome.addresses import AERODROME as AERODROME_ADDRESSES
 
         chain_addrs = AERODROME_ADDRESSES["base"]
         assert "cl_router" in chain_addrs
@@ -283,7 +283,7 @@ class TestVelodromeCompilerIntegration:
 
     def test_optimism_velodrome_defaults_to_classic(self):
         """On Optimism, Velodrome should default to classic routing (no cl_router)."""
-        from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+        from almanak.connectors.aerodrome.addresses import AERODROME as AERODROME_ADDRESSES
 
         chain_addrs = AERODROME_ADDRESSES["optimism"]
         assert "cl_router" not in chain_addrs

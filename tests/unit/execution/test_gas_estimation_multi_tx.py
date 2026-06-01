@@ -271,3 +271,81 @@ class TestZeroGasEstimateFallback:
         # TX should be returned with compiler gas (not crash with ValueError)
         assert len(updated_txs) == 1
         assert updated_txs[0].gas_limit == 100_000  # compiler estimate preserved
+
+
+class TestGasFloorClamp:
+    """VIB-4915: _update_gas_estimate must never submit a gasLimit below the
+    compiler-provided floor.
+
+    The simulation-enabled submission path (orchestrator.py:1759-1769, the
+    DEFAULT path since ExecutionContext.simulation_enabled defaults to True)
+    calls _update_gas_estimate directly. Before VIB-4915 only the
+    simulation-disabled path (_maybe_estimate_gas_limits) clamped a low estimate
+    up to the compiler floor, so a low simulator estimate x buffer could fully
+    replace the connector's seeded gas_limit and risk first-attempt OutOfGas
+    (the residual behind VIB-4533). The clamp now lives in _update_gas_estimate
+    so BOTH paths are protected.
+    """
+
+    @pytest.fixture
+    def orchestrator(self):
+        orch = ExecutionOrchestrator.__new__(ExecutionOrchestrator)
+        orch.rpc_url = "http://localhost:8545"
+        orch.signer = MagicMock()
+        orch.signer.__class__.__name__ = "LocalKeySigner"
+        orch.gas_buffer_multiplier = 1.5
+        return orch
+
+    def test_low_estimate_keeps_compiler_floor(self, orchestrator):
+        """A simulator estimate whose buffered value is below the compiler seed
+        keeps the compiler limit (e.g. Morpho withdraw seed 180k vs a 50k sim)."""
+        tx = UnsignedTransaction(
+            to="0x" + "0" * 40,
+            value=0,
+            data="0x1234",
+            chain_id=1,
+            gas_limit=180_000,  # compiler-provided floor (Morpho withdraw seed)
+            max_fee_per_gas=1_000_000_000,
+            max_priority_fee_per_gas=100_000_000,
+            tx_type=TransactionType.EIP_1559,
+            metadata={"description": "withdraw"},
+        )
+        # 50_000 * 1.5 = 75_000 < 180_000 -> keep compiler floor.
+        result = orchestrator._update_gas_estimate(tx, 50_000)
+        assert result.gas_limit == 180_000
+        assert result is tx  # returned unchanged
+
+    def test_high_estimate_raises_above_floor(self, orchestrator):
+        """A simulator estimate above the compiler seed still raises the limit."""
+        tx = UnsignedTransaction(
+            to="0x" + "0" * 40,
+            value=0,
+            data="0x1234",
+            chain_id=1,
+            gas_limit=180_000,
+            max_fee_per_gas=1_000_000_000,
+            max_priority_fee_per_gas=100_000_000,
+            tx_type=TransactionType.EIP_1559,
+            metadata={"description": "withdraw"},
+        )
+        # 200_000 * 1.5 = 300_000 >= 180_000 -> use the (higher) buffered estimate.
+        result = orchestrator._update_gas_estimate(tx, 200_000)
+        assert result.gas_limit == 300_000
+
+    def test_buffered_equal_to_floor_uses_buffered(self, orchestrator):
+        """Boundary: buffered estimate exactly equal to the floor is not 'below',
+        so the buffered value is used (no spurious fallback)."""
+        tx = UnsignedTransaction(
+            to="0x" + "0" * 40,
+            value=0,
+            data="0x1234",
+            chain_id=1,
+            gas_limit=150_000,
+            max_fee_per_gas=1_000_000_000,
+            max_priority_fee_per_gas=100_000_000,
+            tx_type=TransactionType.EIP_1559,
+            metadata={"description": "supply"},
+        )
+        # 100_000 * 1.5 = 150_000 == floor -> use buffered (boundary is inclusive).
+        result = orchestrator._update_gas_estimate(tx, 100_000)
+        assert result.gas_limit == 150_000

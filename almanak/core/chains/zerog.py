@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -26,6 +26,11 @@ DESCRIPTOR = register_chain(
         timeouts=Timeouts(
             tx_confirmation=120,
             grpc_execute=300,
+        ),
+        rpc=RpcProfile(
+            # zerog has no Alchemy / Tenderly route — public RPC + anvil only.
+            public_rpc="https://rpc.ankr.com/0g_mainnet_evm",
+            anvil_port=8558,
         ),
         aliases=("0g",),
     )

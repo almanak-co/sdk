@@ -146,6 +146,7 @@ class HistoryCache[K: Hashable, V]:
         finalized_ttl_seconds: float = DEFAULT_FINALIZED_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         partition_extractor: Callable[[K], str] | None = None,
+        repromoter: Callable[[V], str | None] | None = None,
         name: str = "history_cache",
     ) -> None:
         if max_entries <= 0:
@@ -163,6 +164,14 @@ class HistoryCache[K: Hashable, V]:
         self._finalized_ttl = finalized_ttl_seconds
         self._clock = clock
         self._partition_extractor = partition_extractor
+        # POOL-6 (VIB-4754) finality re-promotion hook. Called UNDER ``_lock``
+        # with the cached value when a ``provisional`` entry's TTL has expired;
+        # returns the new finality band if the value has aged past the
+        # provider's finality cutoff (and mutates the value's ``finalized_only``
+        # in place), or None to evict + miss as normal. MUST be fast and MUST
+        # NOT re-enter the cache (the non-reentrant lock is held). Only the
+        # public cache wires this; the raw cache does not re-promote.
+        self._repromoter = repromoter
         self._name = name
         self._entries: OrderedDict[K, _CacheEntry[V]] = OrderedDict()
         self._bytes_resident: int = 0
@@ -201,7 +210,12 @@ class HistoryCache[K: Hashable, V]:
                 self._misses += 1
                 return None
             if now > entry.expires_at:
-                # TTL expired — evict and treat as miss.
+                # TTL expired. Before evicting, try finality re-promotion: a
+                # provisional entry whose data has aged past the cutoff is now
+                # finalized + durable, so we flip its band + extend its TTL in
+                # place rather than evicting + re-fetching (D3.F9).
+                if self._try_repromote_locked(key, entry, now):
+                    return entry.value
                 self._remove_locked(key)
                 self._misses += 1
                 return None
@@ -209,6 +223,40 @@ class HistoryCache[K: Hashable, V]:
             self._entries.move_to_end(key, last=True)
             self._hits += 1
             return entry.value
+
+    def _try_repromote_locked(self, key: K, entry: _CacheEntry[V], now: float) -> bool:
+        """Re-promote an expired ``provisional`` entry to ``finalized`` in place.
+
+        Caller MUST hold ``self._lock``. Returns True iff the entry was
+        re-promoted (band flipped, TTL extended, LRU touched, value mutated by
+        the repromoter) — in which case the caller serves ``entry.value`` as a
+        hit. The mutation is in place (no remove/insert), so the key never
+        leaves the dict and a concurrent reader during the flip gets the entry,
+        never a miss-then-insert (D3.F9 atomicity).
+
+        Only provisional entries are eligible. The repromoter decides finality
+        from the value (e.g. ``now - newest_row_ts > provider_cutoff``); a None
+        return means "still provisional — let it expire and re-fetch."
+
+        Trade-off (PoolX.md §D4): re-promotion serves the value as captured at
+        its last fetch. A revision that landed in the gap since then is missed —
+        accepted because once a row ages past the finality cutoff it no longer
+        revises, and the alternative (always re-fetch) burns provider quota.
+        """
+        if self._repromoter is None or entry.finality_band != FINALITY_PROVISIONAL:
+            return False
+        new_band = self._repromoter(entry.value)
+        if new_band is None or new_band == FINALITY_PROVISIONAL:
+            return False
+        # The guard above already returned for None / provisional, and
+        # ``finalized`` is the only other valid band, so a re-promotion always
+        # extends to the finalized TTL.
+        ttl = self._finalized_ttl
+        entry.finality_band = new_band
+        entry.expires_at = now + ttl
+        self._entries.move_to_end(key, last=True)
+        self._hits += 1
+        return True
 
     def put(self, key: K, value: V, finality_band: str) -> None:
         """Insert / replace ``key`` with ``value``. Evicts as needed.
@@ -304,8 +352,11 @@ class HistoryCache[K: Hashable, V]:
                     self._entries.move_to_end(key, last=True)
                     self._hits += 1
                     return entry.value
-                # TTL expired — evict and treat as miss (matches
-                # ``self.get()``'s eviction-on-expiry behaviour).
+                # TTL expired — try finality re-promotion before evicting
+                # (matches ``self.get()``); a re-promotable provisional entry is
+                # served as a hit rather than re-fetched (D3.F9).
+                if self._try_repromote_locked(key, entry, now):
+                    return entry.value
                 self._remove_locked(key)
                 self._misses += 1
 
@@ -354,6 +405,16 @@ class HistoryCache[K: Hashable, V]:
             if not future.done():
                 if isinstance(exc, Exception):
                     future.set_exception(exc)
+                    # The lead caller re-raises ``exc`` below; it never awaits
+                    # its OWN future (only deduped peers do, at the branch
+                    # above). With no peers, the set exception is GC'd
+                    # unretrieved and asyncio logs "Future exception was never
+                    # retrieved" on EVERY failure path — loud noise once a
+                    # caller (e.g. PoolHistoryService, VIB-4753) raises through
+                    # ``get_or_fetch`` on provider exhaustion. Retrieve it here
+                    # to clear the flag; a peer's ``await future`` still
+                    # re-raises ``exc`` verbatim.
+                    future.exception()
                 else:
                     future.cancel()
             raise

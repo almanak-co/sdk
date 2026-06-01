@@ -57,6 +57,20 @@ V4_LP_PARSER_DROPS_TOTAL = Counter(
 )
 
 
+# VIB-4780 / W1-5 — decimal-unit soft-fail guard counter.  Incremented when
+# :func:`almanak.framework.accounting.decimal_guards._check_decimal_unit_soft_fail`
+# detects a payload field whose magnitude / shape looks like raw-wei instead
+# of a human-form decimal.  This is a Wave-1 soft-fail observability metric;
+# Wave 3 (W3-1) will flip the same detection into a hard reject.
+ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL = Counter(
+    "accounting_raw_wei_suspected_total",
+    "Accounting payload-write fields whose value looked like raw-wei "
+    "(soft-fail / observability only; see VIB-4780 W1-5).",
+    ["chain", "field", "event_type", "token_symbol"],
+    registry=FRAMEWORK_REGISTRY,
+)
+
+
 def record_v4_lp_parser_drop(*, chain: str, reason: V4LPDropReason | str, outcome: V4LPDropOutcome) -> None:
     """Increment the ``v4_lp_parser_drops_total`` counter.
 
@@ -81,10 +95,35 @@ def record_v4_lp_parser_drop(*, chain: str, reason: V4LPDropReason | str, outcom
     V4_LP_PARSER_DROPS_TOTAL.labels(chain=chain, reason=reason_value, outcome=outcome).inc()
 
 
+def record_raw_wei_suspected(
+    *,
+    chain: str,
+    field: str,
+    event_type: str,
+    token_symbol: str,
+) -> None:
+    """Increment ``accounting_raw_wei_suspected_total`` (W1-5 soft-fail metric).
+
+    Labels are lower-cased and defaulted so a missing value never spawns
+    a divergent time-series.  All values must be short identifiers — the
+    chokepoint in :mod:`almanak.framework.accounting.decimal_guards` is
+    responsible for ensuring no high-cardinality user-supplied string
+    reaches this counter.
+    """
+    ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL.labels(
+        chain=(chain or "unknown").lower() or "unknown",
+        field=(field or "unknown") or "unknown",
+        event_type=(event_type or "unknown") or "unknown",
+        token_symbol=(token_symbol or "unknown") or "unknown",
+    ).inc()
+
+
 __all__ = [
+    "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
     "V4_LP_PARSER_DROPS_TOTAL",
     "V4LPDropOutcome",
     "V4LPDropReason",
+    "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",
 ]

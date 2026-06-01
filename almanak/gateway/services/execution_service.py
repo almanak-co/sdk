@@ -15,6 +15,8 @@ from typing import Any
 import grpc
 import pydantic
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
@@ -776,8 +778,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
         await self._ensure_initialized()
 
-        # Route to chain-family-specific execution
-        if chain.lower() == "solana":
+        # Route to chain-family-specific execution. ``chain`` is pre-validated
+        # by ``validate_chain``; ``try_resolve`` is defensive against an
+        # allowlist drift returning a name no chain has registered for.
+        chain_descriptor = ChainRegistry.try_resolve(chain)
+        if chain_descriptor is not None and chain_descriptor.family is ChainFamily.SOLANA:
             return await self._execute_solana(request, context, chain, wallet_address)
 
         return await self._execute_evm(request, context, chain, wallet_address)

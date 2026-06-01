@@ -40,8 +40,12 @@ TOKEN_TO_BINANCE_SYMBOL = {
     "WAVAX": "AVAXUSDT",
     "BNB": "BNBUSDT",
     "WBNB": "BNBUSDT",
-    "MATIC": "MATICUSDT",
-    "WMATIC": "MATICUSDT",
+    # Polygon MATIC -> POL rebrand (Sept 2024): MATICUSDT is delisted/stale,
+    # POLUSDT is the live pair. See gateway BinanceOHLCVProvider for detail.
+    "MATIC": "POLUSDT",
+    "WMATIC": "POLUSDT",
+    "POL": "POLUSDT",
+    "WPOL": "POLUSDT",
     "SOL": "SOLUSDT",
     "LINK": "LINKUSDT",
     "UNI": "UNIUSDT",
@@ -407,6 +411,11 @@ class GatewayGeckoTerminalOHLCVProvider:
                 limit=min(limit, 1000),
                 pool_address=pool_address or "",
                 quote=quote,
+                # GeckoTerminal is DEX-native: request continuous buckets so
+                # interior no-trade intervals don't fragment indicator windows.
+                # The trailing-edge (last-trade -> now) gap is closed by the
+                # OHLCV router's DEX forward-fill, not by this flag.
+                include_empty_intervals=True,
             )
             response = await asyncio.to_thread(
                 self._gateway_client.integration.GeckoTerminalGetOHLCV,
@@ -470,7 +479,144 @@ class GatewayGeckoTerminalOHLCVProvider:
         logger.debug("GeckoTerminal OHLCV cache cleared")
 
 
+class GatewayCoinGeckoOHLCVProvider:
+    """Gateway-backed CoinGecko OHLCV provider (second CEX source, VIB-4847).
+
+    Thin client over the gateway's ``CoinGeckoGetOHLCV`` gRPC endpoint. Exists
+    so the router's ``cex_primary`` chain has a real fallback after Binance:
+    when the ALM-2697 staleness guard rejects stale Binance klines, the router
+    falls through here instead of returning a permanent ``DATA_ERROR``.
+
+    Mirrors the :class:`GatewayOHLCVProvider` / :class:`GatewayGeckoTerminalOHLCVProvider`
+    pattern. Candles are price-only (``volume=None``) because CoinGecko's OHLC
+    endpoint carries no volume.
+    """
+
+    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1h", "4h", "1d"]
+    _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1h"}
+
+    def __init__(
+        self,
+        gateway_client: "GatewayClient",
+        cache_ttl_live: float = 30.0,
+        cache_ttl_historical: float = 60.0,
+    ) -> None:
+        self._gateway_client = gateway_client
+        self._metrics = OHLCVHealthMetrics()
+        self._cache: dict[tuple[str, str, str, int], CacheEntry] = {}
+        self._cache_ttl_live = cache_ttl_live
+        self._cache_ttl_historical = cache_ttl_historical
+
+    @property
+    def supported_timeframes(self) -> list[str]:
+        """Return the list of timeframes this provider supports."""
+        return self._SUPPORTED_TIMEFRAMES.copy()
+
+    async def get_ohlcv(
+        self,
+        token: str,
+        quote: str = "USD",
+        timeframe: str = "1h",
+        limit: int = 100,
+    ) -> list[OHLCVCandle]:
+        """Get CEX-reference OHLCV data for a token through the gateway.
+
+        Args:
+            token: Token symbol (e.g., "WETH", "ARB").
+            quote: Quote currency (CoinGecko OHLC is fiat-quoted).
+            timeframe: Candle timeframe. Supported: 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d.
+            limit: Number of candles (max 1000).
+
+        Returns:
+            List of OHLCVCandle sorted ascending by timestamp. ``volume`` is
+            ``None`` (CoinGecko OHLC is price-only).
+
+        Raises:
+            DataSourceUnavailable: If data cannot be fetched.
+            ValueError: If timeframe is not supported.
+        """
+        validate_timeframe(timeframe)
+        self._metrics.total_requests += 1
+
+        cache_key = (token.upper(), quote.upper(), timeframe, limit)
+        ttl = self._cache_ttl_live if timeframe in self._LIVE_TIMEFRAMES else self._cache_ttl_historical
+        entry = self._cache.get(cache_key)
+        if entry is not None and (time.monotonic() - entry.timestamp) < ttl:
+            self._metrics.cache_hits += 1
+            self._metrics.successful_requests += 1
+            return entry.candles
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.CoinGeckoOHLCVRequest(
+                token=token,
+                timeframe=timeframe,
+                limit=min(limit, 1000),
+                quote=quote,
+            )
+            response = await asyncio.to_thread(
+                self._gateway_client.integration.CoinGeckoGetOHLCV,
+                request,
+                self._gateway_client.config.timeout,
+            )
+
+            if not response.candles:
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(
+                    source="gateway_coingecko",
+                    reason=f"No OHLCV data for {token}",
+                )
+
+            candles = [
+                OHLCVCandle(
+                    timestamp=datetime.fromtimestamp(c.timestamp, tz=UTC),
+                    open=Decimal(c.open) if c.open else Decimal(0),
+                    high=Decimal(c.high) if c.high else Decimal(0),
+                    low=Decimal(c.low) if c.low else Decimal(0),
+                    close=Decimal(c.close) if c.close else Decimal(0),
+                    volume=None,  # CoinGecko OHLC carries no volume (unmeasured).
+                )
+                for c in response.candles
+            ]
+
+            candles.sort(key=lambda x: x.timestamp)
+            self._cache[cache_key] = CacheEntry(candles=candles)
+            self._metrics.successful_requests += 1
+            return candles
+
+        except DataSourceUnavailable:
+            raise
+        except Exception as e:
+            from almanak.framework.data.interfaces import data_source_error_from_grpc
+
+            self._metrics.errors += 1
+            typed = data_source_error_from_grpc(e, default_source="gateway_coingecko")
+            if typed is not None:
+                raise typed from e
+            raise DataSourceUnavailable(
+                source="gateway_coingecko",
+                reason=str(e),
+            ) from e
+
+    def get_health_metrics(self) -> dict[str, Any]:
+        """Return health metrics."""
+        return {
+            "total_requests": self._metrics.total_requests,
+            "successful_requests": self._metrics.successful_requests,
+            "cache_hits": self._metrics.cache_hits,
+            "errors": self._metrics.errors,
+            "success_rate": round(self._metrics.success_rate, 2),
+        }
+
+    def clear_cache(self) -> None:
+        """Clear the CoinGecko OHLCV cache."""
+        self._cache.clear()
+        logger.debug("CoinGecko OHLCV cache cleared")
+
+
 __all__ = [
+    "GatewayCoinGeckoOHLCVProvider",
     "GatewayGeckoTerminalOHLCVProvider",
     "GatewayOHLCVProvider",
     "OHLCVHealthMetrics",

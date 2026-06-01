@@ -18,8 +18,8 @@ from .compiler_constants import (
     AAVE_WITHDRAW_SELECTOR,
     BALANCER_FLASH_LOAN_SELECTOR,
     BALANCER_VAULT_ADDRESSES,
-    DEFAULT_GAS_ESTIMATES,
     LENDING_POOL_ADDRESSES,
+    get_gas_estimate,
 )
 
 # =============================================================================
@@ -299,27 +299,27 @@ class AaveV3Adapter:
 
     def estimate_supply_gas(self) -> int:
         """Estimate gas for supply operation."""
-        return DEFAULT_GAS_ESTIMATES["lending_supply"]
+        return get_gas_estimate(self.chain, "lending_supply")
 
     def estimate_borrow_gas(self) -> int:
         """Estimate gas for borrow operation."""
-        return DEFAULT_GAS_ESTIMATES["lending_borrow"]
+        return get_gas_estimate(self.chain, "lending_borrow")
 
     def estimate_repay_gas(self) -> int:
         """Estimate gas for repay operation."""
-        return DEFAULT_GAS_ESTIMATES["lending_repay"]
+        return get_gas_estimate(self.chain, "lending_repay")
 
     def estimate_withdraw_gas(self) -> int:
         """Estimate gas for withdraw operation."""
-        return DEFAULT_GAS_ESTIMATES["lending_withdraw"]
+        return get_gas_estimate(self.chain, "lending_withdraw")
 
     def estimate_flash_loan_gas(self) -> int:
         """Estimate gas for flash loan operation (base only, not including callbacks)."""
-        return DEFAULT_GAS_ESTIMATES["flash_loan"]
+        return get_gas_estimate(self.chain, "flash_loan")
 
     def estimate_flash_loan_simple_gas(self) -> int:
         """Estimate gas for simple flash loan operation (base only, not including callbacks)."""
-        return DEFAULT_GAS_ESTIMATES["flash_loan_simple"]
+        return get_gas_estimate(self.chain, "flash_loan_simple")
 
     def get_flash_loan_simple_calldata(
         self,
@@ -613,11 +613,11 @@ class BalancerAdapter:
 
     def estimate_flash_loan_gas(self) -> int:
         """Estimate gas for a multi-token flash loan (base only, not including callbacks)."""
-        return DEFAULT_GAS_ESTIMATES["balancer_flash_loan"]
+        return get_gas_estimate(self.chain, "balancer_flash_loan")
 
     def estimate_flash_loan_simple_gas(self) -> int:
         """Estimate gas for a single-token flash loan (base only, not including callbacks)."""
-        return DEFAULT_GAS_ESTIMATES["balancer_flash_loan_simple"]
+        return get_gas_estimate(self.chain, "balancer_flash_loan_simple")
 
     @staticmethod
     def _pad_address(addr: str) -> str:

@@ -62,20 +62,23 @@ from almanak.config.runtime import (
     gateway_wallets_configured,
     multi_chain_rpc_urls_from_env,
 )
+from almanak.core.chains import ChainRegistry
 from almanak.framework.execution.interfaces import Chain
 
 
 # Imported here so callers can reference without touching chain_executor directly.
-# Populated after chain_executor module is available (lazy import to avoid circular deps).
 def _default_receipt_timeout(chain: str) -> int:
     """Return the default receipt timeout in seconds for a given chain.
 
     Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
     Users can still override per-strategy with TX_TIMEOUT_SECONDS.
-    """
-    from almanak.framework.execution.chain_executor import CHAIN_RECEIPT_TIMEOUTS, DEFAULT_RECEIPT_TIMEOUT
 
-    return CHAIN_RECEIPT_TIMEOUTS.get(chain.lower(), DEFAULT_RECEIPT_TIMEOUT)
+    VIB-4857 (W5): backed by ``ChainDescriptor.timeouts.receipt_polling``
+    via :func:`almanak.core.chains._helpers.receipt_timeout_for`.
+    """
+    from almanak.core.chains._helpers import receipt_timeout_for
+
+    return receipt_timeout_for(chain.lower())
 
 
 if TYPE_CHECKING:
@@ -242,8 +245,16 @@ class LocalRuntimeConfig:
         # Validate optional fields
         self._validate_optional_fields()
 
-        # Set derived chain_id
-        self.chain_id = CHAIN_IDS.get(self.chain.lower(), 0)
+        # Set derived chain_id.
+        # VIB-4857 (W5): ``ChainRegistry`` is the SSOT; the legacy
+        # ``CHAIN_IDS`` mapping is a derived view. ``self.chain`` is
+        # already normalised by ``_validate_chain`` and guaranteed to
+        # resolve (the validation step raises otherwise), so this
+        # ``try_resolve`` cannot return ``None`` in practice; we still
+        # use ``try_resolve`` + ``0`` fallback to mirror the legacy
+        # ``CHAIN_IDS.get(..., 0)`` shape byte-for-byte.
+        descriptor = ChainRegistry.try_resolve(self.chain)
+        self.chain_id = descriptor.chain_id if descriptor is not None else 0
 
         logger.debug(
             "LocalRuntimeConfig initialized: chain=%s, wallet=%s",
@@ -256,22 +267,19 @@ class LocalRuntimeConfig:
         if not self.chain:
             raise ConfigurationError(field="chain", reason="Chain cannot be empty")
 
-        # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
-        try:
-            from almanak.core.constants import resolve_chain_name
-
-            chain_lower = resolve_chain_name(self.chain)
-        except (ValueError, ImportError):
-            chain_lower = self.chain.lower()
-        if chain_lower not in CHAIN_IDS:
-            valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
+        # Normalize chain alias (e.g., "bnb" -> "bsc") via ChainRegistry —
+        # the registry IS the alias map (VIB-4857 / W5). Unknown chains
+        # raise here rather than silently falling through.
+        descriptor = ChainRegistry.try_resolve(self.chain)
+        if descriptor is None:
+            valid_chains = ", ".join(ChainRegistry.names())
             raise ConfigurationError(
                 field="chain",
                 reason=f"Unsupported chain '{self.chain}'. Valid chains: {valid_chains}",
             )
 
-        # Normalize to lowercase
-        self.chain = chain_lower
+        # Normalize to canonical name
+        self.chain = descriptor.name
 
     def _validate_rpc_url(self) -> None:
         """Validate the RPC URL field."""
@@ -820,6 +828,7 @@ class MultiChainRuntimeConfig:
 
         # Normalize and validate each chain
         normalized_chains: list[str] = []
+        normalized_descriptors: list = []
         for chain in self.chains:
             if not chain:
                 raise ConfigurationError(
@@ -827,19 +836,17 @@ class MultiChainRuntimeConfig:
                     reason="Chain name cannot be empty",
                 )
 
-            # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
-            try:
-                from almanak.core.constants import resolve_chain_name
-
-                chain_lower = resolve_chain_name(chain)
-            except (ValueError, ImportError):
-                chain_lower = chain.lower()
-            if chain_lower not in CHAIN_IDS:
-                valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
+            # Normalize chain alias (e.g., "bnb" -> "bsc") via
+            # ChainRegistry — the registry IS the alias map
+            # (VIB-4857 / W5).
+            descriptor = ChainRegistry.try_resolve(chain)
+            if descriptor is None:
+                valid_chains = ", ".join(ChainRegistry.names())
                 raise ConfigurationError(
                     field="chains",
                     reason=f"Unsupported chain '{chain}'. Valid chains: {valid_chains}",
                 )
+            chain_lower = descriptor.name
 
             if chain_lower in normalized_chains:
                 raise ConfigurationError(
@@ -848,12 +855,13 @@ class MultiChainRuntimeConfig:
                 )
 
             normalized_chains.append(chain_lower)
+            normalized_descriptors.append(descriptor)
 
         # Update with normalized chains
         self.chains = normalized_chains
 
-        # Populate chain_ids
-        self.chain_ids = {chain: CHAIN_IDS[chain] for chain in self.chains}
+        # Populate chain_ids from descriptors (VIB-4857: no parallel lookup).
+        self.chain_ids = {d.name: d.chain_id for d in normalized_descriptors}
 
     def _validate_protocols(self) -> None:
         """Validate protocols mapping against chains and supported protocols."""

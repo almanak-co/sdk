@@ -421,3 +421,57 @@ class CoinGeckoIntegration(BaseIntegration):
         self._update_cache(cache_key, result_dict, ttl=300)
 
         return result_dict
+
+    async def get_ohlc(
+        self,
+        token_id: str,
+        days: str,
+        vs_currency: str = "usd",
+    ) -> list[list[float]]:
+        """Get OHLC candles for a token from CoinGecko's ``/coins/{id}/ohlc``.
+
+        CoinGecko's OHLC endpoint does not accept an explicit interval; the
+        candle granularity is derived from the ``days`` window:
+
+        - ``days=1``      -> 30-minute candles
+        - ``days=7|14|30`` -> 4-hour candles
+        - ``days>=31``    -> 4-day candles
+
+        Volume is **not** returned by this endpoint (CoinGecko OHLC carries
+        price-only candles), so callers receive ``[ts_ms, open, high, low,
+        close]`` rows and must treat volume as unmeasured.
+
+        Args:
+            token_id: CoinGecko token ID (e.g., "ethereum", "bitcoin").
+            days: Lookback window as a string CoinGecko accepts
+                ("1", "7", "14", "30", "90", "180", "365", "max").
+            vs_currency: Quote currency (default: "usd").
+
+        Returns:
+            List of ``[timestamp_ms, open, high, low, close]`` rows in
+            ascending timestamp order, as returned by the API.
+
+        Raises:
+            IntegrationError: On API errors.
+        """
+        cache_key = f"ohlc:{token_id}:{days}:{vs_currency}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        data = await self._fetch(
+            f"/coins/{token_id.lower()}/ohlc",
+            params={
+                "vs_currency": vs_currency.lower(),
+                "days": str(days),
+            },
+        )
+
+        # CoinGecko returns a bare list of [ts_ms, o, h, l, c] rows.
+        rows: list[list[float]] = data if isinstance(data, list) else []
+
+        # OHLC moves only on closed candles; a short TTL keeps the hot path
+        # off the wire without serving multi-window-stale candles.
+        self._update_cache(cache_key, rows, ttl=60)
+
+        return rows

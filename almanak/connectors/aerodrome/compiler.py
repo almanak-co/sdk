@@ -653,7 +653,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
         stable = swap_params.get("stable", False)
 
         # Check chain support dynamically from contract addresses
-        from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+        from .addresses import AERODROME as AERODROME_ADDRESSES
 
         if compiler.chain not in AERODROME_ADDRESSES:
             return CompilationResult(
@@ -1352,12 +1352,13 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
     Returns:
         Pool contract address, or None if pool not found / query failed.
     """
-    from almanak.core.contracts import AERODROME
     from almanak.framework.intents.pool_validation import (
         ZERO_ADDRESS,
         _decode_address,
         _encode_get_pool_aerodrome,
     )
+
+    from .addresses import AERODROME
 
     chain_contracts = AERODROME.get(compiler.chain.lower())
     if chain_contracts is None or "factory" not in chain_contracts:

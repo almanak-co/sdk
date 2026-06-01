@@ -560,3 +560,327 @@ class TestRealizedInterestRendering:
         section = LendingSection(positions=[pos])
         out = render_lending_section(section)
         assert "Realized interest:" not in out
+
+
+# ---------------------------------------------------------------------------
+# Test 8: sub-cent unrealized carry must be visible in render output
+# ---------------------------------------------------------------------------
+
+
+class TestSubCentUnrealizedCarryRendering:
+    """W1-2 (VIB-4777): unrealized carry on a leveraged-lending strategy is
+    often sub-cent per snapshot (e.g. $0.000528 supply yield, -$0.000196
+    borrow cost over ~30 minutes).  The renderer must surface these at >=4dp
+    precision; the older two-decimal formatter that collapsed them to
+    "$0.00" is the bug §A.6.3 in AccountingLastFixesMay22 describes.
+    """
+
+    def test_subcent_supply_unrealized_renders_with_six_decimals(self):
+        """The canonical Looping signal from §A.6.3: +$0.000528 supply
+        accrual.  Must appear character-for-character in the output."""
+        snap = _snapshot(_supply_snapshot_position(unrealized="0.0005280"))
+        data = _make_data([_supply_event()], snapshot=snap)
+        section = build_lending_report(data)
+        out = render_lending_section(section, snapshot=snap)
+        assert "Unrealized carry:" in out
+        assert "+$0.000528" in out, (
+            f"sub-cent supply unrealized must render with 6dp precision; got:\n{out}"
+        )
+        # Critically not collapsed to "$0.00" — the bug the PRD §A.6.3 names.
+        assert "Unrealized carry: +$0.00\n" not in out
+        assert "Unrealized carry:  $0.00\n" not in out
+
+    def test_subcent_borrow_unrealized_renders_negative_with_six_decimals(self):
+        """The canonical Looping signal: -$0.000196 borrow cost."""
+        snap = _snapshot(
+            _borrow_snapshot_position(unrealized="-0.0001960"),
+        )
+        # Borrow-only summary requires a BORROW-side lending event so the
+        # report picks up position_type="BORROW" and enrich works.
+        borrow_event = LendingAccountingEvent(
+            identity=_identity(),
+            event_type=LendingEventType.BORROW,
+            position_key="aave_v3:BORROW:USDT:arbitrum",
+            market_id="0xaave_market",
+            asset="USDT",
+            collateral_value_before_usd=Decimal("0"),
+            collateral_value_after_usd=Decimal("0"),
+            debt_value_before_usd=Decimal("0"),
+            debt_value_after_usd=Decimal("3.1124370"),
+            net_equity_before_usd=Decimal("0"),
+            net_equity_after_usd=Decimal("-3.1124370"),
+            health_factor_before=None,
+            health_factor_after=Decimal("2.5"),
+            liquidation_threshold=None,
+            lltv=None,
+            supply_apr_bps=None,
+            borrow_apr_bps=None,
+            principal_delta_usd=Decimal("3.00"),
+            interest_delta_usd=None,
+            gas_usd=Decimal("0.02"),
+            confidence=AccountingConfidence.HIGH,
+        )
+        data = _make_data([borrow_event], snapshot=snap)
+        section = build_lending_report(data)
+        out = render_lending_section(section, snapshot=snap)
+        assert "Unrealized carry:" in out
+        assert "-$0.000196" in out, (
+            f"sub-cent borrow unrealized must render with 6dp precision and "
+            f"minus sign; got:\n{out}"
+        )
+
+    def test_subcent_net_carry_footer_renders_with_six_decimals(self):
+        """Net carry footer: supply +$0.000528 + borrow -$0.000196 =
+        +$0.000332.  This is the operator-visible aggregate from §A.6.3."""
+        snap = _snapshot(
+            _supply_snapshot_position(unrealized="0.0005280"),
+            _borrow_snapshot_position(unrealized="-0.0001960"),
+        )
+        # Need both SUPPLY and BORROW events so both summaries render.
+        borrow_event = LendingAccountingEvent(
+            identity=_identity(),
+            event_type=LendingEventType.BORROW,
+            position_key="aave_v3:BORROW:USDT:arbitrum",
+            market_id="0xaave_market",
+            asset="USDT",
+            collateral_value_before_usd=Decimal("0"),
+            collateral_value_after_usd=Decimal("10.3746640"),
+            debt_value_before_usd=Decimal("0"),
+            debt_value_after_usd=Decimal("3.1124370"),
+            net_equity_before_usd=Decimal("0"),
+            net_equity_after_usd=Decimal("7.2622270"),
+            health_factor_before=None,
+            health_factor_after=Decimal("2.5"),
+            liquidation_threshold=None,
+            lltv=None,
+            supply_apr_bps=None,
+            borrow_apr_bps=None,
+            principal_delta_usd=Decimal("3.00"),
+            interest_delta_usd=None,
+            gas_usd=Decimal("0.02"),
+            confidence=AccountingConfidence.HIGH,
+        )
+        data = _make_data([_supply_event(), borrow_event], snapshot=snap)
+        section = build_lending_report(data)
+        out = render_lending_section(section, snapshot=snap)
+        assert "Net unrealized:" in out
+        assert "+$0.000332" in out, (
+            f"net carry footer must render the sub-cent aggregate; got:\n{out}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: multi-protocol render — Aave V3 + Morpho Blue in one report
+# ---------------------------------------------------------------------------
+
+
+def _morpho_supply_event(asset: str = "USDC") -> LendingAccountingEvent:
+    """Morpho Blue SUPPLY accounting event (protocol="morpho_blue").
+
+    Used by the multi-protocol render test to verify both Aave V3 and
+    Morpho Blue positions surface their unrealized carry in the same
+    report.  Both protocols write SUPPLY events with the same shape, so
+    the renderer should treat them identically.
+    """
+    return LendingAccountingEvent(
+        identity=AccountingIdentity(
+            id="evt-mpho-001",
+            deployment_id=DEPLOYMENT_ID,
+            cycle_id="cycle-001",
+            execution_mode="live",
+            timestamp=datetime.now(UTC),
+            chain="ethereum",
+            protocol="morpho_blue",
+            wallet_address="0xdeadbeef",
+            tx_hash="0xmpho123",
+            ledger_entry_id="led-mpho-001",
+        ),
+        event_type=LendingEventType.SUPPLY,
+        position_key=f"morpho_blue:SUPPLY:{asset}:ethereum",
+        market_id="0xmorpho_market",
+        asset=asset,
+        collateral_value_before_usd=Decimal("0"),
+        collateral_value_after_usd=Decimal("5.00"),
+        debt_value_before_usd=Decimal("0"),
+        debt_value_after_usd=Decimal("0"),
+        net_equity_before_usd=Decimal("0"),
+        net_equity_after_usd=Decimal("5.00"),
+        health_factor_before=None,
+        health_factor_after=Decimal("999"),
+        liquidation_threshold=None,
+        lltv=None,
+        supply_apr_bps=None,
+        borrow_apr_bps=None,
+        principal_delta_usd=Decimal("5.00"),
+        interest_delta_usd=None,
+        gas_usd=Decimal("0.03"),
+        confidence=AccountingConfidence.HIGH,
+    )
+
+
+class TestMultiProtocolRender:
+    """The renderer is protocol-agnostic: an Aave V3 SUPPLY and a Morpho
+    Blue SUPPLY in the same snapshot must both render with their own
+    per-position carry line.  This proves the design scales to additional
+    lending protocols (Compound, Spark, Fluid, etc.) without needing
+    per-protocol rendering branches.
+    """
+
+    def test_aave_and_morpho_both_render_carry(self):
+        aave_pos = _supply_snapshot_position(unrealized="0.0005280")
+        morpho_pos = PositionValue(
+            position_type=PositionType.SUPPLY,
+            protocol="morpho_blue",
+            chain="ethereum",
+            value_usd=Decimal("5.00"),
+            label="USDC Morpho Supply",
+            tokens=["USDC"],
+            details={"asset": "USDC"},
+            unrealized_pnl_usd=Decimal("0.0003"),
+        )
+        snap = _snapshot(aave_pos, morpho_pos)
+        data = _make_data([_supply_event(), _morpho_supply_event()], snapshot=snap)
+        section = build_lending_report(data)
+        out = render_lending_section(section, snapshot=snap)
+        # Both protocols appear in the header line of their respective
+        # position blocks.
+        assert "[aave_v3 / arbitrum]" in out
+        assert "[morpho_blue / ethereum]" in out
+        # Both carry lines render at 6dp precision.
+        assert "+$0.000528" in out
+        assert "+$0.000300" in out
+        # Net footer combines them: 0.0005280 + 0.0003 = 0.000828.
+        assert "+$0.000828" in out, (
+            f"multi-protocol Net unrealized footer must sum both legs; got:\n{out}"
+        )
+
+    def test_multi_chain_carry_renders_both_protocols(self):
+        """Aave V3 supply on Arbitrum + Aave V3 supply on Base — same
+        protocol, different chains.  Both carry lines must render."""
+        arb_pos = _supply_snapshot_position(
+            chain="arbitrum", unrealized="0.0005280"
+        )
+        base_pos = _supply_snapshot_position(
+            chain="base", value_usd="7.50", unrealized="0.0002500"
+        )
+        # Make the base event match its position so build_lending_report
+        # finds it and enrichment links the snapshot row.
+        base_identity = AccountingIdentity(
+            id="evt-base-001",
+            deployment_id=DEPLOYMENT_ID,
+            cycle_id="cycle-001",
+            execution_mode="live",
+            timestamp=datetime.now(UTC),
+            chain="base",
+            protocol="aave_v3",
+            wallet_address="0xdeadbeef",
+            tx_hash="0xbase123",
+            ledger_entry_id="led-base-001",
+        )
+        base_event = LendingAccountingEvent(
+            identity=base_identity,
+            event_type=LendingEventType.SUPPLY,
+            position_key="aave_v3:SUPPLY:USDC:base",
+            market_id="0xaave_market_base",
+            asset="USDC",
+            collateral_value_before_usd=Decimal("0"),
+            collateral_value_after_usd=Decimal("7.50"),
+            debt_value_before_usd=Decimal("0"),
+            debt_value_after_usd=Decimal("0"),
+            net_equity_before_usd=Decimal("0"),
+            net_equity_after_usd=Decimal("7.50"),
+            health_factor_before=None,
+            health_factor_after=Decimal("999"),
+            liquidation_threshold=None,
+            lltv=None,
+            supply_apr_bps=None,
+            borrow_apr_bps=None,
+            principal_delta_usd=Decimal("7.50"),
+            interest_delta_usd=None,
+            gas_usd=Decimal("0.01"),
+            confidence=AccountingConfidence.HIGH,
+        )
+        snap = _snapshot(arb_pos, base_pos)
+        data = _make_data([_supply_event(), base_event], snapshot=snap)
+        section = build_lending_report(data)
+        out = render_lending_section(section, snapshot=snap)
+        assert "[aave_v3 / arbitrum]" in out
+        assert "[aave_v3 / base]" in out
+        assert "+$0.000528" in out
+        assert "+$0.000250" in out
+
+
+# ---------------------------------------------------------------------------
+# VIB-4792 — collateral/debt post-state scoped to the side the event mutated
+# ---------------------------------------------------------------------------
+
+
+class TestSideScopedPostState:
+    """VIB-4792: a one-sided summary must not inherit the opposite side's value.
+
+    ``collateral_value_after_usd`` / ``debt_value_after_usd`` carry the WHOLE
+    position's state on every event.  ``_borrow_event`` / ``_repay_event``
+    therefore both carry ``collateral_value_after_usd=10.0`` even though they
+    key a USDT-side (BORROW) summary — pre-fix that leaked $10 of USDC
+    collateral onto the USDT summary.  Symmetrically a SUPPLY/WITHDRAW event
+    carrying a debt post-state would leak debt onto a collateral-only summary.
+    """
+
+    def test_borrow_only_summary_does_not_inherit_collateral(self):
+        # newest-first (DB order); build_lending_report reverses for accumulation
+        data = _make_data([_repay_event(), _borrow_event()], snapshot=None)
+        section = build_lending_report(data)
+        assert len(section.positions) == 1
+        pos = section.positions[0]
+        assert pos.position_type == "BORROW"
+        # collateral never written from a borrow-side event → stays unmeasured
+        assert pos.collateral_usd is None
+        # debt is the latest borrow-side post-state (REPAY → measured zero)
+        assert pos.debt_usd == Decimal("0")
+
+    def test_single_borrow_sets_debt_not_collateral(self):
+        pos = build_lending_report(_make_data([_borrow_event()], snapshot=None)).positions[0]
+        assert pos.collateral_usd is None
+        assert pos.debt_usd == Decimal("3.0")
+
+    def test_supply_only_summary_does_not_inherit_debt(self):
+        # A supply-side event that (incorrectly) carries the whole-position debt
+        # must not surface that debt on the collateral-only summary.
+        leaky_supply = _supply_event()
+        leaky_supply.debt_value_after_usd = Decimal("3.0")
+        pos = build_lending_report(_make_data([leaky_supply], snapshot=None)).positions[0]
+        assert pos.position_type == "SUPPLY"
+        assert pos.collateral_usd == Decimal("10.3746640")
+        assert pos.debt_usd is None
+
+    def test_deleverage_updates_both_sides(self):
+        # Whole-position events (DELEVERAGE) still set BOTH collateral and debt.
+        delev = _borrow_event()
+        delev.event_type = LendingEventType.DELEVERAGE
+        delev.collateral_value_after_usd = Decimal("8.0")
+        delev.debt_value_after_usd = Decimal("2.0")
+        pos = build_lending_report(_make_data([delev], snapshot=None)).positions[0]
+        assert pos.collateral_usd == Decimal("8.0")
+        assert pos.debt_usd == Decimal("2.0")
+
+    def test_close_updates_both_sides_to_settled(self):
+        # CLOSE is a whole-position settle: both sides go to its post-state (0).
+        close_ev = _borrow_event()
+        close_ev.event_type = LendingEventType.CLOSE
+        close_ev.collateral_value_after_usd = Decimal("0")
+        close_ev.debt_value_after_usd = Decimal("0")
+        pos = build_lending_report(_make_data([close_ev], snapshot=None)).positions[0]
+        assert pos.collateral_usd == Decimal("0")
+        assert pos.debt_usd == Decimal("0")
+
+    def test_liquidation_risk_update_updates_both_sides(self):
+        # LIQUIDATION_RISK_UPDATE is a whole-position risk snapshot — it is
+        # neither supply-side nor borrow-side, so it updates BOTH collateral
+        # and debt (mirrors DELEVERAGE/CLOSE).
+        liq_ev = _borrow_event()
+        liq_ev.event_type = LendingEventType.LIQUIDATION_RISK_UPDATE
+        liq_ev.collateral_value_after_usd = Decimal("9.5")
+        liq_ev.debt_value_after_usd = Decimal("2.5")
+        pos = build_lending_report(_make_data([liq_ev], snapshot=None)).positions[0]
+        assert pos.collateral_usd == Decimal("9.5")
+        assert pos.debt_usd == Decimal("2.5")

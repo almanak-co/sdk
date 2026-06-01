@@ -267,9 +267,7 @@ class TestExtractRegistryPayloadOpen:
         parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_log(
-                token_id=42, liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14
-            ),
+            _npm_increase_log(token_id=42, liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14),
         ]
         out = parser.extract_registry_payload_open(_receipt(logs), fee_tier=500)
         assert out is not None
@@ -583,9 +581,7 @@ class TestExtractRegistryPayloadClose:
         monkeypatch.setattr(parser, "_decreaseliquidity_token_id", lambda _r: 42)
         assert parser.extract_registry_payload_close({"logs": []}) is None
 
-    def test_returns_none_on_open_payload_token_id_disagreement(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_none_on_open_payload_token_id_disagreement(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Audit M1 — wrong open_payload token_id refuses the close."""
         parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
         monkeypatch.setattr(parser, "extract_lp_close_data", lambda _r: _make_lp_close())
@@ -593,9 +589,7 @@ class TestExtractRegistryPayloadClose:
         op = {"token_id": "9999999", "pool_address": POOL.lower()}
         assert parser.extract_registry_payload_close({"logs": []}, open_payload=op) is None
 
-    def test_returns_none_on_open_payload_pool_disagreement(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_none_on_open_payload_pool_disagreement(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Audit M1 — wrong open_payload pool_address refuses the close."""
         parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
         monkeypatch.setattr(parser, "extract_lp_close_data", lambda _r: _make_lp_close())
@@ -645,9 +639,7 @@ class TestExtractRegistryPayloadClose:
         monkeypatch.setattr(parser, "extract_lp_close_data", lambda _r: _make_lp_close())
         monkeypatch.setattr(parser, "_decreaseliquidity_token_id", lambda _r: 42)
         op = {"token_id": "42", "pool_address": POOL.lower(), "fee_tier": 100}
-        out = parser.extract_registry_payload_close(
-            {"logs": []}, open_payload=op, fee_tier=500
-        )
+        out = parser.extract_registry_payload_close({"logs": []}, open_payload=op, fee_tier=500)
         assert out is not None
         assert out["fee_tier"] == 100  # OPEN-side wins
 
@@ -678,15 +670,11 @@ class TestEndToEnd:
         assert open_payload["pool_address"] == POOL.lower()
 
         close_logs = [
-            _npm_decrease_log(
-                token_id=42, liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14
-            ),
+            _npm_decrease_log(token_id=42, liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14),
             _pool_burn_log(liquidity=10**18, amount0=1_000_000, amount1=5 * 10**14),
             _pool_collect_log(amount0=1_000_500, amount1=5 * 10**14 + 1_000),
         ]
-        close_payload = parser.extract_registry_payload_close(
-            _receipt(close_logs), open_payload=open_payload
-        )
+        close_payload = parser.extract_registry_payload_close(_receipt(close_logs), open_payload=open_payload)
         assert close_payload is not None
         assert close_payload["token_id"] == "42"
         assert close_payload["pool_address"] == POOL.lower()

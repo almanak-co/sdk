@@ -119,7 +119,11 @@ class TestStablecoinFallback:
     async def test_pusd_with_polymarket_address_falls_back_to_one_dollar(self) -> None:
         """Polymarket pUSD (resolved to its on-chain address) gets $1.00 when
         all sources fail. This is the original PR's intent: pUSD has no
-        Chainlink / CoinGecko listing, so the fallback IS the price source."""
+        Chainlink / CoinGecko listing, so the fallback IS the price source.
+
+        ``stablecoin_verify=True`` disables the VIB-4841 proactive peg
+        fast-path so this test exercises the *all-sources-failed* fallback
+        branch specifically (the fast-path is covered by TestStablecoinPeg)."""
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
@@ -129,7 +133,7 @@ class TestStablecoinFallback:
             MockPriceSource("chainlink", error="no feed"),
             MockPriceSource("coingecko", error="404 not listed"),
         ]
-        aggregator = PriceAggregator(sources=sources)
+        aggregator = PriceAggregator(sources=sources, stablecoin_verify=True)
 
         polymarket_pusd = ResolvedToken(
             symbol="PUSD",
@@ -207,14 +211,18 @@ class TestStablecoinFallback:
     async def test_usdc_without_resolved_token_still_falls_back(self) -> None:
         """USDC's symbol IS unambiguous across the EVM token set, so it
         remains in the symbol-keyed allowlist and the legacy bare-symbol
-        path keeps working with no resolved_token."""
+        path keeps working with no resolved_token.
+
+        ``stablecoin_verify=True`` disables the VIB-4841 peg fast-path so this
+        test exercises the all-sources-failed fallback branch (the fast-path
+        is covered by TestStablecoinPeg)."""
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
         sources = [
             MockPriceSource("chainlink", error="rate limited"),
             MockPriceSource("coingecko", error="rate limited"),
         ]
-        aggregator = PriceAggregator(sources=sources)
+        aggregator = PriceAggregator(sources=sources, stablecoin_verify=True)
 
         result = await aggregator.get_aggregated_price("USDC", "USD")
 

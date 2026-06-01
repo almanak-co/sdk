@@ -49,6 +49,11 @@ import aiohttp
 import grpc
 
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.data._history_common import (
+    _CHAIN_TO_GT_NETWORK,
+    _CHAIN_TO_LLAMA_DISPLAY,
+    is_solana_family,
+)
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -62,31 +67,17 @@ logger = logging.getLogger(__name__)
 _YIELDS_API = "https://yields.llama.fi"
 _GT_API = "https://api.geckoterminal.com/api/v2"
 
-# Chain → GeckoTerminal network slug
-_CHAIN_TO_GT_NETWORK: dict[str, str] = {
-    "ethereum": "eth",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon_pos",
-    "avalanche": "avax",
-    "bsc": "bsc",
-    "sonic": "sonic",
-    "solana": "solana",
-}
+# Chain-name maps (``_CHAIN_TO_GT_NETWORK`` / ``_CHAIN_TO_LLAMA_DISPLAY``) and
+# the ``is_solana_family`` helper are imported from the shared
+# ``almanak/gateway/data/_history_common`` home so this service and the
+# pool-history providers agree on chain spelling without duplicating the
+# literals (coupling-ratchet canonical home — blueprint 22).
 
-# Chain → DefiLlama display name (DefiLlama uses capitalized names)
-_CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
-    "ethereum": "Ethereum",
-    "arbitrum": "Arbitrum",
-    "base": "Base",
-    "optimism": "Optimism",
-    "polygon": "Polygon",
-    "avalanche": "Avalanche",
-    "bsc": "BSC",
-    "sonic": "Sonic",
-    "solana": "Solana",
-}
+#: Backward-compatible module-local alias — the chain-family chokepoint used to
+#: be defined here as ``_is_solana_family`` (W3 / VIB-4855). The implementation
+#: now lives in ``_history_common.is_solana_family``; the alias keeps the
+#: pre-existing import surface stable.
+_is_solana_family = is_solana_family
 
 # Protocol hint → DefiLlama project slug — registry-driven (VIB-4811 / VIB-4817).
 #
@@ -232,7 +223,7 @@ def _normalize_pool_address(address: str, chain: str) -> str:
     Mirrors ``almanak.framework.data.tokens.resolver._normalize_address_for_chain``.
     """
     address = address.strip()
-    if chain == "solana":
+    if is_solana_family(chain):
         return address
     return address.lower()
 
@@ -244,7 +235,7 @@ def _validate_pool_address(address: str, chain: str) -> bool:
     embeds the address) can never carry an attacker-supplied path / query
     segment.
     """
-    if chain == "solana":
+    if is_solana_family(chain):
         return bool(_SOLANA_BASE58_RE.match(address))
     return bool(_EVM_ADDRESS_RE.match(address))
 
@@ -602,7 +593,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         # EVM pool_address is already lowercase via _normalize_pool_address;
         # Solana retains case. DefiLlama lowercases EVM addresses in its
         # pool ids but preserves Solana case.
-        target_address = pool_address if chain == "solana" else pool_address.lower()
+        target_address = pool_address if is_solana_family(chain) else pool_address.lower()
         match: dict[str, Any] | None = None
         for pool in pools:
             pool_id = str(pool.get("pool", ""))
@@ -612,7 +603,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
             # Address segment: substring AFTER the last "-" for EVM-style
             # ids like "arbitrum-0xc6962...", or the whole id for Solana.
             address_segment = pool_id.rsplit("-", 1)[-1]
-            if chain != "solana":
+            if not is_solana_family(chain):
                 address_segment = address_segment.lower()
             if address_segment != target_address:
                 continue

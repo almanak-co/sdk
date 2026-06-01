@@ -872,6 +872,93 @@ def plot_atr_indicator(
     return apply_theme(fig, config)
 
 
+def plot_adx_indicator(
+    adx_data: pd.Series | list,
+    plus_di: pd.Series | list,
+    minus_di: pd.Series | list,
+    time_index: pd.DatetimeIndex | pd.Series | list,
+    trend_threshold: float = 25,
+    title: str = "ADX (Average Directional Index)",
+    config: PlotConfig | None = None,
+) -> go.Figure:
+    """Plot Average Directional Index (ADX) with +DI / -DI lines.
+
+    Args:
+        adx_data: ADX (trend strength, 0-100) values
+        plus_di: +DI (positive directional indicator) values
+        minus_di: -DI (negative directional indicator) values
+        time_index: DateTime index for x-axis
+        trend_threshold: ADX level above which a trend is considered strong
+            (default 25)
+        title: Chart title
+        config: Plot configuration
+
+    Returns:
+        Plotly figure with ADX and the directional indicators
+    """
+    config = config or get_default_config()
+    colors = config.colors
+
+    if isinstance(adx_data, list):
+        adx_data = pd.Series(adx_data)
+    if isinstance(plus_di, list):
+        plus_di = pd.Series(plus_di)
+    if isinstance(minus_di, list):
+        minus_di = pd.Series(minus_di)
+
+    if len(adx_data) == 0:
+        return create_empty_figure("No ADX data available", config)
+
+    fig = go.Figure()
+
+    # ADX trend-strength line
+    fig.add_trace(
+        go.Scatter(
+            x=time_index,
+            y=adx_data,
+            mode="lines",
+            name="ADX",
+            line={"color": colors.primary, "width": config.line_width},
+        )
+    )
+    # +DI / -DI directional lines
+    fig.add_trace(
+        go.Scatter(
+            x=time_index,
+            y=plus_di,
+            mode="lines",
+            name="+DI",
+            line={"color": colors.success, "width": 1},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=time_index,
+            y=minus_di,
+            mode="lines",
+            name="-DI",
+            line={"color": colors.danger, "width": 1},
+        )
+    )
+
+    # Trend-strength threshold
+    fig.add_hline(
+        y=trend_threshold,
+        line_dash="dash",
+        line_color=colors.neutral,
+        annotation_text=f"Trend ({trend_threshold})",
+    )
+
+    fig.update_layout(
+        title={"text": title, "font": {"size": config.title_font_size}},
+        xaxis_title="Time",
+        yaxis_title="ADX / DI",
+        hovermode="x unified",
+    )
+
+    return apply_theme(fig, config)
+
+
 def plot_obv_indicator(
     obv_data: pd.Series | list,
     price_data: pd.Series | list,

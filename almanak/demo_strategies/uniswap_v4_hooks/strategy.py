@@ -249,6 +249,9 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             "hooks": self.hook_address,
             "hook_data": hook_data.hex() if hook_data else "",
             "hook_capabilities": self.hook_flags.active_flags,
+            # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork ->
+            # estimated price; opt in so the money-safety guard doesn't block the open.
+            "allow_estimated_price": True,
         }
 
         return Intent.lp_open(

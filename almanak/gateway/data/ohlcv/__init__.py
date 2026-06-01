@@ -14,6 +14,9 @@ from almanak.gateway.data.ohlcv.binance_provider import (
     BINANCE_SYMBOL_MAP,
     BinanceOHLCVProvider,
 )
+from almanak.gateway.data.ohlcv.coingecko_provider import (
+    CoinGeckoOHLCVProvider,
+)
 from almanak.gateway.data.ohlcv.geckoterminal_provider import (
     GeckoTerminalOHLCVProvider,
 )
@@ -21,5 +24,6 @@ from almanak.gateway.data.ohlcv.geckoterminal_provider import (
 __all__ = [
     "BINANCE_SYMBOL_MAP",
     "BinanceOHLCVProvider",
+    "CoinGeckoOHLCVProvider",
     "GeckoTerminalOHLCVProvider",
 ]

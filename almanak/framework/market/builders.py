@@ -103,6 +103,17 @@ class MarketSnapshotBuilder:
 
             pool_analytics_reader = PoolAnalyticsReader(gateway_client=gateway_client)
 
+        # T3-B (VIB-4844): stateless calculators are pure Python — no gateway,
+        # no egress, no secrets. Construct them directly so the documented
+        # MarketSnapshot surface (`il_exposure`, `projected_il`, `realized_vol`,
+        # `vol_cone`, `portfolio_risk`, `rolling_sharpe`) is live instead of
+        # dead. A strategy may inject its own (e.g. an ILCalculator seeded with
+        # tracked positions) via the private attribute; otherwise the default
+        # stateless instance is built. The same calculators are injected on the
+        # backtest factories below — they are pure math over series the snapshot
+        # already holds, so they stay deterministic under replay.
+        il_calculator, volatility_calculator, risk_calculator = _build_stateless_calculators(strategy)
+
         if chains:
             # Multi-chain path: lift the multi-chain providers and the
             # aave_health_factor_provider off the strategy.
@@ -116,6 +127,9 @@ class MarketSnapshotBuilder:
                 aave_health_factor_provider=aave_health_factor_provider
                 or getattr(strategy, "_aave_health_factor_provider", None),
                 pool_analytics_reader=pool_analytics_reader,
+                il_calculator=il_calculator,
+                volatility_calculator=volatility_calculator,
+                risk_calculator=risk_calculator,
                 gateway_client=gateway_client,
                 ohlcv_router=ohlcv_router,
                 runtime_surface=runtime_surface,
@@ -140,6 +154,9 @@ class MarketSnapshotBuilder:
             funding_rate_provider=getattr(strategy, "funding_rate_provider", None)
             or getattr(strategy, "_funding_rate_provider", None),
             pool_analytics_reader=pool_analytics_reader,
+            il_calculator=il_calculator,
+            volatility_calculator=volatility_calculator,
+            risk_calculator=risk_calculator,
             gateway_client=gateway_client,
             ohlcv_router=ohlcv_router,
             default_timeframe=default_timeframe or getattr(strategy, "default_timeframe", None),
@@ -165,8 +182,24 @@ class MarketSnapshotBuilder:
         reproducibility — strategies must take a deterministic code path
         (static fee assumption, fixture-backed analytics, or HOLD) inside
         backtests.
+
+        VIB-4728 / POOL-7 (VIB-4755) extends the same pattern to pool
+        history: ``NullPoolHistoryReader`` is injected for the same
+        determinism reason. ``for_strategy_runner`` does NOT auto-construct
+        the live ``PoolHistoryReader`` (per VIB-4755 D-4: the cut-over is
+        gated on VIB-4730 hosted-egress + VIB-4863 TheGraph API key landing).
         """
+        from almanak.framework.data.null_readers import NullPoolHistoryReader
         from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
+
+        # T3-B (VIB-4844): inject the real stateless calculators on the backtest
+        # path too. They are pure math over series the snapshot already holds
+        # (tracked LP positions, OHLCV candles, a caller-supplied PnL series),
+        # so they produce identical output across replays of the same fixture —
+        # no determinism risk, unlike a live gateway/HTTP provider. A state
+        # object MAY pre-seed its own calculators (e.g. an ILCalculator carrying
+        # the backtest's tracked positions) via the same attributes.
+        il_calculator, volatility_calculator, risk_calculator = _build_stateless_calculators(state)
 
         return MarketSnapshot(
             chain=chain,
@@ -178,6 +211,10 @@ class MarketSnapshotBuilder:
             rate_monitor=getattr(state, "rate_monitor", None),
             funding_rate_provider=getattr(state, "funding_rate_provider", None),
             pool_analytics_reader=NullPoolAnalyticsReader(),
+            pool_history_reader=NullPoolHistoryReader(),
+            il_calculator=il_calculator,
+            volatility_calculator=volatility_calculator,
+            risk_calculator=risk_calculator,
             timestamp=getattr(state, "timestamp", None),
             runtime_surface="pnl_backtest",
         )
@@ -200,13 +237,25 @@ class MarketSnapshotBuilder:
         # the same determinism reason as for_pnl_backtest_state — a live
         # gateway HTTP call at paper-trading time would make replay-of-the-
         # same-fork produce different results across runs.
+        # VIB-4728 / POOL-7 (VIB-4755) extends the same injection to pool
+        # history via NullPoolHistoryReader.
+        from almanak.framework.data.null_readers import NullPoolHistoryReader
         from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
+
+        # T3-B (VIB-4844): stateless calculators are pure math and deterministic
+        # under fork replay — inject the real instances here too (no determinism
+        # concern, unlike live gateway/HTTP analytics).
+        il_calculator, volatility_calculator, risk_calculator = _build_stateless_calculators(None)
 
         snapshot = MarketSnapshot(
             chain=chain,
             wallet_address=wallet_address,
             gateway_client=gateway_client,
             pool_analytics_reader=NullPoolAnalyticsReader(),
+            pool_history_reader=NullPoolHistoryReader(),
+            il_calculator=il_calculator,
+            volatility_calculator=volatility_calculator,
+            risk_calculator=risk_calculator,
             runtime_surface="paper_fork",
         )
         # Builder owns the fork URL — strategies never see it.
@@ -243,12 +292,19 @@ class MarketSnapshotBuilder:
                 "for_http_backtest_spec: spec.chain is required and must be "
                 "non-empty. The builder no longer defaults to 'ethereum'.",
             )
+        # T3-B (VIB-4844): inject the real stateless calculators — pure math,
+        # deterministic over the spec's series.
+        il_calculator, volatility_calculator, risk_calculator = _build_stateless_calculators(spec)
+
         return MarketSnapshot(
             chain=chain,
             wallet_address=getattr(spec, "wallet_address", ""),
             price_oracle=getattr(spec, "price_oracle", None),
             balance_provider=getattr(spec, "balance_provider", None),
             indicator_provider=getattr(spec, "indicator_provider", None),
+            il_calculator=il_calculator,
+            volatility_calculator=volatility_calculator,
+            risk_calculator=risk_calculator,
             timestamp=getattr(spec, "timestamp", None),
             runtime_surface="http_backtest",
         )
@@ -309,6 +365,41 @@ class MarketSnapshotBuilder:
                     seeded[key] = data
                     snapshot._seeded_indicators = seeded  # type: ignore[attr-defined]
         return snapshot
+
+
+def _build_stateless_calculators(
+    source: Any | None,
+) -> tuple[Any, Any, Any]:
+    """Construct the T3-B (VIB-4844) stateless calculators for a snapshot.
+
+    Returns ``(il_calculator, volatility_calculator, risk_calculator)``.
+
+    These three are pure-Python — they hold no gateway client, open no
+    sockets, and read no secrets — so they are wired identically on the live
+    and backtest surfaces (the PRD §Epic B T3-B contract). ``source`` (the
+    strategy / backtest state object, or ``None``) may pre-seed a custom
+    instance via a public-style attribute (``il_calculator`` /
+    ``_il_calculator``, etc.); for the IL calculator this is how a strategy
+    threads its tracked LP positions in. When nothing is injected we build the
+    default stateless instance. The volatility / risk calculators are
+    intrinsically stateless, so the default instance is always sufficient.
+    """
+    from almanak.framework.data.lp import ILCalculator
+    from almanak.framework.data.risk import PortfolioRiskCalculator
+    from almanak.framework.data.volatility import RealizedVolatilityCalculator
+
+    def _injected(name: str) -> Any:
+        if source is None:
+            return None
+        val = getattr(source, name, None)
+        if val is not None:
+            return val
+        return getattr(source, f"_{name}", None)
+
+    il_calculator = _injected("il_calculator") or ILCalculator()
+    volatility_calculator = _injected("volatility_calculator") or RealizedVolatilityCalculator()
+    risk_calculator = _injected("risk_calculator") or PortfolioRiskCalculator()
+    return il_calculator, volatility_calculator, risk_calculator
 
 
 def _resolve_runtime_surface(runtime_context: Any | None, *, default: str) -> str:

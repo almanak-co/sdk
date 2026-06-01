@@ -126,8 +126,17 @@ class TestCexSymbol:
         assert inst.cex_symbol("binance") == "ARBUSDT"
 
     def test_binance_matic_usdt(self):
+        # MATIC->POL rebrand (Sept 2024): MATICUSDT is delisted/stale on Binance,
+        # POLUSDT is the live pair.
         inst = Instrument(base="WMATIC", quote="USDT", chain="polygon")
-        assert inst.cex_symbol("binance") == "MATICUSDT"
+        assert inst.cex_symbol("binance") == "POLUSDT"
+
+    def test_binance_wpol_usdt(self):
+        # Post-rebrand canonical wrapped name. ``WPOL`` is the new label some
+        # tokens/configs use directly; the direct lookup must hit POLUSDT
+        # without relying on ``WMATIC`` aliasing.
+        inst = Instrument(base="WPOL", quote="USDT", chain="polygon")
+        assert inst.cex_symbol("binance") == "POLUSDT"
 
 
 # ---------------------------------------------------------------------------

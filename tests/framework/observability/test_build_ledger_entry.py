@@ -35,6 +35,7 @@ from almanak.framework.execution.extracted_data import (
 )
 from almanak.framework.observability.ledger import (
     LedgerEntry,
+    _stamp_lp_close_discriminator,
     build_ledger_entry,
     deserialize_extracted_data,
 )
@@ -1524,3 +1525,105 @@ class TestPerpOpenExtraction:
         assert entry.intent_type == "PERP_OPEN"
         assert entry.token_in == ""
         assert entry.amount_in == ""
+
+
+# ---------------------------------------------------------------------------
+# VIB-4275 — _stamp_lp_close_discriminator branch coverage.
+#
+# The close RECEIPT cannot carry the closing NFT's token id; the close INTENT
+# can. This helper stamps intent.position_id onto the result's frozen
+# LPCloseData just before serialization so the close-side accounting resolver
+# can attribute a co-pool close to its OWN prior open. Every guard below is a
+# fail-closed / no-op branch — exercise them all (the function is otherwise
+# only indirectly covered, which the CRAP gate flags).
+# ---------------------------------------------------------------------------
+
+
+def _lp_close_result(position_id=None, *, extracted="dict"):
+    """Build a result whose extracted_data carries an LPCloseData (or a stub)."""
+    if extracted == "dict":
+        close = LPCloseData(
+            amount0_collected=480_000,
+            amount1_collected=170_000,
+            fees0=5_000,
+            fees1=2_000,
+            liquidity_removed=1_000_000,
+            position_id=position_id,
+        )
+        return SimpleNamespace(extracted_data={"lp_close_data": close})
+    return SimpleNamespace(extracted_data=extracted)
+
+
+class TestStampLpCloseDiscriminator:
+    """Direct branch coverage for ``_stamp_lp_close_discriminator`` (VIB-4275)."""
+
+    @pytest.mark.parametrize("intent_type", ["LP_CLOSE", "LP_COLLECT_FEES"])
+    def test_stamps_intent_position_id_onto_close_data(self, intent_type):
+        intent = _make_intent(intent_type, position_id="5467895")
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, intent_type)
+        assert result.extracted_data["lp_close_data"].position_id == "5467895"
+
+    def test_non_lp_close_intent_type_is_noop(self):
+        intent = _make_intent("SWAP", position_id="5467895")
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, "SWAP")
+        assert result.extracted_data["lp_close_data"].position_id is None
+
+    @pytest.mark.parametrize("degenerate", [None, "", 0, "0", "  0  "])
+    def test_degenerate_intent_position_id_is_noop(self, degenerate):
+        # None/""/0/"0" (and whitespace-padded "0") are never stamped — they are
+        # exactly what the resolver would discard (gemini review on #2459).
+        intent = _make_intent("LP_CLOSE", position_id=degenerate)
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data["lp_close_data"].position_id is None
+
+    def test_missing_intent_position_id_attr_is_noop(self):
+        intent = _make_intent("LP_CLOSE")  # no position_id attr at all
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data["lp_close_data"].position_id is None
+
+    def test_none_result_is_noop(self):
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        # Must not raise when there is no result to stamp onto.
+        _stamp_lp_close_discriminator(intent, None, "LP_CLOSE")
+
+    def test_non_dict_extracted_data_is_noop(self):
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        result = _lp_close_result(extracted=["not", "a", "dict"])
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data == ["not", "a", "dict"]
+
+    def test_absent_lp_close_data_is_noop(self):
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        result = _lp_close_result(extracted={})
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data == {}
+
+    def test_close_data_without_position_id_attr_is_noop(self):
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        stub = SimpleNamespace(amount0_collected=1)  # no position_id attribute
+        result = SimpleNamespace(extracted_data={"lp_close_data": stub})
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data["lp_close_data"] is stub
+
+    def test_existing_discriminator_is_preserved_not_clobbered(self):
+        # Empty ≠ Zero: a real parser-emitted id must not be overwritten by the
+        # intent's. Idempotent stamp.
+        intent = _make_intent("LP_CLOSE", position_id="111")
+        result = _lp_close_result(position_id="999")
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data["lp_close_data"].position_id == "999"
+
+    def test_non_dataclass_close_data_replace_failure_is_noop(self):
+        # A duck-typed stub that HAS a falsy position_id attr (so it passes the
+        # guards) but is not a dataclass — dataclasses.replace raises TypeError,
+        # which is swallowed rather than crashing the ledger-write path.
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        stub = SimpleNamespace(position_id=None)
+        result = SimpleNamespace(extracted_data={"lp_close_data": stub})
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
+        assert result.extracted_data["lp_close_data"] is stub
+        assert result.extracted_data["lp_close_data"].position_id is None

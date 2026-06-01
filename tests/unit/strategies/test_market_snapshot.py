@@ -325,6 +325,34 @@ class TestCollateralValueUsd:
         assert result == Decimal("0")
 
 
+class TestCachedPriceForCaseInsensitive:
+    """_cached_price_for resolves prices seeded under a different case (VIB-4843).
+
+    ``set_price`` stores ``_prices`` keys verbatim (no normalization), so a
+    mixed-case token (cbBTC, wstETH, ...) looked up under another case would
+    otherwise miss and leave the balance's USD silently unmeasured.
+    """
+
+    def test_mixed_case_price_resolves_case_insensitively(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("cbBTC", Decimal("64000"))
+
+        assert market._cached_price_for("cbBTC", "arbitrum") == Decimal("64000")  # exact
+        assert market._cached_price_for("CBBTC", "arbitrum") == Decimal("64000")  # upper
+        assert market._cached_price_for("cbbtc", "arbitrum") == Decimal("64000")  # lower
+
+    def test_unknown_token_returns_none(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("2500"))
+        assert market._cached_price_for("ARB", "arbitrum") is None
+
+    def test_wrong_chain_skips_prices_map(self):
+        """``_prices`` is only consulted for the snapshot's own chain."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("2500"))
+        assert market._cached_price_for("WETH", "base") is None
+
+
 class TestMarketSnapshotTimeframeResolution:
     """Tests for _resolve_timeframe() priority: explicit > config default > 4h fallback."""
 

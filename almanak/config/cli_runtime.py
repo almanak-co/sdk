@@ -65,12 +65,15 @@ service depend on the CLI surface it is meant to feed.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from almanak.config.env import _load_dotenv_once
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Chain-RPC ladder shared with the paper-trading CLI. The legacy callsite
@@ -706,6 +709,69 @@ def almanak_chain_from_env() -> str | None:
     return _almanak_chain_env()
 
 
+def chain_scoped_gwei_override(*, chain: str, prefix: str = "ALMANAK_") -> int | None:
+    """Return the chain-scoped ``MAX_GAS_PRICE_GWEI_<CHAIN>`` env override.
+
+    VIB-4879 introduces the chain-scoped escape hatch for operators who want
+    explicit per-chain gwei caps. The env var name is
+    ``<prefix>MAX_GAS_PRICE_GWEI_<CHAIN_UPPER>`` (e.g.
+    ``ALMANAK_MAX_GAS_PRICE_GWEI_POLYGON``). The legacy unprefixed form
+    ``MAX_GAS_PRICE_GWEI_<CHAIN_UPPER>`` is also accepted for symmetry with
+    the other risk env vars.
+
+    Returns the parsed positive integer, clamped to
+    :data:`almanak.framework.execution.gas.constants.SANE_GWEI_CEILING` (a
+    WARNING is logged on clamp). Returns ``None`` when the env is unset.
+    Raises ``ValueError`` on malformed (non-int / non-positive) values so
+    typo'd ``.env`` lines fail loudly at boot rather than silently fall
+    back to the chain default.
+    """
+    from almanak.framework.execution.gas.constants import SANE_GWEI_CEILING
+
+    chain_upper = chain.upper()
+    primary = f"{prefix}MAX_GAS_PRICE_GWEI_{chain_upper}"
+    legacy = f"MAX_GAS_PRICE_GWEI_{chain_upper}"
+
+    # gemini (VIB-4879 PR #2488 review): track which env was actually resolved
+    # so error messages + clamp WARNING reference the operator's actual env
+    # var name, not the prefixed form they may not have set. Also handles the
+    # empty-string case correctly — an explicit empty prefixed env should NOT
+    # silently fall through to the legacy form (per CodeRabbit's adjacent
+    # finding); raise on the offending name.
+    raw = os.environ.get(primary)
+    env_name = primary
+    if raw is None:
+        raw = os.environ.get(legacy)
+        env_name = legacy
+
+    if raw is not None and raw.strip() == "":
+        raise ValueError(f"{env_name} is set to empty/whitespace; expected a positive integer (gwei).")
+
+    if not raw:
+        return None
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be a positive integer (gwei). Got: {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{env_name} must be a positive integer (gwei). Got: {value}")
+
+    if value > SANE_GWEI_CEILING:
+        logger.warning(
+            "%s=%d exceeds SANE_GWEI_CEILING (%d); clamping. "
+            "A gwei cap above %d gwei almost certainly indicates a misconfigured "
+            "env value — verify the chain's typical gas price before raising it.",
+            env_name,
+            value,
+            SANE_GWEI_CEILING,
+            SANE_GWEI_CEILING,
+        )
+        return SANE_GWEI_CEILING
+
+    return value
+
+
 __all__ = [
     "DEFAULT_ANVIL_PORT",
     "DEFAULT_SOLANA_RPC_URL",
@@ -713,6 +779,7 @@ __all__ = [
     "CliRuntimeConfig",
     "almanak_chain_from_env",
     "chain_rpc_url_from_env",
+    "chain_scoped_gwei_override",
     "cli_runtime_config_from_env",
     "gas_risk_override_presence",
     "max_value_usd_override",

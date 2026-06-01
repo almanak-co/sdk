@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
-from almanak.core.contracts import UNISWAP_V4
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
     _coerce_pool_id_bytes,
 )

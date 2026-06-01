@@ -57,6 +57,8 @@ def test_hookless_erc20_erc20_pool_compiles(adapter):
         range_lower=Decimal("1500"),
         range_upper=Decimal("2500"),
         protocol="uniswap_v4",
+        # No rpc_url on this adapter → estimated price; opt in (VIB-2180).
+        protocol_params={"allow_estimated_price": True},
     )
     price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
 
@@ -84,6 +86,8 @@ def test_hookless_with_explicit_zero_hooks_compiles(adapter):
         protocol="uniswap_v4",
         protocol_params={
             "hooks": "0x0000000000000000000000000000000000000000",
+            # No rpc_url on this adapter → estimated price; opt in (VIB-2180).
+            "allow_estimated_price": True,
         },
     )
     price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}

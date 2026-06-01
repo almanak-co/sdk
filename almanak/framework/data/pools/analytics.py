@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING
 
 import grpc
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
     DataClassification,
@@ -216,7 +218,9 @@ class PoolAnalyticsReader:
         # case-sensitive → preserve case (lower-casing yields a
         # different address).
         pool_addr_norm = pool_address.strip()
-        if chain_norm != "solana":
+        descriptor = ChainRegistry.try_resolve(chain_norm)
+        is_solana = descriptor is not None and descriptor.family is ChainFamily.SOLANA
+        if not is_solana:
             pool_addr_norm = pool_addr_norm.lower()
         protocol_norm = (protocol or "").lower()
 

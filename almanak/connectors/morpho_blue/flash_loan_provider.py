@@ -17,7 +17,8 @@ from almanak.connectors._strategy_base.flash_loan_base import (
     FlashLoanProvider,
     FlashLoanProviderInfo,
 )
-from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
+
+from .addresses import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 
 # Morpho Blue charges zero protocol fee for flash loans.
 MORPHO_FLASH_LOAN_FEE_BPS = 0

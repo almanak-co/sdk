@@ -291,7 +291,7 @@ class TraderJoeV2Adapter:
         self.chain = config.chain.lower()
 
         # Validate chain
-        from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
+        from .addresses import TRADERJOE_V2 as TJ_ADDRESSES
 
         if self.chain not in TJ_ADDRESSES:
             raise TraderJoeV2SDKError(

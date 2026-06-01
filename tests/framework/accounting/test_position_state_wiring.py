@@ -54,17 +54,34 @@ def _insert_parent_snapshot(path: Path, snapshot_id: int) -> None:
 
 
 @pytest.fixture
-def sqlite_store():
+def loop():
+    """Explicit, function-scoped event loop shared across the ``sqlite_store``
+    fixture (setup + teardown) and the test body. ``SQLiteStore`` opens its
+    aiosqlite connection on one loop and every subsequent call must reuse it,
+    so both the fixture and the test depend on this single loop object rather
+    than ``asyncio.get_event_loop()`` (removed in 3.12 when no loop is set,
+    which broke under pytest-xdist)."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield loop
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+@pytest.fixture
+def sqlite_store(loop):
     """Initialised SQLite store on a tmp file. Yields the store and path."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
     tmp.close()
     path = Path(tmp.name)
     store = SQLiteStore(SQLiteConfig(db_path=str(path)))
-    asyncio.get_event_loop().run_until_complete(store.initialize())
+    loop.run_until_complete(store.initialize())
     try:
         yield store, path
     finally:
-        asyncio.get_event_loop().run_until_complete(store.close())
+        loop.run_until_complete(store.close())
         path.unlink(missing_ok=True)
 
 
@@ -90,17 +107,13 @@ def _row(**overrides) -> PositionStateRow:
     return PositionStateRow(**base)
 
 
-def test_sqlite_round_trip_single_row(sqlite_store):
+def test_sqlite_round_trip_single_row(loop, sqlite_store):
     store, path = sqlite_store
     _insert_parent_snapshot(path, snapshot_id=42)
     rows = [_row()]
-    written = asyncio.get_event_loop().run_until_complete(
-        store.save_position_state_snapshots(snapshot_id=42, rows=rows)
-    )
+    written = loop.run_until_complete(store.save_position_state_snapshots(snapshot_id=42, rows=rows))
     assert written == 1
-    out = asyncio.get_event_loop().run_until_complete(
-        store.get_position_state_snapshots(snapshot_id=42)
-    )
+    out = loop.run_until_complete(store.get_position_state_snapshots(snapshot_id=42))
     assert len(out) == 1
     r = out[0]
     assert r["position_id"] == "pos-1"
@@ -112,7 +125,7 @@ def test_sqlite_round_trip_single_row(sqlite_store):
     assert r["value_confidence"] == "HIGH"
 
 
-def test_sqlite_round_trip_preserves_null_distinction(sqlite_store):
+def test_sqlite_round_trip_preserves_null_distinction(loop, sqlite_store):
     """Null fields must come back as None, not as 0 / empty string —
     ESTIMATED-vs-unmeasured is a real distinction (CLAUDE.md "Empty ≠
     zero")."""
@@ -126,44 +139,32 @@ def test_sqlite_round_trip_preserves_null_distinction(sqlite_store):
             current_tick=None,
         )
     ]
-    asyncio.get_event_loop().run_until_complete(
-        store.save_position_state_snapshots(snapshot_id=1, rows=rows)
-    )
-    out = asyncio.get_event_loop().run_until_complete(
-        store.get_position_state_snapshots(snapshot_id=1)
-    )
+    loop.run_until_complete(store.save_position_state_snapshots(snapshot_id=1, rows=rows))
+    out = loop.run_until_complete(store.get_position_state_snapshots(snapshot_id=1))
     assert out[0]["in_range"] is None
     assert out[0]["health_factor"] is None
     assert out[0]["supply_apy_pct"] is None
     assert out[0]["current_tick"] is None
 
 
-def test_sqlite_save_empty_rows_returns_zero(sqlite_store):
+def test_sqlite_save_empty_rows_returns_zero(loop, sqlite_store):
     """Empty input is a measured zero, not an error — strategies that
     hold only cash legitimately have zero open positions."""
     store, _ = sqlite_store
-    written = asyncio.get_event_loop().run_until_complete(
-        store.save_position_state_snapshots(snapshot_id=99, rows=[])
-    )
+    written = loop.run_until_complete(store.save_position_state_snapshots(snapshot_id=99, rows=[]))
     assert written == 0
 
 
-def test_sqlite_save_bulk_round_trip(sqlite_store):
+def test_sqlite_save_bulk_round_trip(loop, sqlite_store):
     """Bulk insert of 5 rows lands in one transaction; per-position
     filter works."""
     store, path = sqlite_store
     _insert_parent_snapshot(path, snapshot_id=10)
     rows = [_row(position_id=f"pos-{i}", in_range=(i % 2 == 0)) for i in range(5)]
-    asyncio.get_event_loop().run_until_complete(
-        store.save_position_state_snapshots(snapshot_id=10, rows=rows)
-    )
-    all_out = asyncio.get_event_loop().run_until_complete(
-        store.get_position_state_snapshots(snapshot_id=10)
-    )
+    loop.run_until_complete(store.save_position_state_snapshots(snapshot_id=10, rows=rows))
+    all_out = loop.run_until_complete(store.get_position_state_snapshots(snapshot_id=10))
     assert len(all_out) == 5
-    one = asyncio.get_event_loop().run_until_complete(
-        store.get_position_state_snapshots(snapshot_id=10, position_id="pos-3")
-    )
+    one = loop.run_until_complete(store.get_position_state_snapshots(snapshot_id=10, position_id="pos-3"))
     assert len(one) == 1
     assert one[0]["position_id"] == "pos-3"
 

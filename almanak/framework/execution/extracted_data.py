@@ -215,6 +215,44 @@ class LPCloseData:
     # the handler falls back to user-intent order in that case.
     currency0: str | None = None
     currency1: str | None = None
+    # VIB-4275 — per-position discriminator (closing leg's NFT token id). The
+    # close RECEIPT does not re-emit the token id (a Burn carries no NFT id),
+    # so parsers leave this ``None``; the runner stamps it from the close
+    # INTENT (``LPCloseIntent.position_id``) at ledger-build time. The
+    # close-side resolver matches it against the prior OPEN payload's
+    # ``position_id`` so a co-pool close attributes to its OWN open rather than
+    # the most-recent open by timestamp. String form (JSON-stable across the V3
+    # integer tokenId and any future handle). ``None`` ⇒ no discriminator
+    # available (the resolver then only resolves the single-open legacy case).
+    position_id: str | None = None
+
+    # VIB-4848 (T8) — fee separation taxonomy. ``__post_init__`` infers safe
+    # defaults from ``fees0`` / ``fees1`` so existing parsers do not need
+    # per-protocol updates; explicit values from a parser always win.
+    # ``"SEPARATE"`` + ``"EXACT"`` ⇒ canonical accounting path (fees were
+    # measured on-chain, e.g. Uniswap V3 / PancakeSwap V3 / SushiSwap V3 /
+    # Aerodrome Slipstream).
+    # ``"BUNDLED"`` + ``"UNKNOWN"`` ⇒ receipt emits a single Collect mixing
+    # principal + fees (Uniswap V4, Fluid, Aerodrome V1). No exact fee value;
+    # downstream consumers MUST NOT fabricate a zero or fold an estimate into
+    # ``realized_pnl_usd``. A future estimator can lift ``fee_confidence`` to
+    # ``"ESTIMATED"`` for a reporting-only signal — never accounting truth.
+    # ``"UNKNOWN"`` + ``"UNKNOWN"`` ⇒ hand-built fixture / test default.
+    fee_separation_method: str = "UNKNOWN"
+    fee_confidence: str = "UNKNOWN"
+
+    def __post_init__(self) -> None:
+        # frozen dataclass — use object.__setattr__ to mutate. Only set
+        # inferred defaults when the parser left the taxonomy fields at
+        # their sentinel ``"UNKNOWN"`` (i.e. an explicit parser-set value
+        # always wins).
+        if self.fee_separation_method == "UNKNOWN":
+            if self.fees0 is not None or self.fees1 is not None:
+                object.__setattr__(self, "fee_separation_method", "SEPARATE")
+            elif self.fees0 is None and self.fees1 is None:
+                object.__setattr__(self, "fee_separation_method", "BUNDLED")
+        if self.fee_confidence == "UNKNOWN" and self.fee_separation_method == "SEPARATE":
+            object.__setattr__(self, "fee_confidence", "EXACT")
 
     @property
     def all_amounts(self) -> list[int]:
@@ -256,6 +294,11 @@ class LPCloseData:
             # VIB-4426 P1 #4
             "currency0": self.currency0,
             "currency1": self.currency1,
+            # VIB-4275 — per-position discriminator (closing leg's token id).
+            "position_id": self.position_id,
+            # VIB-4848 (T8) — fee separation taxonomy.
+            "fee_separation_method": self.fee_separation_method,
+            "fee_confidence": self.fee_confidence,
         }
         if self.additional_amounts:
             d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}

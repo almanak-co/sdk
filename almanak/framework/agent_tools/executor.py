@@ -47,10 +47,31 @@ from almanak.framework.agent_tools.schemas import ToolResponse
 from almanak.framework.agent_tools.tracing import DecisionTracer, sanitize_args
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.vault_tool_registry import VaultToolCapability
     from almanak.framework.agent_tools.approval import ApprovalNotifier
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+# Default protocol fallbacks for agent tools whose ``protocol`` request field
+# is optional. This is the one place a protocol literal is *semantically*
+# load-bearing — it is the fallback the intent-param builders + read handlers
+# use when the LLM omits ``protocol`` entirely. Sourcing it from a single
+# named constant (rather than inline ``args.get("protocol", "uniswap_v3")``
+# string literals scattered through the executor) keeps the coupling scanner
+# clean and gives a one-line change point if the canonical default ever moves.
+# (VIB-4860 / W8 §6 step 4.)
+DEFAULT_LP_PROTOCOL = "uniswap_v3"
+DEFAULT_LENDING_PROTOCOL = "aave_v3"
+
+# The vault connector the vault tools (deploy/settle/state/approve/deposit/
+# teardown) construct their SDK/deployer/adapter from. Lagoon is the only
+# vault protocol today; the vault tools are not protocol-parameterized, so
+# this is a fixed lookup key into ``STRATEGY_VAULT_TOOL_REGISTRY`` (not an
+# LLM-facing default). A second vault connector would make the vault tools
+# take a ``protocol`` arg and resolve it like the LP/lending tools do.
+# (VIB-4860 / W8 §6 step 3.)
+VAULT_PROTOCOL = "lagoon"
 
 # Native-token decimals for chains exposed through ``get_portfolio`` /
 # ``list_lp_positions``. Every currently-registered EVM chain uses 18 decimals
@@ -1305,7 +1326,7 @@ class ToolExecutor:
                 "pool": pool,
                 "amount0": amount_a,
                 "amount1": amount_b,
-                "protocol": args.get("protocol", "uniswap_v3"),
+                "protocol": args.get("protocol", DEFAULT_LP_PROTOCOL),
                 "range_lower": price_lower,
                 "range_upper": price_upper,
             }
@@ -1323,14 +1344,14 @@ class ToolExecutor:
             return "lp_close", {
                 "position_id": args["position_id"],
                 "collect_fees": args.get("collect_fees", True),
-                "protocol": args.get("protocol", "uniswap_v3"),
+                "protocol": args.get("protocol", DEFAULT_LP_PROTOCOL),
             }
 
         if tool_name == "supply_lending":
             params = {
                 "token": args["token"],
                 "amount": args["amount"],
-                "protocol": args.get("protocol", "aave_v3"),
+                "protocol": args.get("protocol", DEFAULT_LENDING_PROTOCOL),
                 "use_as_collateral": args.get("use_as_collateral", True),
             }
             if args.get("market_id"):
@@ -1343,7 +1364,7 @@ class ToolExecutor:
                 "borrow_amount": args["amount"],
                 "collateral_token": args["collateral_token"],
                 "collateral_amount": args["collateral_amount"],
-                "protocol": args.get("protocol", "aave_v3"),
+                "protocol": args.get("protocol", DEFAULT_LENDING_PROTOCOL),
             }
             if args.get("market_id"):
                 params["market_id"] = args["market_id"]
@@ -1353,7 +1374,7 @@ class ToolExecutor:
             params = {
                 "token": args["token"],
                 "amount": args["amount"],
-                "protocol": args.get("protocol", "aave_v3"),
+                "protocol": args.get("protocol", DEFAULT_LENDING_PROTOCOL),
             }
             if args.get("market_id"):
                 params["market_id"] = args["market_id"]
@@ -1373,7 +1394,7 @@ class ToolExecutor:
             # would ignore it. (CodeRabbit PR #1535 round 4.)
             from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
-            protocol = args.get("protocol", "aave_v3")
+            protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
             params = {
                 "token": args["token"],
                 "amount": args["amount"],
@@ -1723,18 +1744,41 @@ class ToolExecutor:
 
     # ── VAULT TOOLS ──────────────────────────────────────────────────────
 
+    def _vault_capability(self) -> VaultToolCapability:
+        """Resolve the vault connector's construction capability.
+
+        The vault tools construct their SDK/deployer/adapter through
+        ``STRATEGY_VAULT_TOOL_REGISTRY`` (VIB-4860 / W8) instead of importing
+        the connector. Called *inside* each handler — i.e. strictly after the
+        ``_execute_inner`` policy gate (and, in the teardown state machine,
+        after each re-dispatched sub-tool's own gate). The capability is pure
+        construction (no gateway round-trip, no signing, no PolicyEngine); the
+        executor supplies its own gateway client and owns the gate.
+
+        Raises ``ExecutionFailedError`` if the vault connector is not
+        registered — a boot-time wiring bug, never an agent-reachable
+        condition.
+        """
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_VAULT_TOOL_REGISTRY
+
+        cap = STRATEGY_VAULT_TOOL_REGISTRY.lookup(VAULT_PROTOCOL)
+        if cap is None:
+            raise ExecutionFailedError(
+                f"vault connector {VAULT_PROTOCOL!r} not registered in "
+                "STRATEGY_VAULT_TOOL_REGISTRY (boot-time wiring bug)",
+                tool_name="vault",
+            )
+        return cap
+
     async def _execute_deploy_vault(self, args: dict) -> ToolResponse:
         """Deploy a new Lagoon vault via factory contract.
 
         Includes idempotency check: if agent state already has a vault_address,
         verifies it on-chain and returns it rather than deploying a duplicate.
         """
-        from almanak.connectors.lagoon.deployer import (
-            LagoonVaultDeployer,
-            VaultDeployParams,
-        )
         from almanak.gateway.proto import gateway_pb2
 
+        cap = self._vault_capability()
         chain = args.get("chain", self._default_chain)
         dry_run = args.get("dry_run", False)
 
@@ -1745,9 +1789,7 @@ class ToolExecutor:
             existing_vault = saved_state.get("vault_address")
             if existing_vault:
                 # Verify it exists on-chain
-                from almanak.connectors.lagoon.sdk import LagoonVaultSDK
-
-                sdk = LagoonVaultSDK(self._client, chain=chain)
+                sdk = cap.build_sdk(self._client, chain)
                 try:
                     sdk.get_total_assets(existing_vault)
                     logger.info(
@@ -1793,7 +1835,7 @@ class ToolExecutor:
                     ),
                 )
 
-        params = VaultDeployParams(
+        params = cap.deploy_params_type()(
             chain=chain,
             underlying_token_address=args["underlying_token_address"],
             name=args["name"],
@@ -1805,7 +1847,7 @@ class ToolExecutor:
             valuation_manager_address=args.get("valuation_manager_address"),
         )
 
-        deployer = LagoonVaultDeployer(gateway_client=self._client)
+        deployer = cap.build_deployer(self._client)
         bundle = deployer.build_deploy_vault_bundle(params)
         bundle_bytes = json.dumps(bundle.to_dict()).encode()
 
@@ -1846,7 +1888,7 @@ class ToolExecutor:
                 if receipts_list and isinstance(receipts_list, list) and len(receipts_list) > 0:
                     receipt = receipts_list[0]
                     if isinstance(receipt, dict):
-                        deploy_result = LagoonVaultDeployer.parse_deploy_receipt(receipt)
+                        deploy_result = cap.parse_deploy_receipt(receipt)
                         vault_address = deploy_result.vault_address
             except Exception as e:
                 logger.warning("Failed to parse deploy receipt: %s", e)
@@ -1876,8 +1918,8 @@ class ToolExecutor:
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
         from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
-        from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
 
@@ -1886,24 +1928,21 @@ class ToolExecutor:
         token_b_sym = args["token_b"]
         fee_tier = args.get("fee_tier", 3000)
         # Normalize protocol to canonical name (e.g., "uniswap_v3" on Mantle -> "agni_finance")
-        protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+        protocol = normalize_protocol(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
 
-        # Map canonical protocol names to their contract address registries
-        _PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
-            "uniswap_v3": UNISWAP_V3,
-            "agni_finance": AGNI_FINANCE,
-            "pancakeswap_v3": PANCAKESWAP_V3,
-            "sushiswap_v3": SUSHISWAP_V3,
-            "aerodrome_slipstream": AERODROME,
-        }
-        _FACTORY_KEY = {"aerodrome_slipstream": "cl_factory"}
-        registry = _PROTOCOL_REGISTRIES.get(protocol)
-        if registry is None:
+        # Resolve the connector's on-chain read descriptors (factory address +
+        # getPool selector) from the strategy-side registry. The connector owns
+        # "which address / which selector"; the executor owns the RPC + decode.
+        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(protocol)
+        if cap is None or "pool_state" not in cap.agent_read_keys():
+            supported = sorted(
+                c.protocol for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "pool_state" in c.agent_read_keys()
+            )
             return ToolResponse(
                 status="error",
                 error=_error_dict(
                     AgentErrorCode.VALIDATION_ERROR,
-                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {list(_PROTOCOL_REGISTRIES)}",
+                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {supported}",
                     recoverable=True,
                 ),
             )
@@ -1918,15 +1957,14 @@ class ToolExecutor:
         # values (e.g., Agni Finance on Mantle).
         pool_address = args.get("pool_address")
         if not pool_address:
-            chain_contracts = registry.get(chain, {})
-            factory_address = chain_contracts.get(_FACTORY_KEY.get(protocol, "factory"))
+            factory_address = cap.factory_address(chain)
             if not factory_address:
                 return ToolResponse(
                     status="error",
                     error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
                 )
             # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
-            get_pool_selector = "0x28af8d0b" if protocol == "aerodrome_slipstream" else "0x1698ee82"
+            get_pool_selector = cap.get_pool_selector()
             addr_a_padded = token_a.address.lower().removeprefix("0x").zfill(64)
             addr_b_padded = token_b.address.lower().removeprefix("0x").zfill(64)
             fee_padded = hex(fee_tier)[2:].zfill(64)
@@ -2050,9 +2088,8 @@ class ToolExecutor:
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901
         """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
         from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
-        from almanak.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
-        from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -2062,12 +2099,27 @@ class ToolExecutor:
         # and we pass "" to let the gateway use its configured default.
         network = args.get("network", "")
         position_id = int(args["position_id"])
-        lp_protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+        lp_protocol = normalize_protocol(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
 
-        if lp_protocol == "aerodrome_slipstream":
-            nft_manager = AERODROME.get(chain, {}).get("cl_nft")
-        else:
-            nft_manager = POSITION_MANAGER_ADDRESSES.get(chain)
+        # Resolve the connector's on-chain read descriptors (NFT position
+        # manager + factory address + getPool selector) from the strategy-side
+        # registry. The connector owns "which address / which selector"; the
+        # executor owns the positions()/getPool()/slot0() RPC + decode.
+        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(lp_protocol)
+        if cap is None or "lp_position" not in cap.agent_read_keys():
+            supported = sorted(
+                c.protocol for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "lp_position" in c.agent_read_keys()
+            )
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {supported}",
+                    recoverable=True,
+                ),
+            )
+
+        nft_manager = cap.position_manager_address(chain)
         if not nft_manager:
             return ToolResponse(
                 status="error",
@@ -2114,30 +2166,14 @@ class ToolExecutor:
         # Read current tick to determine if in range.
         # We need the pool address -- query factory.getPool() via gateway RPC to avoid
         # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
-        _LP_PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
-            "uniswap_v3": UNISWAP_V3,
-            "agni_finance": AGNI_FINANCE,
-            "pancakeswap_v3": PANCAKESWAP_V3,
-            "sushiswap_v3": SUSHISWAP_V3,
-            "aerodrome_slipstream": AERODROME,
-        }
-        _LP_FACTORY_KEY = {"aerodrome_slipstream": "cl_factory"}
-        lp_registry = _LP_PROTOCOL_REGISTRIES.get(lp_protocol)
-        if lp_registry is None:
-            return ToolResponse(
-                status="error",
-                error=_error_dict(
-                    AgentErrorCode.VALIDATION_ERROR,
-                    f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {list(_LP_PROTOCOL_REGISTRIES)}",
-                    recoverable=True,
-                ),
-            )
-        lp_factory_address = lp_registry.get(chain, {}).get(_LP_FACTORY_KEY.get(lp_protocol, "factory"))
+        # The connector publishes its factory address + getPool selector (uint24
+        # fee for the v3 family, int24 tick-spacing for Slipstream).
+        lp_factory_address = cap.factory_address(chain)
 
         in_range: bool | None = None
         pool_current_tick = None
         if lp_factory_address:
-            get_pool_selector = "0x28af8d0b" if lp_protocol == "aerodrome_slipstream" else "0x1698ee82"
+            get_pool_selector = cap.get_pool_selector()
             addr0_padded = token0.lower().removeprefix("0x").zfill(64)
             addr1_padded = token1.lower().removeprefix("0x").zfill(64)
             fee_hex_padded = hex(fee)[2:].zfill(64)
@@ -2435,18 +2471,27 @@ class ToolExecutor:
         threshold, LTV, and health factor (1e18-scaled; MAX_UINT256 when the
         account has no debt).
         """
-        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
 
         chain = args.get("chain", self._default_chain)
         network = args.get("network", "")
-        protocol = args.get("protocol", "aave_v3")
+        protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
 
-        if protocol != "aave_v3":
+        # Resolve the lending connector's read descriptor (Pool address) from
+        # the strategy-side registry. The connector owns "which Pool address";
+        # the executor owns the getUserAccountData RPC + scaling decode.
+        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(protocol)
+        if cap is None or "lending_account" not in cap.agent_read_keys():
+            supported: list[str] = sorted(
+                c.protocol
+                for c in STRATEGY_AGENT_READ_REGISTRY.capabilities()
+                if "lending_account" in c.agent_read_keys()
+            )
             return ToolResponse(
                 status="error",
                 error=_error_dict(
                     AgentErrorCode.VALIDATION_ERROR,
-                    f"list_lending_positions: unsupported protocol '{protocol}'. Supported: ['aave_v3']",
+                    f"list_lending_positions: unsupported protocol '{protocol}'. Supported: {supported}",
                 ),
             )
 
@@ -2460,7 +2505,7 @@ class ToolExecutor:
                 ),
             )
 
-        pool_addr = AAVE_V3_POOL_ADDRESSES.get(chain)
+        pool_addr = cap.lending_pool_address(chain)
         if not pool_addr:
             return ToolResponse(
                 status="error",
@@ -2542,7 +2587,7 @@ class ToolExecutor:
         failures indistinguishable from "no positions" on a $10M treasury
         query.
         """
-        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
         from almanak.framework.teardown.discovery import _npms_for_chain
         from almanak.gateway.proto import gateway_pb2
 
@@ -2680,8 +2725,12 @@ class ToolExecutor:
                     (lp_resp.error or {}).get("message", "list_lp_positions returned no data"),
                 )
 
-        # Lending (Aave V3 only for v1).
-        if AAVE_V3_POOL_ADDRESSES.get(chain):
+        # Lending (Aave V3 only for v1). Gate on the lending connector's own
+        # Pool-address descriptor (resolved from the read registry) instead of
+        # importing the connector's address table — byte-equivalent to the
+        # pre-W8 ``AAVE_V3_POOL_ADDRESSES.get(chain)`` check.
+        lending_cap = STRATEGY_AGENT_READ_REGISTRY.lookup(DEFAULT_LENDING_PROTOCOL)
+        if lending_cap is not None and lending_cap.lending_pool_address(chain):
             lend_resp = await self._execute_list_lending_positions(
                 {"chain": chain, "wallet_address": wallet, "network": network}
             )
@@ -2691,7 +2740,7 @@ class ToolExecutor:
                 try:
                     if Decimal(total_debt) > 0 or Decimal(total_collat) > 0:
                         summary["lending"] = {
-                            "protocol": "aave_v3",
+                            "protocol": DEFAULT_LENDING_PROTOCOL,
                             "total_collateral_usd": total_collat,
                             "total_debt_usd": total_debt,
                             "health_factor": lend_resp.data.get("health_factor", ""),
@@ -3381,11 +3430,9 @@ class ToolExecutor:
 
     async def _execute_get_vault_state(self, args: dict) -> ToolResponse:
         """Read current state of a Lagoon vault."""
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
-
         chain = args.get("chain", self._default_chain)
         vault_address = args["vault_address"]
-        sdk = LagoonVaultSDK(self._client, chain=chain)
+        sdk = self._vault_capability().build_sdk(self._client, chain)
 
         try:
             total_assets = sdk.get_total_assets(vault_address)
@@ -3424,10 +3471,9 @@ class ToolExecutor:
 
         Returns total in raw underlying token units.
         """
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.gateway.proto import gateway_pb2
 
-        sdk = LagoonVaultSDK(self._client, chain=chain)
+        sdk = self._vault_capability().build_sdk(self._client, chain)
 
         # Get underlying token address from vault
         try:
@@ -3605,10 +3651,9 @@ class ToolExecutor:
         Returns:
             Tuple of (sufficient, liquid_balance, needed_amount).
         """
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.gateway.proto import gateway_pb2
 
-        sdk = LagoonVaultSDK(self._client, chain=chain)
+        sdk = self._vault_capability().build_sdk(self._client, chain)
 
         try:
             pending_redeems = sdk.get_pending_redemptions(vault_address)
@@ -3753,19 +3798,18 @@ class ToolExecutor:
         interrupted point. This prevents orphaned vault state if the process
         crashes between propose and settle.
         """
-        from almanak.connectors.lagoon.adapter import LagoonVaultAdapter
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.core.models.params import UpdateTotalAssetsParams
         from almanak.gateway.proto import gateway_pb2
 
+        cap = self._vault_capability()
         chain = args.get("chain", self._default_chain)
         vault_address = args["vault_address"]
         safe_address = args["safe_address"]
         valuator_address = args["valuator_address"]
         dry_run = args.get("dry_run", False)
 
-        sdk = LagoonVaultSDK(self._client, chain=chain)
-        adapter = LagoonVaultAdapter(sdk)
+        sdk = cap.build_sdk(self._client, chain)
+        adapter = cap.build_adapter(sdk)
 
         # Preflight: verify on-chain vault config matches provided args
         preflight_error = self._vault_preflight_checks(sdk, vault_address, safe_address, valuator_address)
@@ -4474,8 +4518,6 @@ class ToolExecutor:
         Progress is persisted after each phase so partial failures resume
         from the interrupted step instead of retrying from scratch.
         """
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
-
         # Phase 0: policy preflight.
         preflight = self._teardown_check_sub_tool_policy()
         if preflight is not None:
@@ -4507,7 +4549,7 @@ class ToolExecutor:
             return lp_error
 
         # Phase 3: swap non-underlying tokens to underlying.
-        sdk = LagoonVaultSDK(self._client, chain=ctx.chain)
+        sdk = self._vault_capability().build_sdk(self._client, ctx.chain)
         try:
             underlying_token: str | None = sdk.get_underlying_token_address(ctx.vault_address)
         except Exception:
@@ -4538,7 +4580,6 @@ class ToolExecutor:
 
     async def _execute_approve_vault_underlying(self, args: dict) -> ToolResponse:
         """Approve the vault to pull underlying tokens from the Safe."""
-        from almanak.connectors.lagoon.deployer import LagoonVaultDeployer
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -4547,7 +4588,9 @@ class ToolExecutor:
         safe_address = args["safe_address"]
         dry_run = args.get("dry_run", False)
 
-        deployer = LagoonVaultDeployer()
+        # Pre-W8 built ``LagoonVaultDeployer()`` (no gateway client) here — the
+        # post-deploy bundle is pure calldata. ``build_deployer(None)`` is 1:1.
+        deployer = self._vault_capability().build_deployer(None)
         bundle = deployer.build_post_deploy_bundle(underlying_token, vault_address, safe_address)
         bundle_bytes = json.dumps(bundle.to_dict()).encode()
 
@@ -4592,7 +4635,6 @@ class ToolExecutor:
         Split into two Execute calls because requestDeposit depends on
         the approve being committed first (simulation would fail otherwise).
         """
-        from almanak.connectors.lagoon.sdk import LagoonVaultSDK
         from almanak.framework.models.reproduction_bundle import ActionBundle
         from almanak.gateway.proto import gateway_pb2
 
@@ -4602,7 +4644,7 @@ class ToolExecutor:
         depositor = args.get("depositor_address") or self._wallet_address
         dry_run = args.get("dry_run", False)
 
-        sdk = LagoonVaultSDK(self._client, chain=chain)
+        sdk = self._vault_capability().build_sdk(self._client, chain)
         underlying_token = args["underlying_token"]
         simulate = self._policy_engine.policy.require_simulation_before_execution
 

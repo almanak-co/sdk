@@ -99,14 +99,71 @@ Missing-data semantics (critical)
 
 import json
 import logging
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# v3 bumps the formula: attribute_perp persists funding_fee_usd raw value in
-# attribution dict to survive recompute_attribution() cycles (VIB-3519).
-CURRENT_VERSION = 3
+# v4 bumps the formula: VIB-4848 lands three coordinated LP attribution
+# changes (T8/T9/T12) — fee-separation taxonomy stamped on attribution_json
+# (``fee_separation_method`` / ``fee_confidence``), fee-adjusted V_lp in
+# ``compute_impermanent_loss`` (closes the IL double-count for bundled-fee
+# protocols on the position_events lane), and an optional ``collect_events``
+# arg on ``attribute_lp`` that folds mid-life ``LP_COLLECT_FEES`` into
+# per-lifecycle ``net_pnl_usd`` / ``collected_fees_usd``.  v3 bumped the
+# formula so ``attribute_perp`` persists ``funding_fee_usd`` raw value in the
+# attribution dict to survive ``recompute_attribution()`` cycles (VIB-3519).
+CURRENT_VERSION = 4
+
+
+def select_open_for_lp_close(
+    history: list[dict],
+    *,
+    close_timestamp: str | None = None,
+) -> dict | None:
+    """Select the matching OPEN for an LP_CLOSE from a position's history.
+
+    VIB-4896 — extracted verbatim from the OPEN-selection loop in
+    ``StrategyRunner._hydrate_lp_close_from_durable_store`` so the runner's
+    durable-hydration fallback and the offline repair CLI
+    (``almanak strat repair-teardown-lp-close``) share one implementation of
+    the rule.
+
+    ``history`` is the per-``position_id`` event list ordered **ASC by
+    timestamp** (as returned by ``get_position_history`` /
+    ``SQLiteStore.get_position_history``). The rule is the "newest OPEN wins,
+    an intervening CLOSE invalidates" walk:
+
+    * ``OPEN``  -> ``latest_open = row``
+    * ``CLOSE`` -> ``latest_open = None`` (the prior OPEN's bracket is spent;
+      only an OPEN *after* a CLOSE should be carried forward)
+    * ``SNAPSHOT`` / ``COLLECT_FEES`` / any other type -> ignored
+
+    ``close_timestamp`` bounds the walk: when given, only rows at or before
+    the CLOSE's timestamp are considered (the repair engine passes the CLOSE
+    row's timestamp so a *later* re-open of the same ``position_id`` does not
+    leak its bracket onto an earlier CLOSE). The runner passes ``None`` to
+    preserve today's no-upper-bound behaviour. Comparison is lexicographic on
+    the ISO-8601 timestamp strings, which sorts identically to chronological
+    order for the zero-padded ISO format the store persists.
+
+    Returns the matching OPEN row, or ``None`` when none applies.
+    """
+    latest_open: dict | None = None
+    for row in history:
+        row = row or {}
+        if close_timestamp is not None:
+            ts = str(row.get("timestamp") or "")
+            if ts and ts > close_timestamp:
+                # A row strictly after the CLOSE cannot be its OPEN.
+                continue
+        et = str(row.get("event_type") or "").upper()
+        if et == "OPEN":
+            latest_open = row
+        elif et == "CLOSE":
+            latest_open = None
+    return latest_open
 
 
 def _dec(value: Any) -> Decimal:
@@ -297,14 +354,17 @@ def _price_for_token(prices: dict, token: str) -> Decimal | None:
     return None
 
 
-def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | None:
+def compute_impermanent_loss(
+    open_event: dict,
+    close_event: dict,
+    fees_usd: Decimal | None = None,
+) -> Decimal | None:
     """Compute impermanent loss for an LP position.
 
     ``IL = V_lp - V_hold`` where
 
-    * ``V_lp`` = ``close_event["value_usd"]`` (current LP position value
-      supplied by PositionValuer; includes both in-range and out-of-range
-      single-sided positions)
+    * ``V_lp`` = ``close_event["value_usd"]`` minus bundled fees (when known)
+      — see VIB-4848 (T9) below.
     * ``V_hold`` = ``amount0_open * price0_now + amount1_open * price1_now``
       (what holding the entry tokens would be worth at close-time prices)
 
@@ -314,6 +374,29 @@ def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | N
     ``entry_state`` (pre-VIB-3205 schema), OPEN rows with unparseable
     ``entry_state``, or CLOSE rows missing ``current_prices``. Attribution
     must not silently emit an incorrect zero.
+
+    VIB-4848 (T9) — fee-adjusted V_lp
+    ---------------------------------
+    Protocols that bundle principal + fees into a single close payment
+    (Uniswap V3 ``decreaseLiquidity`` + ``collect``, Aerodrome Slipstream,
+    PancakeSwap V3) cause ``close_event["value_usd"]`` to include fee
+    income on top of the recovered principal. Without subtracting the fee
+    portion, ``IL = V_lp - V_hodl`` is biased toward zero (or even
+    positive) because fee income masquerades as price-movement upside.
+
+    When ``fees_usd`` is supplied — typically computed by the caller from
+    the close-event's raw ``fees_token0`` / ``fees_token1`` and the
+    close-time price oracle — it is subtracted from ``V_lp`` to recover
+    the principal-only valuation before the IL math. ``None`` preserves
+    the v2 behavior (no adjustment); ``Decimal("0")`` is a measured-zero
+    fee adjustment (a SEPARATE/EXACT close that genuinely earned no
+    fees), distinct from the BUNDLED/UNKNOWN case where the parser could
+    not attribute fees and ``fees_usd`` should be left ``None`` instead.
+    This mirrors the lp_handler's
+    ``_compute_lp_impermanent_loss`` (lp_handler.py:621) which already
+    does ``v_lp_principal_only = cost_basis_usd - fees_total_usd`` on the
+    accounting_events lane — T9 closes the symmetric gap on the
+    position_events / attribution lane.
     """
     entry = _entry_state_from_open(open_event)
     if entry is None:
@@ -344,6 +427,8 @@ def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | N
 
     hodl = (amount0_open * (price0_now or Decimal("0"))) + (amount1_open * (price1_now or Decimal("0")))
     v_lp = _dec(close_event.get("value_usd"))
+    if fees_usd is not None:
+        v_lp = v_lp - fees_usd
     return v_lp - hodl
 
 
@@ -417,7 +502,6 @@ def compute_fee_apy(  # noqa: C901
         return None
 
     try:
-        from datetime import datetime
 
         def _parse_ts(raw: object) -> datetime | None:
             if isinstance(raw, datetime):
@@ -448,12 +532,108 @@ def compute_fee_apy(  # noqa: C901
         return None
 
 
-def attribute_lp(open_event: dict, close_event: dict) -> dict:
+def _compute_close_fees_usd(close_event: dict) -> Decimal | None:
+    """VIB-4848 (T9 helper) — read the USD-priced close fees.
+
+    ``_apply_lp_close_value_usd`` (``position_events.py``) stamps
+    ``attribution_json["fees_total_usd"]`` for SEPARATE/EXACT closes
+    (UniV3 / PancakeSwap V3 / SushiSwap V3 / Aerodrome Slipstream) at
+    close-event build time — it has the resolver + close-time prices
+    handy there. This helper just reads the stamp.
+
+    Returns ``None`` (Empty ≠ Zero) when:
+
+    - ``fee_separation_method`` is not ``"SEPARATE"`` (BUNDLED / UNKNOWN
+      events have no measured fee value; emitting a ``Decimal("0")``
+      here would silently substitute a fabricated zero for an unmeasured
+      observation).
+    - The stamp is missing (close-time prices were unavailable, or token
+      decimals could not be resolved at enrichment time).
+
+    Returns a ``Decimal`` (possibly ``Decimal("0")``) when the SEPARATE
+    enricher succeeded.
+    """
+    raw = close_event.get("attribution_json")
+    if not raw:
+        return None
+    try:
+        sidecar = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(sidecar, dict):
+        return None
+
+    method = str(sidecar.get("fee_separation_method") or "").upper()
+    if method != "SEPARATE":
+        return None
+
+    stamped = sidecar.get("fees_total_usd")
+    if stamped is None:
+        return None
+    try:
+        return Decimal(str(stamped))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _sum_collect_events_usd(collect_events: list[dict] | None) -> Decimal | None:
+    """VIB-4848 (T12 helper) — sum mid-life COLLECT_FEES events to USD.
+
+    A ``LP_COLLECT_FEES`` ``PositionEvent``'s ``value_usd`` field is the
+    USD value of fees collected in that single transaction (see
+    ``compute_fee_apy`` for the same convention).
+
+    Empty ≠ Zero contract:
+    - ``None`` / no collect events                -> return ``None`` (unmeasured)
+    - Every event has missing / malformed value   -> return ``None`` (unmeasured)
+    - At least one event has a parseable value    -> sum the parseable
+      values (a measured ``Decimal("0")`` counts) and return the sum.
+
+    The previous implementation coerced missing values to ``Decimal("0")``
+    via ``_dec``, silently turning "unmeasured" into "measured zero" and
+    understating ``collected_fees_usd`` whenever a collect row lacked a
+    USD valuation.
+    """
+    if not collect_events:
+        return None
+    total = Decimal("0")
+    measured = False
+    for evt in collect_events:
+        raw = evt.get("value_usd")
+        if raw is None or raw == "":
+            continue
+        try:
+            total += Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            logger.warning(
+                "PnL attribution: collect_event value_usd=%r unparseable, treating as unmeasured",
+                raw,
+            )
+            continue
+        measured = True
+    if not measured:
+        return None
+    return total
+
+
+def attribute_lp(
+    open_event: dict,
+    close_event: dict,
+    collect_events: list[dict] | None = None,
+) -> dict:
     """Compute LP PnL attribution from OPEN and CLOSE events.
 
     Args:
         open_event: The OPEN position event dict.
         close_event: The CLOSE position event dict.
+        collect_events: VIB-4848 (T12). Optional list of mid-life
+            ``LP_COLLECT_FEES`` events that were harvested between OPEN
+            and CLOSE without unwinding the position. When provided, the
+            sum of their ``value_usd`` is folded into ``net_pnl_usd`` and
+            surfaced separately as ``collected_fees_usd``. ``None``
+            (default) preserves v2/v3 behaviour for callers that have not
+            been migrated yet — net PnL omits mid-life fees in that case,
+            matching the historical contract.
 
     Returns:
         Attribution dict with versioned breakdown. Numeric fields are encoded
@@ -487,11 +667,19 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
     fees_paid = _sum_protocol_fees(open_event, close_event)
     fee_pnl: Decimal | None = None if fees_paid is None else -fees_paid
 
+    # VIB-4848 (T9) — close-side bundled fees. Compute the USD-priced
+    # fee portion of the close tx so IL math can recover the principal-
+    # only V_lp. ``_compute_close_fees_usd`` returns ``None`` for BUNDLED
+    # / UNKNOWN closes — Empty ≠ Zero — and the IL falls through to v2
+    # behaviour (no adjustment) in that case.
+    close_fees_usd = _compute_close_fees_usd(close_event)
+
     # Impermanent loss (VIB-3205): real IL when entry_state + current_prices
     # are available, else None. None must not cascade into net_pnl as 0;
     # instead, net_pnl when IL is unknown omits the IL term (HODL-relative
     # attribution simply isn't available for this row).
-    il = compute_impermanent_loss(open_event, close_event)
+    il = compute_impermanent_loss(open_event, close_event, fees_usd=close_fees_usd)
+    fee_adjusted = close_fees_usd is not None
 
     # Price PnL = what hodling would have given - what was deposited
     # When IL is known, price_pnl = principal_recovered - il - principal_deposited
@@ -506,11 +694,40 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
     else:
         price_pnl = Decimal("0")
 
-    # Net PnL = principal_recovered - principal_deposited + fee_pnl - gas
-    # IL is *already captured* in principal_recovered (which reflects actual
-    # value at close), so it must NOT be added again here — it's broken out
-    # as a reporting signal only.
-    net_pnl = principal_recovered + (fee_pnl or Decimal("0")) - principal_deposited - total_gas
+    # VIB-4848 (T12) — sum mid-life COLLECT_FEES into a separate field.
+    # Lifecycle PnL must include them; ``compute_fee_apy`` already
+    # consumes ``collect_events`` for APY but the lifecycle entry point
+    # previously did not, understating per-position net PnL for any
+    # strategy that harvests fees without closing.
+    collected_fees_usd = _sum_collect_events_usd(collect_events)
+
+    # Net PnL = principal_recovered - principal_deposited + fee_pnl
+    # + collected_fees_usd - gas
+    # IL is *already captured* in principal_recovered (which reflects
+    # actual value at close), so it must NOT be added again here — it's
+    # broken out as a reporting signal only.
+    net_pnl = (
+        principal_recovered
+        + (fee_pnl or Decimal("0"))
+        + (collected_fees_usd or Decimal("0"))
+        - principal_deposited
+        - total_gas
+    )
+
+    # Surface T8's fee separation taxonomy and T9's fee-adjusted flag so
+    # downstream consumers (dashboards, repair tooling) can tell which
+    # branch of the attribution math produced this row.
+    method = ""
+    confidence = ""
+    raw_sidecar = close_event.get("attribution_json")
+    if raw_sidecar:
+        try:
+            decoded = json.loads(raw_sidecar) if isinstance(raw_sidecar, str) else raw_sidecar
+            if isinstance(decoded, dict):
+                method = str(decoded.get("fee_separation_method") or "")
+                confidence = str(decoded.get("fee_confidence") or "")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     return {
         "version": CURRENT_VERSION,
@@ -526,6 +743,23 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
         "net_pnl_usd": str(net_pnl),
         "amount0_recovered": str(amount0_recovered),
         "amount1_recovered": str(amount1_recovered),
+        # VIB-4848 (T8) — fee separation taxonomy
+        "fee_separation_method": method or None,
+        "fee_confidence": confidence or None,
+        # VIB-4848 (T9) — whether IL was computed on a fee-adjusted V_lp.
+        # ``True`` ⇒ ``close_fees_usd`` was subtracted before IL.
+        # ``False`` ⇒ v2/v3 behaviour (BUNDLED / UNKNOWN closes).
+        "fee_adjusted": fee_adjusted,
+        # VIB-4848 (T9) — the actual USD value subtracted from V_lp for
+        # the IL computation. ``None`` (not "0") when no adjustment ran
+        # so consumers can distinguish "no measurement" from "measured
+        # zero fees" per Empty ≠ Zero.
+        "close_fees_usd": None if close_fees_usd is None else str(close_fees_usd),
+        # VIB-4848 (T12) — mid-life COLLECT_FEES total. ``None`` (not
+        # "0") when ``collect_events`` was not provided so a caller that
+        # has not yet been migrated to thread collect events is
+        # distinguishable from one that explicitly observed zero.
+        "collected_fees_usd": None if collected_fees_usd is None else str(collected_fees_usd),
     }
 
 
@@ -751,12 +985,21 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
     }
 
 
-def compute_attribution(open_event: dict, close_event: dict) -> str:
+def compute_attribution(
+    open_event: dict,
+    close_event: dict,
+    collect_events: list[dict] | None = None,
+) -> str:
     """Compute PnL attribution JSON for a position lifecycle.
 
     Args:
         open_event: The OPEN event dict (from get_position_history).
         close_event: The CLOSE event dict.
+        collect_events: VIB-4848 (T12). Mid-life ``LP_COLLECT_FEES``
+            events between OPEN and CLOSE, threaded through to
+            ``attribute_lp`` so per-lifecycle net PnL includes them. Only
+            applies when ``position_type == "LP"`` — PERP attribution
+            ignores it.
 
     Returns:
         JSON string with versioned attribution, or '{}' on failure.
@@ -765,7 +1008,7 @@ def compute_attribution(open_event: dict, close_event: dict) -> str:
         position_type = (close_event.get("position_type") or open_event.get("position_type") or "").upper()
 
         if position_type == "LP":
-            result = attribute_lp(open_event, close_event)
+            result = attribute_lp(open_event, close_event, collect_events=collect_events)
         elif position_type == "PERP":
             result = attribute_perp(open_event, close_event)
         else:
@@ -776,6 +1019,94 @@ def compute_attribution(open_event: dict, close_event: dict) -> str:
     except Exception:
         logger.debug("Attribution computation failed", exc_info=True)
         return "{}"
+
+
+def _coerce_timestamp(value: Any) -> Any:
+    """VIB-4848 (T12) — normalise mixed timestamp representations.
+
+    ``PositionEvent.timestamp`` round-trips through SQLite either as a
+    ``datetime`` (live in-memory ORM hit) or as an ISO-8601 ``str``
+    (after a ``json.dumps`` / row-decode cycle).  Direct comparison
+    between the two raises ``TypeError`` in Python 3.  Coerce to
+    ``datetime`` when parseable; return ``None`` for unknown / unparseable
+    values so callers can skip ordering checks rather than crash.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _close_event_attr(close_event: Any, name: str) -> Any:
+    """Read ``name`` from ``close_event`` regardless of dict / object shape.
+
+    ``run_attribution_on_close`` calls in with a dict; ``recompute_
+    attribution`` recovers it from the ORM as a ``PositionEvent`` instance.
+    Both shapes must be tolerated without the call-site branching on type.
+    """
+    if isinstance(close_event, dict):
+        return close_event.get(name)
+    return getattr(close_event, name, None)
+
+
+def _is_collect_in_window(
+    evt: dict,
+    *,
+    open_ts: Any,
+    close_ts: Any,
+    close_id: Any,
+) -> bool:
+    """Predicate for ``_extract_collect_events_between``.
+
+    Returns ``True`` iff ``evt`` is an ``LP_COLLECT_FEES`` row whose
+    timestamp lies strictly after ``open_ts`` and on-or-before ``close_ts``,
+    and whose row id does not coincide with ``close_id``.  Unparseable
+    ordering bounds (``None``) are treated as "skip this side of the
+    window" — preferred over raising on a malformed timestamp.
+    """
+    if str(evt.get("event_type") or "").upper() != "LP_COLLECT_FEES":
+        return False
+    if close_id is not None and evt.get("id") == close_id:
+        return False
+    ts = _coerce_timestamp(evt.get("timestamp"))
+    if ts is None:
+        return True
+    if open_ts is not None and ts <= open_ts:
+        return False
+    if close_ts is not None and ts > close_ts:
+        return False
+    return True
+
+
+def _extract_collect_events_between(
+    history: list,
+    open_event: dict,
+    close_event: Any,
+) -> list[dict]:
+    """VIB-4848 (T12) — pick ``LP_COLLECT_FEES`` events between OPEN and CLOSE.
+
+    Walks ``history`` (ORDER BY timestamp ASC per
+    ``get_position_history``) and returns any ``LP_COLLECT_FEES`` rows
+    whose timestamp falls strictly after the OPEN and on-or-before the
+    CLOSE.  Used by ``run_attribution_on_close`` to thread mid-life fee
+    collections through to ``attribute_lp`` for the per-lifecycle PnL.
+
+    Timestamps may arrive as ``datetime`` or ISO ``str`` (the SQLite
+    payload boundary serialises through both shapes).  Both sides of
+    every comparison are coerced via :func:`_coerce_timestamp` to keep
+    the ordering well-defined; unparseable timestamps are conservatively
+    treated as "skip ordering" so a malformed row never throws.
+    """
+    open_ts = _coerce_timestamp(open_event.get("timestamp"))
+    close_id = _close_event_attr(close_event, "id")
+    close_ts = _coerce_timestamp(_close_event_attr(close_event, "timestamp"))
+    return [evt for evt in history if _is_collect_in_window(evt, open_ts=open_ts, close_ts=close_ts, close_id=close_id)]
 
 
 def build_entry_state(
@@ -942,6 +1273,7 @@ async def stamp_entry_state_on_open(
         logger.warning("Failed to stamp entry_state on OPEN", exc_info=True)
 
 
+# crap-allowlist: VIB-4888 — pre-existing complexity (cc=16, cov=52%, CRAP=43) unchanged by VIB-4848 (single-line T12 helper call added at line 1293). Decomposition + coverage backfill tracked in VIB-4888.
 async def run_attribution_on_close(
     store: Any,
     close_event: Any,
@@ -1004,7 +1336,13 @@ async def run_attribution_on_close(
             close_attr_parsed["current_prices"] = prices
             close_dict["attribution_json"] = json.dumps(close_attr_parsed)
 
-        attribution = compute_attribution(open_event, close_dict)
+        # VIB-4848 (T12) — pick mid-life LP_COLLECT_FEES events from the
+        # already-loaded history so attribute_lp can fold them into
+        # per-lifecycle net PnL. Empty list ⇒ no harvests ⇒ attribute_lp
+        # falls back to v2/v3 behaviour (collected_fees_usd=None).
+        collect_events = _extract_collect_events_between(history, open_event, close_event)
+
+        attribution = compute_attribution(open_event, close_dict, collect_events=collect_events)
 
         if attribution != "{}":
             # CodeRabbit audit fix: persist ``current_prices`` INSIDE the
@@ -1093,7 +1431,9 @@ async def recompute_attribution(
             if open_event is None:
                 continue
 
-            attribution = compute_attribution(open_event, close_dict)
+            # VIB-4848 (T12) — same filter as live attribution.
+            collect_events_recompute = _extract_collect_events_between(history, open_event, close_dict)
+            attribution = compute_attribution(open_event, close_dict, collect_events=collect_events_recompute)
             if attribution != "{}":
                 # CodeRabbit audit fix (round 3): preserve the persisted
                 # ``current_prices`` sidecar across a recompute. Without this,

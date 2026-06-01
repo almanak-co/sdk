@@ -1807,7 +1807,7 @@ _SLIPSTREAM_SWAP_CL_TOPIC = EVENT_TOPICS["SwapCL"].lower()
 # adding a new chain is a one-line change in ``contracts.py`` and this dict
 # rebuilds automatically.
 def _build_slipstream_npm_addresses() -> dict[str, str]:
-    from almanak.core.contracts import AERODROME
+    from .addresses import AERODROME
 
     out: dict[str, str] = {}
     for chain, entry in AERODROME.items():

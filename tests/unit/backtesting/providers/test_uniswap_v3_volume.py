@@ -1,18 +1,16 @@
-"""Unit tests for Uniswap V3 Volume Provider.
+"""Unit tests for the gateway-backed Uniswap V3 Volume Provider.
 
-This module tests the UniswapV3VolumeProvider class in providers/dex/uniswap_v3_volume.py,
-covering:
-- Provider initialization and configuration
-- Supported chains and subgraph ID mapping
-- Volume fetching with mocked responses
-- Fallback behavior when data unavailable
-- Error handling for subgraph failures
+**VIB-4870 / W7**: ``UniswapV3VolumeProvider`` is now a thin gRPC client
+of ``RateHistoryService.GetDexVolumeHistory``. These tests assert against
+the gateway-client path (a mocked ``rate_history`` stub) rather than the
+removed ``SubgraphClient`` egress. Volume VALUES are still asserted
+byte-equivalent to the pre-W7 provider (W7 §6); the pre-W7 silent-zero
+fallback path is replaced by ``DataSourceUnavailable``.
 """
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,43 +21,75 @@ from almanak.framework.backtesting.pnl.providers.dex.uniswap_v3_volume import (
     UNISWAP_V3_SUBGRAPH_IDS,
     UniswapV3VolumeProvider,
 )
-from almanak.framework.backtesting.pnl.providers.subgraph_client import (
-    SubgraphClient,
-    SubgraphQueryError,
-    SubgraphRateLimitError,
-)
 from almanak.framework.backtesting.pnl.types import DataConfidence
+from almanak.framework.data.interfaces import DataSourceUnavailable
+
+_GW_MODULE = "almanak.framework.backtesting.pnl.providers.dex._gateway_volume"
+
+
+def _make_point(timestamp: int, volume_usd: str) -> MagicMock:
+    point = MagicMock()
+    point.timestamp = timestamp
+    point.volume_usd = volume_usd
+    return point
+
+
+def _make_response(
+    points: list[MagicMock], *, success: bool = True, source: str = "the_graph", error: str = ""
+) -> MagicMock:
+    resp = MagicMock()
+    resp.success = success
+    resp.source = source
+    resp.error = error
+    resp.points = points
+    return resp
+
+
+def _patch_gateway(response: MagicMock):
+    """Patch the shared gateway-client helper to return ``response``.
+
+    Returns a context manager yielding the captured ``GetDexVolumeHistory``
+    request object so tests can assert the request the provider built.
+    """
+    captured: dict[str, object] = {}
+
+    client = MagicMock()
+    client.is_connected = True
+
+    def _get_volume_history(request):
+        captured["request"] = request
+        return response
+
+    client.rate_history.GetDexVolumeHistory = _get_volume_history
+
+    import almanak.gateway.proto.gateway_pb2 as gateway_pb2
+
+    patcher = patch(
+        f"{_GW_MODULE}._get_connected_gateway_client",
+        return_value=(client, gateway_pb2),
+    )
+    return patcher, captured
 
 
 class TestUniswapV3VolumeProviderInitialization:
-    """Tests for UniswapV3VolumeProvider initialization."""
+    """Tests for UniswapV3VolumeProvider initialization (back-compat surface)."""
 
     def test_init_default(self):
-        """Test provider initializes with default settings."""
         provider = UniswapV3VolumeProvider()
         assert provider.supported_chains == SUPPORTED_CHAINS
         assert provider._fallback_volume == Decimal("0")
-        assert provider._owns_client is True
 
-    def test_init_with_custom_fallback(self):
-        """Test provider initializes with custom fallback volume."""
+    def test_init_with_custom_fallback_is_accepted(self):
+        # fallback_volume kept for back-compat (ignored at runtime).
         provider = UniswapV3VolumeProvider(fallback_volume=Decimal("1000"))
         assert provider._fallback_volume == Decimal("1000")
 
-    def test_init_with_custom_rate_limit(self):
-        """Test provider initializes with custom rate limit."""
-        provider = UniswapV3VolumeProvider(requests_per_minute=50)
-        assert provider._client.config.requests_per_minute == 50
-
-    def test_init_with_provided_client(self):
-        """Test provider uses provided client and doesn't own it."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        provider = UniswapV3VolumeProvider(client=mock_client)
-        assert provider._client is mock_client
-        assert provider._owns_client is False
+    def test_init_with_legacy_kwargs_accepted(self):
+        # client / requests_per_minute kept for back-compat (ignored).
+        provider = UniswapV3VolumeProvider(client=MagicMock(), requests_per_minute=50)
+        assert provider.supported_chains == SUPPORTED_CHAINS
 
     def test_supported_chains_property_returns_copy(self):
-        """Test supported_chains returns a copy, not the original."""
         provider = UniswapV3VolumeProvider()
         chains1 = provider.supported_chains
         chains2 = provider.supported_chains
@@ -68,11 +98,9 @@ class TestUniswapV3VolumeProviderInitialization:
 
 
 class TestSupportedChains:
-    """Tests for supported chains configuration."""
+    """Tests for supported chains configuration (preserved tables)."""
 
     def test_supported_chains_include_required_networks(self):
-        """Test that required networks are supported."""
-        # US-007 requires: Ethereum, Arbitrum, Base, Optimism, Polygon
         assert Chain.ETHEREUM in SUPPORTED_CHAINS
         assert Chain.ARBITRUM in SUPPORTED_CHAINS
         assert Chain.BASE in SUPPORTED_CHAINS
@@ -80,82 +108,60 @@ class TestSupportedChains:
         assert Chain.POLYGON in SUPPORTED_CHAINS
 
     def test_all_supported_chains_have_subgraph_ids(self):
-        """Test all supported chains have subgraph IDs."""
         for chain in SUPPORTED_CHAINS:
             assert chain in UNISWAP_V3_SUBGRAPH_IDS
-            assert UNISWAP_V3_SUBGRAPH_IDS[chain]  # Non-empty
-
-    def test_subgraph_ids_are_valid_format(self):
-        """Test subgraph IDs are non-empty strings."""
-        for chain, subgraph_id in UNISWAP_V3_SUBGRAPH_IDS.items():
-            assert isinstance(subgraph_id, str)
-            assert len(subgraph_id) > 10  # Reasonable length for deployment ID
+            assert UNISWAP_V3_SUBGRAPH_IDS[chain]
 
 
 class TestGetVolume:
-    """Tests for get_volume method."""
+    """Tests for the gateway-backed get_volume path."""
 
     @pytest.mark.asyncio
     async def test_get_volume_success(self):
-        """Test successfully fetching volume data."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {
-                        "id": "0x123-12345",
-                        "date": 1705276800,  # 2024-01-15 00:00:00 UTC
-                        "volumeUSD": "1500000.50",
-                        "feesUSD": "4500.15",
-                        "tvlUSD": "25000000.00",
-                        "liquidity": "5000000000",
-                    }
-                ]
-            }
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123abc",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
+        # 1705276800 = 2024-01-15 00:00:00 UTC
+        response = _make_response([_make_point(1705276800, "1500000.50")])
+        patcher, captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            volumes = await provider.get_volume(
+                pool_address="0x123ABC",
+                chain=Chain.ARBITRUM,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 15),
+            )
 
         assert len(volumes) == 1
         assert volumes[0].value == Decimal("1500000.50")
         assert volumes[0].source_info.source == DATA_SOURCE
         assert volumes[0].source_info.confidence == DataConfidence.HIGH
 
-        # Verify client was called with correct parameters
-        mock_client.query.assert_called_once()
-        call_args = mock_client.query.call_args
-        assert call_args.kwargs["subgraph_id"] == UNISWAP_V3_SUBGRAPH_IDS[Chain.ARBITRUM]
-        assert "0x123abc" in str(call_args.kwargs["variables"])
+        # The RPC was built for the right dex / chain / pool / daily interval.
+        request = captured["request"]
+        assert request.dex == "uniswap_v3"
+        assert request.chain == "arbitrum"
+        assert request.pool_address == "0x123ABC"
+        assert request.interval_secs == 86400
+        # Single-day window must satisfy the gateway's strict start < end.
+        assert request.start_ts < request.end_ts
 
     @pytest.mark.asyncio
     async def test_get_volume_multiple_days(self):
-        """Test fetching volume for multiple days."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {"id": "1", "date": 1705276800, "volumeUSD": "1000000"},
-                    {"id": "2", "date": 1705363200, "volumeUSD": "1100000"},
-                    {"id": "3", "date": 1705449600, "volumeUSD": "1200000"},
-                ]
-            }
+        response = _make_response(
+            [
+                _make_point(1705276800, "1000000"),
+                _make_point(1705363200, "1100000"),
+                _make_point(1705449600, "1200000"),
+            ]
         )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ETHEREUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 17),
-        )
+        patcher, _captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            volumes = await provider.get_volume(
+                pool_address="0x123",
+                chain=Chain.ETHEREUM,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 17),
+            )
 
         assert len(volumes) == 3
         assert volumes[0].value == Decimal("1000000")
@@ -163,35 +169,24 @@ class TestGetVolume:
         assert volumes[2].value == Decimal("1200000")
 
     @pytest.mark.asyncio
-    async def test_get_volume_no_data_returns_fallback(self):
-        """Test that empty response returns fallback results."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(return_value={"poolDayDatas": []})
-
-        provider = UniswapV3VolumeProvider(
-            client=mock_client,
-            fallback_volume=Decimal("1000"),
-        )
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 17),
-        )
-
-        # Should return fallback for each day in range
-        assert len(volumes) == 3
-        for vol in volumes:
-            assert vol.value == Decimal("1000")
-            assert vol.source_info.confidence == DataConfidence.LOW
-            assert vol.source_info.source == "fallback"
+    async def test_get_volume_no_data_raises_unavailable(self):
+        # W7 intentional change: empty subgraph -> success=False ->
+        # DataSourceUnavailable (NOT a silent Decimal("0") LOW row).
+        response = _make_response([], success=False, source="uniswap_v3", error="subgraph returned no poolDayDatas")
+        patcher, _captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            with pytest.raises(DataSourceUnavailable):
+                await provider.get_volume(
+                    pool_address="0x123",
+                    chain=Chain.ARBITRUM,
+                    start_date=date(2024, 1, 15),
+                    end_date=date(2024, 1, 17),
+                )
 
     @pytest.mark.asyncio
     async def test_get_volume_unsupported_chain_raises(self):
-        """Test that unsupported chain raises ValueError."""
         provider = UniswapV3VolumeProvider()
-
         with pytest.raises(ValueError) as exc_info:
             await provider.get_volume(
                 pool_address="0x123",
@@ -199,222 +194,70 @@ class TestGetVolume:
                 start_date=date(2024, 1, 15),
                 end_date=date(2024, 1, 15),
             )
-
         assert "Unsupported chain" in str(exc_info.value)
         assert "AVALANCHE" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_get_volume_normalizes_address(self):
-        """Test that pool address is normalized to lowercase."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {"id": "1", "date": 1705276800, "volumeUSD": "1000000"}
-                ]
-            }
-        )
+    async def test_rpc_failure_raises_unavailable(self):
+        client = MagicMock()
+        client.is_connected = True
+        client.rate_history.GetDexVolumeHistory = MagicMock(side_effect=RuntimeError("channel down"))
+        import almanak.gateway.proto.gateway_pb2 as gateway_pb2
 
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        await provider.get_volume(
-            pool_address="0xABC123DEF",  # Mixed case
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        # Verify address was lowercased in query
-        call_args = mock_client.query.call_args
-        assert call_args.kwargs["variables"]["poolAddress"] == "0xabc123def"
-
-
-class TestErrorHandling:
-    """Tests for error handling in volume fetching."""
-
-    @pytest.mark.asyncio
-    async def test_rate_limit_error_returns_fallback(self):
-        """Test that rate limit error returns fallback results."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            side_effect=SubgraphRateLimitError("Rate limit exceeded")
-        )
-
-        provider = UniswapV3VolumeProvider(
-            client=mock_client,
-            fallback_volume=Decimal("500"),
-        )
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        assert len(volumes) == 1
-        assert volumes[0].value == Decimal("500")
-        assert volumes[0].source_info.confidence == DataConfidence.LOW
-
-    @pytest.mark.asyncio
-    async def test_query_error_returns_fallback(self):
-        """Test that query error returns fallback results."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            side_effect=SubgraphQueryError("Invalid query")
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        assert len(volumes) == 1
-        assert volumes[0].value == Decimal("0")  # Default fallback
-        assert volumes[0].source_info.confidence == DataConfidence.LOW
-
-    @pytest.mark.asyncio
-    async def test_unexpected_error_returns_fallback(self):
-        """Test that unexpected errors return fallback results."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(side_effect=Exception("Unexpected error"))
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        assert len(volumes) == 1
-        assert volumes[0].source_info.confidence == DataConfidence.LOW
+        with patch(f"{_GW_MODULE}._get_connected_gateway_client", return_value=(client, gateway_pb2)):
+            provider = UniswapV3VolumeProvider()
+            with pytest.raises(DataSourceUnavailable):
+                await provider.get_volume(
+                    pool_address="0x123",
+                    chain=Chain.ARBITRUM,
+                    start_date=date(2024, 1, 15),
+                    end_date=date(2024, 1, 15),
+                )
 
 
 class TestContextManager:
     """Tests for async context manager behavior."""
 
     @pytest.mark.asyncio
-    async def test_context_manager_closes_owned_client(self):
-        """Test that context manager closes client when owned."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.close = AsyncMock()
-
-        # Create provider that owns the client (default)
+    async def test_context_manager_is_noop(self):
         provider = UniswapV3VolumeProvider()
-        provider._client = mock_client
-        provider._owns_client = True
-
         async with provider:
             pass
-
-        mock_client.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_context_manager_does_not_close_provided_client(self):
-        """Test that context manager doesn't close provided client."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.close = AsyncMock()
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-        assert provider._owns_client is False
-
-        async with provider:
-            pass
-
-        mock_client.close.assert_not_called()
+        # close() is a no-op (no owned client) — must not raise.
+        await provider.close()
 
 
 class TestDataParsing:
-    """Tests for parsing subgraph response data."""
+    """Tests for byte-equivalent value + timestamp mapping (W7 §6)."""
 
     @pytest.mark.asyncio
     async def test_parse_volume_with_decimal_precision(self):
-        """Test that volume values maintain decimal precision."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {
-                        "id": "1",
-                        "date": 1705276800,
-                        "volumeUSD": "1234567.89012345",
-                    }
-                ]
-            }
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
+        response = _make_response([_make_point(1705276800, "1234567.89012345")])
+        patcher, _captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            volumes = await provider.get_volume(
+                pool_address="0x123",
+                chain=Chain.ARBITRUM,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 15),
+            )
         assert volumes[0].value == Decimal("1234567.89012345")
 
     @pytest.mark.asyncio
-    async def test_parse_volume_handles_missing_fields(self):
-        """Test handling of missing optional fields in response."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {
-                        "id": "1",
-                        "date": 1705276800,
-                        # Only volumeUSD, no other fields
-                    }
-                ]
-            }
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        # Should default to 0 when volumeUSD is missing
-        assert volumes[0].value == Decimal("0")
-
-    @pytest.mark.asyncio
     async def test_timestamp_conversion(self):
-        """Test that timestamps are correctly converted to datetime."""
-        mock_client = MagicMock(spec=SubgraphClient)
         # 1705276800 = 2024-01-15 00:00:00 UTC
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {
-                        "id": "1",
-                        "date": 1705276800,
-                        "volumeUSD": "1000000",
-                    }
-                ]
-            }
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
-        assert volumes[0].source_info.timestamp.date() == date(2024, 1, 15)
+        response = _make_response([_make_point(1705276800, "1000000")])
+        patcher, _captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            volumes = await provider.get_volume(
+                pool_address="0x123",
+                chain=Chain.ARBITRUM,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 15),
+            )
+        assert volumes[0].source_info.timestamp == datetime(2024, 1, 15, tzinfo=UTC)
 
 
 class TestAllSupportedChains:
@@ -423,26 +266,15 @@ class TestAllSupportedChains:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("chain", SUPPORTED_CHAINS)
     async def test_can_query_all_supported_chains(self, chain: Chain):
-        """Test that all supported chains can be queried."""
-        mock_client = MagicMock(spec=SubgraphClient)
-        mock_client.query = AsyncMock(
-            return_value={
-                "poolDayDatas": [
-                    {"id": "1", "date": 1705276800, "volumeUSD": "1000000"}
-                ]
-            }
-        )
-
-        provider = UniswapV3VolumeProvider(client=mock_client)
-
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=chain,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-
+        response = _make_response([_make_point(1705276800, "1000000")])
+        patcher, captured = _patch_gateway(response)
+        with patcher:
+            provider = UniswapV3VolumeProvider()
+            volumes = await provider.get_volume(
+                pool_address="0x123",
+                chain=chain,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 15),
+            )
         assert len(volumes) == 1
-        # Verify correct subgraph ID was used
-        call_args = mock_client.query.call_args
-        assert call_args.kwargs["subgraph_id"] == UNISWAP_V3_SUBGRAPH_IDS[chain]
+        assert captured["request"].chain == chain.value.lower()

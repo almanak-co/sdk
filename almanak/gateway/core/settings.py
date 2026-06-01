@@ -95,6 +95,20 @@ class GatewaySettings(
     # alongside the per-token ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` values.
     enable_manual_price_overrides: bool = False
 
+    # VIB-4841 / FR-5002 — stablecoin peg fast-path. When False (default), the
+    # PriceAggregator short-circuits a stable/USD pair to the $1.00 peg without
+    # any upstream price call (the peg is what the aggregate returns anyway), a
+    # per-iteration cost cut for RSI/LP strategies that re-fetch USDC/USDT/DAI
+    # every loop. Set True to force the full multi-source aggregate for stables
+    # (live de-peg verification). Toggle via ``ALMANAK_GATEWAY_STABLECOIN_VERIFY``.
+    stablecoin_verify: bool = False
+
+    # How often (1-in-N peg-served calls) the fast-path runs an on-chain
+    # Chainlink peg sanity check. Best-effort de-peg detector — logs loudly on
+    # drift, never blocks the peg. Non-positive disables the check. Override via
+    # ``ALMANAK_GATEWAY_STABLECOIN_CHAINLINK_CHECK_INTERVAL``.
+    stablecoin_chainlink_check_interval: int = 50
+
     # PoolHistoryService kill-switch (VIB-4728 / POOL-2).
     # Default false until POOL-5 wires real providers. The servicer is
     # always REGISTERED on the gRPC server; this flag gates the handler.
@@ -131,6 +145,49 @@ class GatewaySettings(
     # disable the bound (mirrors the soft-cap fallback semantics).
     pool_history_cache_max_entries: int = 5000
     pool_history_cache_max_bytes: int = 64 * 1024 * 1024
+
+    # PoolHistory TheGraph monthly-query budget breaker (POOL-5 / VIB-4753).
+    # The Graph bills per query against a monthly plan quota. Once the
+    # gateway's in-memory monthly query count reaches this max, the TheGraph
+    # provider is skipped and the dispatcher falls through to DefiLlama /
+    # GeckoTerminal (UAT card D3.F11 trip). Operators tune this to their
+    # Graph plan via ``ALMANAK_GATEWAY_POOL_HISTORY_THEGRAPH_MONTHLY_BUDGET_MAX``.
+    # Non-positive / malformed overrides fall back to the default via
+    # ``_validate_pool_history_thegraph_budget`` so a typo can't silently
+    # disable the breaker (mirrors the soft-cap fallback semantics).
+    pool_history_thegraph_monthly_budget_max: int = 100000
+
+    # PoolHistory per-provider finality cutoff (seconds) — POOL-6 (VIB-4754).
+    # A returned series is ``finalized_only`` iff its newest row is older than
+    # the serving provider's cutoff; otherwise the trailing bar is provisional
+    # and the cache entry is written under the short-TTL ``provisional`` band
+    # (see ``_history_cache``). DefiLlama revises daily TVL / volume >24h after
+    # the fact (PoolX.md §D4), so its cutoff is longer than The Graph's /
+    # GeckoTerminal's 24h. Operators override via
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_{THE_GRAPH,DEFILLAMA,GECKOTERMINAL}``.
+    # Non-positive / malformed overrides fall back to the default via
+    # ``_validate_pool_history_finality_cutoff`` so a typo can't silently mark
+    # provisional data as finalized (which would over-cache revisable rows).
+    pool_history_finality_cutoff_seconds_the_graph: int = 86400
+    pool_history_finality_cutoff_seconds_defillama: int = 259200
+    pool_history_finality_cutoff_seconds_geckoterminal: int = 86400
+
+    # PoolHistory per-provider response row ceiling — POOL-6 (VIB-4754). When a
+    # provider returns MORE rows than this for the (clamped) window, the handler
+    # serves the OLDEST ceiling-many rows with ``truncation_reason=PROVIDER_PAGE_CAP``
+    # and ``next_start_ts`` so the caller re-chunks forward. The default equals
+    # the providers' internal pagination safety bound (100k), so it is
+    # structurally unreachable after soft-cap clamping in production (the
+    # largest clamped window is 90d-1h = 2160 rows); it exists so an operator
+    # (or the D3.F7 acceptance test) can lower a single provider's ceiling.
+    # Operators override via
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_PAGE_CAP_ROWS_{THE_GRAPH,DEFILLAMA,GECKOTERMINAL}``.
+    # Non-positive / malformed overrides fall back to the default via
+    # ``_validate_pool_history_page_cap_rows`` so a typo can't silently disable
+    # the (already huge) ceiling.
+    pool_history_page_cap_rows_the_graph: int = 100000
+    pool_history_page_cap_rows_defillama: int = 100000
+    pool_history_page_cap_rows_geckoterminal: int = 100000
 
     # Metrics settings
     metrics_enabled: bool = True
@@ -365,6 +422,84 @@ class GatewaySettings(
         defaults: dict[str, int] = {
             "pool_history_cache_max_entries": 5000,
             "pool_history_cache_max_bytes": 64 * 1024 * 1024,
+        }
+        field_name = info.field_name or ""
+        default = defaults[field_name]
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if parsed <= 0:
+            return default
+        return parsed
+
+    @field_validator("pool_history_thegraph_monthly_budget_max", mode="before")
+    @classmethod
+    def _validate_pool_history_thegraph_budget(cls, value: object) -> int:
+        # The monthly-budget breaker max must be > 0; non-positive or
+        # malformed env values fall back to the default so a typo
+        # (``...BUDGET_MAX=0``) can't silently disable TheGraph entirely
+        # (a max of 0 would trip the breaker on the very first query).
+        default = 100000
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if parsed <= 0:
+            return default
+        return parsed
+
+    @field_validator(
+        "pool_history_finality_cutoff_seconds_the_graph",
+        "pool_history_finality_cutoff_seconds_defillama",
+        "pool_history_finality_cutoff_seconds_geckoterminal",
+        mode="before",
+    )
+    @classmethod
+    def _validate_pool_history_finality_cutoff(cls, value: object, info: ValidationInfo) -> int:
+        # Per-provider finality cutoff (seconds) must be > 0; non-positive or
+        # malformed env values fall back to the field default so a typo
+        # (``...CUTOFF_SECONDS_DEFILLAMA=0``) can't silently mark every row
+        # finalized (cutoff 0 would treat an in-the-future-tolerance bar as
+        # finalized and over-cache revisable data). Defaults are sourced here
+        # so a single edit point updates both branches.
+        defaults: dict[str, int] = {
+            "pool_history_finality_cutoff_seconds_the_graph": 86400,
+            "pool_history_finality_cutoff_seconds_defillama": 259200,
+            "pool_history_finality_cutoff_seconds_geckoterminal": 86400,
+        }
+        field_name = info.field_name or ""
+        default = defaults[field_name]
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if parsed <= 0:
+            return default
+        return parsed
+
+    @field_validator(
+        "pool_history_page_cap_rows_the_graph",
+        "pool_history_page_cap_rows_defillama",
+        "pool_history_page_cap_rows_geckoterminal",
+        mode="before",
+    )
+    @classmethod
+    def _validate_pool_history_page_cap_rows(cls, value: object, info: ValidationInfo) -> int:
+        # Per-provider response row ceiling must be > 0; non-positive or
+        # malformed env values fall back to the field default so a typo
+        # (``...PAGE_CAP_ROWS_THE_GRAPH=0``) can't silently truncate every
+        # response to zero rows. Defaults sourced here for a single edit point.
+        defaults: dict[str, int] = {
+            "pool_history_page_cap_rows_the_graph": 100000,
+            "pool_history_page_cap_rows_defillama": 100000,
+            "pool_history_page_cap_rows_geckoterminal": 100000,
         }
         field_name = info.field_name or ""
         default = defaults[field_name]

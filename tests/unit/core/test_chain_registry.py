@@ -17,6 +17,7 @@ Three layers of guarantee:
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 
 import pytest
@@ -26,6 +27,7 @@ from almanak.core.chains import (
     ChainRegistry,
     GasProfile,
     NativeToken,
+    RpcProfile,
     Timeouts,
 )
 from almanak.core.enums import Chain, ChainFamily
@@ -103,16 +105,23 @@ HISTORICAL_CHAIN_GAS_PRICE_CAPS_GWEI = {
     "ethereum": 300,
     "arbitrum": 10,
     "optimism": 10,
-    "polygon": 500,
+    # VIB-4879: polygon 500 → 1000, mantle 10 → 100, sonic 100 → 200.
+    # Original migration (VIB-4801) snapshot was byte-identical to the legacy
+    # CHAIN_GAS_PRICE_CAPS_GWEI literal; once that one-shot byte-identity
+    # invariant ships, the registry IS the source of truth and the historical
+    # map tracks intentional, audited drift. See VIB-4879 ticket + the live-gas
+    # snapshot in tests/unit/core/test_chain_gas_cap_sanity.py for the
+    # justification of each bump.
+    "polygon": 1000,
     "base": 10,
     "avalanche": 100,
     "bsc": 20,
     "linea": 10,
     "plasma": 50,
     "blast": 10,
-    "mantle": 10,
+    "mantle": 100,
     "berachain": 50,
-    "sonic": 100,
+    "sonic": 200,
     "monad": 50,
     "xlayer": 10,
     "zerog": 50,
@@ -598,3 +607,116 @@ class TestChainFamilyMapAgreement:
         from almanak.core.enums import CHAIN_FAMILY_MAP
 
         assert CHAIN_FAMILY_MAP[chain] is ChainRegistry.get(chain).family
+
+
+# ---------------------------------------------------------------------------
+# 6. RpcProfile + ChainDescriptor.rpc — schema and wiring
+# ---------------------------------------------------------------------------
+
+
+class TestRpcProfile:
+    """Defaults, immutability, and ChainDescriptor wiring for ``RpcProfile``.
+
+    The data this dataclass carries used to live in
+    ``config/rpc_defaults.json`` plus a duplicate ``_BUILTIN_CHAINS``
+    literal in ``almanak/gateway/utils/rpc_provider.py``. Both are gone;
+    these tests pin the new schema so a future edit to ``_descriptor.py``
+    cannot silently reshape it.
+    """
+
+    def test_default_profile_is_all_unset(self) -> None:
+        """A bare ``RpcProfile()`` carries no data — matches the
+        ``GasProfile`` asymmetric-coverage convention and means
+        ``berachain`` / ``blast`` (no JSON entry today) stay absent from
+        every derived RPC dict."""
+        rpc = RpcProfile()
+        assert rpc.public_rpc is None
+        assert rpc.alchemy_prefix is None
+        assert rpc.tenderly_subdomain is None
+        assert rpc.anvil_port is None
+        assert rpc.poa is False
+
+    def test_is_frozen(self) -> None:
+        """``RpcProfile`` is ``frozen=True`` so it is hashable and cannot
+        be mutated after construction."""
+        rpc = RpcProfile(public_rpc="https://example.com")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            rpc.public_rpc = "https://other.example"  # type: ignore[misc]
+
+    def test_explicit_fields_round_trip(self) -> None:
+        """Explicitly passed values survive on the dataclass."""
+        rpc = RpcProfile(
+            public_rpc="https://rpc.example.com",
+            alchemy_prefix="ex",
+            tenderly_subdomain="example",
+            anvil_port=8600,
+            poa=True,
+        )
+        assert rpc.public_rpc == "https://rpc.example.com"
+        assert rpc.alchemy_prefix == "ex"
+        assert rpc.tenderly_subdomain == "example"
+        assert rpc.anvil_port == 8600
+        assert rpc.poa is True
+
+    def test_chain_descriptor_default_rpc_is_empty(self) -> None:
+        """``ChainDescriptor`` constructed without ``rpc=`` gets a fresh
+        empty ``RpcProfile`` — not ``None``, so downstream
+        ``descriptor.rpc.public_rpc`` access is always safe."""
+        descriptor = ChainDescriptor(
+            enum=Chain.ETHEREUM,
+            name="ethereum",
+            chain_id=1,
+            family=ChainFamily.EVM,
+            native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+            gas=GasProfile(),
+            timeouts=Timeouts(),
+        )
+        assert isinstance(descriptor.rpc, RpcProfile)
+        assert descriptor.rpc == RpcProfile()
+
+    def test_chain_descriptor_preserves_explicit_rpc(self) -> None:
+        """An explicit ``rpc=`` argument flows through unchanged."""
+        rpc = RpcProfile(
+            public_rpc="https://rpc.example.com",
+            alchemy_prefix="ex",
+            anvil_port=8600,
+            poa=True,
+        )
+        descriptor = ChainDescriptor(
+            enum=Chain.ETHEREUM,
+            name="ethereum",
+            chain_id=1,
+            family=ChainFamily.EVM,
+            native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+            gas=GasProfile(),
+            timeouts=Timeouts(),
+            rpc=rpc,
+        )
+        # Same identity AND same values — verifies neither a copy nor
+        # a default rebuild happened.
+        assert descriptor.rpc is rpc
+        assert descriptor.rpc.public_rpc == "https://rpc.example.com"
+        assert descriptor.rpc.alchemy_prefix == "ex"
+        assert descriptor.rpc.tenderly_subdomain is None
+        assert descriptor.rpc.anvil_port == 8600
+        assert descriptor.rpc.poa is True
+
+    def test_registered_chain_with_rpc_data_round_trips(self) -> None:
+        """Spot-check that one chain's descriptor still carries the
+        RPC values from its module — guards the wiring between the
+        per-chain file and the registry."""
+        ethereum = ChainRegistry.get(Chain.ETHEREUM)
+        assert ethereum.rpc.public_rpc == "https://ethereum-rpc.publicnode.com"
+        assert ethereum.rpc.alchemy_prefix == "eth"
+        assert ethereum.rpc.tenderly_subdomain == "mainnet"
+        assert ethereum.rpc.anvil_port == 8549
+        assert ethereum.rpc.poa is False
+
+        avalanche = ChainRegistry.get(Chain.AVALANCHE)
+        assert avalanche.rpc.poa is True  # POA flag wired through
+
+    def test_registered_chain_without_rpc_data_uses_default(self) -> None:
+        """``berachain`` / ``blast`` had no entry in the old JSON, so
+        their descriptor must carry the empty ``RpcProfile``."""
+        for chain in (Chain.BERACHAIN, Chain.BLAST):
+            assert ChainRegistry.get(chain).rpc == RpcProfile()

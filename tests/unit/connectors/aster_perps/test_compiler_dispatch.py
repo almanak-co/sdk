@@ -71,6 +71,65 @@ class TestPerpOpenDispatch:
         assert aster_meta["limit_price_1e8"] == pcs_meta["limit_price_1e8"]
 
 
+class TestBSCPerpPriceAliasFallback:
+    """The compiler routes BSC perp market base symbols (BTC, ETH, BNB)
+    through ``_PERP_PRICE_ALIAS_BY_CHAIN`` to the canonical registry symbol
+    (BTCB, WETH, WBNB) before querying the price oracle.
+
+    This exercises the alias fallback specifically — the price oracle here
+    is seeded with ONLY the wrapped symbols (no "BTC"/"ETH"/"BNB"), so
+    compilation can only succeed when the alias mapping fires."""
+
+    _ALIAS_ONLY_ORACLE: dict[str, Decimal] = {
+        # Note: the bare base symbols (BTC, ETH, BNB) are deliberately absent
+        # so the alias path is the only way the compiler reaches a price.
+        "BTCB": Decimal("95000"),
+        "WETH": Decimal("3500"),
+        "WBNB": Decimal("600"),
+        "USDT": Decimal("1"),
+        "USDC": Decimal("1"),
+    }
+
+    def _compile_with_alias_only_oracle(self, market: str) -> CompilationStatus:
+        compiler = IntentCompiler(
+            chain="bsc",
+            wallet_address=_WALLET,
+            price_oracle=self._ALIAS_ONLY_ORACLE,
+        )
+        intent = PerpOpenIntent(
+            market=market,
+            collateral_token="BNB",
+            collateral_amount=Decimal("0.3"),
+            size_usd=Decimal("500"),
+            is_long=True,
+            max_slippage=Decimal("0.01"),
+            protocol="aster_perps",
+            leverage=Decimal("3"),
+        )
+        return compiler.compile(intent).status
+
+    @pytest.mark.parametrize(
+        "market",
+        ["BTC/USD", "ETH/USD", "BNB/USD"],
+    )
+    def test_bsc_base_symbol_routes_through_alias_to_registered_wrapper(
+        self, market: str
+    ) -> None:
+        """BTC → BTCB, ETH → WETH, BNB → WBNB. The oracle only has the
+        wrappers, so a SUCCESS verdict proves the alias dict fired."""
+        assert (
+            self._compile_with_alias_only_oracle(market) == CompilationStatus.SUCCESS
+        )
+
+    def test_unknown_base_symbol_with_no_alias_fails_loudly(self) -> None:
+        """A symbol with no chain-alias entry must propagate the underlying
+        ValueError as a failed compile — the helper must NOT silently
+        substitute a default price."""
+        # XYZ is not in any oracle, not in any alias map.
+        status = self._compile_with_alias_only_oracle("XYZ/USD")
+        assert status == CompilationStatus.FAILED
+
+
 class TestPerpClosePrecondition:
     """PERP_CLOSE dispatch — both keys route through the same close flow."""
 

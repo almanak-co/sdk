@@ -871,6 +871,12 @@ class StrategyRunner:
         self._last_cycle_id = cycle_id  # Phase 4: preserve for snapshot capture after iteration
         add_context(cycle_id=cycle_id)
 
+        # VIB-4843 FR-5001: open a per-iteration MarketSnapshot scope keyed by
+        # the cycle_id so pre-warm → decide() → post-decide portfolio valuation
+        # all reuse ONE snapshot instance (and its pre-warmed _price_cache)
+        # instead of re-minting cold snapshots and re-fetching every price.
+        self._begin_market_snapshot_iteration(strategy, cycle_id)
+
         logger.info(f"Starting iteration for strategy: {deployment_id}")
 
         state = RunIterationState(
@@ -2223,6 +2229,92 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — never raise from a cache update
             logger.debug("recent-open cache update failed", exc_info=True)
 
+    async def _hydrate_lp_close_from_durable_store(
+        self,
+        *,
+        deployment_id: str,
+        position_id: str,
+    ) -> dict | None:
+        """VIB-4839 — durable-storage fallback for the LP_CLOSE carry-forward.
+
+        ``_recent_open_events`` is a process-local in-memory cache.
+        ``hydrate_recent_open_events_cache`` warms it from disk at boot, but:
+
+        * On hosted (GatewayStateManager) the bulk hydration silently
+          no-ops because the sync getter isn't exposed.
+        * Cross-process restarts that miss the boot path (signal-driven
+          teardown on a fresh process, certain harness orderings) leave
+          the cache cold for positions opened in an earlier process.
+
+        Without a fallback, ``_apply_lp_close_columns`` carries no token /
+        tick / liquidity from the matching OPEN, and ``_apply_lp_close_value_usd``
+        silently early-returns on blank token0/token1 — the May-22 / May-26
+        ``lp_triple`` rerun bug where teardown CLOSE rows landed with
+        ``value_usd=''`` and ``principal_recovered_usd=0``.
+
+        This helper reads the most-recent OPEN for ``position_id`` via the
+        async ``get_position_history`` surface (present on both
+        ``StateManager`` and ``GatewayStateManager``), shaped into the same
+        payload as the in-memory cache entries. Returns ``None`` on empty /
+        missing API / any error — never raises. The caller writes the
+        result into ``self._recent_open_events`` so the existing
+        carry-forward path in ``build_position_event_from_intent`` picks
+        it up transparently.
+        """
+        sm = getattr(self, "state_manager", None)
+        if sm is None or not hasattr(sm, "get_position_history"):
+            # VIB-4839 — UAT-card criterion 5 (loud + durable per blueprint
+            # 27 §14.1).  A missing durable surface is the silent-failure
+            # shape that hid the hosted GSM hydration gap; surface it so any
+            # future backend regression that drops ``get_position_history``
+            # is uniformly observable.  We still fall through to the
+            # "no durable OPEN" path (Empty != Zero); never raise here.
+            logger.warning(
+                "lp_close_durable_hydration.unavailable deployment_id=%s position_id=%s "
+                "reason=state_manager_or_method_absent has_state_manager=%s has_method=%s",
+                deployment_id,
+                position_id,
+                sm is not None,
+                hasattr(sm, "get_position_history") if sm is not None else False,
+            )
+            return None
+        try:
+            history = await sm.get_position_history(deployment_id, position_id)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: cache stays empty
+            logger.warning(
+                "lp_close_durable_hydration.failed deployment_id=%s position_id=%s err=%s",
+                deployment_id,
+                position_id,
+                exc,
+            )
+            return None
+        if not history:
+            return None
+        # get_position_history returns rows ASC by timestamp; the most-recent
+        # OPEN is the one we want to mirror (re-opens of the same id are
+        # rare on LP NFTs, but if they happen the later OPEN wins — same
+        # ordering rule as _collect_open_positions in _run_loop_helpers.py).
+        # VIB-4896 — selection rule extracted to ``select_open_for_lp_close``
+        # (pnl_attributor) so the offline repair CLI shares it. ``close_
+        # timestamp=None`` preserves the runner's no-upper-bound behaviour.
+        from almanak.framework.observability.pnl_attributor import (
+            select_open_for_lp_close,
+        )
+
+        latest_open = select_open_for_lp_close(history, close_timestamp=None)
+        if latest_open is None:
+            return None
+        return {
+            "value_usd": str(latest_open.get("value_usd") or ""),
+            "ledger_entry_id": str(latest_open.get("ledger_entry_id") or ""),
+            "timestamp": str(latest_open.get("timestamp") or ""),
+            "tick_lower": latest_open.get("tick_lower"),
+            "tick_upper": latest_open.get("tick_upper"),
+            "liquidity": str(latest_open.get("liquidity") or ""),
+            "token0": str(latest_open.get("token0") or ""),
+            "token1": str(latest_open.get("token1") or ""),
+        }
+
     def _maybe_enrich_lp_open_with_slot0(self, result: Any, chain: str) -> None:
         """VIB-3893 — fill ``LPOpenData.current_tick`` from a slot0 RPC.
 
@@ -2298,6 +2390,7 @@ class StrategyRunner:
         price_oracle: dict | None = None,
         pre_state: dict | None = None,
         post_state: dict | None = None,
+        emit_position_event: bool = True,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -2313,6 +2406,18 @@ class StrategyRunner:
         gets populated.  Callers that don't have it (slippage circuit-breaker
         path, recon-failure path) skip the conversion — gas_usd stays empty
         and the operator sees the same diagnostic that lent before.
+
+        ``emit_position_event`` (VIB-4895): the iteration lane emits the matching
+        ``position_events`` row transitively from here on a successful chain TX
+        (default ``True``). The **teardown lane** (``commit_teardown_intent``)
+        passes ``False`` because it owns the emit explicitly as its own Step 2b
+        under the loud-but-never-block contract (blueprint 27 §14.1) — letting
+        this method also emit would write a *duplicate* CLOSE row (``id`` is a
+        random UUID, so ``save_position_event``'s ``INSERT OR IGNORE`` keyed on
+        ``id`` does not dedupe two independent builds). Suppressing the transitive
+        emit here also keeps the teardown ``ledger_entry_id`` intact when only the
+        position-event write fails, so outbox still fires and the degraded reason
+        is labelled ``position_event`` rather than mislabelled ``ledger``.
         """
 
         try:
@@ -2407,8 +2512,17 @@ class StrategyRunner:
             # this, ledger.success=False rows whose underlying TX landed leave
             # ``position_events`` and ``_recent_open_events`` desynced from chain
             # reality, and close-time IL attribution loses its OPEN bracket.
+            #
+            # VIB-4895: the teardown lane passes ``emit_position_event=False`` and
+            # owns the emit explicitly (``commit_teardown_intent`` Step 2b). Skipping
+            # it here avoids a duplicate CLOSE row on the teardown path.
             chain_success = bool(getattr(result, "success", False))
-            if chain_success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
+            if (
+                emit_position_event
+                and chain_success
+                and self.state_manager
+                and hasattr(self.state_manager, "save_position_event")
+            ):
                 await self._emit_position_event_for_intent(
                     strategy=strategy,
                     intent=intent,
@@ -2720,23 +2834,20 @@ class StrategyRunner:
     ) -> None:
         """Sync the ``_lp_registry_id_cache`` after a registry-mode write.
 
-        Audit P2 (CodeRabbit): the cache key
-        ``(protocol, chain, pool_address)`` collides for multiple NFTs
-        in the same pool (multi-open delta-neutral hedge). On OPEN, if
-        a different token_id already lives at this key, drop the entry
-        so the sync lookup returns ``None`` and the tracker fallback
-        fires. On CLOSE, only evict when the cached token_id matches
-        the closing one — otherwise leave the other position's
-        token_id in place. The complete fix plumbs a per-position
-        discriminator (``registry_handle``) through the
-        :class:`LPPositionTracker` contract; that's a deferred
-        follow-up. The registry's authoritative read remains
-        ``get_position_registry_open_rows`` keyed on
-        ``physical_identity_hash``.
+        VIB-4301: the cache value is the SET of open token_ids for the
+        ``(protocol, chain, pool_address)`` key. An OPEN adds its token_id to
+        the set; a CLOSE removes it. Co-pool NFTs (a delta-neutral hedge or any
+        multi-NFT-per-pool strategy) therefore coexist in the set rather than
+        colliding — there is no cache thrash and no spurious "multi-NFT"
+        warning on a legitimate second open. The reader (``_sync_lookup``) only
+        auto-injects when the set has exactly one element; with N>1 the strategy
+        supplies ``position_id`` on the close intent and the tracker injects
+        nothing. The registry's authoritative read remains
+        ``get_position_registry_open_rows`` keyed on ``physical_identity_hash``.
         """
         from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
 
-        cache: dict[tuple[str, str, str], str] = getattr(self, "_lp_registry_id_cache", {})
+        cache: dict[tuple[str, str, str], set[str]] = getattr(self, "_lp_registry_id_cache", {})
         if not pool_addr:
             self._lp_registry_id_cache = cache
             return
@@ -2744,25 +2855,13 @@ class StrategyRunner:
         for protocol_slug in _UNIV3_LP_PROTOCOLS:
             key = (protocol_slug, chain, pool_addr)
             if is_open:
-                existing = cache.get(key)
-                if existing is not None and existing != token_str:
-                    cache.pop(key, None)
-                    logger.warning(
-                        "LP registry-id cache: multi-NFT collision on "
-                        "(protocol=%s chain=%s pool=%s); cache cleared, "
-                        "tracker fallback for subsequent injection. "
-                        "Multi-NFT-per-pool needs a per-position "
-                        "discriminator (follow-up).",
-                        protocol_slug,
-                        chain,
-                        pool_addr,
-                    )
-                else:
-                    cache[key] = token_str
-            else:  # closed
-                if cache.get(key) == token_str:
-                    cache.pop(key, None)
-                # else: another live position holds this key — leave it.
+                cache.setdefault(key, set()).add(token_str)
+            else:  # closed — drop just this leg; co-pool siblings stay.
+                siblings = cache.get(key)
+                if siblings is not None:
+                    siblings.discard(token_str)
+                    if not siblings:
+                        cache.pop(key, None)
         self._lp_registry_id_cache = cache
 
     async def _maybe_save_ledger_with_registry(
@@ -3248,6 +3347,7 @@ class StrategyRunner:
         are alerted; paper/dry-run modes log ERROR and continue.
         """
         try:
+            from ..intents.vocabulary import IntentType
             from ..observability.position_events import build_position_event_from_intent
 
             # VIB-4085 — wallet address scopes lending position_id. Try the
@@ -3259,6 +3359,41 @@ class StrategyRunner:
                 or getattr(strategy, "wallet_address", "")
                 or ""
             )
+
+            # VIB-4839 — durable-storage fallback for LP_CLOSE column
+            # carry-forward.  When the in-memory ``_recent_open_events`` cache
+            # lacks the matching OPEN (cross-process restart, hosted-mode
+            # hydration gap, signal-driven teardown on a fresh process), pull
+            # the OPEN bracket from durable storage and seed the cache so
+            # ``_apply_lp_close_columns`` carries token0/token1/ticks/liquidity
+            # through and ``_apply_lp_close_value_usd`` can compute value_usd.
+            # Pre-fix: lp_triple May-22 → May-26 teardown CLOSE rows landed
+            # with ``value_usd=''`` and ``principal_recovered_usd=0``, making
+            # per-leg PnL look like a full-principal loss.
+            #
+            # Position-id precedence MUST match ``_seed_event`` (result first,
+            # then intent — see ``position_events.py:_seed_event``).  A
+            # mismatch would seed the cache under one key while
+            # ``_apply_lp_close_columns`` looks up another, defeating the
+            # carry-forward.  (Codex P2 review on this PR.)
+            if getattr(intent, "intent_type", None) == IntentType.LP_CLOSE:
+                # Use getattr for both surfaces — ``intent`` is the AnyIntent
+                # union which does not expose ``position_id`` uniformly, and
+                # ``result`` may be ``None``.  Direct attribute access trips
+                # the typechecker's union-narrowing.
+                result_pid = str(getattr(result, "position_id", "") or "")
+                intent_pid = str(getattr(intent, "position_id", "") or "")
+                lp_position_id = result_pid or intent_pid
+                if lp_position_id:
+                    key = (lp_position_id, "LP")
+                    if key not in self._recent_open_events:
+                        durable_payload = await self._hydrate_lp_close_from_durable_store(
+                            deployment_id=deployment_id,
+                            position_id=lp_position_id,
+                        )
+                        if durable_payload is not None:
+                            self._recent_open_events[key] = durable_payload
+
             pos_event = build_position_event_from_intent(
                 deployment_id=deployment_id,
                 intent=intent,
@@ -6398,6 +6533,23 @@ class StrategyRunner:
 
         inject_simulated_balances(self, market, strategy)
 
+    @staticmethod
+    def _begin_market_snapshot_iteration(strategy, cycle_id) -> None:
+        """Open the strategy's per-iteration MarketSnapshot scope (VIB-4843 FR-5001).
+
+        Stamps the iteration token so pre-warm, ``decide()``, and the
+        post-decide portfolio valuation reuse ONE snapshot instance. Never
+        raises — snapshot memo bookkeeping must not break an iteration; a
+        failure just degrades to the legacy per-call snapshot behaviour.
+        """
+        begin = getattr(strategy, "begin_market_snapshot_iteration", None)
+        if begin is None:
+            return
+        try:
+            begin(cycle_id)
+        except Exception:  # noqa: BLE001 — never let memo bookkeeping break an iteration
+            logger.debug("begin_market_snapshot_iteration failed; falling back to per-call snapshots")
+
     async def _pre_warm_prices(self, market, strategy) -> None:
         """Pre-warm the market snapshot's price cache before decide().
 
@@ -6428,6 +6580,17 @@ class StrategyRunner:
             except Exception as e:
                 logger.debug(f"Failed to get tracked tokens for pre-warming: {e}")
 
+        # VIB-4843 FR-5004: the native gas token is priced every iteration by
+        # the portfolio valuer (VIB-4225 G6 reconciliation requires it, and
+        # live mode HALTS if it's missing — so we cannot defer it on HOLD).
+        # It is rarely in _get_tracked_tokens, so without this it is the one
+        # price fetched INSIDE the decide()/valuation path. Pre-warm it here
+        # so the single required fetch lands OUTSIDE the decide timeout and the
+        # valuation lane hits the shared snapshot's warm _price_cache instead.
+        native = self._native_gas_token_for_prewarm(strategy)
+        if native and native.upper() not in {t.upper() for t in tokens}:
+            tokens = [*tokens, native]
+
         if not tokens:
             return
 
@@ -6438,6 +6601,30 @@ class StrategyRunner:
                 await asyncio.to_thread(market.price, token)
             except Exception as e:
                 logger.debug(f"Price pre-warm failed for {token}: {e}")
+
+    @staticmethod
+    def _native_gas_token_for_prewarm(strategy) -> str | None:
+        """Resolve the chain's native gas-token symbol for pre-warming (FR-5004).
+
+        Returns ``None`` for multi-chain strategies (the per-chain native is
+        ambiguous at the single pre-warm seam) or when the chain cannot be
+        resolved — pre-warm stays best-effort and never raises.
+        """
+        if getattr(strategy, "is_multi_chain", None) is not None:
+            try:
+                if strategy.is_multi_chain():
+                    return None
+            except Exception:  # noqa: BLE001
+                return None
+        chain = getattr(strategy, "chain", None) or getattr(strategy, "_chain", None)
+        if not chain:
+            return None
+        try:
+            from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+            return native_token_for_chain(chain)
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _bridge_token_resolution_candidates(token_symbol, bridge_status):

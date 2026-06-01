@@ -66,6 +66,10 @@ class DataMeta:
         latency_ms: Milliseconds between request and response.
         confidence: 0.0 (unreliable) to 1.0 (fully confident).
         cache_hit: Whether this value was served from cache.
+        proxy_source: Original symbol when a wrapped-token proxy was used.
+        forward_filled: True when the value carries synthetic forward-filled
+            data points (e.g. flat OHLCV candles synthesised for a quiet DEX
+            pool, VIB-4875) rather than purely observed values.
     """
 
     source: str
@@ -77,6 +81,7 @@ class DataMeta:
     confidence: float = 1.0
     cache_hit: bool = False
     proxy_source: str | None = None
+    forward_filled: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
@@ -203,12 +208,15 @@ CEX_SYMBOL_MAP: dict[tuple[str, str, str], str] = {
     ("binance", "WETH", "USDT"): "ETHUSDT",
     ("binance", "WBTC", "USDT"): "BTCUSDT",
     ("binance", "WBTC", "USDC"): "BTCUSDC",
+    ("binance", "BTCB", "USDT"): "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
+    ("binance", "BTCB", "USDC"): "BTCUSDC",
     ("binance", "LINK", "USDT"): "LINKUSDT",
     ("binance", "UNI", "USDT"): "UNIUSDT",
     ("binance", "AAVE", "USDT"): "AAVEUSDT",
     ("binance", "ARB", "USDT"): "ARBUSDT",
     ("binance", "OP", "USDT"): "OPUSDT",
-    ("binance", "WMATIC", "USDT"): "MATICUSDT",
+    ("binance", "WMATIC", "USDT"): "POLUSDT",  # MATIC->POL rebrand: POLUSDT is the live pair
+    ("binance", "WPOL", "USDT"): "POLUSDT",  # Post-rebrand canonical wrapped name
     ("binance", "WAVAX", "USDT"): "AVAXUSDT",
     ("binance", "WBNB", "USDT"): "BNBUSDT",
     ("binance", "GMX", "USDT"): "GMXUSDT",

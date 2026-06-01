@@ -37,6 +37,11 @@ def _register_once() -> None:
             name="radiant_v2",
             intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
             chains=("ethereum",),
+            # Hidden from ``almanak info matrix`` — Radiant V2 has no live
+            # demo or intent test and the matrix has never surfaced it.
+            # Remove this once a demo + on-chain intent test cover the full
+            # SUPPLY / BORROW / REPAY / WITHDRAW lifecycle. VIB-4856.
+            matrix_entries=(),
         )
     except Exception:
         _registered = False

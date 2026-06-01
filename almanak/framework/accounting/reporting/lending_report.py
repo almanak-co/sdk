@@ -202,6 +202,29 @@ def _enrich_from_snapshot(summary: LendingPositionSummary, snapshot: object) -> 
         return
 
 
+def _apply_sided_post_state(summary: LendingPositionSummary, ev: LendingAccountingEvent) -> None:
+    """Apply an event's collateral/debt post-state, scoped to the side it mutated.
+
+    VIB-4792: ``collateral_value_after_usd`` and ``debt_value_after_usd`` carry
+    the WHOLE position's state on every event, so a borrow-side event (e.g. a
+    BORROW on the USDT leg of a Looping position) would otherwise leak the
+    position's collateral (USDC) into a USDT-keyed summary — and a supply-side
+    event would symmetrically leak the debt.  Gate by the event's own type so a
+    one-sided summary never inherits the opposite side's dollar value.
+    SUPPLY / WITHDRAW update only ``collateral_usd``; BORROW / REPAY update only
+    ``debt_usd``; DELEVERAGE / CLOSE / LIQUIDATION_RISK_UPDATE are whole-position
+    events and update both.  Read-side only — no writer change, no
+    matching_policy_version bump.  ``net_equity_after_usd`` is handled by the
+    caller and stays whole-position by design (display-only; out of scope).
+    """
+    supply_side = ev.event_type in (LendingEventType.SUPPLY, LendingEventType.WITHDRAW)
+    borrow_side = ev.event_type in (LendingEventType.BORROW, LendingEventType.REPAY)
+    if ev.collateral_value_after_usd is not None and not borrow_side:
+        summary.collateral_usd = ev.collateral_value_after_usd
+    if ev.debt_value_after_usd is not None and not supply_side:
+        summary.debt_usd = ev.debt_value_after_usd
+
+
 def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
     """Build a per-position lending carry summary from accounting events."""
     if not data.lending_events:
@@ -227,11 +250,10 @@ def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
         has_supply_event = False
         has_borrow_event = False
         for ev in events:
-            # Apply latest non-None values from each event in order
-            if ev.collateral_value_after_usd is not None:
-                summary.collateral_usd = ev.collateral_value_after_usd
-            if ev.debt_value_after_usd is not None:
-                summary.debt_usd = ev.debt_value_after_usd
+            # Apply latest non-None values from each event in order.
+            # VIB-4792: collateral/debt post-state is scoped to the side the
+            # event mutated — see _apply_sided_post_state.
+            _apply_sided_post_state(summary, ev)
             if ev.net_equity_after_usd is not None:
                 summary.net_equity_usd = ev.net_equity_after_usd
             if ev.health_factor_after is not None:

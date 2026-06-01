@@ -157,6 +157,8 @@ async def _open_v4_position(
         range_upper=LP_RANGE_UPPER,
         protocol="uniswap_v4",
         chain=CHAIN_NAME,
+        # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork -> estimated price; opt in.
+        protocol_params={"allow_estimated_price": True},
     )
 
     compiler = IntentCompiler(
@@ -361,6 +363,8 @@ async def _open_v4_position_with_accounting(
         range_upper=LP_RANGE_UPPER,
         protocol="uniswap_v4",
         chain=CHAIN_NAME,
+        # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork -> estimated price; opt in.
+        protocol_params={"allow_estimated_price": True},
     )
 
     compiler = IntentCompiler(

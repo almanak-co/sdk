@@ -664,6 +664,8 @@ class TestReflectionAndPort:
             "almanak.gateway.proto.FundingRateService",
             "almanak.gateway.proto.SimulationService",
             "almanak.gateway.proto.PolymarketService",
+            "almanak.gateway.proto.PoolAnalyticsService",
+            "almanak.gateway.proto.PoolHistoryService",
             "almanak.gateway.proto.EnsoService",
             "almanak.gateway.proto.TokenService",
             "almanak.gateway.proto.LifecycleService",

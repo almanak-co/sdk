@@ -229,11 +229,33 @@ def classify_instrument(instrument: Instrument) -> str:
     return "defi_primary"
 
 
-# Provider chain ordering per classification
+# Provider chain ordering per classification.
+#
+# INVARIANT (VIB-4847): every name here MUST be registered by the OHLCV
+# factory. A name listed but never constructed is a "phantom tier" — the
+# router walks past it on every miss and the chain silently degrades to one
+# fewer provider than advertised. ``assert_provider_chains_registered`` (in
+# ``factory.py``) enforces this at build time + in unit tests. If a provider
+# is intentionally not-yet-wired, REMOVE it from the chain rather than leaving
+# it dangling.
+#
+# ``defillama`` was removed here (VIB-4847) because no gateway-backed DeFi
+# Llama OHLCV provider exists yet (tracked on VIB-3448). When that provider
+# ships, re-add it to both chains AND register it in the factory in the same
+# change so the invariant stays satisfied.
 _PROVIDER_CHAINS: dict[str, list[str]] = {
-    "cex_primary": ["binance", "coingecko", "defillama"],
-    "defi_primary": ["geckoterminal", "defillama", "binance"],
+    "cex_primary": ["binance", "coingecko"],
+    "defi_primary": ["geckoterminal", "binance"],
 }
+
+
+def provider_names_in_chains() -> set[str]:
+    """Return the set of distinct provider names referenced by any chain.
+
+    Single source of truth for the provider-chain ↔ registry invariant guard
+    (VIB-4847). The factory asserts every name returned here is registered.
+    """
+    return {name for chain in _PROVIDER_CHAINS.values() for name in chain}
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +320,29 @@ _STALE_TIMEFRAME_MULTIPLE = 2
 # never claim a feed is stale until at least this many seconds have passed
 # since the youngest candle.
 _STALE_MIN_BUDGET = timedelta(seconds=300)
+
+# VIB-4875: on-chain DEX OHLCV sources where "no trade in an interval" is the
+# *correct* representation of a quiet market — not a dead feed. For a quiet
+# pool the newest real candle legitimately lags wall-clock (GeckoTerminal only
+# emits a bucket when a swap occurs, and ``include_empty_intervals`` backfills
+# only *interior* gaps, never past the last trade). For these sources we (1)
+# forward-fill flat candles up to the current bucket so indicators get a
+# continuous, current series, and (2) apply a relaxed staleness budget that
+# doubles as the "dead pool" horizon. CEX sources (binance/coingecko) are
+# deliberately excluded — there, a stale response means a dead/rebranded ticker
+# (the ALM-2697 case) and must still be rejected on the strict budget.
+_DEX_QUIET_POOL_PROVIDERS = frozenset({"geckoterminal"})
+
+# Relaxed staleness multiple for DEX quiet-pool sources. This is the dead-pool
+# horizon: a DEX pool with no trade for more than ``_DEX_STALE_TIMEFRAME_MULTIPLE``
+# timeframes is presumed dead/illiquid and is NOT forward-filled (the staleness
+# guard then rejects it). It also bounds the number of synthetic forward-fill
+# candles to at most this many. 24x the timeframe (e.g. 24h on 1h, 24m on 1m).
+_DEX_STALE_TIMEFRAME_MULTIPLE = 24
+
+# Confidence ceiling stamped on a response that carries synthetic forward-filled
+# candles — lower than a live trade, mirroring the CEX/DEX basis-risk haircut.
+_DEX_FORWARD_FILL_CONFIDENCE = 0.6
 
 
 # Default disk cache directory — use home if writable, fall back to system temp
@@ -617,6 +662,8 @@ class OHLCVRouter:
         instrument: Instrument,
         target_chain: str,
         now: datetime,
+        *,
+        is_dex: bool = False,
     ) -> DataSourceUnavailable | None:
         """ALM-2697: upstream-staleness guard for fresh provider responses.
 
@@ -634,11 +681,11 @@ class OHLCVRouter:
         ``ohlcv_upstream_stale`` warning at the staleness verdict so callers
         do not need to.
         """
-        is_stale, lag = _is_upstream_stale(candles, timeframe, now)
+        is_stale, lag = _is_upstream_stale(candles, timeframe, now, is_dex=is_dex)
         if not is_stale:
             return None
 
-        budget = _staleness_budget(timeframe)
+        budget = _staleness_budget(timeframe, is_dex=is_dex)
         lag_seconds = lag.total_seconds() if lag is not None else float("nan")
         budget_seconds = budget.total_seconds()
         logger.warning(
@@ -658,6 +705,143 @@ class OHLCVRouter:
                 f"wall-clock (budget {budget_seconds:.0f}s for timeframe {timeframe}); "
                 "treating as provider miss"
             ),
+        )
+
+    @staticmethod
+    def _apply_dex_forward_fill(
+        candles: list[OHLCVCandle],
+        provider_name: str,
+        timeframe: str,
+        instrument: Instrument,
+        now: datetime,
+    ) -> tuple[list[OHLCVCandle], int]:
+        """VIB-4875: trailing-edge forward-fill for DEX quiet-pool sources.
+
+        No-op for non-DEX providers (see ``_DEX_QUIET_POOL_PROVIDERS``). Applied
+        *before* the staleness guard so a quiet-but-live pool yields a continuous,
+        current series instead of a false ``ohlcv_upstream_stale`` miss. Returns
+        ``(candles, n_synth)`` — the (possibly extended) ascending list and the
+        count of synthetic buckets appended (0 = no fill). The caller needs the
+        count, not just a boolean, to keep synthetic buckets out of the finalized
+        disk cache. Logs the structured ``ohlcv_dex_forward_fill`` line at the
+        fill verdict so the caller does not need to.
+        """
+        if provider_name not in _DEX_QUIET_POOL_PROVIDERS:
+            return candles, 0
+        filled, n_synth = _forward_fill_dex_candles(candles, timeframe, now)
+        if n_synth:
+            logger.info(
+                "ohlcv_dex_forward_fill provider=%s instrument=%s timeframe=%s synth=%d",
+                provider_name,
+                instrument.pair,
+                timeframe,
+                n_synth,
+            )
+        return filled, n_synth
+
+    def _forward_fill_and_trim(
+        self,
+        candles: list[OHLCVCandle],
+        provider_name: str,
+        timeframe: str,
+        instrument: Instrument,
+        now: datetime,
+        limit: int,
+    ) -> tuple[list[OHLCVCandle], int]:
+        """Forward-fill a quiet DEX pool, then clamp to the requested ``limit``.
+
+        ``limit`` is a maximum (``MarketSnapshot.ohlcv`` contract): synthetic
+        forward-fill buckets must not silently widen the lookback window past
+        what was requested. Keep the newest ``limit`` buckets — the synthetic
+        tail is anchored at ``now``, so trimming drops the oldest *real* candles
+        first and the series stays current (VIB-4875). Returns the (possibly
+        trimmed) candle list and the surviving synthetic-bucket count.
+        """
+        candles, n_synth = self._apply_dex_forward_fill(candles, provider_name, timeframe, instrument, now)
+        if len(candles) > limit:
+            candles = candles[-limit:]
+            n_synth = min(n_synth, len(candles))
+        return candles, n_synth
+
+    def _build_success_envelope(
+        self,
+        *,
+        candles: list[OHLCVCandle],
+        n_synth: int,
+        provider_name: str,
+        instrument: Instrument,
+        base_confidence: float,
+        latency_ms: int,
+        attempt: int,
+        disk_key: str,
+        now: datetime,
+    ) -> DataEnvelope[list[OHLCVCandle]]:
+        """Assemble the success-path envelope for a fetched OHLCV response.
+
+        Applies the confidence haircuts (CEX/DEX basis risk and forward-fill),
+        splits finality, persists finalized *real* candles to the disk cache,
+        and stamps ``DataMeta``. Extracted from ``get_ohlcv`` to keep that
+        method's complexity bounded.
+
+        Synthetic forward-fill buckets are NEVER finalized: for longer timeframes
+        a synthetic bucket can age past the 24h finalization cutoff, but it is a
+        no-trade placeholder, not immutable history — persisting it to the disk
+        cache would later serve it as ``source="disk_cache"`` confidence=1.0
+        immutable OHLCV. Split only the real candles; the synthetic tail (always
+        the last ``n_synth``) stays provisional (VIB-4875).
+        """
+        forward_filled = n_synth > 0
+
+        # CEX source used for a DeFi-native pair carries basis risk.
+        is_cex_source = provider_name in ("binance", "coingecko")
+        has_basis_risk = is_cex_source and classify_instrument(instrument) == "defi_primary"
+
+        confidence = base_confidence
+        if has_basis_risk:
+            confidence = min(confidence, 0.7)
+            logger.warning(
+                "cex_dex_basis_warning instrument=%s provider=%s confidence=%.2f "
+                "reason='CEX source used for DeFi-native pair, basis risk'",
+                instrument.pair,
+                provider_name,
+                confidence,
+            )
+        if forward_filled:
+            confidence = min(confidence, _DEX_FORWARD_FILL_CONFIDENCE)
+
+        real_candles = candles[:-n_synth] if n_synth else candles
+        finalized, provisional = _split_by_finality(real_candles, now)
+        if n_synth:
+            provisional = provisional + candles[-n_synth:]
+
+        if finalized:
+            self._disk_cache.put(disk_key, finalized)
+
+        meta = DataMeta(
+            source=provider_name,
+            observed_at=now,
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=latency_ms,
+            confidence=confidence,
+            cache_hit=False,
+            forward_filled=forward_filled,
+        )
+
+        logger.info(
+            "ohlcv_fetched provider=%s instrument=%s attempt=%d candles=%d finalized=%d provisional=%d",
+            provider_name,
+            instrument.pair,
+            attempt + 1,
+            len(candles),
+            len(finalized),
+            len(provisional),
+        )
+
+        return DataEnvelope(
+            value=candles,
+            meta=meta,
+            classification=DataClassification.INFORMATIONAL,
         )
 
     def get_ohlcv(  # noqa: C901
@@ -783,14 +967,31 @@ class OHLCVRouter:
                         logger.debug("ohlcv_empty_result provider=%s", provider_name)
                         break  # treat empty result as a provider miss, skip to next
 
+                    now = datetime.now(UTC)
+
+                    # VIB-4875: quiet-pool trailing-edge forward-fill for DEX
+                    # sources, applied BEFORE the staleness guard so a quiet
+                    # (but live) pool yields a continuous, current series rather
+                    # than a false "stale upstream" miss. `limit` is honored
+                    # (it is a maximum) inside the helper.
+                    candles, n_synth = self._forward_fill_and_trim(
+                        candles, provider_name, timeframe, instrument, now, limit
+                    )
+
                     # ALM-2697: upstream-staleness guard. Stale response →
-                    # provider miss; never cached, never returned. The helper
+                    # provider miss; never cached, never returned. DEX sources
+                    # use the relaxed dead-pool budget (VIB-4875). The helper
                     # logs the structured warning; we just record the miss and
                     # break out to the next provider.
-                    now = datetime.now(UTC)
                     if (
                         stale_miss := self._build_stale_response_miss(
-                            candles, timeframe, provider_name, instrument, target_chain, now
+                            candles,
+                            timeframe,
+                            provider_name,
+                            instrument,
+                            target_chain,
+                            now,
+                            is_dex=provider_name in _DEX_QUIET_POOL_PROVIDERS,
                         )
                     ) is not None:
                         last_error = stale_miss
@@ -799,53 +1000,16 @@ class OHLCVRouter:
                         )
                         break  # fall through to next provider in the chain
 
-                    # Determine if this is a CEX/DEX basis mismatch
-                    is_cex_source = provider_name in ("binance", "coingecko")
-                    classification = classify_instrument(instrument)
-                    has_basis_risk = is_cex_source and classification == "defi_primary"
-
-                    confidence = envelope.meta.confidence
-                    if has_basis_risk:
-                        confidence = min(confidence, 0.7)
-                        logger.warning(
-                            "cex_dex_basis_warning instrument=%s provider=%s confidence=%.2f "
-                            "reason='CEX source used for DeFi-native pair, basis risk'",
-                            instrument.pair,
-                            provider_name,
-                            confidence,
-                        )
-
-                    # Split candles into finalized and provisional
-                    finalized, provisional = _split_by_finality(candles, now)
-
-                    # Cache finalized candles to disk
-                    if finalized:
-                        self._disk_cache.put(disk_key, finalized)
-
-                    meta = DataMeta(
-                        source=provider_name,
-                        observed_at=now,
-                        finality="off_chain",
-                        staleness_ms=0,
+                    return self._build_success_envelope(
+                        candles=candles,
+                        n_synth=n_synth,
+                        provider_name=provider_name,
+                        instrument=instrument,
+                        base_confidence=envelope.meta.confidence,
                         latency_ms=latency_ms,
-                        confidence=confidence,
-                        cache_hit=False,
-                    )
-
-                    logger.info(
-                        "ohlcv_fetched provider=%s instrument=%s attempt=%d candles=%d finalized=%d provisional=%d",
-                        provider_name,
-                        instrument.pair,
-                        attempt + 1,
-                        len(candles),
-                        len(finalized),
-                        len(provisional),
-                    )
-
-                    return DataEnvelope(
-                        value=candles,
-                        meta=meta,
-                        classification=DataClassification.INFORMATIONAL,
+                        attempt=attempt,
+                        disk_key=disk_key,
+                        now=now,
                     )
 
                 except Exception as exc:
@@ -935,16 +1099,22 @@ def _split_by_finality(
     return finalized, provisional
 
 
-def _staleness_budget(timeframe: str) -> timedelta:
+def _staleness_budget(timeframe: str, *, is_dex: bool = False) -> timedelta:
     """Return the wall-clock lag budget for the youngest candle on *timeframe*.
 
     See module-level ``_STALE_TIMEFRAME_MULTIPLE`` / ``_STALE_MIN_BUDGET``
     notes for rationale. Unknown timeframes fall back to 1 hour, matching
     the router's default ``timeframe="1h"`` so the floor remains meaningful
     even when a caller passes an unsupported interval.
+
+    When ``is_dex`` is set (a DEX quiet-pool source, see
+    ``_DEX_QUIET_POOL_PROVIDERS``) the relaxed ``_DEX_STALE_TIMEFRAME_MULTIPLE``
+    is used instead — this is the dead-pool horizon: a quiet pool may legitimately
+    lag wall-clock by many timeframes without the feed being broken (VIB-4875).
     """
     seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
-    budget = timedelta(seconds=seconds * _STALE_TIMEFRAME_MULTIPLE)
+    multiple = _DEX_STALE_TIMEFRAME_MULTIPLE if is_dex else _STALE_TIMEFRAME_MULTIPLE
+    budget = timedelta(seconds=seconds * multiple)
     return max(budget, _STALE_MIN_BUDGET)
 
 
@@ -952,6 +1122,8 @@ def _is_upstream_stale(
     candles: list[OHLCVCandle],
     timeframe: str,
     now: datetime,
+    *,
+    is_dex: bool = False,
 ) -> tuple[bool, timedelta | None]:
     """Detect whether an upstream OHLCV response is stale relative to *now*.
 
@@ -979,7 +1151,71 @@ def _is_upstream_stale(
     # rather than trusting [-1].
     youngest = max(candle.timestamp for candle in candles)
     lag = now - youngest
-    return lag > _staleness_budget(timeframe), lag
+    return lag > _staleness_budget(timeframe, is_dex=is_dex), lag
+
+
+def _forward_fill_dex_candles(
+    candles: list[OHLCVCandle],
+    timeframe: str,
+    now: datetime,
+) -> tuple[list[OHLCVCandle], int]:
+    """Trailing-edge forward-fill for a quiet on-chain DEX pool (VIB-4875).
+
+    A DEX OHLCV source only emits a bucket when a swap occurs, so a genuinely
+    quiet pool returns a newest candle that lags wall-clock — which the
+    staleness guard would otherwise reject as a dead feed, stranding the
+    strategy in ``DATA_ERROR``. For a DEX source that is the *correct* on-chain
+    state ("price didn't move because nothing traded"), so we synthesise flat
+    candles (carry the last close, zero volume) from the youngest real candle
+    up to the current wall-clock bucket. This advances the newest timestamp so
+    the guard passes AND hands indicators (RSI/MACD/ATR) a continuous, current
+    series.
+
+    Bounded by the dead-pool horizon: if the gap exceeds the DEX staleness
+    budget the pool is presumed dead/illiquid and is left untouched (the guard
+    then rejects it). This caps the synthetic-candle count at
+    ``_DEX_STALE_TIMEFRAME_MULTIPLE``. For longer timeframes that horizon spans
+    more than 24h (e.g. ``1d`` → 24 days), so synthetic buckets *can* age past
+    the finalization cutoff; the caller therefore excludes the synthetic tail
+    from finalized disk caching explicitly rather than relying on recency.
+
+    Returns ``(candles, n_synth)`` — the (possibly extended) ascending candle
+    list and the number of synthetic candles appended (0 when no fill applied).
+    """
+    if not candles:
+        return candles, 0
+
+    tf_seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
+    step = timedelta(seconds=tf_seconds)
+    youngest = max(candles, key=lambda c: c.timestamp)
+    gap = now - youngest.timestamp
+
+    # Already current (the in-progress / just-closed bucket is present), or so
+    # stale the pool is presumed dead — in both cases, no forward-fill.
+    if gap <= step or gap > _staleness_budget(timeframe, is_dex=True):
+        return candles, 0
+
+    # Fill up to the current wall-clock bucket start (floor(now / tf)).
+    current_bucket = datetime.fromtimestamp((int(now.timestamp()) // tf_seconds) * tf_seconds, tz=UTC)
+    last_close = youngest.close
+    synthetic: list[OHLCVCandle] = []
+    stamp = youngest.timestamp + step
+    while stamp <= current_bucket:
+        synthetic.append(
+            OHLCVCandle(
+                timestamp=stamp,
+                open=last_close,
+                high=last_close,
+                low=last_close,
+                close=last_close,
+                volume=Decimal(0),
+            )
+        )
+        stamp += step
+
+    if not synthetic:
+        return candles, 0
+    return candles + synthetic, len(synthetic)
 
 
 # =============================================================================
@@ -989,4 +1225,5 @@ def _is_upstream_stale(
 __all__ = [
     "OHLCVRouter",
     "classify_instrument",
+    "provider_names_in_chains",
 ]

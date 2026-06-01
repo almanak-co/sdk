@@ -322,7 +322,8 @@ class TestMultiProtocolScan:
 
     def test_base_scans_both_uniswap_and_sushiswap_npms(self):
         """On Base, Uniswap V3 + SushiSwap V3 NPMs are both enumerated."""
-        from almanak.core.contracts import SUSHISWAP_V3, UNISWAP_V3
+        from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         univ3_npm = UNISWAP_V3["base"]["position_manager"].lower()
         sushi_npm = SUSHISWAP_V3["base"]["position_manager"].lower()
@@ -367,7 +368,7 @@ class TestDiscoveryIncomplete:
 
     def test_raises_when_position_read_fails_after_retries(self):
         """Wallet owns 2 positions but positions(2001) always returns '0x'."""
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         npm = UNISWAP_V3["zerog"]["position_manager"].lower()
         encoded = _encode_positions("0xaa" + "0" * 38, "0xbb" + "0" * 38, 3000, 0, 100, 111)
@@ -392,7 +393,7 @@ class TestDiscoveryIncomplete:
 
     def test_non_strict_returns_partial(self):
         """strict=False surfaces what we could read and logs a warning."""
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         npm = UNISWAP_V3["zerog"]["position_manager"].lower()
         encoded = _encode_positions("0xaa" + "0" * 38, "0xbb" + "0" * 38, 3000, 0, 100, 111)
@@ -427,7 +428,7 @@ class TestBalanceOfFailurePropagation:
 
     def test_unreadable_balance_of_raises_in_strict_mode(self):
         """A failing balanceOf → DiscoveryIncomplete rather than empty list."""
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         npm = UNISWAP_V3["zerog"]["position_manager"].lower()
 
@@ -455,7 +456,7 @@ class TestBalanceOfFailurePropagation:
 
     def test_unreadable_balance_of_skips_npm_in_non_strict_mode(self):
         """strict=False warns and continues to the next NPM instead of raising."""
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         npm = UNISWAP_V3["zerog"]["position_manager"].lower()
 
@@ -488,7 +489,7 @@ class TestMaxPositionsCap:
     WALLET = "0xaaaa000000000000000000000000000000000000"
 
     def test_strict_mode_raises_when_cap_hit(self):
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
         from almanak.framework.teardown.discovery import _MAX_POSITIONS_PER_NPM
 
         npm = UNISWAP_V3["zerog"]["position_manager"].lower()

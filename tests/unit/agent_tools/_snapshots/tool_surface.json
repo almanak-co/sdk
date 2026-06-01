@@ -1,0 +1,3446 @@
+{
+  "mcp_tools": [
+    {
+      "description": "Get the current USD price of a token on a specific chain.",
+      "inputSchema": {
+        "description": "Get the current USD price of a token.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "description": "Blockchain name (e.g. 'arbitrum', 'base', 'ethereum')",
+            "title": "Chain",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token symbol (e.g. 'ETH', 'USDC') or contract address",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "GetPriceRequest",
+        "type": "object"
+      },
+      "name": "get_price"
+    },
+    {
+      "description": "Get the balance of a single token in a wallet. Defaults to the strategy wallet; pass wallet_address to query another (e.g. a Safe).",
+      "inputSchema": {
+        "description": "Get the balance of a single token in a wallet.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token symbol or address",
+            "title": "Token",
+            "type": "string"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "GetBalanceRequest",
+        "type": "object"
+      },
+      "name": "get_balance"
+    },
+    {
+      "description": "Get token balances for a wallet on a chain. Defaults to the strategy wallet; pass wallet_address to query another (e.g. a Safe).",
+      "inputSchema": {
+        "description": "Get token balances for a wallet.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "tokens": {
+            "description": "Token symbols to query (e.g. ['ETH', 'USDC'])",
+            "items": {
+              "type": "string"
+            },
+            "title": "Tokens",
+            "type": "array"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tokens"
+        ],
+        "title": "BatchGetBalancesRequest",
+        "type": "object"
+      },
+      "name": "batch_get_balances"
+    },
+    {
+      "description": "Calculate a technical indicator (RSI, SMA, EMA, MACD, Bollinger Bands, ATR) for a token.",
+      "inputSchema": {
+        "description": "Calculate a technical indicator for a token.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "indicator": {
+            "description": "One of: rsi, sma, ema, macd, bollinger, atr",
+            "title": "Indicator",
+            "type": "string"
+          },
+          "period": {
+            "default": 14,
+            "description": "Look-back period",
+            "title": "Period",
+            "type": "integer"
+          },
+          "token": {
+            "description": "Token symbol",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "indicator"
+        ],
+        "title": "GetIndicatorRequest",
+        "type": "object"
+      },
+      "name": "get_indicator"
+    },
+    {
+      "description": "Get details about a liquidity pool: price, tick, liquidity, volume, fees, TVL.",
+      "inputSchema": {
+        "description": "Get details about a liquidity pool.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "fee_tier": {
+            "default": 3000,
+            "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)",
+            "title": "Fee Tier",
+            "type": "integer"
+          },
+          "pool_address": {
+            "default": "",
+            "description": "Explicit pool contract address (bypasses computed address)",
+            "title": "Pool Address",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "uniswap_v3",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token_a": {
+            "description": "First token symbol",
+            "title": "Token A",
+            "type": "string"
+          },
+          "token_b": {
+            "description": "Second token symbol",
+            "title": "Token B",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_a",
+          "token_b"
+        ],
+        "title": "GetPoolStateRequest",
+        "type": "object"
+      },
+      "name": "get_pool_state"
+    },
+    {
+      "description": "Get details about an existing LP position: range, liquidity, accrued fees.",
+      "inputSchema": {
+        "description": "Get details about an existing LP position.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "position_id": {
+            "description": "NFT token ID of the LP position",
+            "title": "Position Id",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "uniswap_v3",
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position_id"
+        ],
+        "title": "GetLPPositionRequest",
+        "type": "object"
+      },
+      "name": "get_lp_position"
+    },
+    {
+      "description": "List all Uniswap V3-style LP positions owned by a wallet (compact summary per position).",
+      "inputSchema": {
+        "description": "List all LP positions owned by a wallet.\n\nIterates NonfungiblePositionManager.tokenOfOwnerByIndex(owner, i) for\ni in [0, balanceOf(owner)). Returns a compact summary per position so\noperators can pick a tokenId without drilling into `get_lp_position`.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "include_empty": {
+            "default": false,
+            "description": "Include positions with zero liquidity (default: skip burned/fully-withdrawn positions).",
+            "title": "Include Empty",
+            "type": "boolean"
+          },
+          "network": {
+            "default": "",
+            "description": "'mainnet' or 'anvil'; empty means gateway default.",
+            "title": "Network",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "uniswap_v3",
+            "description": "LP protocol (uniswap_v3 only for v1).",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "title": "ListLPPositionsRequest",
+        "type": "object"
+      },
+      "name": "list_lp_positions"
+    },
+    {
+      "description": "List a wallet's lending positions with account-level totals and health factor (Aave V3).",
+      "inputSchema": {
+        "description": "List lending positions for a wallet on a supported protocol.\n\nv1: Aave V3 only. Returns account-level totals + health factor via\nPool.getUserAccountData(user). Per-reserve drill-down is a future\nextension.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "network": {
+            "default": "",
+            "description": "'mainnet' or 'anvil'; empty means gateway default.",
+            "title": "Network",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "description": "Lending protocol (aave_v3 only for v1).",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "title": "ListLendingPositionsRequest",
+        "type": "object"
+      },
+      "name": "list_lending_positions"
+    },
+    {
+      "description": "Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
+      "inputSchema": {
+        "description": "Summarize a wallet's on-chain positions on a single chain.\n\nCombines native balance, ERC20 balances (via batch_get_balances for\ncommon symbols or a caller-supplied list), LP positions, and lending\npositions.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "network": {
+            "default": "",
+            "description": "'mainnet' or 'anvil'; empty means gateway default.",
+            "title": "Network",
+            "type": "string"
+          },
+          "tokens": {
+            "description": "ERC20 symbols to include in the balance snapshot (e.g. ['USDC', 'WETH']).",
+            "items": {
+              "type": "string"
+            },
+            "title": "Tokens",
+            "type": "array"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "title": "GetPortfolioRequest",
+        "type": "object"
+      },
+      "name": "get_portfolio"
+    },
+    {
+      "description": "Resolve a token symbol or address to its full metadata (address, decimals, chain).",
+      "inputSchema": {
+        "description": "Resolve a token symbol or address to full metadata.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token symbol (e.g. 'USDC') or contract address",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "ResolveTokenRequest",
+        "type": "object"
+      },
+      "name": "resolve_token"
+    },
+    {
+      "description": "Get portfolio risk metrics: VaR, Sharpe ratio, volatility, max drawdown.",
+      "inputSchema": {
+        "description": "Get portfolio risk metrics.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "window_days": {
+            "default": 30,
+            "description": "Look-back window for risk calculations",
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "title": "GetRiskMetricsRequest",
+        "type": "object"
+      },
+      "name": "get_risk_metrics"
+    },
+    {
+      "description": "Compile a high-level intent into an executable ActionBundle for review or execution.",
+      "inputSchema": {
+        "description": "Compile a high-level intent into an executable ActionBundle.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "intent_type": {
+            "description": "Intent type: swap, lp_open, lp_close, supply, borrow, repay, etc.",
+            "title": "Intent Type",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Intent parameters (token_in, token_out, amount, etc.)",
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "intent_type",
+          "params"
+        ],
+        "title": "CompileIntentRequest",
+        "type": "object"
+      },
+      "name": "compile_intent"
+    },
+    {
+      "description": "Dry-run an intent or compiled bundle without on-chain execution to check feasibility.",
+      "inputSchema": {
+        "description": "Dry-run an intent or compiled bundle without on-chain execution.",
+        "properties": {
+          "bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ID of a previously compiled bundle",
+            "title": "Bundle Id"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "intent_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Or specify intent directly for ad-hoc simulation",
+            "title": "Intent Type"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Intent params if intent_type is provided",
+            "title": "Params"
+          }
+        },
+        "title": "SimulateIntentRequest",
+        "type": "object"
+      },
+      "name": "simulate_intent"
+    },
+    {
+      "description": "Check an intent against RiskGuard constraints before execution.",
+      "inputSchema": {
+        "description": "Check an intent against RiskGuard constraints.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "intent_type": {
+            "description": "Intent type to validate",
+            "title": "Intent Type",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Intent parameters",
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "intent_type",
+          "params"
+        ],
+        "title": "ValidateRiskRequest",
+        "type": "object"
+      },
+      "name": "validate_risk"
+    },
+    {
+      "description": "Estimate gas cost (in USD and native token) for an intent.",
+      "inputSchema": {
+        "description": "Estimate gas cost for an intent.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "intent_type": {
+            "description": "Intent type",
+            "title": "Intent Type",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Intent parameters",
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "intent_type",
+          "params"
+        ],
+        "title": "EstimateGasRequest",
+        "type": "object"
+      },
+      "name": "estimate_gas"
+    },
+    {
+      "description": "Deterministic economic viability check for LP rebalancing. Computes gas cost vs expected fee revenue.",
+      "inputSchema": {
+        "description": "Deterministic check: is an LP rebalance worth the gas cost?",
+        "properties": {
+          "chain": {
+            "default": "base",
+            "title": "Chain",
+            "type": "string"
+          },
+          "estimated_daily_volume": {
+            "default": "5000",
+            "description": "Estimated daily pool volume in USD",
+            "title": "Estimated Daily Volume",
+            "type": "string"
+          },
+          "fee_tier": {
+            "default": 3000,
+            "description": "Pool fee tier",
+            "title": "Fee Tier",
+            "type": "integer"
+          },
+          "our_liquidity_share": {
+            "default": "0.1",
+            "description": "Our share of pool liquidity (0-1)",
+            "title": "Our Liquidity Share",
+            "type": "string"
+          },
+          "position_id": {
+            "description": "Current LP position NFT token ID",
+            "title": "Position Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position_id"
+        ],
+        "title": "ComputeRebalanceCandidateRequest",
+        "type": "object"
+      },
+      "name": "compute_rebalance_candidate"
+    },
+    {
+      "description": "Swap one token for another on a DEX. Supports dry_run for simulation.",
+      "inputSchema": {
+        "description": "Execute a token swap on a DEX. Supports cross-chain swaps via destination_chain.",
+        "properties": {
+          "amount": {
+            "description": "Amount to swap as a decimal string (in token_in units)",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "destination_chain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Destination chain for cross-chain swaps (None for same-chain). Falls back to default aggregator if protocol is not specified.",
+            "title": "Destination Chain"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only -- do not execute on-chain",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "execution_wallet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+            "title": "Execution Wallet"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Specific DEX; None = best available",
+            "title": "Protocol"
+          },
+          "slippage_bps": {
+            "default": 50,
+            "description": "Max slippage in basis points (1-1000, i.e. 0.01%-10%)",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Slippage Bps",
+            "type": "integer"
+          },
+          "token_in": {
+            "description": "Token to sell (symbol or address)",
+            "title": "Token In",
+            "type": "string"
+          },
+          "token_out": {
+            "description": "Token to buy (symbol or address)",
+            "title": "Token Out",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_in",
+          "token_out",
+          "amount"
+        ],
+        "title": "SwapTokensRequest",
+        "type": "object"
+      },
+      "name": "swap_tokens"
+    },
+    {
+      "description": "Open a new concentrated liquidity position. Supports dry_run.",
+      "inputSchema": {
+        "description": "Open a new concentrated liquidity position.",
+        "properties": {
+          "amount_a": {
+            "description": "Amount of token_a as decimal string",
+            "title": "Amount A",
+            "type": "string"
+          },
+          "amount_b": {
+            "description": "Amount of token_b as decimal string",
+            "title": "Amount B",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "execution_wallet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+            "title": "Execution Wallet"
+          },
+          "fee_tier": {
+            "default": 3000,
+            "description": "Pool fee tier (100-100000)",
+            "maximum": 100000,
+            "minimum": 100,
+            "title": "Fee Tier",
+            "type": "integer"
+          },
+          "price_lower": {
+            "description": "Lower price bound (required; use tick-min for full range)",
+            "title": "Price Lower",
+            "type": "string"
+          },
+          "price_upper": {
+            "description": "Upper price bound (required; use tick-max for full range)",
+            "title": "Price Upper",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "uniswap_v3",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token_a": {
+            "description": "First token symbol or address",
+            "title": "Token A",
+            "type": "string"
+          },
+          "token_b": {
+            "description": "Second token symbol or address",
+            "title": "Token B",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_a",
+          "token_b",
+          "amount_a",
+          "amount_b",
+          "price_lower",
+          "price_upper"
+        ],
+        "title": "OpenLPPositionRequest",
+        "type": "object"
+      },
+      "name": "open_lp_position"
+    },
+    {
+      "description": "Close or reduce a liquidity position. Supports dry_run.",
+      "inputSchema": {
+        "description": "Close or reduce a liquidity position.",
+        "properties": {
+          "amount": {
+            "default": "all",
+            "description": "Must be 'all' (partial close is not supported)",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "collect_fees": {
+            "default": true,
+            "description": "Collect accrued fees during close",
+            "title": "Collect Fees",
+            "type": "boolean"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "position_id": {
+            "description": "NFT token ID of the LP position",
+            "title": "Position Id",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "uniswap_v3",
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position_id"
+        ],
+        "title": "CloseLPPositionRequest",
+        "type": "object"
+      },
+      "name": "close_lp_position"
+    },
+    {
+      "description": "Supply tokens to a lending protocol (e.g. Aave V3). Supports dry_run.",
+      "inputSchema": {
+        "description": "Supply tokens to a lending protocol.",
+        "properties": {
+          "amount": {
+            "description": "Amount as decimal string",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "market_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+            "title": "Market Id"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "description": "Lending protocol",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token to supply",
+            "title": "Token",
+            "type": "string"
+          },
+          "use_as_collateral": {
+            "default": true,
+            "title": "Use As Collateral",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "token",
+          "amount"
+        ],
+        "title": "SupplyLendingRequest",
+        "type": "object"
+      },
+      "name": "supply_lending"
+    },
+    {
+      "description": "Borrow tokens from a lending protocol. Supports dry_run.",
+      "inputSchema": {
+        "description": "Borrow tokens from a lending protocol.",
+        "properties": {
+          "amount": {
+            "description": "Amount to borrow as decimal string",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "collateral_amount": {
+            "description": "Amount of collateral as decimal string, or 'all'",
+            "title": "Collateral Amount",
+            "type": "string"
+          },
+          "collateral_token": {
+            "description": "Token to use as collateral",
+            "title": "Collateral Token",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "market_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+            "title": "Market Id"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token to borrow",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount",
+          "collateral_token",
+          "collateral_amount"
+        ],
+        "title": "BorrowLendingRequest",
+        "type": "object"
+      },
+      "name": "borrow_lending"
+    },
+    {
+      "description": "Repay a lending position. Supports dry_run.",
+      "inputSchema": {
+        "description": "Repay a lending position.",
+        "properties": {
+          "amount": {
+            "description": "Amount as decimal string, or 'all' for full repayment",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "market_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+            "title": "Market Id"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token to repay",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount"
+        ],
+        "title": "RepayLendingRequest",
+        "type": "object"
+      },
+      "name": "repay_lending"
+    },
+    {
+      "description": "Withdraw supplied tokens from a lending protocol (full or partial). Supports dry_run.",
+      "inputSchema": {
+        "description": "Withdraw supplied tokens from a lending protocol.",
+        "properties": {
+          "amount": {
+            "description": "Amount as decimal string, or 'all' for full withdrawal",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "is_collateral": {
+            "default": true,
+            "description": "Morpho Blue only: True withdraws collateral, False withdraws loan token",
+            "title": "Is Collateral",
+            "type": "boolean"
+          },
+          "market_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Required for protocols with isolated markets (e.g. Morpho Blue); ignored for Aave V3",
+            "title": "Market Id"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token to withdraw",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount"
+        ],
+        "title": "WithdrawLendingRequest",
+        "type": "object"
+      },
+      "name": "withdraw_lending"
+    },
+    {
+      "description": "Bridge tokens from one chain to another. Uses Across or Stargate bridges. Supports dry_run.",
+      "inputSchema": {
+        "description": "Bridge tokens from one chain to another.",
+        "properties": {
+          "amount": {
+            "description": "Amount to bridge as a decimal string (in token units)",
+            "title": "Amount",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only -- do not execute on-chain",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "execution_wallet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+            "title": "Execution Wallet"
+          },
+          "from_chain": {
+            "description": "Source chain (e.g. 'base', 'arbitrum')",
+            "title": "From Chain",
+            "type": "string"
+          },
+          "preferred_bridge": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Preferred bridge adapter (e.g. 'across', 'stargate')",
+            "title": "Preferred Bridge"
+          },
+          "slippage_bps": {
+            "default": 50,
+            "description": "Max slippage in basis points (1-1000, i.e. 0.01%-10%)",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Slippage Bps",
+            "type": "integer"
+          },
+          "to_chain": {
+            "description": "Destination chain (e.g. 'arbitrum', 'ethereum')",
+            "title": "To Chain",
+            "type": "string"
+          },
+          "token": {
+            "description": "Token to bridge (symbol or address)",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount",
+          "from_chain",
+          "to_chain"
+        ],
+        "title": "BridgeTokensRequest",
+        "type": "object"
+      },
+      "name": "bridge_tokens"
+    },
+    {
+      "description": "Unwrap wrapped native tokens back to native currency (e.g. WETH -> ETH, WMATIC -> MATIC). Supports dry_run.",
+      "inputSchema": {
+        "description": "Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC).",
+        "properties": {
+          "amount": {
+            "description": "Amount to unwrap as a decimal string, or 'all'",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "description": "Blockchain name",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "execution_wallet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override wallet for execution",
+            "title": "Execution Wallet"
+          },
+          "token": {
+            "description": "Wrapped token symbol (e.g. 'WETH', 'WMATIC', 'WAVAX')",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount"
+        ],
+        "title": "UnwrapNativeRequest",
+        "type": "object"
+      },
+      "name": "unwrap_native"
+    },
+    {
+      "description": "Execute a previously compiled ActionBundle. Supports dry_run.",
+      "inputSchema": {
+        "description": "Execute a previously compiled and simulated ActionBundle.",
+        "properties": {
+          "bundle_id": {
+            "description": "ID returned by compile_intent",
+            "title": "Bundle Id",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "require_simulation": {
+            "default": true,
+            "description": "Require successful simulation before execution",
+            "title": "Require Simulation",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bundle_id"
+        ],
+        "title": "ExecuteCompiledBundleRequest",
+        "type": "object"
+      },
+      "name": "execute_compiled_bundle"
+    },
+    {
+      "description": "Deploy a new Lagoon vault via factory contract. Returns the vault address on success.",
+      "inputSchema": {
+        "description": "Deploy a new Lagoon vault via factory contract.",
+        "properties": {
+          "admin_address": {
+            "description": "Admin address for vault governance (usually same as safe)",
+            "title": "Admin Address",
+            "type": "string"
+          },
+          "chain": {
+            "description": "Chain to deploy on (e.g. 'base', 'ethereum', 'arbitrum')",
+            "title": "Chain",
+            "type": "string"
+          },
+          "deployer_address": {
+            "description": "EOA address that signs the factory deploy tx",
+            "title": "Deployer Address",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "fee_receiver_address": {
+            "description": "Address to receive management/performance fees",
+            "title": "Fee Receiver Address",
+            "type": "string"
+          },
+          "name": {
+            "description": "Vault display name (e.g. 'Almanak DeFAI Vault')",
+            "title": "Name",
+            "type": "string"
+          },
+          "safe_address": {
+            "description": "Pre-deployed Safe wallet address (vault owner)",
+            "title": "Safe Address",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "Vault share token symbol (e.g. 'aALM')",
+            "title": "Symbol",
+            "type": "string"
+          },
+          "underlying_token_address": {
+            "description": "Address of the vault's underlying token (e.g. USDC)",
+            "title": "Underlying Token Address",
+            "type": "string"
+          },
+          "valuation_manager_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Address that can propose vault valuations (defaults to admin_address)",
+            "title": "Valuation Manager Address"
+          }
+        },
+        "required": [
+          "chain",
+          "name",
+          "symbol",
+          "underlying_token_address",
+          "safe_address",
+          "admin_address",
+          "fee_receiver_address",
+          "deployer_address"
+        ],
+        "title": "DeployVaultRequest",
+        "type": "object"
+      },
+      "name": "deploy_vault"
+    },
+    {
+      "description": "Read current state of a Lagoon vault: total assets, pending deposits/redeems, share price.",
+      "inputSchema": {
+        "description": "Read current state of a Lagoon vault.",
+        "properties": {
+          "chain": {
+            "default": "base",
+            "description": "Chain where vault is deployed",
+            "title": "Chain",
+            "type": "string"
+          },
+          "vault_address": {
+            "description": "Vault contract address",
+            "title": "Vault Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault_address"
+        ],
+        "title": "GetVaultStateRequest",
+        "type": "object"
+      },
+      "name": "get_vault_state"
+    },
+    {
+      "description": "Run a vault settlement cycle: propose new valuation, settle deposits and redeems.",
+      "inputSchema": {
+        "description": "Run a vault settlement cycle (propose + settle deposits/redeems).",
+        "properties": {
+          "chain": {
+            "default": "base",
+            "description": "Chain where vault is deployed",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "new_total_assets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override NAV in raw underlying units; auto-computed if omitted",
+            "title": "New Total Assets"
+          },
+          "safe_address": {
+            "description": "Safe wallet address (vault owner)",
+            "title": "Safe Address",
+            "type": "string"
+          },
+          "valuator_address": {
+            "description": "Address authorized to propose valuations",
+            "title": "Valuator Address",
+            "type": "string"
+          },
+          "vault_address": {
+            "description": "Vault contract address",
+            "title": "Vault Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault_address",
+          "safe_address",
+          "valuator_address"
+        ],
+        "title": "SettleVaultRequest",
+        "type": "object"
+      },
+      "name": "settle_vault"
+    },
+    {
+      "description": "Approve the vault to pull underlying tokens from the Safe (required for redemption settlement).",
+      "inputSchema": {
+        "description": "Approve the vault to pull underlying tokens from the Safe (for redemption settlement).",
+        "properties": {
+          "chain": {
+            "default": "base",
+            "description": "Chain where vault is deployed",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "safe_address": {
+            "description": "Safe wallet address that holds the underlying tokens",
+            "title": "Safe Address",
+            "type": "string"
+          },
+          "underlying_token": {
+            "description": "Address of the underlying ERC20 token",
+            "title": "Underlying Token",
+            "type": "string"
+          },
+          "vault_address": {
+            "description": "Vault contract address",
+            "title": "Vault Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault_address",
+          "underlying_token",
+          "safe_address"
+        ],
+        "title": "ApproveVaultUnderlyingRequest",
+        "type": "object"
+      },
+      "name": "approve_vault_underlying"
+    },
+    {
+      "description": "Deposit underlying tokens into a vault (approve + requestDeposit). Depositor is the EOA.",
+      "inputSchema": {
+        "description": "Deposit underlying tokens into a Lagoon vault (approve + requestDeposit).",
+        "properties": {
+          "amount": {
+            "description": "Amount to deposit in raw underlying units (e.g. '10000000' for 10 USDC)",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "base",
+            "description": "Chain where vault is deployed",
+            "title": "Chain",
+            "type": "string"
+          },
+          "depositor_address": {
+            "default": "",
+            "description": "Depositor address (defaults to strategy wallet if empty)",
+            "title": "Depositor Address",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "underlying_token": {
+            "description": "Address of the vault's underlying token (e.g. USDC address)",
+            "title": "Underlying Token",
+            "type": "string"
+          },
+          "vault_address": {
+            "description": "Vault contract address",
+            "title": "Vault Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault_address",
+          "underlying_token",
+          "amount"
+        ],
+        "title": "DepositVaultRequest",
+        "type": "object"
+      },
+      "name": "deposit_vault"
+    },
+    {
+      "description": "Initiate a deterministic vault teardown: close all LP positions, swap to underlying, run final settlement.",
+      "inputSchema": {
+        "description": "Initiate a deterministic vault teardown: close positions, swap to underlying, final settle.",
+        "properties": {
+          "chain": {
+            "default": "base",
+            "description": "Chain where vault is deployed",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "safe_address": {
+            "description": "Safe wallet address (vault owner)",
+            "title": "Safe Address",
+            "type": "string"
+          },
+          "valuator_address": {
+            "description": "Address authorized to propose valuations",
+            "title": "Valuator Address",
+            "type": "string"
+          },
+          "vault_address": {
+            "description": "Vault contract address",
+            "title": "Vault Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault_address",
+          "safe_address",
+          "valuator_address"
+        ],
+        "title": "TeardownVaultRequest",
+        "type": "object"
+      },
+      "name": "teardown_vault"
+    },
+    {
+      "description": "Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC). Required before LP operations when wallet holds native tokens. Supports dry_run.",
+      "inputSchema": {
+        "description": "Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC).",
+        "properties": {
+          "amount": {
+            "description": "Amount of native token to wrap as a decimal string, or 'all'",
+            "title": "Amount",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "description": "Blockchain name",
+            "title": "Chain",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "If true, simulate only",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "execution_wallet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Override wallet for execution",
+            "title": "Execution Wallet"
+          },
+          "token": {
+            "description": "Wrapped token symbol to receive (e.g. 'WETH', 'WMATIC', 'WAVAX')",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "amount"
+        ],
+        "title": "WrapNativeRequest",
+        "type": "object"
+      },
+      "name": "wrap_native"
+    },
+    {
+      "description": "Get a complete wallet balance overview in a single call. Automatically queries common tokens for the chain, filters dust, and returns total USD value. Use instead of multiple get_balance calls.",
+      "inputSchema": {
+        "description": "Get a complete wallet balance overview in a single call.\n\nAutomatically queries all common tokens for the chain (ETH, WETH, USDC, USDT, etc.)\nplus any additional tokens specified. Filters out dust balances below min_balance_usd.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "description": "Blockchain name",
+            "title": "Chain",
+            "type": "string"
+          },
+          "extra_tokens": {
+            "description": "Additional token symbols to query beyond the default set",
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Tokens",
+            "type": "array"
+          },
+          "min_balance_usd": {
+            "default": 0.01,
+            "description": "Minimum USD balance to include (filters dust)",
+            "minimum": 0,
+            "title": "Min Balance Usd",
+            "type": "number"
+          },
+          "wallet_address": {
+            "default": "",
+            "description": "Wallet to query. Defaults to strategy wallet.",
+            "title": "Wallet Address",
+            "type": "string"
+          }
+        },
+        "title": "GetWalletOverviewRequest",
+        "type": "object"
+      },
+      "name": "get_wallet_overview"
+    },
+    {
+      "description": "Check whether the SDK supports a given protocol on a given chain. Returns supported actions, recommended strategy template, and chain availability. No network calls \u2014 uses static registry.",
+      "inputSchema": {
+        "description": "Check whether the SDK supports a given protocol on a given chain.\n\nReturns supported actions, recommended strategy template, and known issues.\nUses static SDK registry data \u2014 no network calls needed.",
+        "properties": {
+          "chain": {
+            "default": "",
+            "description": "Chain to check (e.g. 'arbitrum'). If empty, returns all chains.",
+            "title": "Chain",
+            "type": "string"
+          },
+          "protocol": {
+            "description": "Protocol name (e.g. 'uniswap_v3', 'morpho_blue', 'fluid-dex')",
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol"
+        ],
+        "title": "CheckProtocolSupportRequest",
+        "type": "object"
+      },
+      "name": "check_protocol_support"
+    },
+    {
+      "description": "Persist agent/strategy state for retrieval across iterations.",
+      "inputSchema": {
+        "description": "Persist agent/strategy state.",
+        "properties": {
+          "deployment_id": {
+            "default": "",
+            "description": "Deployment identifier; uses default if empty",
+            "title": "Deployment Id",
+            "type": "string"
+          },
+          "state": {
+            "additionalProperties": true,
+            "description": "Arbitrary JSON-serializable state to persist",
+            "title": "State",
+            "type": "object"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "SaveAgentStateRequest",
+        "type": "object"
+      },
+      "name": "save_agent_state"
+    },
+    {
+      "description": "Load previously saved agent/strategy state.",
+      "inputSchema": {
+        "description": "Load previously saved state.",
+        "properties": {
+          "deployment_id": {
+            "default": "",
+            "description": "Deployment identifier; uses default if empty",
+            "title": "Deployment Id",
+            "type": "string"
+          }
+        },
+        "title": "LoadAgentStateRequest",
+        "type": "object"
+      },
+      "name": "load_agent_state"
+    },
+    {
+      "description": "Record an agent decision summary and tool call log for audit trail.",
+      "inputSchema": {
+        "description": "Record an agent decision for audit trail.",
+        "properties": {
+          "decision_summary": {
+            "description": "What the agent decided and why",
+            "title": "Decision Summary",
+            "type": "string"
+          },
+          "deployment_id": {
+            "default": "",
+            "title": "Deployment Id",
+            "type": "string"
+          },
+          "intent_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Resulting intent type, if any",
+            "title": "Intent Type"
+          },
+          "tool_calls": {
+            "description": "Tool calls made during this decision",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision_summary"
+        ],
+        "title": "RecordAgentDecisionRequest",
+        "type": "object"
+      },
+      "name": "record_agent_decision"
+    }
+  ],
+  "openai_tools": [
+    {
+      "function": {
+        "description": "Get the current USD price of a token on a specific chain.",
+        "name": "get_price",
+        "parameters": {
+          "description": "Get the current USD price of a token.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "description": "Blockchain name (e.g. 'arbitrum', 'base', 'ethereum')",
+              "title": "Chain",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token symbol (e.g. 'ETH', 'USDC') or contract address",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "title": "GetPriceRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get the balance of a single token in a wallet. Defaults to the strategy wallet; pass wallet_address to query another (e.g. a Safe).",
+        "name": "get_balance",
+        "parameters": {
+          "description": "Get the balance of a single token in a wallet.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token symbol or address",
+              "title": "Token",
+              "type": "string"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "title": "GetBalanceRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get token balances for a wallet on a chain. Defaults to the strategy wallet; pass wallet_address to query another (e.g. a Safe).",
+        "name": "batch_get_balances",
+        "parameters": {
+          "description": "Get token balances for a wallet.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "tokens": {
+              "description": "Token symbols to query (e.g. ['ETH', 'USDC'])",
+              "items": {
+                "type": "string"
+              },
+              "title": "Tokens",
+              "type": "array"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tokens"
+          ],
+          "title": "BatchGetBalancesRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Calculate a technical indicator (RSI, SMA, EMA, MACD, Bollinger Bands, ATR) for a token.",
+        "name": "get_indicator",
+        "parameters": {
+          "description": "Calculate a technical indicator for a token.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "indicator": {
+              "description": "One of: rsi, sma, ema, macd, bollinger, atr",
+              "title": "Indicator",
+              "type": "string"
+            },
+            "period": {
+              "default": 14,
+              "description": "Look-back period",
+              "title": "Period",
+              "type": "integer"
+            },
+            "token": {
+              "description": "Token symbol",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "indicator"
+          ],
+          "title": "GetIndicatorRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get details about a liquidity pool: price, tick, liquidity, volume, fees, TVL.",
+        "name": "get_pool_state",
+        "parameters": {
+          "description": "Get details about a liquidity pool.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "fee_tier": {
+              "default": 3000,
+              "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)",
+              "title": "Fee Tier",
+              "type": "integer"
+            },
+            "pool_address": {
+              "default": "",
+              "description": "Explicit pool contract address (bypasses computed address)",
+              "title": "Pool Address",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "uniswap_v3",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token_a": {
+              "description": "First token symbol",
+              "title": "Token A",
+              "type": "string"
+            },
+            "token_b": {
+              "description": "Second token symbol",
+              "title": "Token B",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token_a",
+            "token_b"
+          ],
+          "title": "GetPoolStateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get details about an existing LP position: range, liquidity, accrued fees.",
+        "name": "get_lp_position",
+        "parameters": {
+          "description": "Get details about an existing LP position.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "position_id": {
+              "description": "NFT token ID of the LP position",
+              "title": "Position Id",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "uniswap_v3",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "position_id"
+          ],
+          "title": "GetLPPositionRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List all Uniswap V3-style LP positions owned by a wallet (compact summary per position).",
+        "name": "list_lp_positions",
+        "parameters": {
+          "description": "List all LP positions owned by a wallet.\n\nIterates NonfungiblePositionManager.tokenOfOwnerByIndex(owner, i) for\ni in [0, balanceOf(owner)). Returns a compact summary per position so\noperators can pick a tokenId without drilling into `get_lp_position`.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "include_empty": {
+              "default": false,
+              "description": "Include positions with zero liquidity (default: skip burned/fully-withdrawn positions).",
+              "title": "Include Empty",
+              "type": "boolean"
+            },
+            "network": {
+              "default": "",
+              "description": "'mainnet' or 'anvil'; empty means gateway default.",
+              "title": "Network",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "uniswap_v3",
+              "description": "LP protocol (uniswap_v3 only for v1).",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "title": "ListLPPositionsRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List a wallet's lending positions with account-level totals and health factor (Aave V3).",
+        "name": "list_lending_positions",
+        "parameters": {
+          "description": "List lending positions for a wallet on a supported protocol.\n\nv1: Aave V3 only. Returns account-level totals + health factor via\nPool.getUserAccountData(user). Per-reserve drill-down is a future\nextension.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "network": {
+              "default": "",
+              "description": "'mainnet' or 'anvil'; empty means gateway default.",
+              "title": "Network",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "description": "Lending protocol (aave_v3 only for v1).",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "title": "ListLendingPositionsRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
+        "name": "get_portfolio",
+        "parameters": {
+          "description": "Summarize a wallet's on-chain positions on a single chain.\n\nCombines native balance, ERC20 balances (via batch_get_balances for\ncommon symbols or a caller-supplied list), LP positions, and lending\npositions.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "network": {
+              "default": "",
+              "description": "'mainnet' or 'anvil'; empty means gateway default.",
+              "title": "Network",
+              "type": "string"
+            },
+            "tokens": {
+              "description": "ERC20 symbols to include in the balance snapshot (e.g. ['USDC', 'WETH']).",
+              "items": {
+                "type": "string"
+              },
+              "title": "Tokens",
+              "type": "array"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "title": "GetPortfolioRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Resolve a token symbol or address to its full metadata (address, decimals, chain).",
+        "name": "resolve_token",
+        "parameters": {
+          "description": "Resolve a token symbol or address to full metadata.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token symbol (e.g. 'USDC') or contract address",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "title": "ResolveTokenRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get portfolio risk metrics: VaR, Sharpe ratio, volatility, max drawdown.",
+        "name": "get_risk_metrics",
+        "parameters": {
+          "description": "Get portfolio risk metrics.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "window_days": {
+              "default": 30,
+              "description": "Look-back window for risk calculations",
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          "title": "GetRiskMetricsRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Compile a high-level intent into an executable ActionBundle for review or execution.",
+        "name": "compile_intent",
+        "parameters": {
+          "description": "Compile a high-level intent into an executable ActionBundle.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "intent_type": {
+              "description": "Intent type: swap, lp_open, lp_close, supply, borrow, repay, etc.",
+              "title": "Intent Type",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": true,
+              "description": "Intent parameters (token_in, token_out, amount, etc.)",
+              "title": "Params",
+              "type": "object"
+            }
+          },
+          "required": [
+            "intent_type",
+            "params"
+          ],
+          "title": "CompileIntentRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Dry-run an intent or compiled bundle without on-chain execution to check feasibility.",
+        "name": "simulate_intent",
+        "parameters": {
+          "description": "Dry-run an intent or compiled bundle without on-chain execution.",
+          "properties": {
+            "bundle_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "ID of a previously compiled bundle",
+              "title": "Bundle Id"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "intent_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Or specify intent directly for ad-hoc simulation",
+              "title": "Intent Type"
+            },
+            "params": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Intent params if intent_type is provided",
+              "title": "Params"
+            }
+          },
+          "title": "SimulateIntentRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Check an intent against RiskGuard constraints before execution.",
+        "name": "validate_risk",
+        "parameters": {
+          "description": "Check an intent against RiskGuard constraints.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "intent_type": {
+              "description": "Intent type to validate",
+              "title": "Intent Type",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": true,
+              "description": "Intent parameters",
+              "title": "Params",
+              "type": "object"
+            }
+          },
+          "required": [
+            "intent_type",
+            "params"
+          ],
+          "title": "ValidateRiskRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Estimate gas cost (in USD and native token) for an intent.",
+        "name": "estimate_gas",
+        "parameters": {
+          "description": "Estimate gas cost for an intent.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "intent_type": {
+              "description": "Intent type",
+              "title": "Intent Type",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": true,
+              "description": "Intent parameters",
+              "title": "Params",
+              "type": "object"
+            }
+          },
+          "required": [
+            "intent_type",
+            "params"
+          ],
+          "title": "EstimateGasRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Deterministic economic viability check for LP rebalancing. Computes gas cost vs expected fee revenue.",
+        "name": "compute_rebalance_candidate",
+        "parameters": {
+          "description": "Deterministic check: is an LP rebalance worth the gas cost?",
+          "properties": {
+            "chain": {
+              "default": "base",
+              "title": "Chain",
+              "type": "string"
+            },
+            "estimated_daily_volume": {
+              "default": "5000",
+              "description": "Estimated daily pool volume in USD",
+              "title": "Estimated Daily Volume",
+              "type": "string"
+            },
+            "fee_tier": {
+              "default": 3000,
+              "description": "Pool fee tier",
+              "title": "Fee Tier",
+              "type": "integer"
+            },
+            "our_liquidity_share": {
+              "default": "0.1",
+              "description": "Our share of pool liquidity (0-1)",
+              "title": "Our Liquidity Share",
+              "type": "string"
+            },
+            "position_id": {
+              "description": "Current LP position NFT token ID",
+              "title": "Position Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "position_id"
+          ],
+          "title": "ComputeRebalanceCandidateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Swap one token for another on a DEX. Supports dry_run for simulation.",
+        "name": "swap_tokens",
+        "parameters": {
+          "description": "Execute a token swap on a DEX. Supports cross-chain swaps via destination_chain.",
+          "properties": {
+            "amount": {
+              "description": "Amount to swap as a decimal string (in token_in units)",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "destination_chain": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Destination chain for cross-chain swaps (None for same-chain). Falls back to default aggregator if protocol is not specified.",
+              "title": "Destination Chain"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only -- do not execute on-chain",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "execution_wallet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+              "title": "Execution Wallet"
+            },
+            "protocol": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Specific DEX; None = best available",
+              "title": "Protocol"
+            },
+            "slippage_bps": {
+              "default": 50,
+              "description": "Max slippage in basis points (1-1000, i.e. 0.01%-10%)",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Slippage Bps",
+              "type": "integer"
+            },
+            "token_in": {
+              "description": "Token to sell (symbol or address)",
+              "title": "Token In",
+              "type": "string"
+            },
+            "token_out": {
+              "description": "Token to buy (symbol or address)",
+              "title": "Token Out",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token_in",
+            "token_out",
+            "amount"
+          ],
+          "title": "SwapTokensRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Open a new concentrated liquidity position. Supports dry_run.",
+        "name": "open_lp_position",
+        "parameters": {
+          "description": "Open a new concentrated liquidity position.",
+          "properties": {
+            "amount_a": {
+              "description": "Amount of token_a as decimal string",
+              "title": "Amount A",
+              "type": "string"
+            },
+            "amount_b": {
+              "description": "Amount of token_b as decimal string",
+              "title": "Amount B",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "execution_wallet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+              "title": "Execution Wallet"
+            },
+            "fee_tier": {
+              "default": 3000,
+              "description": "Pool fee tier (100-100000)",
+              "maximum": 100000,
+              "minimum": 100,
+              "title": "Fee Tier",
+              "type": "integer"
+            },
+            "price_lower": {
+              "description": "Lower price bound (required; use tick-min for full range)",
+              "title": "Price Lower",
+              "type": "string"
+            },
+            "price_upper": {
+              "description": "Upper price bound (required; use tick-max for full range)",
+              "title": "Price Upper",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "uniswap_v3",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token_a": {
+              "description": "First token symbol or address",
+              "title": "Token A",
+              "type": "string"
+            },
+            "token_b": {
+              "description": "Second token symbol or address",
+              "title": "Token B",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token_a",
+            "token_b",
+            "amount_a",
+            "amount_b",
+            "price_lower",
+            "price_upper"
+          ],
+          "title": "OpenLPPositionRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Close or reduce a liquidity position. Supports dry_run.",
+        "name": "close_lp_position",
+        "parameters": {
+          "description": "Close or reduce a liquidity position.",
+          "properties": {
+            "amount": {
+              "default": "all",
+              "description": "Must be 'all' (partial close is not supported)",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "collect_fees": {
+              "default": true,
+              "description": "Collect accrued fees during close",
+              "title": "Collect Fees",
+              "type": "boolean"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "position_id": {
+              "description": "NFT token ID of the LP position",
+              "title": "Position Id",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "uniswap_v3",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "position_id"
+          ],
+          "title": "CloseLPPositionRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Supply tokens to a lending protocol (e.g. Aave V3). Supports dry_run.",
+        "name": "supply_lending",
+        "parameters": {
+          "description": "Supply tokens to a lending protocol.",
+          "properties": {
+            "amount": {
+              "description": "Amount as decimal string",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "market_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+              "title": "Market Id"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "description": "Lending protocol",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token to supply",
+              "title": "Token",
+              "type": "string"
+            },
+            "use_as_collateral": {
+              "default": true,
+              "title": "Use As Collateral",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "token",
+            "amount"
+          ],
+          "title": "SupplyLendingRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Borrow tokens from a lending protocol. Supports dry_run.",
+        "name": "borrow_lending",
+        "parameters": {
+          "description": "Borrow tokens from a lending protocol.",
+          "properties": {
+            "amount": {
+              "description": "Amount to borrow as decimal string",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "collateral_amount": {
+              "description": "Amount of collateral as decimal string, or 'all'",
+              "title": "Collateral Amount",
+              "type": "string"
+            },
+            "collateral_token": {
+              "description": "Token to use as collateral",
+              "title": "Collateral Token",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "market_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+              "title": "Market Id"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token to borrow",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount",
+            "collateral_token",
+            "collateral_amount"
+          ],
+          "title": "BorrowLendingRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Repay a lending position. Supports dry_run.",
+        "name": "repay_lending",
+        "parameters": {
+          "description": "Repay a lending position.",
+          "properties": {
+            "amount": {
+              "description": "Amount as decimal string, or 'all' for full repayment",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "market_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+              "title": "Market Id"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token to repay",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount"
+          ],
+          "title": "RepayLendingRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Withdraw supplied tokens from a lending protocol (full or partial). Supports dry_run.",
+        "name": "withdraw_lending",
+        "parameters": {
+          "description": "Withdraw supplied tokens from a lending protocol.",
+          "properties": {
+            "amount": {
+              "description": "Amount as decimal string, or 'all' for full withdrawal",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "is_collateral": {
+              "default": true,
+              "description": "Morpho Blue only: True withdraws collateral, False withdraws loan token",
+              "title": "Is Collateral",
+              "type": "boolean"
+            },
+            "market_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Required for protocols with isolated markets (e.g. Morpho Blue); ignored for Aave V3",
+              "title": "Market Id"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "title": "Protocol",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token to withdraw",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount"
+          ],
+          "title": "WithdrawLendingRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Bridge tokens from one chain to another. Uses Across or Stargate bridges. Supports dry_run.",
+        "name": "bridge_tokens",
+        "parameters": {
+          "description": "Bridge tokens from one chain to another.",
+          "properties": {
+            "amount": {
+              "description": "Amount to bridge as a decimal string (in token units)",
+              "title": "Amount",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only -- do not execute on-chain",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "execution_wallet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override wallet for execution (e.g. Safe address for vault funds)",
+              "title": "Execution Wallet"
+            },
+            "from_chain": {
+              "description": "Source chain (e.g. 'base', 'arbitrum')",
+              "title": "From Chain",
+              "type": "string"
+            },
+            "preferred_bridge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Preferred bridge adapter (e.g. 'across', 'stargate')",
+              "title": "Preferred Bridge"
+            },
+            "slippage_bps": {
+              "default": 50,
+              "description": "Max slippage in basis points (1-1000, i.e. 0.01%-10%)",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Slippage Bps",
+              "type": "integer"
+            },
+            "to_chain": {
+              "description": "Destination chain (e.g. 'arbitrum', 'ethereum')",
+              "title": "To Chain",
+              "type": "string"
+            },
+            "token": {
+              "description": "Token to bridge (symbol or address)",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount",
+            "from_chain",
+            "to_chain"
+          ],
+          "title": "BridgeTokensRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Unwrap wrapped native tokens back to native currency (e.g. WETH -> ETH, WMATIC -> MATIC). Supports dry_run.",
+        "name": "unwrap_native",
+        "parameters": {
+          "description": "Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC).",
+          "properties": {
+            "amount": {
+              "description": "Amount to unwrap as a decimal string, or 'all'",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "description": "Blockchain name",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "execution_wallet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override wallet for execution",
+              "title": "Execution Wallet"
+            },
+            "token": {
+              "description": "Wrapped token symbol (e.g. 'WETH', 'WMATIC', 'WAVAX')",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount"
+          ],
+          "title": "UnwrapNativeRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Execute a previously compiled ActionBundle. Supports dry_run.",
+        "name": "execute_compiled_bundle",
+        "parameters": {
+          "description": "Execute a previously compiled and simulated ActionBundle.",
+          "properties": {
+            "bundle_id": {
+              "description": "ID returned by compile_intent",
+              "title": "Bundle Id",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "require_simulation": {
+              "default": true,
+              "description": "Require successful simulation before execution",
+              "title": "Require Simulation",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bundle_id"
+          ],
+          "title": "ExecuteCompiledBundleRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Deploy a new Lagoon vault via factory contract. Returns the vault address on success.",
+        "name": "deploy_vault",
+        "parameters": {
+          "description": "Deploy a new Lagoon vault via factory contract.",
+          "properties": {
+            "admin_address": {
+              "description": "Admin address for vault governance (usually same as safe)",
+              "title": "Admin Address",
+              "type": "string"
+            },
+            "chain": {
+              "description": "Chain to deploy on (e.g. 'base', 'ethereum', 'arbitrum')",
+              "title": "Chain",
+              "type": "string"
+            },
+            "deployer_address": {
+              "description": "EOA address that signs the factory deploy tx",
+              "title": "Deployer Address",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "fee_receiver_address": {
+              "description": "Address to receive management/performance fees",
+              "title": "Fee Receiver Address",
+              "type": "string"
+            },
+            "name": {
+              "description": "Vault display name (e.g. 'Almanak DeFAI Vault')",
+              "title": "Name",
+              "type": "string"
+            },
+            "safe_address": {
+              "description": "Pre-deployed Safe wallet address (vault owner)",
+              "title": "Safe Address",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "Vault share token symbol (e.g. 'aALM')",
+              "title": "Symbol",
+              "type": "string"
+            },
+            "underlying_token_address": {
+              "description": "Address of the vault's underlying token (e.g. USDC)",
+              "title": "Underlying Token Address",
+              "type": "string"
+            },
+            "valuation_manager_address": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Address that can propose vault valuations (defaults to admin_address)",
+              "title": "Valuation Manager Address"
+            }
+          },
+          "required": [
+            "chain",
+            "name",
+            "symbol",
+            "underlying_token_address",
+            "safe_address",
+            "admin_address",
+            "fee_receiver_address",
+            "deployer_address"
+          ],
+          "title": "DeployVaultRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Read current state of a Lagoon vault: total assets, pending deposits/redeems, share price.",
+        "name": "get_vault_state",
+        "parameters": {
+          "description": "Read current state of a Lagoon vault.",
+          "properties": {
+            "chain": {
+              "default": "base",
+              "description": "Chain where vault is deployed",
+              "title": "Chain",
+              "type": "string"
+            },
+            "vault_address": {
+              "description": "Vault contract address",
+              "title": "Vault Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vault_address"
+          ],
+          "title": "GetVaultStateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Run a vault settlement cycle: propose new valuation, settle deposits and redeems.",
+        "name": "settle_vault",
+        "parameters": {
+          "description": "Run a vault settlement cycle (propose + settle deposits/redeems).",
+          "properties": {
+            "chain": {
+              "default": "base",
+              "description": "Chain where vault is deployed",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "new_total_assets": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override NAV in raw underlying units; auto-computed if omitted",
+              "title": "New Total Assets"
+            },
+            "safe_address": {
+              "description": "Safe wallet address (vault owner)",
+              "title": "Safe Address",
+              "type": "string"
+            },
+            "valuator_address": {
+              "description": "Address authorized to propose valuations",
+              "title": "Valuator Address",
+              "type": "string"
+            },
+            "vault_address": {
+              "description": "Vault contract address",
+              "title": "Vault Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vault_address",
+            "safe_address",
+            "valuator_address"
+          ],
+          "title": "SettleVaultRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Approve the vault to pull underlying tokens from the Safe (required for redemption settlement).",
+        "name": "approve_vault_underlying",
+        "parameters": {
+          "description": "Approve the vault to pull underlying tokens from the Safe (for redemption settlement).",
+          "properties": {
+            "chain": {
+              "default": "base",
+              "description": "Chain where vault is deployed",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "safe_address": {
+              "description": "Safe wallet address that holds the underlying tokens",
+              "title": "Safe Address",
+              "type": "string"
+            },
+            "underlying_token": {
+              "description": "Address of the underlying ERC20 token",
+              "title": "Underlying Token",
+              "type": "string"
+            },
+            "vault_address": {
+              "description": "Vault contract address",
+              "title": "Vault Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vault_address",
+            "underlying_token",
+            "safe_address"
+          ],
+          "title": "ApproveVaultUnderlyingRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Deposit underlying tokens into a vault (approve + requestDeposit). Depositor is the EOA.",
+        "name": "deposit_vault",
+        "parameters": {
+          "description": "Deposit underlying tokens into a Lagoon vault (approve + requestDeposit).",
+          "properties": {
+            "amount": {
+              "description": "Amount to deposit in raw underlying units (e.g. '10000000' for 10 USDC)",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "base",
+              "description": "Chain where vault is deployed",
+              "title": "Chain",
+              "type": "string"
+            },
+            "depositor_address": {
+              "default": "",
+              "description": "Depositor address (defaults to strategy wallet if empty)",
+              "title": "Depositor Address",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "underlying_token": {
+              "description": "Address of the vault's underlying token (e.g. USDC address)",
+              "title": "Underlying Token",
+              "type": "string"
+            },
+            "vault_address": {
+              "description": "Vault contract address",
+              "title": "Vault Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vault_address",
+            "underlying_token",
+            "amount"
+          ],
+          "title": "DepositVaultRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Initiate a deterministic vault teardown: close all LP positions, swap to underlying, run final settlement.",
+        "name": "teardown_vault",
+        "parameters": {
+          "description": "Initiate a deterministic vault teardown: close positions, swap to underlying, final settle.",
+          "properties": {
+            "chain": {
+              "default": "base",
+              "description": "Chain where vault is deployed",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "safe_address": {
+              "description": "Safe wallet address (vault owner)",
+              "title": "Safe Address",
+              "type": "string"
+            },
+            "valuator_address": {
+              "description": "Address authorized to propose valuations",
+              "title": "Valuator Address",
+              "type": "string"
+            },
+            "vault_address": {
+              "description": "Vault contract address",
+              "title": "Vault Address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vault_address",
+            "safe_address",
+            "valuator_address"
+          ],
+          "title": "TeardownVaultRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC). Required before LP operations when wallet holds native tokens. Supports dry_run.",
+        "name": "wrap_native",
+        "parameters": {
+          "description": "Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC).",
+          "properties": {
+            "amount": {
+              "description": "Amount of native token to wrap as a decimal string, or 'all'",
+              "title": "Amount",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "description": "Blockchain name",
+              "title": "Chain",
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "description": "If true, simulate only",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "execution_wallet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Override wallet for execution",
+              "title": "Execution Wallet"
+            },
+            "token": {
+              "description": "Wrapped token symbol to receive (e.g. 'WETH', 'WMATIC', 'WAVAX')",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "amount"
+          ],
+          "title": "WrapNativeRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Get a complete wallet balance overview in a single call. Automatically queries common tokens for the chain, filters dust, and returns total USD value. Use instead of multiple get_balance calls.",
+        "name": "get_wallet_overview",
+        "parameters": {
+          "description": "Get a complete wallet balance overview in a single call.\n\nAutomatically queries all common tokens for the chain (ETH, WETH, USDC, USDT, etc.)\nplus any additional tokens specified. Filters out dust balances below min_balance_usd.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "description": "Blockchain name",
+              "title": "Chain",
+              "type": "string"
+            },
+            "extra_tokens": {
+              "description": "Additional token symbols to query beyond the default set",
+              "items": {
+                "type": "string"
+              },
+              "title": "Extra Tokens",
+              "type": "array"
+            },
+            "min_balance_usd": {
+              "default": 0.01,
+              "description": "Minimum USD balance to include (filters dust)",
+              "minimum": 0,
+              "title": "Min Balance Usd",
+              "type": "number"
+            },
+            "wallet_address": {
+              "default": "",
+              "description": "Wallet to query. Defaults to strategy wallet.",
+              "title": "Wallet Address",
+              "type": "string"
+            }
+          },
+          "title": "GetWalletOverviewRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Check whether the SDK supports a given protocol on a given chain. Returns supported actions, recommended strategy template, and chain availability. No network calls \u2014 uses static registry.",
+        "name": "check_protocol_support",
+        "parameters": {
+          "description": "Check whether the SDK supports a given protocol on a given chain.\n\nReturns supported actions, recommended strategy template, and known issues.\nUses static SDK registry data \u2014 no network calls needed.",
+          "properties": {
+            "chain": {
+              "default": "",
+              "description": "Chain to check (e.g. 'arbitrum'). If empty, returns all chains.",
+              "title": "Chain",
+              "type": "string"
+            },
+            "protocol": {
+              "description": "Protocol name (e.g. 'uniswap_v3', 'morpho_blue', 'fluid-dex')",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "protocol"
+          ],
+          "title": "CheckProtocolSupportRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Persist agent/strategy state for retrieval across iterations.",
+        "name": "save_agent_state",
+        "parameters": {
+          "description": "Persist agent/strategy state.",
+          "properties": {
+            "deployment_id": {
+              "default": "",
+              "description": "Deployment identifier; uses default if empty",
+              "title": "Deployment Id",
+              "type": "string"
+            },
+            "state": {
+              "additionalProperties": true,
+              "description": "Arbitrary JSON-serializable state to persist",
+              "title": "State",
+              "type": "object"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "title": "SaveAgentStateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Load previously saved agent/strategy state.",
+        "name": "load_agent_state",
+        "parameters": {
+          "description": "Load previously saved state.",
+          "properties": {
+            "deployment_id": {
+              "default": "",
+              "description": "Deployment identifier; uses default if empty",
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          },
+          "title": "LoadAgentStateRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Record an agent decision summary and tool call log for audit trail.",
+        "name": "record_agent_decision",
+        "parameters": {
+          "description": "Record an agent decision for audit trail.",
+          "properties": {
+            "decision_summary": {
+              "description": "What the agent decided and why",
+              "title": "Decision Summary",
+              "type": "string"
+            },
+            "deployment_id": {
+              "default": "",
+              "title": "Deployment Id",
+              "type": "string"
+            },
+            "intent_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Resulting intent type, if any",
+              "title": "Intent Type"
+            },
+            "tool_calls": {
+              "description": "Tool calls made during this decision",
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Tool Calls",
+              "type": "array"
+            }
+          },
+          "required": [
+            "decision_summary"
+          ],
+          "title": "RecordAgentDecisionRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

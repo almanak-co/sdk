@@ -57,7 +57,12 @@ class HandlerContext:
     outbox_row: dict[str, Any]
     ledger_row: dict[str, Any]
     basis_store: FIFOBasisStore
-    prior_open_lookup: Callable[[str], dict[str, Any] | None]
+    # VIB-4275 — ``(position_key, discriminator)`` → prior LP_OPEN payload.
+    # ``discriminator`` is the closing leg's per-position id (NFT token id) used
+    # to disambiguate co-pool opens; ``None`` resolves only the single-open
+    # legacy case. The resolver NEVER falls back to "latest open" under
+    # ambiguity (it returns ``None``).
+    prior_open_lookup: Callable[[str, str | None], dict[str, Any] | None]
 
 
 HandlerFn = Callable[[HandlerContext], Any]

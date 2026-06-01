@@ -321,7 +321,7 @@ class TestPreviouslyMissingConnectors:
 
     def test_traderjoe_v2_swap_entry(self, matrix_data: dict) -> None:
         """TraderJoe V2 has a dedicated swap compilation path (VIB-1928); matrix must expose it."""
-        from almanak.core.contracts import TRADERJOE_V2
+        from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
 
         entries = [p for p in matrix_data["protocols"] if p["name"] == "traderjoe_v2" and p["category"] == "swap"]
         assert len(entries) == 1
@@ -329,7 +329,7 @@ class TestPreviouslyMissingConnectors:
 
     def test_uniswap_v4_swap_entry(self, matrix_data: dict) -> None:
         """Uniswap V4 swaps through the Universal Router are supported on every V4 chain."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         entries = [p for p in matrix_data["protocols"] if p["name"] == "uniswap_v4" and p["category"] == "swap"]
         assert len(entries) == 1
@@ -394,3 +394,174 @@ class TestPredictionCategory:
         users discover the new filter via `almanak info matrix --help`."""
         opt = next(p for p in support_matrix.params if p.name == "category")
         assert "prediction" in (opt.help or "")
+
+
+# =============================================================================
+# Registry-driven matrix discovery (VIB-4856 / W4)
+# =============================================================================
+
+
+class TestDynamicCapabilityDiscovery:
+    """Locks the W4 invariant: a connector that publishes
+    ``MatrixEntry`` rows automatically appears in the matrix without any
+    edit to ``support_matrix.py``.
+
+    The test registers a synthetic ``ConnectorManifest`` into the live
+    ``ConnectorRegistry`` (using a unique connector name that no real
+    connector uses), rebuilds the matrix, and asserts the synthetic
+    rows surface in the rendered output. Teardown unregisters the
+    connector so the test is isolated from siblings in the same suite.
+
+    Matrix metadata is published via :class:`MatrixEntry` (strategy-side)
+    rather than ``SupportedActionsCapability`` (gateway-side): the matrix
+    CLI is a strategy-container module and the strategy-side import
+    boundary (``tests/static/test_strategy_import_boundary.py``) forbids
+    reading anything under ``almanak.connectors._base.gateway_*``. See
+    the ``support_matrix`` module docstring for the architectural call.
+    """
+
+    def test_matrix_entries_picks_up_new_connector(self) -> None:
+        """A ``ConnectorManifest`` with a single ``matrix_entries`` row
+        produces exactly one matrix row, verbatim from the declaration.
+        Mirrors the simple-case dispatch every connector goes through.
+        """
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            MatrixEntry,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        manifest = ConnectorManifest(
+            name="vib_4856_mock_swap",
+            intents=(IntentType.SWAP,),
+            chains=("ethereum",),
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="vib_4856_mock_swap",
+                    category="swap",
+                    chains=frozenset({"ethereum", "arbitrum"}),
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            mock_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_swap"]
+            assert len(mock_rows) == 1, f"mock connector should produce one matrix row, got {mock_rows!r}"
+            assert mock_rows[0]["category"] == "swap"
+            assert set(mock_rows[0]["chains"]) == {"ethereum", "arbitrum"}
+        finally:
+            ConnectorRegistry._entries.pop("vib_4856_mock_swap", None)
+
+    def test_matrix_entries_multi_row_connector(self) -> None:
+        """One ``ConnectorManifest`` can publish multiple ``MatrixEntry``
+        rows under different ``matrix_name``\\ s — the mechanism Aerodrome's
+        slipstream alias uses in production.
+        """
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            MatrixEntry,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        manifest = ConnectorManifest(
+            name="vib_4856_mock_multi",
+            intents=(IntentType.LP_OPEN,),
+            chains=("ethereum",),
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="vib_4856_mock_multi",
+                    category="lp",
+                    chains=frozenset({"ethereum"}),
+                ),
+                MatrixEntry(
+                    matrix_name="vib_4856_mock_multi_alias",
+                    category="lp",
+                    chains=frozenset({"ethereum", "base"}),
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            names = {p["name"] for p in data["protocols"]}
+            assert "vib_4856_mock_multi" in names
+            assert "vib_4856_mock_multi_alias" in names
+
+            alias_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_multi_alias"]
+            assert set(alias_rows[0]["chains"]) == {"base", "ethereum"}
+        finally:
+            ConnectorRegistry._entries.pop("vib_4856_mock_multi", None)
+
+    def test_manifest_matrix_entries_picks_up_new_connector(self) -> None:
+        """Strategy-side path: a ``ConnectorManifest`` with explicit
+        ``matrix_entries`` produces matrix rows verbatim — used by
+        connectors without a gateway-side provider (e.g. LiFi).
+        """
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            MatrixEntry,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        manifest = ConnectorManifest(
+            name="vib_4856_mock_strategy",
+            intents=(IntentType.SWAP,),
+            chains=("ethereum",),
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="vib_4856_mock_strategy",
+                    category="aggregator",
+                    chains=frozenset({"ethereum", "polygon"}),
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            rows = [
+                p
+                for p in data["protocols"]
+                if p["name"] == "vib_4856_mock_strategy"
+            ]
+            assert len(rows) == 1
+            assert rows[0]["category"] == "aggregator"
+            assert set(rows[0]["chains"]) == {"ethereum", "polygon"}
+        finally:
+            ConnectorRegistry._entries.pop("vib_4856_mock_strategy", None)
+
+    def test_manifest_empty_matrix_entries_suppresses_derivation(self) -> None:
+        """A connector that declares ``matrix_entries=()`` (e.g. when the
+        gateway side is authoritative) does NOT produce a derived row.
+        Guards against the regression where the strategy-side intent
+        derivation double-counts a connector that the gateway already
+        published.
+        """
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        manifest = ConnectorManifest(
+            name="vib_4856_mock_suppressed",
+            intents=(IntentType.SUPPLY, IntentType.BORROW),
+            chains=("ethereum",),
+            matrix_entries=(),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            rows = [
+                p
+                for p in data["protocols"]
+                if p["name"] == "vib_4856_mock_suppressed"
+            ]
+            assert rows == [], (
+                "matrix_entries=() must suppress strategy-side derivation"
+            )
+        finally:
+            ConnectorRegistry._entries.pop("vib_4856_mock_suppressed", None)

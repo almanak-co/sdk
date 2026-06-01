@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any
 from web3 import Web3
 from web3.contract import Contract
 
-from almanak.core.contracts import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
+from .addresses import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient

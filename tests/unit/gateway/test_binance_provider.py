@@ -25,16 +25,22 @@ class TestBinanceSymbolMap:
             ("WBNB", "BNBUSDT"),
             ("BNB", "BNBUSDT"),
             ("WAVAX", "AVAXUSDT"),
-            ("WMATIC", "MATICUSDT"),
+            ("WMATIC", "POLUSDT"),  # MATIC->POL rebrand: POLUSDT is the live pair
+            ("WPOL", "POLUSDT"),
             ("S", "SUSDT"),
             ("WS", "SUSDT"),
             # Pre-existing mappings (regression guard)
             ("WETH", "ETHUSDT"),
             ("ETH", "ETHUSDT"),
             ("AVAX", "AVAXUSDT"),
-            ("MATIC", "MATICUSDT"),
+            ("MATIC", "POLUSDT"),  # MATIC->POL rebrand: POLUSDT is the live pair
             ("BTC", "BTCUSDT"),
             ("WBTC", "BTCUSDT"),
+            # BSC's BTC wrapper is BTCB (Binance-Peg BTC, 18 decimals).
+            # The OHLCV path must map it to the same BTCUSDT spot pair as
+            # WBTC so price/OHLCV requests on BSC don't fall through to a
+            # different feed. (PR #2505 / btcb-decimals-bsc.)
+            ("BTCB", "BTCUSDT"),
         ],
     )
     def test_symbol_map_contains_token(self, token: str, expected_pair: str):

@@ -1,0 +1,14 @@
+{
+    "_comment": "Polygon mainnet TEST config: forces an immediate WPOL->USDC trade so execution/gas/price paths can be verified on-chain. RSI is computed on the volatile base (WPOL); rsi_overbought=1 makes every reading 'overbought' => SELL base on the first signal transition. Not a production config.",
+    "chain": "polygon",
+    "trade_size_usd": 6,
+    "rsi_period": 14,
+    "rsi_oversold": 0,
+    "rsi_overbought": 1,
+    "max_slippage_bps": 150,
+    "protocol": "uniswap_v3",
+    "base_token": "WPOL",
+    "base_token_address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    "quote_token": "USDC",
+    "quote_token_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+}

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.contracts import UNISWAP_V4
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.core.enums import Protocol
 from almanak.connectors._strategy_base.contract_registry import get_default_registry
 from almanak.connectors.uniswap_v4.sdk import (

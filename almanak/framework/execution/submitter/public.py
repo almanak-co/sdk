@@ -154,6 +154,19 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     # PancakeSwap V3
     "0xce30421c": "TooLittleReceived()",
     "0x675cae38": "TooMuchRequested()",
+    # Uniswap V4 PositionManager / PoolManager (VIB-2703).
+    # Selectors keccak-verified against v4-periphery / v4-core signatures.
+    # NOTE: the v4-core "PoolNotInitialized()" selector is 0x486aa307 — NOT
+    # 0xe450d38c (that selector is OpenZeppelin ERC20InsufficientBalance, below).
+    # The 0x24df576f "TooMuchRequested()" here is the keccak-correct selector and
+    # is distinct from PancakeSwap's pre-existing 0x675cae38 row above.
+    "0x0ca968d8": "NotApproved(address)",
+    "0x1ad777f8": "TickUpperOutOfBounds(int24)",
+    "0x24df576f": "TooMuchRequested()",
+    "0x486aa307": "PoolNotInitialized()",
+    "0xa74f97ab": "NoLiquidityToReceiveFees()",
+    "0xbfb22adf": "DeadlinePassed(uint256)",
+    "0xd5e2f7ab": "TickLowerOutOfBounds(int24)",
     # OpenZeppelin Address library
     "0x1425ea42": "FailedInnerCall()",
     "0xd6bda275": "FailedCall()",

@@ -144,11 +144,11 @@ class PancakeSwapDeltaNeutralLPStrategy(IntentStrategy):
         # --- Perp config ---
         # ApolloX trades synthetic perps keyed on canonical symbols ('BTC',
         # 'ETH', 'BNB'). The compiler maps these back to BSC-registered tokens
-        # (WBTC for BTCB, WETH for the bridged ETH, WBNB for BNB) for the
-        # price-oracle lookup. ``perp_price_symbol`` overrides the gateway-side
-        # price symbol if the strategy needs it (e.g., for tracked-token
-        # pre-warming in the runner). Default to the LP's token0_symbol so the
-        # hedged asset matches the LP's volatile side.
+        # (BTCB for BTC — Binance-Peg BTC at 0x7130d2A1…, WETH for the bridged
+        # ETH, WBNB for BNB) for the price-oracle lookup. ``perp_price_symbol``
+        # overrides the gateway-side price symbol if the strategy needs it
+        # (e.g., for tracked-token pre-warming in the runner). Default to the
+        # LP's token0_symbol so the hedged asset matches the LP's volatile side.
         self.perp_market = str(self.config.get("perp_market", "BNB/USD"))
         self.perp_price_symbol = str(self.config.get("perp_price_symbol", self.token0_symbol))
         self.perp_collateral_token = str(self.config.get("perp_collateral_token", "BNB"))

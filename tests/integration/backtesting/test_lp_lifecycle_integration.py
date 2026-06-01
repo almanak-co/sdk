@@ -275,6 +275,10 @@ def lp_adapter() -> LPBacktestAdapter:
         rebalance_on_out_of_range=True,
         volume_multiplier=Decimal("10"),
         base_liquidity=Decimal("1000000"),
+        # VIB-4849: this lifecycle test intentionally exercises fee accrual without a
+        # subgraph (token-pair pools have no address), so it must explicitly opt into
+        # the volume_multiplier heuristic rather than rely on the removed silent fallback.
+        allow_volume_fallback=True,
     )
     return LPBacktestAdapter(config)
 

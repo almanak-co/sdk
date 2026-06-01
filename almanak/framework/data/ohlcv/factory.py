@@ -28,14 +28,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
+    CoinGeckoGatewayDataProvider,
     GatewayOHLCVDataProvider,
     GeckoTerminalGatewayDataProvider,
 )
 from almanak.framework.data.ohlcv.gateway_provider import (
+    GatewayCoinGeckoOHLCVProvider,
     GatewayGeckoTerminalOHLCVProvider,
     GatewayOHLCVProvider,
 )
-from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
+from almanak.framework.data.ohlcv.ohlcv_router import (
+    OHLCVRouter,
+    provider_names_in_chains,
+)
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
 
 
@@ -87,11 +92,22 @@ def create_ohlcv_stack(
         :class:`OHLCVStack` with ``router`` and ``provider`` populated.
 
     Note:
-        ``OHLCVRouter._PROVIDER_CHAINS["defi_primary"]`` lists a ``"defillama"``
-        middle tier between ``"geckoterminal"`` and ``"binance"``, but no
-        gateway-backed DeFi Llama OHLCV provider exists yet. Until one is wired,
-        GeckoTerminal blips fall straight through to Binance. Tracked on
-        VIB-3448 / gateway roadmap.
+        Three providers are wired: ``geckoterminal`` (DEX-native),
+        ``binance`` (CEX primary), and ``coingecko`` (CEX fallback, VIB-4847).
+        CoinGecko gives the ``cex_primary`` chain a real fallback so a stale /
+        rebranded Binance ticker (rejected by the ALM-2697 staleness guard) no
+        longer dead-ends in a permanent ``DATA_ERROR``.
+
+        The ``defillama`` tier named in older chain configs was **removed** from
+        ``_PROVIDER_CHAINS`` (VIB-4847) because no gateway-backed DeFi Llama
+        OHLCV provider exists yet (tracked on VIB-3448). The
+        provider-chain ↔ registry invariant (:func:`assert_provider_chains_registered`)
+        forbids dangling names, so DeFi Llama must be re-added to both the chain
+        AND the registry in the same change when it ships.
+
+    Raises:
+        ValueError: If a provider named in ``_PROVIDER_CHAINS`` is not
+            registered (provider-chain ↔ registry invariant, VIB-4847).
     """
     gateway_provider = GatewayOHLCVProvider(gateway_client=gateway_client)
     binance_adapter = GatewayOHLCVDataProvider(gateway_provider)
@@ -99,9 +115,19 @@ def create_ohlcv_stack(
     gecko_provider = GatewayGeckoTerminalOHLCVProvider(gateway_client=gateway_client, chain=chain)
     gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
 
+    coingecko_provider = GatewayCoinGeckoOHLCVProvider(gateway_client=gateway_client)
+    coingecko_adapter = CoinGeckoGatewayDataProvider(coingecko_provider)
+
     router = OHLCVRouter(default_chain=chain)
     router.register_provider(gecko_adapter)
     router.register_provider(binance_adapter)
+    router.register_provider(coingecko_adapter)
+
+    # Provider-chain ↔ registry invariant (VIB-4847): fail loud at build time
+    # if any advertised provider name was never registered. This is the durable
+    # fix — it catches the next phantom-tier regression before a strategy hits a
+    # silent failover dead-end in production.
+    assert_provider_chains_registered(router)
 
     routing_provider = RoutingOHLCVProvider(
         router=router,
@@ -111,6 +137,38 @@ def create_ohlcv_stack(
     )
 
     return OHLCVStack(router=router, provider=routing_provider)
+
+
+def assert_provider_chains_registered(router: OHLCVRouter) -> None:
+    """Assert every provider named in ``_PROVIDER_CHAINS`` is registered.
+
+    The root cause of VIB-4847 was silent drift between the *advertised*
+    failover chain (``_PROVIDER_CHAINS``) and the *registered* providers: a
+    name listed in the chain but never constructed makes the router walk past
+    it on every miss, degrading the chain to fewer providers than advertised.
+
+    This guard makes that drift loud. It runs at factory build time (so a
+    misconfigured deployment fails on boot, not mid-strategy) and is also
+    exercised directly by unit tests.
+
+    Args:
+        router: A composed :class:`OHLCVRouter` with providers registered.
+
+    Raises:
+        ValueError: If any name in ``_PROVIDER_CHAINS`` has no registered
+            provider. The message lists the missing names so the fix is
+            obvious: either register the provider, or remove it from the chain.
+    """
+    advertised = provider_names_in_chains()
+    registered = set(router._providers.keys())
+    missing = advertised - registered
+    if missing:
+        raise ValueError(
+            "OHLCV provider-chain ↔ registry invariant violated (VIB-4847): "
+            f"provider(s) {sorted(missing)} are referenced in _PROVIDER_CHAINS "
+            f"but not registered in the factory (registered: {sorted(registered)}). "
+            "Either register the provider or remove its name from _PROVIDER_CHAINS."
+        )
 
 
 def create_routing_ohlcv_provider(
@@ -145,6 +203,7 @@ def create_routing_ohlcv_provider(
 
 __all__ = [
     "OHLCVStack",
+    "assert_provider_chains_registered",
     "create_ohlcv_stack",
     "create_routing_ohlcv_provider",
 ]

@@ -666,10 +666,15 @@ CHAIN_CONFIGS = {
             "WETH": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
             "USDT": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
         },
+        # Verified on a Linea mainnet fork (2026-05-27): writing the balance
+        # storage slot keccak256(abi.encode(holder, slot)) credits balanceOf()
+        # only at these slots — USDC is a bridged FiatTokenV2-style proxy with
+        # _balances at slot 9 (slot 0 is a no-op), matching fork_manager.py's
+        # LINEA balance-slot table (VIB-2724). WETH/USDT confirmed at slot 3/51.
         "balance_slots": {
-            "USDC": 0,
-            "WETH": 0,
-            "USDT": 0,
+            "USDC": 9,
+            "WETH": 3,
+            "USDT": 51,
         },
     },
     "blast": {
@@ -2088,7 +2093,7 @@ price_oracle_bnb = _create_price_oracle_fixture("bnb")  # Alias for bsc
 price_oracle_mantle = _create_price_oracle_fixture("mantle")
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
-price_oracle_mantle = _create_price_oracle_fixture("mantle")
+price_oracle_linea = _create_price_oracle_fixture("linea")
 price_oracle_monad = _create_price_oracle_fixture("monad")
 price_oracle_xlayer = _create_price_oracle_fixture("xlayer")
 
@@ -2127,6 +2132,7 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "bnb": "price_oracle_bnb",
         "optimism": "price_oracle_optimism",
         "polygon": "price_oracle_polygon",
+        "linea": "price_oracle_linea",
         "xlayer": "price_oracle_xlayer",
     }
 

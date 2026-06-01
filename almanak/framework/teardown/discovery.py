@@ -29,7 +29,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 from almanak.gateway.proto import gateway_pb2
 
@@ -276,10 +278,28 @@ def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for protocol, registry in sorted(_NPM_PROTOCOL_REGISTRIES.items()):
         chain_entry = registry.get(chain) or {}
-        npm = chain_entry.get("position_manager")
+        npm = _npm_from_chain_entry(chain_entry)
         if npm:
             found.append((protocol, npm))
     return found
+
+
+# Connectors record the NonfungiblePositionManager under one of two keys:
+# ``position_manager`` (uniswap_v3 / agni_finance / sushiswap_v3) or ``nft``
+# (pancakeswap_v3, whose receipt parser and intent compiler already standardise
+# on ``nft``). Accepting both keeps a single per-fork NPM source — the
+# connector's ``addresses.py`` — instead of forcing a key rename that would
+# ripple through every Pancake reader (VIB-4902).
+_NPM_ADDRESS_KEYS = ("position_manager", "nft")
+
+
+def _npm_from_chain_entry(chain_entry: dict[str, str]) -> str | None:
+    """Resolve the NPM address from a connector chain entry under either key."""
+    for key in _NPM_ADDRESS_KEYS:
+        npm = chain_entry.get(key)
+        if npm:
+            return npm
+    return None
 
 
 async def _call_with_retries(

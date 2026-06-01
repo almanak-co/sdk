@@ -168,3 +168,62 @@ class TestIsTradeWorthwhile:
             gas_oracle=oracle,
         )
         assert snapshot.is_trade_worthwhile(Decimal("100"), "arbitrum", Decimal("0")) is False
+
+
+_GAS_LOGGER = "almanak.framework.market.snapshot"
+
+
+class TestT3AObservability:
+    """VIB-4844 T3-A: the two fail-open gas methods must log a warning on the
+    unconfigured path while keeping their (signature-stable) return values.
+    """
+
+    def test_estimate_swap_gas_cost_warns_when_oracle_missing(self, caplog) -> None:
+        snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        with caplog.at_level("WARNING", logger=_GAS_LOGGER):
+            result = snapshot.estimate_swap_gas_cost_usd("arbitrum")
+        # Return value unchanged (stopgap contract: Decimal("0"), not None).
+        assert result == Decimal("0")
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("gas oracle unconfigured" in r.getMessage() for r in warnings), warnings
+
+    def test_is_trade_worthwhile_warns_when_oracle_missing(self, caplog) -> None:
+        snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        with caplog.at_level("WARNING", logger=_GAS_LOGGER):
+            result = snapshot.is_trade_worthwhile(Decimal("100"), "arbitrum")
+        # Fail-open return value unchanged.
+        assert result is True
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        # Both the estimate path and the worthwhile decision warn; assert the
+        # worthwhile-specific warning is present.
+        assert any("trade-worthwhile check defaulting to True" in m for m in msgs), msgs
+
+    def test_is_trade_worthwhile_warns_on_gas_unavailable_error(self, caplog) -> None:
+        from almanak.framework.market import GasUnavailableError
+
+        oracle = MagicMock()
+        oracle.get_gas_price = AsyncMock(
+            side_effect=GasUnavailableError("arbitrum", "rpc timeout")
+        )
+        snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0xtest", gas_oracle=oracle)
+        with caplog.at_level("WARNING", logger=_GAS_LOGGER):
+            result = snapshot.is_trade_worthwhile(Decimal("100"), "arbitrum")
+        assert result is True
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("GasUnavailableError" in m for m in msgs), msgs
+
+    def test_no_warning_when_oracle_configured(self, caplog) -> None:
+        """The happy path must stay quiet — no fail-open warning when the
+        oracle prices gas successfully."""
+        oracle = _make_gas_oracle(Decimal("0.01"), chain="arbitrum")
+        snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0xtest", gas_oracle=oracle)
+        with caplog.at_level("WARNING", logger=_GAS_LOGGER):
+            snapshot.estimate_swap_gas_cost_usd("arbitrum")
+            snapshot.is_trade_worthwhile(Decimal("100"), "arbitrum")
+        fail_open = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+            and ("gas oracle unconfigured" in r.getMessage() or "defaulting to True" in r.getMessage())
+        ]
+        assert fail_open == [], fail_open

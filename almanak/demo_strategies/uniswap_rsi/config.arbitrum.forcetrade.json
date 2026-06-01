@@ -1,0 +1,14 @@
+{
+    "_comment": "VIB-4879 mainnet smoke (acceptance criterion 8). Second-chain confirmation of the chain-agnostic ALMANAK_MAX_GAS_COST_USD=25 cap. Forces an immediate WETH->USDC trade on Arbitrum so we prove the USD-cost cap path works cross-chain with a single env var (no per-chain config). RSI is computed on WETH; rsi_overbought=1 makes every reading 'overbought' => SELL base on first signal transition. Not a production config.",
+    "chain": "arbitrum",
+    "trade_size_usd": 6,
+    "rsi_period": 14,
+    "rsi_oversold": 0,
+    "rsi_overbought": 1,
+    "max_slippage_bps": 100,
+    "protocol": "uniswap_v3",
+    "base_token": "WETH",
+    "base_token_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "quote_token": "USDC",
+    "quote_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+}

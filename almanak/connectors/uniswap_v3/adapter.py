@@ -23,8 +23,9 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.contracts import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+
+from .addresses import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
 
 if TYPE_CHECKING:
     # Used only inside ``compile_swap``; importing at runtime triggers

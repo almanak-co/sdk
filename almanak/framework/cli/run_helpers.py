@@ -2267,7 +2267,10 @@ def _build_orchestrator_and_providers(  # noqa: C901
 
                 primary_chain = strategy_chains[0]
                 chain_rpc_url = runtime_config.rpc_urls.get(primary_chain)
-                rate_monitor = RateMonitor(chain=primary_chain, rpc_url=chain_rpc_url)
+                # _internal=True: framework wiring of the gateway-backed rate
+                # source onto MarketSnapshot is the canonical lending-rate lane,
+                # not a deprecated strategy-side bypass (VIB-4869).
+                rate_monitor = RateMonitor(chain=primary_chain, rpc_url=chain_rpc_url, _internal=True)
                 strategy_instance._rate_monitor = rate_monitor
                 rate_monitor_wired = True
             except Exception as e:
@@ -2423,7 +2426,10 @@ def _build_orchestrator_and_providers(  # noqa: C901
                 from ..data.rates import RateMonitor
 
                 rpc_url = getattr(runtime_config, "rpc_url", None)
-                rate_monitor = RateMonitor(chain=runtime_config.chain, rpc_url=rpc_url)
+                # _internal=True: framework wiring of the gateway-backed rate
+                # source onto MarketSnapshot is the canonical lending-rate lane,
+                # not a deprecated strategy-side bypass (VIB-4869).
+                rate_monitor = RateMonitor(chain=runtime_config.chain, rpc_url=rpc_url, _internal=True)
                 strategy_instance._rate_monitor = rate_monitor
                 rate_monitor_wired = True
             except Exception as e:

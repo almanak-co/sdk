@@ -268,14 +268,51 @@ def test_primitive_versions_map_covers_every_primitive_member() -> None:
         assert version >= 1, f"Primitive.{member.name} version must be >= 1, got {version}"
 
 
-def test_primitive_versions_initial_baseline_is_one() -> None:
-    """All entries default to 1 on the initial T6 ship — no bumps yet."""
+def test_primitive_versions_explicit_per_primitive_pinning() -> None:
+    """Pin every per-primitive version explicitly so bumps require a deliberate
+    update here.
+
+    The original T6 ship had every primitive at ``PRIMITIVE_VERSION_DEFAULT``
+    (``1``).  VIB-4905 / F1 bumps ``Primitive.SWAP`` to ``2`` as the
+    SwapEventPayload now carries the partial-match field bundle
+    (``realized_pnl_usd_matched`` / ``unmatched_amount_in`` /
+    ``unmatched_proceeds_usd``).  Other primitives stay at the default
+    until their own contract changes ship.
+
+    Adding a new primitive to the enum must also add an entry here AND in
+    ``PRIMITIVE_VERSIONS`` (``test_primitive_versions_map_covers_every_primitive_member``
+    enforces the dict coverage side; this test enforces the explicit-pin
+    side so a silent default-bump can't sneak through).
+    """
     assert PRIMITIVE_VERSION_DEFAULT == 1
-    for member, version in PRIMITIVE_VERSIONS.items():
-        assert version == PRIMITIVE_VERSION_DEFAULT, (
-            f"Primitive.{member.name} = {version}, expected {PRIMITIVE_VERSION_DEFAULT}. "
-            f"Bumps are per-primitive (see payload_schemas docstring); tests must be updated when bumping."
+    expected: dict[Primitive, int] = {
+        Primitive.LP: 1,
+        Primitive.LP_V4: 1,
+        Primitive.LENDING: 1,
+        Primitive.CDP: 1,
+        Primitive.LIQUIDATION: 1,
+        Primitive.PERP: 1,
+        Primitive.UTILITY: 1,
+        # VIB-4905 (F1): bumped 1→2 — SwapEventPayload partial-match contract.
+        Primitive.SWAP: 2,
+        Primitive.VAULT: 1,
+        Primitive.STAKING: 1,
+        Primitive.BRIDGE: 1,
+        Primitive.PREDICTION: 1,
+        Primitive.FLASH_LOAN: 1,
+    }
+    for member, want in expected.items():
+        got = PRIMITIVE_VERSIONS[member]
+        assert got == want, (
+            f"Primitive.{member.name} = {got}, expected {want}. "
+            f"If you bumped intentionally, update this test alongside "
+            f"``PRIMITIVE_VERSIONS`` and document the bump in the dict's comment."
         )
+    # Every PRIMITIVE_VERSIONS key must be pinned here too — surface accidental
+    # additions to the dict that this baseline test forgot to mirror.
+    assert set(expected.keys()) == set(PRIMITIVE_VERSIONS.keys()), (
+        "PRIMITIVE_VERSIONS and the explicit-pin map drifted; update both."
+    )
 
 
 # ─── D1 Correctness — augment chokepoint stamps ────────────────────────────
@@ -305,7 +342,12 @@ def test_augment_stamps_primitive_version_for_every_known_event_type(
         ("SWAP", Primitive.SWAP),
         ("TRANSFER", Primitive.BRIDGE),
         ("VAULT_DEPOSIT", Primitive.VAULT),
-        ("PT_BUY", Primitive.LENDING),  # PT_BUY is classified under LENDING per taxonomy
+        # PT_BUY is taxonomy-mapped to Primitive.SWAP (taxonomy.py:332-338) —
+        # the writer's per-primitive stamping reads ``primitive_for("PT_BUY")``
+        # which returns SWAP, not LENDING.  Pre-VIB-4905 this parametrization
+        # said LENDING and passed only because both primitives were at version 1;
+        # the SWAP bump to v2 surfaced the latent test bug.
+        ("PT_BUY", Primitive.SWAP),
         ("PREDICTION_OPEN", Primitive.PREDICTION),
     ],
 )
@@ -468,7 +510,10 @@ async def sqlite_store(tmp_path: Path):
     [
         (LPAccountingEvent, Primitive.LP),
         (LendingAccountingEvent, Primitive.LENDING),
-        (PendleAccountingEvent, Primitive.LENDING),  # PT_BUY → LENDING per taxonomy (VIB-4160 §taxonomy)
+        # PT_BUY → SWAP per taxonomy.py:332-338 (corrected at VIB-4905 — the
+        # prior LENDING parametrization was wrong, passed silently while both
+        # primitives shared version 1).
+        (PendleAccountingEvent, Primitive.SWAP),
         (PerpAccountingEvent, Primitive.PERP),
         (SwapAccountingEvent, Primitive.SWAP),
         (TransferAccountingEvent, Primitive.BRIDGE),

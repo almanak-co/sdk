@@ -2601,6 +2601,11 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.CoinGeckoMarketChartRangeRequest.SerializeToString,
                 response_deserializer=gateway__pb2.CoinGeckoMarketChartRangeResponse.FromString,
                 _registered_method=True)
+        self.CoinGeckoGetOHLCV = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/CoinGeckoGetOHLCV',
+                request_serializer=gateway__pb2.CoinGeckoOHLCVRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CoinGeckoOHLCVResponse.FromString,
+                _registered_method=True)
         self.TheGraphQuery = channel.unary_unary(
                 '/almanak.gateway.proto.IntegrationService/TheGraphQuery',
                 request_serializer=gateway__pb2.TheGraphQueryRequest.SerializeToString,
@@ -2680,6 +2685,14 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CoinGeckoGetOHLCV(self, request, context):
+        """CoinGecko CEX-reference OHLCV (second CEX provider for the cex_primary
+        failover chain — VIB-4847). Price-only candles (no volume).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def TheGraphQuery(self, request, context):
         """TheGraph subgraph query endpoint
         """
@@ -2749,6 +2762,11 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     servicer.CoinGeckoGetMarketChartRange,
                     request_deserializer=gateway__pb2.CoinGeckoMarketChartRangeRequest.FromString,
                     response_serializer=gateway__pb2.CoinGeckoMarketChartRangeResponse.SerializeToString,
+            ),
+            'CoinGeckoGetOHLCV': grpc.unary_unary_rpc_method_handler(
+                    servicer.CoinGeckoGetOHLCV,
+                    request_deserializer=gateway__pb2.CoinGeckoOHLCVRequest.FromString,
+                    response_serializer=gateway__pb2.CoinGeckoOHLCVResponse.SerializeToString,
             ),
             'TheGraphQuery': grpc.unary_unary_rpc_method_handler(
                     servicer.TheGraphQuery,
@@ -2991,6 +3009,33 @@ class IntegrationService(object):
             '/almanak.gateway.proto.IntegrationService/CoinGeckoGetMarketChartRange',
             gateway__pb2.CoinGeckoMarketChartRangeRequest.SerializeToString,
             gateway__pb2.CoinGeckoMarketChartRangeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CoinGeckoGetOHLCV(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.IntegrationService/CoinGeckoGetOHLCV',
+            gateway__pb2.CoinGeckoOHLCVRequest.SerializeToString,
+            gateway__pb2.CoinGeckoOHLCVResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -3546,6 +3591,427 @@ class PoolHistoryService(object):
             '/almanak.gateway.proto.PoolHistoryService/GetPoolHistory',
             gateway__pb2.PoolHistoryRequest.SerializeToString,
             gateway__pb2.PoolHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class RateHistoryServiceStub(object):
+    """=============================================================================
+    RateHistoryService - lending APY / perp funding / DEX TWAP / DEX volume
+    =============================================================================
+
+    VIB-4859 (W7 of epic VIB-4851). Replaces the in-framework rate-data fetch
+    scattered across ``almanak/framework/data/rates/{monitor,history}.py`` and
+    ``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}``
+    which used direct ``httpx`` / ``aiohttp`` / ``Web3(HTTPProvider(...))``
+    egress from inside the strategy container, violating the gateway boundary
+    (``AGENTS.md`` §"Gateway boundary"). All HTTP / GraphQL / Web3 egress moves
+    server-side; framework consumers become thin gRPC clients.
+
+    Four RPCs map to the four sibling capabilities declared in
+    ``almanak.connectors._base.gateway_capabilities``:
+
+    - GetLendingRateCurrent + GetLendingRateHistory
+    → ``GatewayLendingRateHistoryCapability``
+    - GetFundingRateHistory
+    → ``GatewayFundingHistoryCapability``
+    (sibling of the existing live-only ``GetFundingRate`` on
+    ``FundingRateService``)
+    - GetDexTwap + GetDexTwapSeries
+    → ``GatewayDexTwapCapability``
+    - GetDexVolumeHistory
+    → ``GatewayDexVolumeCapability``
+
+    Wire conventions (Decimal as string, Empty != Zero, dual-channel
+    envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+    - status OK + success=true   -> fresh data, returned as envelope.
+    - status OK + success=false  -> framework raises DataSourceUnavailable
+    (no silent zero-fill / no default-rate
+    fallback).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+    DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetLendingRateCurrent = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetLendingRateCurrent',
+                request_serializer=gateway__pb2.GetLendingRateCurrentRequest.SerializeToString,
+                response_deserializer=gateway__pb2.LendingRatePointResponse.FromString,
+                _registered_method=True)
+        self.GetLendingRateHistory = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetLendingRateHistory',
+                request_serializer=gateway__pb2.GetLendingRateHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.LendingRateHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetFundingRateHistory = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetFundingRateHistory',
+                request_serializer=gateway__pb2.GetFundingRateHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.FundingRateHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetDexTwap = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetDexTwap',
+                request_serializer=gateway__pb2.GetDexTwapRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DexTwapPointResponse.FromString,
+                _registered_method=True)
+        self.GetDexTwapSeries = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetDexTwapSeries',
+                request_serializer=gateway__pb2.GetDexTwapSeriesRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DexTwapHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetDexVolumeHistory = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetDexVolumeHistory',
+                request_serializer=gateway__pb2.GetDexVolumeHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DexVolumeHistoryResponse.FromString,
+                _registered_method=True)
+
+
+class RateHistoryServiceServicer(object):
+    """=============================================================================
+    RateHistoryService - lending APY / perp funding / DEX TWAP / DEX volume
+    =============================================================================
+
+    VIB-4859 (W7 of epic VIB-4851). Replaces the in-framework rate-data fetch
+    scattered across ``almanak/framework/data/rates/{monitor,history}.py`` and
+    ``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}``
+    which used direct ``httpx`` / ``aiohttp`` / ``Web3(HTTPProvider(...))``
+    egress from inside the strategy container, violating the gateway boundary
+    (``AGENTS.md`` §"Gateway boundary"). All HTTP / GraphQL / Web3 egress moves
+    server-side; framework consumers become thin gRPC clients.
+
+    Four RPCs map to the four sibling capabilities declared in
+    ``almanak.connectors._base.gateway_capabilities``:
+
+    - GetLendingRateCurrent + GetLendingRateHistory
+    → ``GatewayLendingRateHistoryCapability``
+    - GetFundingRateHistory
+    → ``GatewayFundingHistoryCapability``
+    (sibling of the existing live-only ``GetFundingRate`` on
+    ``FundingRateService``)
+    - GetDexTwap + GetDexTwapSeries
+    → ``GatewayDexTwapCapability``
+    - GetDexVolumeHistory
+    → ``GatewayDexVolumeCapability``
+
+    Wire conventions (Decimal as string, Empty != Zero, dual-channel
+    envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+    - status OK + success=true   -> fresh data, returned as envelope.
+    - status OK + success=false  -> framework raises DataSourceUnavailable
+    (no silent zero-fill / no default-rate
+    fallback).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+    DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+
+    """
+
+    def GetLendingRateCurrent(self, request, context):
+        """Single-point live lending rate (supply or borrow APY + utilisation)
+        for ``(chain, protocol, asset_symbol)``. Replaces
+        ``RateMonitor._fetch_<protocol>_rate_onchain`` ``eth_call`` paths.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLendingRateHistory(self, request, context):
+        """Time-series lending APY / borrow / utilisation. Replaces the
+        TheGraph / DefiLlama subgraph crawls in
+        ``framework/data/rates/history.py`` and the duplicates under
+        ``backtesting/pnl/providers/lending/``.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetFundingRateHistory(self, request, context):
+        """Historical funding-rate series for a perp ``(venue, market)``.
+        Sibling of ``FundingRateService.GetFundingRate`` (live-only).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetDexTwap(self, request, context):
+        """Single TWAP price observation for ``(chain, pool_address)`` over
+        ``[as_of - secs_ago_start, as_of - secs_ago_end]`` (matches the
+        Uniswap V3 ``observe(secondsAgos)`` semantics — secs_ago is
+        measured backwards from current head, or ``as_of_block`` head when
+        pinned). Replaces ``twap.py:_query_observe`` /
+        ``_query_observe_at_block``.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetDexTwapSeries(self, request, context):
+        """TWAP series for ``(chain, pool_address)`` at ``interval_secs``
+        spacing over ``[start_ts, end_ts)``.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetDexVolumeHistory(self, request, context):
+        """Historical DEX trading-volume series for a single pool.
+        Replaces the per-DEX duplicate egress under
+        ``backtesting/pnl/providers/dex/``.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_RateHistoryServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetLendingRateCurrent': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLendingRateCurrent,
+                    request_deserializer=gateway__pb2.GetLendingRateCurrentRequest.FromString,
+                    response_serializer=gateway__pb2.LendingRatePointResponse.SerializeToString,
+            ),
+            'GetLendingRateHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLendingRateHistory,
+                    request_deserializer=gateway__pb2.GetLendingRateHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.LendingRateHistoryResponse.SerializeToString,
+            ),
+            'GetFundingRateHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetFundingRateHistory,
+                    request_deserializer=gateway__pb2.GetFundingRateHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.FundingRateHistoryResponse.SerializeToString,
+            ),
+            'GetDexTwap': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetDexTwap,
+                    request_deserializer=gateway__pb2.GetDexTwapRequest.FromString,
+                    response_serializer=gateway__pb2.DexTwapPointResponse.SerializeToString,
+            ),
+            'GetDexTwapSeries': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetDexTwapSeries,
+                    request_deserializer=gateway__pb2.GetDexTwapSeriesRequest.FromString,
+                    response_serializer=gateway__pb2.DexTwapHistoryResponse.SerializeToString,
+            ),
+            'GetDexVolumeHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetDexVolumeHistory,
+                    request_deserializer=gateway__pb2.GetDexVolumeHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.DexVolumeHistoryResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.RateHistoryService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.RateHistoryService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class RateHistoryService(object):
+    """=============================================================================
+    RateHistoryService - lending APY / perp funding / DEX TWAP / DEX volume
+    =============================================================================
+
+    VIB-4859 (W7 of epic VIB-4851). Replaces the in-framework rate-data fetch
+    scattered across ``almanak/framework/data/rates/{monitor,history}.py`` and
+    ``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}``
+    which used direct ``httpx`` / ``aiohttp`` / ``Web3(HTTPProvider(...))``
+    egress from inside the strategy container, violating the gateway boundary
+    (``AGENTS.md`` §"Gateway boundary"). All HTTP / GraphQL / Web3 egress moves
+    server-side; framework consumers become thin gRPC clients.
+
+    Four RPCs map to the four sibling capabilities declared in
+    ``almanak.connectors._base.gateway_capabilities``:
+
+    - GetLendingRateCurrent + GetLendingRateHistory
+    → ``GatewayLendingRateHistoryCapability``
+    - GetFundingRateHistory
+    → ``GatewayFundingHistoryCapability``
+    (sibling of the existing live-only ``GetFundingRate`` on
+    ``FundingRateService``)
+    - GetDexTwap + GetDexTwapSeries
+    → ``GatewayDexTwapCapability``
+    - GetDexVolumeHistory
+    → ``GatewayDexVolumeCapability``
+
+    Wire conventions (Decimal as string, Empty != Zero, dual-channel
+    envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
+
+    Error semantics — dual-channel wire shape, v1 behavior:
+    - status OK + success=true   -> fresh data, returned as envelope.
+    - status OK + success=false  -> framework raises DataSourceUnavailable
+    (no silent zero-fill / no default-rate
+    fallback).
+    - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+    PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+    DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+
+    """
+
+    @staticmethod
+    def GetLendingRateCurrent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetLendingRateCurrent',
+            gateway__pb2.GetLendingRateCurrentRequest.SerializeToString,
+            gateway__pb2.LendingRatePointResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLendingRateHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetLendingRateHistory',
+            gateway__pb2.GetLendingRateHistoryRequest.SerializeToString,
+            gateway__pb2.LendingRateHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetFundingRateHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetFundingRateHistory',
+            gateway__pb2.GetFundingRateHistoryRequest.SerializeToString,
+            gateway__pb2.FundingRateHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetDexTwap(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetDexTwap',
+            gateway__pb2.GetDexTwapRequest.SerializeToString,
+            gateway__pb2.DexTwapPointResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetDexTwapSeries(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetDexTwapSeries',
+            gateway__pb2.GetDexTwapSeriesRequest.SerializeToString,
+            gateway__pb2.DexTwapHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetDexVolumeHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetDexVolumeHistory',
+            gateway__pb2.GetDexVolumeHistoryRequest.SerializeToString,
+            gateway__pb2.DexVolumeHistoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

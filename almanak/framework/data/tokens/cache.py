@@ -43,6 +43,16 @@ from almanak.framework.data.tokens.models import ResolvedToken
 
 logger = logging.getLogger(__name__)
 
+# Disk-cache schema version. Bump this whenever the static registry's view of
+# an already-cached token changes in a way that would silently serve wrong
+# values to anyone with a warm cache. v2 was introduced by PR #2505 because v1
+# could carry a stale ``bsc:WBTC`` / ``bsc:0x7130d2a1…`` entry recording
+# ``decimals=8`` (off-by-10^10 vs the on-chain BTCB contract's 18 decimals).
+# On load, a version mismatch drops the entire disk cache and forces a re-fill
+# from the corrected static registry. Cheap insurance — cache rebuilds itself
+# from registry hits within a single session.
+DISK_CACHE_SCHEMA_VERSION = 2
+
 
 def cache_key(chain: str, *, address: str | None = None, symbol: str | None = None) -> str:
     """Generate a consistent cache key from chain and identifier.
@@ -172,7 +182,14 @@ class TokenCacheManager:
             return fallback
 
     def _ensure_disk_loaded(self) -> None:
-        """Load disk cache if not already loaded. Must be called with lock held."""
+        """Load disk cache if not already loaded. Must be called with lock held.
+
+        On version mismatch (e.g., a v1 cache file written before PR #2505's
+        BTCB-on-BSC fix), the entire disk cache is dropped and the next
+        ``put()`` call writes a fresh v2 file. We can't selectively migrate
+        because the static registry's authoritative view has changed; the
+        only safe thing is to start over.
+        """
         if self._disk_loaded:
             return
 
@@ -180,6 +197,20 @@ class TokenCacheManager:
             if self._cache_file.exists():
                 with self._cache_file.open("r") as f:
                     data = json.load(f)
+                cached_version = data.get("version")
+                if cached_version != DISK_CACHE_SCHEMA_VERSION:
+                    logger.info(
+                        "token_cache_schema_mismatch",
+                        extra={
+                            "cache_file": str(self._cache_file),
+                            "cached_version": cached_version,
+                            "expected_version": DISK_CACHE_SCHEMA_VERSION,
+                            "action": "drop_disk_cache",
+                            "rationale": "Static registry view changed; stale entries may serve wrong decimals (see PR #2505).",
+                        },
+                    )
+                    self._disk_cache = {}
+                else:
                     self._disk_cache = data.get("tokens", {})
                     logger.debug(f"Loaded {len(self._disk_cache)} tokens from disk cache")
             else:
@@ -197,7 +228,7 @@ class TokenCacheManager:
             with self._cache_file.open("w") as f:
                 json.dump(
                     {
-                        "version": 1,
+                        "version": DISK_CACHE_SCHEMA_VERSION,
                         "updated_at": datetime.now().isoformat(),
                         "tokens": self._disk_cache,
                     },

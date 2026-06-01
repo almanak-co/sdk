@@ -42,7 +42,15 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from almanak.framework.dashboard.plots import plot_macd_indicator, plot_price_with_signals
+from almanak.framework.dashboard.plots import (
+    plot_adx_indicator,
+    plot_atr_indicator,
+    plot_bollinger_bands,
+    plot_cci_indicator,
+    plot_macd_indicator,
+    plot_price_with_signals,
+    plot_stochastic_indicator,
+)
 from almanak.framework.dashboard.plots.base import get_default_config
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
@@ -157,18 +165,216 @@ def _macd_series_from_closes(closes: pd.Series, fast: int, slow: int, signal: in
     return pd.DataFrame({"macd": macd_line, "signal": signal_line, "histogram": histogram})
 
 
+def _high_low_close(price_df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return float ``(high, low, close)`` series from a price history frame.
+
+    ``price`` is the close. When the frame carries no ``high`` / ``low``
+    (caller supplied a close-only history) both fall back to the close —
+    the same close==high==low degradation the framework's own
+    ``ATRCalculator.calculate_atr_from_prices`` documents — so the range
+    indicators still produce a (flattened) series instead of crashing.
+    """
+    close = price_df["price"].astype(float)
+    # A row can carry a valid close but a NaN high/low (bad/missing OHLC field
+    # coerced by ``pd.to_numeric(errors="coerce")``); fill those from the close
+    # so the NaN doesn't poison the rolling window and blank the chart.
+    high = price_df["high"].astype(float).fillna(close) if "high" in price_df.columns else close
+    low = price_df["low"].astype(float).fillna(close) if "low" in price_df.columns else close
+    return high, low, close
+
+
+def _bollinger_bands_from_closes(closes: pd.Series, period: int, std_dev: float) -> pd.DataFrame:
+    """Compute rolling Bollinger Bands (upper / middle / lower) from closes.
+
+    Mirrors ``BollingerBandsCalculator.calculate_bollinger_from_prices``:
+    middle = SMA(period), bands = middle ± std_dev · population-σ (``ddof=0``,
+    dividing by ``period`` to match the calculator's variance). Reimplemented
+    locally rather than imported to keep the dashboard import lean (see
+    ``tests/framework/dashboard/test_imports_lean.py``). Returns an empty
+    ``upper/middle/lower`` frame when there are too few rows.
+    """
+    empty = pd.DataFrame(columns=["upper", "middle", "lower"])
+    if len(closes) < period:
+        return empty
+    floats = closes.astype(float)
+    middle = floats.rolling(period).mean()
+    sigma = floats.rolling(period).std(ddof=0)
+    upper = middle + std_dev * sigma
+    lower = middle - std_dev * sigma
+    return pd.DataFrame({"upper": upper, "middle": middle, "lower": lower})
+
+
+def _cci_series(price_df: pd.DataFrame, period: int) -> pd.Series:
+    """Compute the rolling CCI series from a price history frame.
+
+    Mirrors ``CCICalculator.calculate_cci_from_candles``: typical price
+    ``(H+L+C)/3``, then ``(TP - SMA(TP)) / (0.015 · meanDeviation(TP))`` over
+    each window (mean deviation divides by ``period``). CCI is 0 where the
+    mean deviation is 0.
+    """
+    high, low, close = _high_low_close(price_df)
+    if len(close) < period:
+        return pd.Series(dtype=float, name="cci")
+    typical = (high + low + close) / 3.0
+    sma = typical.rolling(period).mean()
+    mean_dev = typical.rolling(period).apply(lambda w: float(abs(w - w.mean()).mean()), raw=True)
+    cci = (typical - sma) / (0.015 * mean_dev)
+    cci = cci.where(mean_dev != 0, other=0.0)
+    return cci.rename("cci")
+
+
+def _stochastic_series(price_df: pd.DataFrame, k_period: int, d_period: int) -> pd.DataFrame:
+    """Compute the rolling Stochastic %K / %D series from a price history frame.
+
+    Mirrors ``StochasticCalculator.calculate_stochastic_from_candles``:
+    ``%K = 100 · (close - LL) / (HH - LL)`` over ``k_period`` (50 when the
+    range is flat), ``%D = SMA(%K, d_period)``. Returns an empty ``k/d`` frame
+    when there are fewer than ``k_period + d_period - 1`` rows — %D needs that
+    many to yield a single non-NaN value, matching the calculator's
+    ``required`` threshold.
+    """
+    empty = pd.DataFrame(columns=["k", "d"])
+    high, low, close = _high_low_close(price_df)
+    if len(close) < k_period + d_period - 1:
+        return empty
+    lowest_low = low.rolling(k_period).min()
+    highest_high = high.rolling(k_period).max()
+    price_range = highest_high - lowest_low
+    k = 100.0 * (close - lowest_low) / price_range
+    k = k.where(price_range > 0, other=50.0)
+    d = k.rolling(d_period).mean()
+    return pd.DataFrame({"k": k, "d": d})
+
+
+def _atr_series(price_df: pd.DataFrame, period: int) -> pd.Series:
+    """Compute the rolling ATR series via Wilder's smoothing.
+
+    Mirrors ``ATRCalculator.calculate_atr_from_candles``: True Range =
+    ``max(H-L, |H-prevC|, |L-prevC|)``; the seed ATR at index ``period`` is the
+    simple mean of the first ``period`` True Ranges, then Wilder smoothing
+    ``ATR = (priorATR·(period-1) + TR) / period``. NaN before the seed.
+    """
+    high, low, close = _high_low_close(price_df)
+    n = len(close)
+    out = pd.Series([float("nan")] * n, index=price_df.index, name="atr")
+    if n < period + 1:
+        return out
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    tr = true_range.to_numpy()  # tr[0] is NaN (no prior close)
+    values = [float("nan")] * n
+    atr = float(tr[1 : period + 1].mean())
+    values[period] = atr
+    for i in range(period + 1, n):
+        atr = (atr * (period - 1) + tr[i]) / period
+        values[i] = atr
+    return pd.Series(values, index=price_df.index, name="atr")
+
+
+def _adx_series(price_df: pd.DataFrame, period: int) -> pd.DataFrame:
+    """Compute the rolling ADX / +DI / -DI series via Wilder's smoothing.
+
+    Mirrors ``ADXCalculator.calculate_adx_from_candles``: directional movement
+    and True Range are Wilder-smoothed into +DI / -DI; ``DX = 100·|+DI - -DI| /
+    (+DI + -DI)``; ADX seeds at the mean of the first ``period`` DX values then
+    Wilder-smooths. The first ADX lands at index ``2·period - 1``. Returns an
+    empty ``adx/plus_di/minus_di`` frame when there are too few rows.
+    """
+    empty = pd.DataFrame(columns=["adx", "plus_di", "minus_di"])
+    high, low, close = _high_low_close(price_df)
+    n = len(close)
+    if n < period * 2:
+        return empty
+
+    h = high.to_numpy()
+    low_arr = low.to_numpy()
+    c = close.to_numpy()
+    tr_values, plus_dm, minus_dm = [], [], []
+    for i in range(1, n):
+        high_diff = h[i] - h[i - 1]
+        low_diff = low_arr[i - 1] - low_arr[i]
+        plus_dm.append(high_diff if high_diff > low_diff and high_diff > 0 else 0.0)
+        minus_dm.append(low_diff if low_diff > high_diff and low_diff > 0 else 0.0)
+        tr_values.append(max(h[i] - low_arr[i], abs(h[i] - c[i - 1]), abs(low_arr[i] - c[i - 1])))
+
+    tr_smooth = sum(tr_values[:period])
+    plus_smooth = sum(plus_dm[:period])
+    minus_smooth = sum(minus_dm[:period])
+
+    plus_di_series = [float("nan")] * n
+    minus_di_series = [float("nan")] * n
+    adx_series = [float("nan")] * n
+
+    def _di(smooth: float) -> float:
+        return 100.0 * (smooth / tr_smooth) if tr_smooth > 0 else 0.0
+
+    def _dx(plus: float, minus: float) -> float:
+        denom = plus + minus
+        return 100.0 * abs(plus - minus) / denom if denom > 0 else 0.0
+
+    # First smoothed DI/DX correspond to candle index ``period`` (tr_values[k]
+    # maps to candle k+1, so the first ``period`` TRs cover candles 1..period).
+    plus_di = _di(plus_smooth)
+    minus_di = _di(minus_smooth)
+    plus_di_series[period] = plus_di
+    minus_di_series[period] = minus_di
+    dx_values = [_dx(plus_di, minus_di)]
+
+    for idx in range(period, len(tr_values)):
+        tr_smooth = tr_smooth - (tr_smooth / period) + tr_values[idx]
+        plus_smooth = plus_smooth - (plus_smooth / period) + plus_dm[idx]
+        minus_smooth = minus_smooth - (minus_smooth / period) + minus_dm[idx]
+        plus_di = _di(plus_smooth)
+        minus_di = _di(minus_smooth)
+        candle_idx = idx + 1
+        plus_di_series[candle_idx] = plus_di
+        minus_di_series[candle_idx] = minus_di
+        dx_values.append(_dx(plus_di, minus_di))
+
+    # ADX seeds at the mean of the first ``period`` DX values (dx_values[j]
+    # maps to candle index ``period + j``), then Wilder-smooths.
+    adx = sum(dx_values[:period]) / period
+    adx_series[period * 2 - 1] = adx
+    for j in range(period, len(dx_values)):
+        adx = (adx * (period - 1) + dx_values[j]) / period
+        adx_series[period + j] = adx
+
+    return pd.DataFrame(
+        {"adx": adx_series, "plus_di": plus_di_series, "minus_di": minus_di_series},
+        index=price_df.index,
+    )
+
+
 def _ohlcv_to_price_history(ohlcv: list[dict[str, Any]]) -> pd.DataFrame:
-    """Normalise an api_client.get_ohlcv() payload into ``{time, price}`` rows."""
+    """Normalise an api_client.get_ohlcv() payload into ``{time, price}`` rows.
+
+    ``high`` / ``low`` are carried through as extra columns when the payload
+    provides them — the OHLC-range indicators (CCI, Stochastic, ATR, ADX)
+    need them, while close-only indicators (RSI, MACD, Bollinger) just read
+    ``price``. They are dropped silently when absent so callers that supply a
+    close-only price history keep working.
+    """
+    base_cols = ["time", "price"]
     if not ohlcv:
-        return pd.DataFrame(columns=["time", "price"])
+        return pd.DataFrame(columns=base_cols)
     df = pd.DataFrame(ohlcv)
     if "timestamp" not in df.columns or "close" not in df.columns:
-        return pd.DataFrame(columns=["time", "price"])
+        return pd.DataFrame(columns=base_cols)
     df = df.rename(columns={"timestamp": "time", "close": "price"})
     df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df = df.dropna(subset=["time", "price"]).sort_values("time").reset_index(drop=True)
-    return df[["time", "price"]]
+
+    keep = list(base_cols)
+    for col in ("high", "low"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            keep.append(col)
+
+    df = df.dropna(subset=base_cols).sort_values("time").reset_index(drop=True)
+    return df[keep]
 
 
 def _trade_rows_to_signals(
@@ -340,56 +546,163 @@ def _strategy_start_time(api_client: Any) -> datetime | pd.Timestamp | None:
     return parsed.min()
 
 
+def _time_indexed(series_or_frame: pd.Series | pd.DataFrame, price_df: pd.DataFrame) -> pd.Series | pd.DataFrame:
+    """Re-index a positionally-aligned series/frame onto the price-history time axis.
+
+    The compute helpers return values aligned to ``price_df`` row order; the
+    renderers consume them with a ``DatetimeIndex`` x-axis, so swap the index
+    here in one place.
+    """
+    out = series_or_frame.copy()
+    out.index = pd.DatetimeIndex(price_df["time"])
+    return out
+
+
+def _apply_rsi(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``rsi_history`` (Series) + latest scalar — close-only."""
+    rsi = _time_indexed(_rsi_series_from_closes(price_df["price"], config.indicator_period), price_df).dropna()
+    if rsi.empty:
+        return
+    result["rsi_history"] = rsi.rename("rsi")
+    result.setdefault("rsi_value", float(rsi.iloc[-1]))
+    result.setdefault("rsi", result["rsi_value"])
+
+
+def _apply_macd(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``macd_data`` (macd/signal/histogram frame) + latest scalars — close-only."""
+    periods = list(config.secondary_periods or [])
+    slow = int(periods[0]) if len(periods) > 0 else 26
+    signal_period = int(periods[1]) if len(periods) > 1 else 9
+    macd_df = _macd_series_from_closes(price_df["price"], int(config.indicator_period), slow, signal_period)
+    if macd_df.empty:
+        return
+    macd_df = _time_indexed(macd_df, price_df).dropna(subset=["macd"])
+    if macd_df.empty:
+        return
+    result["macd_data"] = macd_df
+    latest = macd_df.iloc[-1]
+    result.setdefault("macd_value", float(latest["macd"]))
+    result.setdefault("signal_line", float(latest["signal"]))
+    result.setdefault("histogram", float(latest["histogram"]))
+    result.setdefault("macd", result["macd_value"])
+
+
+def _apply_bollinger(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``bollinger_data`` (upper/middle/lower frame) — close-only.
+
+    ``get_bollinger_config`` encodes ``std_dev`` as ``secondary_periods=[std_dev*10]``;
+    decode it back here.
+    """
+    periods = list(config.secondary_periods or [])
+    std_dev = (periods[0] / 10.0) if periods else 2.0
+    bands = _bollinger_bands_from_closes(price_df["price"], int(config.indicator_period), std_dev)
+    if bands.empty:
+        return
+    bands = _time_indexed(bands, price_df).dropna()
+    if bands.empty:
+        return
+    result["bollinger_data"] = bands
+    result.setdefault("bollinger_value", float(bands["middle"].iloc[-1]))
+    result.setdefault("bollinger", result["bollinger_value"])
+
+
+def _apply_cci(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``cci_history`` (Series) — needs OHLC high/low (degrades to close-only)."""
+    cci = _cci_series(price_df, int(config.indicator_period))
+    if cci.empty:
+        return
+    cci = _time_indexed(cci, price_df).dropna()
+    if cci.empty:
+        return
+    result["cci_history"] = cci.rename("cci")
+    result.setdefault("cci_value", float(cci.iloc[-1]))
+    result.setdefault("cci", result["cci_value"])
+
+
+def _apply_stochastic(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``stochastic_data`` (k/d frame) — needs OHLC high/low (degrades to close-only).
+
+    ``get_stochastic_config`` encodes ``secondary_periods=[slow_k, slow_d]``. The
+    framework's ``StochasticCalculator`` is a *fast* stochastic — raw %K over
+    ``k_period`` then ``%D = SMA(%K, slow_d)``, with no ``slow_k`` "slowing" of
+    %K. We mirror that exactly (``k_period = indicator_period``, ``d_period =
+    slow_d``) so the chart matches the strategy's own signals; ``slow_k`` is
+    intentionally not applied — wiring it would diverge the dashboard from the
+    calculator the strategy actually runs.
+    """
+    periods = list(config.secondary_periods or [])
+    d_period = int(periods[1]) if len(periods) > 1 else 3
+    stoch = _stochastic_series(price_df, int(config.indicator_period), d_period)
+    if stoch.empty:
+        return
+    stoch = _time_indexed(stoch, price_df).dropna()
+    if stoch.empty:
+        return
+    result["stochastic_data"] = stoch
+    result.setdefault("stochastic_value", float(stoch["k"].iloc[-1]))
+    result.setdefault("stochastic", result["stochastic_value"])
+
+
+def _apply_atr(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``atr_history`` (Series) — needs OHLC high/low (degrades to close-only)."""
+    atr = _atr_series(price_df, int(config.indicator_period))
+    if atr.empty:
+        return
+    atr = _time_indexed(atr, price_df).dropna()
+    if atr.empty:
+        return
+    result["atr_history"] = atr.rename("atr")
+    result.setdefault("atr_value", float(atr.iloc[-1]))
+    result.setdefault("atr", result["atr_value"])
+
+
+def _apply_adx(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
+    """Emit ``adx_data`` (adx/plus_di/minus_di frame) — needs OHLC high/low (degrades to close-only)."""
+    adx = _adx_series(price_df, int(config.indicator_period))
+    if adx.empty:
+        return
+    adx = _time_indexed(adx, price_df).dropna(subset=["adx"])
+    if adx.empty:
+        return
+    result["adx_data"] = adx
+    result.setdefault("adx_value", float(adx["adx"].iloc[-1]))
+    result.setdefault("adx", result["adx_value"])
+
+
+# Indicator key (``config.indicator_name.lower()``) → series-compute handler.
+# Each handler populates ``result`` in place with a time-indexed series/frame
+# plus a latest scalar; the dispatcher wraps them in a single soft-fail guard.
+_INDICATOR_HANDLERS: dict[str, Callable[[dict[str, Any], pd.DataFrame, TADashboardConfig], None]] = {
+    "rsi": _apply_rsi,
+    "macd": _apply_macd,
+    "bollinger": _apply_bollinger,
+    "cci": _apply_cci,
+    "stochastic": _apply_stochastic,
+    "atr": _apply_atr,
+    "adx": _apply_adx,
+}
+
+
 def _apply_indicator_series(result: dict[str, Any], price_df: pd.DataFrame, config: TADashboardConfig) -> None:
-    """Compute the indicator series (RSI or MACD) into ``result`` in place.
+    """Compute the configured indicator's chart series into ``result`` in place.
 
     No-op when the caller already supplied the series, when there's no price
-    data, or when the indicator isn't one we compute client-side. RSI emits a
-    ``rsi_history`` Series; MACD emits a ``macd_data`` frame with
-    ``macd`` / ``signal`` / ``histogram`` columns indexed by time. Both degrade
-    silently on error so the dashboard still renders price + signals.
+    data, or when the indicator isn't one we compute client-side. Dispatches to
+    a per-indicator handler (see :data:`_INDICATOR_HANDLERS`) which emits a
+    time-indexed ``<key>_history`` Series or ``<key>_data`` frame plus a latest
+    scalar. Degrades silently on error so the dashboard still renders price +
+    signals.
     """
     indicator_key = config.indicator_name.lower()
-    history_key = f"{indicator_key}_history"
-    data_key = f"{indicator_key}_data"
-    if history_key in result or data_key in result or price_df.empty:
+    if f"{indicator_key}_history" in result or f"{indicator_key}_data" in result or price_df.empty:
         return
-
-    if indicator_key == "rsi":
-        try:
-            rsi = _rsi_series_from_closes(price_df["price"], config.indicator_period)
-            # The renderer's RSI subplot consumes `rsi_history` as a pandas
-            # Series indexed by time, so emit a Series (renderer reads
-            # `rsi_series.values` without further coercion).
-            history_series = pd.Series(rsi.values, index=pd.DatetimeIndex(price_df["time"]), name="rsi").dropna()
-            if not history_series.empty:
-                result[history_key] = history_series
-                # Surface the latest value to the metric row too.
-                result.setdefault(f"{indicator_key}_value", float(history_series.iloc[-1]))
-                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
-        except Exception:  # noqa: BLE001
-            logger.debug("RSI series computation failed", exc_info=True)
-
-    elif indicator_key == "macd":
-        try:
-            periods = list(config.secondary_periods or [])
-            slow = int(periods[0]) if len(periods) > 0 else 26
-            signal_period = int(periods[1]) if len(periods) > 1 else 9
-            macd_df = _macd_series_from_closes(price_df["price"], int(config.indicator_period), slow, signal_period)
-            if not macd_df.empty:
-                macd_df.index = pd.DatetimeIndex(price_df["time"])
-                macd_df = macd_df.dropna(subset=["macd"])
-            if not macd_df.empty:
-                # The renderer's MACD branch consumes `macd_data` as a frame
-                # with `macd` / `signal` / `histogram` columns indexed by time.
-                result[data_key] = macd_df
-                latest = macd_df.iloc[-1]
-                result.setdefault(f"{indicator_key}_value", float(latest["macd"]))
-                result.setdefault("signal_line", float(latest["signal"]))
-                result.setdefault("histogram", float(latest["histogram"]))
-                result.setdefault(indicator_key, result[f"{indicator_key}_value"])
-        except Exception:  # noqa: BLE001
-            logger.debug("MACD series computation failed", exc_info=True)
+    handler = _INDICATOR_HANDLERS.get(indicator_key)
+    if handler is None:
+        return
+    try:
+        handler(result, price_df, config)
+    except Exception:  # noqa: BLE001
+        logger.debug("%s indicator series computation failed", indicator_key, exc_info=True)
 
 
 def prepare_ta_session_state(
@@ -780,9 +1093,10 @@ def _render_charts_section(  # noqa: C901
 
         st.plotly_chart(fig, use_container_width=True)
 
-    elif config.indicator_name.upper() == "MACD" and _has_indicator_data(indicator_data):
-        # MACD needs line + signal + histogram, not the generic single line.
-        _render_macd_charts(price_df, buy_df, sell_df, indicator_data)
+    elif _has_indicator_data(indicator_data) and config.indicator_name.upper() in _DEDICATED_RENDERERS:
+        # MACD/Bollinger/CCI/Stochastic/ATR/ADX each need a purpose-built chart
+        # (multi-line bands, oscillator zones, …), not the generic single line.
+        _DEDICATED_RENDERERS[config.indicator_name.upper()](price_df, buy_df, sell_df, indicator_data, config)
 
     else:
         # For other indicators, use separate charts
@@ -826,13 +1140,12 @@ def _render_charts_section(  # noqa: C901
             st.plotly_chart(fig_indicator, use_container_width=True)
 
 
-def _render_macd_charts(
+def _render_price_signals(
     price_df: pd.DataFrame,
     buy_df: pd.DataFrame | None,
     sell_df: pd.DataFrame | None,
-    macd_data: Any,
 ) -> None:
-    """Render the price+signals chart and the MACD line/signal/histogram chart."""
+    """Render the shared price-with-buy/sell-signals chart."""
     fig_price = plot_price_with_signals(
         price_data=price_df,
         buy_signals=buy_df,
@@ -841,6 +1154,26 @@ def _render_macd_charts(
     )
     st.plotly_chart(fig_price, use_container_width=True)
 
+
+def _as_indicator_series(data: Any) -> pd.Series | None:
+    """Coerce a single-line indicator payload (Series or list of pairs) to a Series."""
+    if isinstance(data, pd.Series):
+        return data if not data.empty else None
+    if isinstance(data, list) and data:
+        times = [item[0] for item in data]
+        values = [item[1] for item in data]
+        return pd.Series(values, index=pd.to_datetime(times))
+    return None
+
+
+def _render_macd_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    macd_data: Any,
+) -> None:
+    """Render the price+signals chart and the MACD line/signal/histogram chart."""
+    _render_price_signals(price_df, buy_df, sell_df)
     if isinstance(macd_data, pd.DataFrame) and not macd_data.empty:
         fig_macd = plot_macd_indicator(
             macd=macd_data["macd"],
@@ -849,6 +1182,123 @@ def _render_macd_charts(
             time_index=macd_data.index,
         )
         st.plotly_chart(fig_macd, use_container_width=True)
+
+
+def _render_bollinger_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Render price+signals and the upper/middle/lower Bollinger Bands chart."""
+    _render_price_signals(price_df, buy_df, sell_df)
+    if not (isinstance(data, pd.DataFrame) and not data.empty):
+        return
+    price_aligned = price_df.set_index("time")["price"].reindex(data.index)
+    fig = plot_bollinger_bands(
+        price_data=price_aligned,
+        upper_band=data["upper"],
+        middle_band=data["middle"],
+        lower_band=data["lower"],
+        time_index=data.index,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_cci_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Render price+signals and the CCI oscillator chart."""
+    _render_price_signals(price_df, buy_df, sell_df)
+    series = _as_indicator_series(data)
+    if series is None:
+        return
+    fig = plot_cci_indicator(
+        cci_data=series,
+        time_index=series.index,
+        overbought=config.upper_threshold if config.upper_threshold is not None else 100,
+        oversold=config.lower_threshold if config.lower_threshold is not None else -100,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_stochastic_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Render price+signals and the Stochastic %K/%D oscillator chart."""
+    _render_price_signals(price_df, buy_df, sell_df)
+    if not (isinstance(data, pd.DataFrame) and not data.empty):
+        return
+    fig = plot_stochastic_indicator(
+        stoch_k=data["k"],
+        stoch_d=data["d"],
+        time_index=data.index,
+        overbought=config.upper_threshold if config.upper_threshold is not None else 80,
+        oversold=config.lower_threshold if config.lower_threshold is not None else 20,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_atr_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Render price+signals and the ATR volatility chart."""
+    _render_price_signals(price_df, buy_df, sell_df)
+    series = _as_indicator_series(data)
+    if series is None:
+        return
+    fig = plot_atr_indicator(atr_data=series, time_index=series.index)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_adx_charts(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Render price+signals and the ADX trend-strength chart (ADX + DI lines)."""
+    _render_price_signals(price_df, buy_df, sell_df)
+    if not (isinstance(data, pd.DataFrame) and not data.empty):
+        return
+    fig = plot_adx_indicator(
+        adx_data=data["adx"],
+        plus_di=data["plus_di"],
+        minus_di=data["minus_di"],
+        time_index=data.index,
+        trend_threshold=config.lower_threshold if config.lower_threshold is not None else 25,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# Uppercased ``config.indicator_name`` → dedicated chart renderer. RSI is
+# handled inline in ``_render_charts_section`` (combined price+RSI subplot);
+# everything here gets a price+signals chart plus its purpose-built indicator
+# chart, reusing the ``almanak.framework.dashboard.plots`` primitives.
+_DEDICATED_RENDERERS: dict[
+    str, Callable[[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, Any, TADashboardConfig], None]
+] = {
+    "MACD": lambda p, b, s, d, _c: _render_macd_charts(p, b, s, d),
+    "BOLLINGER": _render_bollinger_charts,
+    "CCI": _render_cci_charts,
+    "STOCHASTIC": _render_stochastic_charts,
+    "ATR": _render_atr_charts,
+    "ADX": _render_adx_charts,
+}
 
 
 def _render_signal_status(

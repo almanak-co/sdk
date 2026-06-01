@@ -1,0 +1,32 @@
+{
+    "chain": "polygon",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+            "chain": "polygon",
+            "amount": "0.005",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+            "chain": "polygon",
+            "amount": "10",
+            "amount_type": "usd"
+        }
+    ],
+    "trade_size_usd": 3,
+    "rsi_period": 14,
+    "rsi_oversold": 40,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "protocol": "uniswap_v3",
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "anvil_funding": {
+        "MATIC": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

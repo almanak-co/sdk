@@ -96,6 +96,7 @@ from almanak.framework.dashboard.plots.prediction_plots import (
 from almanak.framework.dashboard.plots.ta_plots import (
     TAMetrics,
     calculate_ta_metrics,
+    plot_adx_indicator,
     plot_atr_indicator,
     plot_bollinger_bands,
     plot_cci_indicator,
@@ -157,6 +158,7 @@ __all__ = [
     "plot_probability_over_time",
     # TA plots
     "calculate_ta_metrics",
+    "plot_adx_indicator",
     "plot_atr_indicator",
     "plot_bollinger_bands",
     "plot_cci_indicator",

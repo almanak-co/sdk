@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.core.contracts import UNISWAP_V4
+from .addresses import UNISWAP_V4
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient

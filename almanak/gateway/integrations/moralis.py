@@ -19,6 +19,8 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
@@ -88,7 +90,8 @@ class MoralisIntegration(BaseIntegration):
 
     def _is_solana(self, chain: str) -> bool:
         """Check if the chain is Solana."""
-        return chain.lower() == "solana"
+        descriptor = ChainRegistry.try_resolve(chain)
+        return descriptor is not None and descriptor.family is ChainFamily.SOLANA
 
     def _get_chain_slug(self, chain: str) -> str | None:
         """Get the Moralis slug for an EVM chain. Returns None if unsupported."""

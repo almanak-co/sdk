@@ -147,13 +147,36 @@ def _register_once() -> None:
         return
     _registered = True
     try:
-        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.connectors._strategy_base.registry import (
+            MatrixEntry,
+            register_connector,
+        )
+
+        # Import CHAIN_MAPPING locally so the matrix coverage tracks the
+        # connector's own data without exposing the literal chain list
+        # in the manifest. ``CHAIN_MAPPING`` holds 10 LiFi-supported
+        # chains (bsc encoded as ``"bsc"``, no further normalisation
+        # needed).
+        from almanak.connectors.lifi.client import CHAIN_MAPPING as _LIFI_CHAINS
         from almanak.framework.intents.vocabulary import IntentType
 
         register_connector(
             name="lifi",
             intents=(IntentType.SWAP, IntentType.BRIDGE),
             chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
+            # Matrix output — LiFi is an aggregator (cross-chain quote
+            # router with bridge fallback). Surfaces under the
+            # ``aggregator`` category, NOT ``swap``/``bridge``, so Edge /
+            # agent classifiers don't pick it as a primary venue for
+            # either. Chains come from the connector's own
+            # ``CHAIN_MAPPING`` (10), not this manifest's 7. VIB-4856.
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="lifi",
+                    category="aggregator",
+                    chains=frozenset(_LIFI_CHAINS.keys()),
+                ),
+            ),
         )
     except Exception:
         _registered = False

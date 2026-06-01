@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from almanak.framework.data.indicators.rsi import RSICalculator
     from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
@@ -130,21 +131,38 @@ CHAIN_ID_ETHEREUM = 1
 CHAIN_ID_ARBITRUM = 42161
 CHAIN_ID_BASE = 8453
 
-# Reverse mapping from chain_id (int) -> chain name (str) for TokenResolver calls
-_CHAIN_ID_TO_NAME: dict[int, str] = {
-    1: "ethereum",
-    42161: "arbitrum",
-    10: "optimism",
-    8453: "base",
-    43114: "avalanche",
-    137: "polygon",
-    56: "bsc",
-    146: "sonic",
-    9745: "plasma",
-    81457: "blast",
-    5000: "mantle",
-    80094: "berachain",
-}
+
+def _chain_name_for_id(chain_id: int) -> str | None:
+    """Resolve an EIP-155 chain id to its canonical chain name for TokenResolver.
+
+    Sources the id->name mapping from ``ChainRegistry`` (the single source of
+    truth, VIB-4801) rather than a local hand-maintained dict. Preserves the
+    previous ``dict.get(chain_id)`` contract exactly: an unknown id returns
+    ``None`` so callers fall through to the local ``TOKEN_DECIMALS`` registry
+    instead of raising.
+    """
+    try:
+        return ChainRegistry.by_id(chain_id).name
+    except ValueError:
+        return None
+
+
+# Paper-engine price-source allowlist: the chains for which the engine wires up
+# the on-chain Chainlink / DEX-TWAP price providers.
+#
+# This is a deliberate engine-level *subset*, not "every chain a provider could
+# serve": DEXTWAPDataProvider supports exactly these 6, while
+# ChainlinkDataProvider additionally has feeds for bsc/linea/sonic that the
+# engine intentionally does not enable here (enabling them would change
+# paper-mode price-source selection — and therefore PnL — on those chains).
+# VIB-4861 collapsed two duplicated inline identity-map dicts (one per provider)
+# into this single named constant; the membership semantics are byte-for-byte
+# the same as the former per-provider ``identity_map.get(config.chain)`` lookup.
+# The names are resolved through ChainRegistry at import so a typo / rename
+# fails loudly at startup instead of silently disabling a price source.
+_PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(
+    ChainRegistry.resolve(_name).name for _name in ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche")
+)
 
 
 def _get_resolver():
@@ -294,7 +312,7 @@ def get_token_decimals(chain_id: int, token_address: str) -> int | None:
     normalized_address = token_address.lower()
 
     # Try TokenResolver first
-    chain_name = _CHAIN_ID_TO_NAME.get(chain_id)
+    chain_name = _chain_name_for_id(chain_id)
     if chain_name:
         resolver = _get_resolver()
         if resolver:
@@ -415,7 +433,7 @@ async def get_token_decimals_with_fallback(
         return 18
 
     # 2. Try TokenResolver first (unified resolution)
-    chain_name = _CHAIN_ID_TO_NAME.get(chain_id)
+    chain_name = _chain_name_for_id(chain_id)
     if chain_name:
         resolver = _get_resolver()
         if resolver:
@@ -2757,33 +2775,31 @@ class PaperTrader:
         return int(slippage)
 
     def _get_intent_protocol(self, intent: Any) -> str:
-        """Extract the protocol from an intent object.
+        """Extract the protocol label for an intent's ``PaperTrade.protocol`` tag.
 
-        Args:
-            intent: Intent object
+        The label is read directly from whichever protocol-bearing attribute the
+        intent carries (``protocol`` / ``protocol_name`` / ``connector`` /
+        ``adapter``); intents that name a protocol populate one of these already
+        (e.g. ``SwapIntent(protocol="enso")``, ``LPIntent`` defaulting to
+        ``"uniswap_v3"``, ``OpenPositionIntent`` defaulting to ``"gmx_v2"``).
+        Intents that name no protocol fall back to ``"default"``.
 
-        Returns:
-            Protocol name string
+        This is a reporting tag only — it drives no simulation, accounting, or
+        dispatch (those run on the real Anvil fork via the Orchestrator).
+
+        VIB-4861: dropped the former per-protocol class-name heuristic
+        (``"uniswap" in class_name -> "uniswap_v3"`` …). It was dead code: every
+        intent class is generically named (``SwapIntent``, ``LPIntent``,
+        ``OpenPositionIntent``, ``SupplyIntent``, ``BridgeIntent``, …) — none
+        contains a protocol token, so those branches could never match and every
+        reachable intent already resolved via the attribute loop or fell through
+        to ``"default"``. Removing them is byte-identical and drops the
+        hard-coded protocol-name literals.
         """
-        # Check for protocol attribute
-        for attr in ["protocol", "protocol_name", "connector", "adapter"]:
-            if hasattr(intent, attr):
-                value = getattr(intent, attr)
-                if value and isinstance(value, str):
-                    return value.lower()
-
-        # Infer from class name
-        class_name = intent.__class__.__name__.lower()
-        if "uniswap" in class_name:
-            return "uniswap_v3"
-        if "gmx" in class_name:
-            return "gmx"
-        if "aave" in class_name:
-            return "aave_v3"
-        if "hyperliquid" in class_name:
-            return "hyperliquid"
-        if "across" in class_name or "stargate" in class_name:
-            return "bridge"
+        for attr in ("protocol", "protocol_name", "connector", "adapter"):
+            value = getattr(intent, attr, None)
+            if value and isinstance(value, str):
+                return value.lower()
 
         return "default"
 
@@ -2877,16 +2893,19 @@ class PaperTrader:
         # available after fork initialization via self.config.rpc_url
         if "chainlink" in self._price_source_order:
             try:
-                # Map chain name to Chainlink-supported chain identifier
-                chain_mapping = {
-                    "ethereum": "ethereum",
-                    "arbitrum": "arbitrum",
-                    "base": "base",
-                    "optimism": "optimism",
-                    "polygon": "polygon",
-                    "avalanche": "avalanche",
-                }
-                chainlink_chain = chain_mapping.get(self.config.chain)
+                # config.chain is already the canonical lowercase chain name.
+                # Gate on the paper-engine price-source allowlist (VIB-4861)
+                # instead of a duplicated inline chain-name dict. Unsupported
+                # chains yield None and skip to the next source, as before.
+                #
+                # NOTE: this is the historical 6-chain allowlist, which is a
+                # deliberate *subset* of ChainlinkDataProvider._SUPPORTED_CHAINS
+                # (the provider also has feeds for bsc/linea/sonic). Gating on
+                # the provider's full set would change paper-mode price-source
+                # selection on those chains, so the engine keeps its own subset.
+                # Branch-free membership gate (set intersection) keeps this hot
+                # init path's cyclomatic complexity at its pre-VIB-4861 level.
+                chainlink_chain = next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)
                 if chainlink_chain:
                     self._chainlink_provider = ChainlinkDataProvider(
                         chain=chainlink_chain,
@@ -2917,16 +2936,13 @@ class PaperTrader:
         # Initialize TWAP provider if needed
         if "twap" in self._price_source_order:
             try:
-                # Map chain name to TWAP-supported chain identifier
-                twap_chain_mapping = {
-                    "ethereum": "ethereum",
-                    "arbitrum": "arbitrum",
-                    "base": "base",
-                    "optimism": "optimism",
-                    "polygon": "polygon",
-                    "avalanche": "avalanche",
-                }
-                twap_chain = twap_chain_mapping.get(self.config.chain)
+                # config.chain is already the canonical lowercase chain name.
+                # Gate on the shared paper-engine price-source allowlist
+                # (VIB-4861) instead of a duplicated inline chain-name dict.
+                # Unsupported chains yield None and skip to the next source.
+                # Branch-free membership gate (set intersection) keeps this hot
+                # init path's cyclomatic complexity at its pre-VIB-4861 level.
+                twap_chain = next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)
                 if twap_chain:
                     self._twap_provider = DEXTWAPDataProvider(
                         chain=twap_chain,

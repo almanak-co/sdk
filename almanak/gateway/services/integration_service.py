@@ -612,6 +612,77 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.CoinGeckoMarketChartRangeResponse(success=False, error=str(e))
 
+    async def CoinGeckoGetOHLCV(
+        self,
+        request: gateway_pb2.CoinGeckoOHLCVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.CoinGeckoOHLCVResponse:
+        """Get CEX-reference OHLCV candles from CoinGecko (VIB-4847).
+
+        Second CEX-capable OHLCV provider, used as the ``cex_primary``
+        failover when the Binance staleness guard rejects a stale kline
+        response. Candles are price-only (no volume). Reuses the shared
+        :class:`CoinGeckoIntegration` for egress + rate limiting.
+
+        Args:
+            request: OHLCV request with token, timeframe, limit, quote.
+            context: gRPC context.
+
+        Returns:
+            CoinGeckoOHLCVResponse with list of candles.
+        """
+        await self._ensure_initialized()
+
+        if not request.token or not request.token.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("token is required and cannot be empty")
+            return gateway_pb2.CoinGeckoOHLCVResponse()
+
+        req_timeframe = request.timeframe or "1h"
+        req_limit = request.limit or 100
+        if req_limit < 1 or req_limit > 1000:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"limit must be between 1 and 1000, got {req_limit}")
+            return gateway_pb2.CoinGeckoOHLCVResponse()
+
+        try:
+            from almanak.gateway.data.ohlcv.coingecko_provider import CoinGeckoOHLCVProvider
+
+            assert self._coingecko is not None
+            provider = CoinGeckoOHLCVProvider(integration=self._coingecko)
+
+            start_time_metric = time.monotonic()
+            candles = await provider.get_ohlcv(
+                token=request.token.strip(),
+                quote=request.quote or "USD",
+                timeframe=req_timeframe,
+                limit=req_limit,
+            )
+            latency = time.monotonic() - start_time_metric
+            record_integration_request("coingecko", "get_ohlcv")
+            record_integration_latency("coingecko", "get_ohlcv", latency)
+
+            candle_messages = [
+                gateway_pb2.CoinGeckoOHLCVCandle(
+                    timestamp=int(c.timestamp.timestamp()),
+                    open=str(c.open),
+                    high=str(c.high),
+                    low=str(c.low),
+                    close=str(c.close),
+                )
+                for c in candles
+            ]
+            return gateway_pb2.CoinGeckoOHLCVResponse(candles=candle_messages)
+
+        except ValueError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.CoinGeckoOHLCVResponse()
+        except Exception as e:
+            logger.exception("CoinGeckoGetOHLCV failed for %s", request.token)
+            set_error_from_upstream(context, e, upstream="coingecko")
+            return gateway_pb2.CoinGeckoOHLCVResponse()
+
     # =========================================================================
     # TheGraph endpoints
     # =========================================================================
@@ -741,6 +812,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                     limit=req_limit,
                     chain=request.chain.strip(),
                     pool_address=request.pool_address or None,
+                    include_empty_intervals=request.include_empty_intervals,
                 )
 
             latency = time.monotonic() - start_time_metric

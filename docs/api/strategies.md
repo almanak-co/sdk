@@ -260,8 +260,12 @@ class MyLPStrategy(IntentStrategy):
                 protocol_params={"position_id": self._position_id},
             )
         return Intent.lp_open(
-            token_a="WETH", token_b="USDC",
-            amount_usd=Decimal("1000"), protocol="uniswap_v3",
+            pool="WETH/USDC/3000",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1000"),
+            range_lower=Decimal("1800"),
+            range_upper=Decimal("2200"),
+            protocol="uniswap_v3",
         )
 
     def on_intent_executed(self, intent, success: bool, result):

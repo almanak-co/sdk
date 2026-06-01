@@ -53,7 +53,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
-from almanak.core.contracts import AAVE_V3
+from .addresses import AAVE_V3
 
 logger = logging.getLogger(__name__)
 

@@ -25,6 +25,9 @@ from urllib.parse import quote_plus
 
 import aiohttp
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+
 from .models import BoostedToken, DexPair, parse_boosted_token, parse_pair
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,21 @@ BASE_URL = "https://api.dexscreener.com"
 # Rate limit windows (seconds per request)
 _PAIR_RATE_LIMIT = 60 / 300  # 300 req/min -> 0.2s
 _PROFILE_RATE_LIMIT = 60 / 60  # 60 req/min -> 1.0s
+
+
+def _is_solana_chain_id(chain_id: str | None) -> bool:
+    """Return True when a DexScreener ``chain_id`` resolves to the SOLANA family.
+
+    DexScreener uses canonical lowercase chain names that round-trip through
+    :class:`ChainRegistry`. Unknown / missing ``chain_id`` values fall
+    through to ``False`` — they cannot be Solana, so the legacy
+    ``p.chain_id == "solana"`` contract is preserved (and a malformed
+    upstream payload with no ``chainId`` can never raise from here).
+    """
+    if not chain_id:
+        return False
+    descriptor = ChainRegistry.try_resolve(chain_id)
+    return descriptor is not None and descriptor.family is ChainFamily.SOLANA
 
 
 class DexScreenerError(Exception):
@@ -178,7 +196,7 @@ class DexScreenerClient:
             token_symbol_or_address: Token symbol (e.g., "BONK") or mint address.
         """
         pairs = await self.search_pairs(token_symbol_or_address)
-        solana_pairs = [p for p in pairs if p.chain_id == "solana"]
+        solana_pairs = [p for p in pairs if _is_solana_chain_id(p.chain_id)]
         if not solana_pairs:
             return None
         return max(solana_pairs, key=lambda p: p.liquidity.usd)
@@ -209,7 +227,7 @@ class DexScreenerClient:
         """
         # Gather candidates from boosted tokens
         boosted = await self.get_top_boosts()
-        solana_boosts = [b for b in boosted if b.chain_id == "solana"]
+        solana_boosts = [b for b in boosted if _is_solana_chain_id(b.chain_id)]
 
         # Look up pair data for boosted tokens
         candidates: list[DexPair] = []
@@ -222,7 +240,7 @@ class DexScreenerClient:
         for keyword in ["meme solana", "BONK", "WIF", "PEPE solana"]:
             try:
                 results = await self.search_pairs(keyword)
-                candidates.extend(p for p in results if p.chain_id == "solana")
+                candidates.extend(p for p in results if _is_solana_chain_id(p.chain_id))
             except DexScreenerError as exc:
                 logger.debug("DexScreener search failed for keyword '%s': %s", keyword, exc)
                 continue

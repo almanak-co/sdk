@@ -13,18 +13,33 @@ The live fetch delegates to the gateway servicer's existing
 client + Pydantic parser plumbing stays alongside the
 ``HyperliquidAssetContext`` / ``HyperliquidUniverseItem`` models, and
 the existing unit tests for that method continue to pass.
+
+W7 (VIB-4859) adds:
+
+* ``GatewayFundingHistoryCapability`` — historical hourly funding-rate
+  series via the Hyperliquid Info API (``POST /info`` with
+  ``type=fundingHistory``). Migrates the
+  ``_query_hyperliquid_funding`` body that used to live strategy-side
+  in ``framework/data/rates/history.py`` (and opened its own aiohttp
+  ``ClientSession``) and the duplicated egress in
+  ``framework/backtesting/pnl/providers/perp/hyperliquid_funding.py``.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
+import logging
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+
+logger = logging.getLogger(__name__)
 
 # Default per-market hourly funding rates — fallback when the REST
 # fetch fails / times out. Moved verbatim from
@@ -41,8 +56,187 @@ _HYPERLIQUID_DEFAULT_RATES: dict[str, Decimal] = {
 # ``_get_default_rate`` second arg to ``.get``).
 _UNKNOWN_MARKET_DEFAULT = Decimal("0.00001")
 
+# W7: Hyperliquid Info API endpoint (POST /info).
+_HYPERLIQUID_INFO_API = "https://api.hyperliquid.xyz/info"
 
-class HyperliquidGatewayConnector(GatewayConnector, GatewayFundingRateCapability):
+# Mapping from market symbol → Hyperliquid coin code (used for the
+# ``coin`` field on the ``fundingHistory`` request body). Moved verbatim
+# from ``framework/data/rates/history.py:_HYPER_MARKET_TO_COIN``.
+_HYPER_MARKET_TO_COIN: dict[str, str] = {
+    "ETH-USD": "ETH",
+    "BTC-USD": "BTC",
+    "ARB-USD": "ARB",
+    "LINK-USD": "LINK",
+    "SOL-USD": "SOL",
+    "DOGE-USD": "DOGE",
+    "AVAX-USD": "AVAX",
+    "OP-USD": "OP",
+}
+
+# Hours per year for annualisation.
+_HOURS_PER_YEAR = 8760
+
+
+def _safe_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    """Best-effort Decimal coercion (matches history.py helper)."""
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return default
+
+
+def _hyperliquid_resolve_coin(market: str) -> str:
+    """Resolve the Hyperliquid coin code for ``market``.
+
+    Raises ``RateHistoryUnavailable`` if the market is not in the supported set.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    coin = _HYPER_MARKET_TO_COIN.get(market)
+    if coin is None:
+        raise RateHistoryUnavailable("hyperliquid", f"Unsupported market: {market!r}")
+    return coin
+
+
+async def _hyperliquid_read_funding_response(response: Any) -> Any:
+    """Read a Hyperliquid Info-API response, raising on non-200 status.
+
+    Split out of ``_hyperliquid_post_funding_history`` so the outer
+    try/except plumbing stays decomposable.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    if response.status != 200:
+        text = await response.text()
+        raise RateHistoryUnavailable(
+            "hyperliquid",
+            f"HTTP {response.status}: {text[:200]}",
+        )
+    return await response.json()
+
+
+async def _hyperliquid_post_funding_history(
+    session: Any,
+    *,
+    coin: str,
+    start_ts: int,
+    end_ts: int,
+    market: str,
+) -> list[Any]:
+    """POST ``fundingHistory`` to the Hyperliquid Info API and return the entry list.
+
+    Normalises all non-200 / decode failure modes to ``RateHistoryUnavailable``.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    payload = {
+        "type": "fundingHistory",
+        "coin": coin,
+        "startTime": start_ts * 1000,
+        "endTime": end_ts * 1000,
+    }
+
+    try:
+        async with session.post(
+            _HYPERLIQUID_INFO_API,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        ) as response:
+            data = await _hyperliquid_read_funding_response(response)
+    except RateHistoryUnavailable:
+        raise
+    except Exception as exc:
+        raise RateHistoryUnavailable(
+            "hyperliquid",
+            f"fundingHistory request / decode failed: {exc}",
+        ) from exc
+
+    if not isinstance(data, list) or not data:
+        raise RateHistoryUnavailable(
+            "hyperliquid",
+            f"No funding-rate data returned for market {market!r}",
+        )
+    return data
+
+
+def _hyperliquid_parse_funding_timestamp(time_value: Any) -> datetime | None:
+    """Parse a Hyperliquid ``time`` field into an aware ``datetime``.
+
+    Accepts ISO-8601 strings (with or without trailing ``Z``) and
+    epoch-ms numerics. Returns ``None`` for anything else (silent skip
+    matches the original verbatim behaviour).
+    """
+    if isinstance(time_value, str) and time_value:
+        timestamp = datetime.fromisoformat(time_value.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp
+    if isinstance(time_value, int | float):
+        return datetime.fromtimestamp(time_value / 1000, tz=UTC)
+    return None
+
+
+def _hyperliquid_build_funding_point(
+    item: Any,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> Any:
+    """Convert one Hyperliquid funding entry to ``FundingRatePoint``.
+
+    Returns ``None`` when the entry is out of range or its ``time`` field
+    is unparseable (silent skip preserved from history.py). Raises on
+    decimal / parse failure so the caller can demote to a debug-log skip.
+    """
+    from almanak.gateway.services.rate_history_service import FundingRatePoint
+
+    timestamp = _hyperliquid_parse_funding_timestamp(item.get("time", ""))
+    if timestamp is None:
+        return None
+    if timestamp < start_dt or timestamp > end_dt:
+        return None
+
+    rate = _safe_decimal(item.get("fundingRate", "0"))
+    annualized = rate * Decimal(str(_HOURS_PER_YEAR))
+
+    return FundingRatePoint(
+        timestamp=int(timestamp.timestamp()),
+        rate_hourly=rate,
+        rate_annualized=annualized,
+    )
+
+
+def _hyperliquid_parse_funding_entries(
+    data: list[Any],
+    *,
+    start_ts: int,
+    end_ts: int,
+) -> list[Any]:
+    """Parse Hyperliquid ``fundingHistory`` entries into ``FundingRatePoint`` rows.
+
+    Entries with malformed time / rate fields, or timestamps outside
+    ``[start_ts, end_ts]``, are silently skipped — matches the verbatim
+    history.py behaviour.
+    """
+    points: list[Any] = []
+    start_dt = datetime.fromtimestamp(start_ts, tz=UTC)
+    end_dt = datetime.fromtimestamp(end_ts, tz=UTC)
+    for item in data:
+        try:
+            point = _hyperliquid_build_funding_point(item, start_dt=start_dt, end_dt=end_dt)
+        except (ValueError, TypeError, InvalidOperation):
+            logger.debug("Skipping malformed Hyperliquid funding entry: %s", item)
+            continue
+        if point is not None:
+            points.append(point)
+    return points
+
+
+class HyperliquidGatewayConnector(
+    GatewayConnector,
+    GatewayFundingRateCapability,
+    GatewayFundingHistoryCapability,
+):
     """Gateway-side connector for Hyperliquid perp venue."""
 
     protocol: ClassVar[ProtocolName] = ProtocolName("hyperliquid")
@@ -67,6 +261,62 @@ class HyperliquidGatewayConnector(GatewayConnector, GatewayFundingRateCapability
         venues like GMX V2.
         """
         return await servicer._fetch_hyperliquid_rate(market)
+
+    # ---------------------------------------------------------------------
+    # GatewayFundingHistoryCapability (VIB-4859 / W7)
+    # ---------------------------------------------------------------------
+
+    def funding_venue(self) -> str:
+        """Venue identifier matching :meth:`venue` for the live capability."""
+        return "hyperliquid"
+
+    def funding_supported_markets(self) -> frozenset[str]:
+        """Markets the Hyperliquid Info API serves on the historical lane."""
+        return frozenset(_HYPER_MARKET_TO_COIN.keys())
+
+    async def fetch_funding_history(
+        self,
+        servicer: Any,
+        *,
+        market: str,
+        chain: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> Any:
+        """Historical hourly funding via the Hyperliquid Info API.
+
+        Migrated verbatim from
+        ``framework/data/rates/history.py:_query_hyperliquid_funding`` +
+        ``_parse_hyperliquid_funding_response``. ``servicer`` is the
+        ``RateHistoryServiceServicer`` — we reuse its shared aiohttp
+        session so the rate-limit budget is shared with other consumers.
+        """
+        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+        coin = _hyperliquid_resolve_coin(market)
+        session = await servicer._get_http_session()
+
+        data = await _hyperliquid_post_funding_history(
+            session,
+            coin=coin,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            market=market,
+        )
+
+        points = _hyperliquid_parse_funding_entries(
+            data,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+
+        if not points:
+            raise RateHistoryUnavailable(
+                "hyperliquid",
+                f"All Hyperliquid funding entries fell outside [{start_ts}, {end_ts}]",
+            )
+
+        return points
 
 
 __all__ = ["HyperliquidGatewayConnector"]

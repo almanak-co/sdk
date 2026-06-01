@@ -90,7 +90,7 @@ class TestAsterPerpsOpenIntent:
           4. Balance delta: BNB decreased by exactly margin + gas; pending trade
              exists on-chain
         """
-        from almanak.core.contracts import ASTER_PERPS
+        from almanak.connectors.aster_perps.addresses import ASTER_PERPS
 
         router = ASTER_PERPS[CHAIN_NAME]["router"]
         # Aster enforces a minimum position notional (TradingCheckerFacet:

@@ -78,9 +78,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {}
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[100, 101, 102])
@@ -92,9 +90,7 @@ class TestTraderJoeV2PostCondition:
 
         assert result.closed is True
         assert result.residual == {}
-        sdk.get_position_balances_for_ids.assert_called_once_with(
-            POOL, WALLET, [100, 101, 102]
-        )
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101, 102])
         # Heuristic must NOT fire when bin_ids are present.
         sdk.get_position_balances.assert_not_called()
 
@@ -103,9 +99,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {100: 4567, 101: 1234}
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[100, 101, 102])
@@ -127,9 +121,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances.return_value = {}
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=None)
@@ -149,9 +141,7 @@ class TestTraderJoeV2PostCondition:
         sdk = MagicMock()
         sdk.get_position_balances.return_value = {500: 999}
 
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=None)
@@ -218,9 +208,7 @@ class TestTraderJoeV2PostCondition:
         Mirrors the Uniswap V3 non-LP gate.
         """
         # Pre-empt any SDK init by ensuring the adapter is never constructed.
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             position = SimpleNamespace(
                 protocol="traderjoe_v2",
                 position_id="s008_rsi_token_0",
@@ -250,9 +238,7 @@ class TestTraderJoeV2PostCondition:
         """
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {}
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = SimpleNamespace(
@@ -270,9 +256,7 @@ class TestTraderJoeV2PostCondition:
 
         assert result.closed is True
         assert "skipped_reason" not in result.residual
-        sdk.get_position_balances_for_ids.assert_called_once_with(
-            POOL, WALLET, [10, 11, 12]
-        )
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [10, 11, 12])
 
     def test_lp_position_with_residual_still_fails_closure(self) -> None:
         """Regression guard: an LP position with residual liquidity must
@@ -281,9 +265,7 @@ class TestTraderJoeV2PostCondition:
         """
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.return_value = {10: 7777}
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = SimpleNamespace(
@@ -305,9 +287,7 @@ class TestTraderJoeV2PostCondition:
     def test_balance_query_failure_returns_error(self) -> None:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.side_effect = RuntimeError("rpc-down")
-        with patch(
-            "almanak.connectors.traderjoe_v2.TraderJoeV2Adapter"
-        ) as adapter_cls:
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[1, 2])

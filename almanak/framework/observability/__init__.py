@@ -11,13 +11,16 @@ from almanak.framework.observability.context import get_cycle_id, set_cycle_id
 from almanak.framework.observability.events import ForensicEvent, StrategyPhase
 from almanak.framework.observability.ledger import LedgerEntry, build_ledger_entry
 from almanak.framework.observability.metrics import (
+    ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL,
     FRAMEWORK_REGISTRY,
     V4_LP_PARSER_DROPS_TOTAL,
     V4LPDropReason,
+    record_raw_wei_suspected,
     record_v4_lp_parser_drop,
 )
 
 __all__ = [
+    "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
     "ForensicEvent",
     "LedgerEntry",
@@ -26,6 +29,7 @@ __all__ = [
     "V4LPDropReason",
     "build_ledger_entry",
     "get_cycle_id",
+    "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",
     "set_cycle_id",
 ]

@@ -31,6 +31,7 @@ import pytest
 from almanak.framework.runner._run_loop_helpers import (
     _UNIV3_FAMILY_PROTOCOL_SLUGS,
     _index_lp_registry_row_into_cache,
+    _install_registry_lookup_for_lp_tracker,
     _refresh_lp_registry_id_cache,
 )
 
@@ -63,16 +64,13 @@ class TestIndexLpRegistryRowIntoCache:
         return {"chain": chain, "payload": payload}
 
     def test_indexes_under_every_univ3_family_slug(self) -> None:
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
-        _index_lp_registry_row_into_cache(
-            row=self._row(), cache=cache, ambiguous=ambiguous
-        )
+        cache: dict[tuple[str, str, str], set[str]] = {}
+        _index_lp_registry_row_into_cache(row=self._row(), cache=cache)
         # The row must land under every UniV3 family slug — the registry
         # doesn't carry ``protocol``, so the lookup table is fanned-out.
+        # VIB-4301: value is the SET of open token_ids.
         for slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
-            assert cache[(slug, self.CHAIN, self.POOL)] == self.TOKEN_ID_A
-        assert ambiguous == set()
+            assert cache[(slug, self.CHAIN, self.POOL)] == {self.TOKEN_ID_A}
 
     def test_corrupt_payload_is_skipped(self) -> None:
         # payload is not a dict (corrupt registry row) — must be a no-op.
@@ -133,116 +131,61 @@ class TestIndexLpRegistryRowIntoCache:
 
     def test_pool_lowercased(self) -> None:
         # Mixed-case pool from the registry → lowercased on the cache key.
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
-        _index_lp_registry_row_into_cache(
-            row=self._row(pool=self.POOL.upper()),
-            cache=cache,
-            ambiguous=ambiguous,
-        )
-        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == self.TOKEN_ID_A
+        cache: dict[tuple[str, str, str], set[str]] = {}
+        _index_lp_registry_row_into_cache(row=self._row(pool=self.POOL.upper()), cache=cache)
+        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == {self.TOKEN_ID_A}
 
     def test_chain_lowercased(self) -> None:
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
-        _index_lp_registry_row_into_cache(
-            row=self._row(chain="ARBITRUM"),
-            cache=cache,
-            ambiguous=ambiguous,
-        )
-        assert cache[("uniswap_v3", "arbitrum", self.POOL)] == self.TOKEN_ID_A
+        cache: dict[tuple[str, str, str], set[str]] = {}
+        _index_lp_registry_row_into_cache(row=self._row(chain="ARBITRUM"), cache=cache)
+        assert cache[("uniswap_v3", "arbitrum", self.POOL)] == {self.TOKEN_ID_A}
 
     def test_chain_missing_uses_empty_string(self) -> None:
         # ``row.get("chain")`` is None — defaults to "".
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
+        cache: dict[tuple[str, str, str], set[str]] = {}
         _index_lp_registry_row_into_cache(
             row={"payload": {"token_id": self.TOKEN_ID_A, "pool_address": self.POOL}},
             cache=cache,
-            ambiguous=ambiguous,
         )
-        assert cache[("uniswap_v3", "", self.POOL)] == self.TOKEN_ID_A
+        assert cache[("uniswap_v3", "", self.POOL)] == {self.TOKEN_ID_A}
 
     def test_idempotent_same_token_same_pool(self) -> None:
-        # Same row indexed twice — second call is a no-op (cache value
-        # equal to existing).
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
+        # Same row indexed twice — second call is a no-op (set add idempotent).
+        cache: dict[tuple[str, str, str], set[str]] = {}
         row = self._row()
-        _index_lp_registry_row_into_cache(row=row, cache=cache, ambiguous=ambiguous)
-        cache_after_first = dict(cache)
-        _index_lp_registry_row_into_cache(row=row, cache=cache, ambiguous=ambiguous)
+        _index_lp_registry_row_into_cache(row=row, cache=cache)
+        cache_after_first = {k: set(v) for k, v in cache.items()}
+        _index_lp_registry_row_into_cache(row=row, cache=cache)
         assert cache == cache_after_first
-        assert ambiguous == set()
 
-    def test_collision_detection_drops_entry_and_marks_ambiguous(self, caplog) -> None:
-        # Two different token_ids for the SAME (chain, pool) → drop the
-        # entry, mark ambiguous, log WARNING. Audit P2.
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
-        _index_lp_registry_row_into_cache(
-            row=self._row(token_id=self.TOKEN_ID_A),
-            cache=cache,
-            ambiguous=ambiguous,
-        )
-        # First indexing seeded the cache.
-        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == self.TOKEN_ID_A
+    def test_co_pool_opens_accumulate_in_set_no_warning(self, caplog) -> None:
+        # VIB-4301: two different token_ids for the SAME (chain, pool) now
+        # ACCUMULATE into the set — no drop, no spurious warning. The reader
+        # (`_sync_lookup`) auto-injects only when the set has exactly one entry;
+        # with N>1 the strategy supplies position_id on the close intent itself.
+        cache: dict[tuple[str, str, str], set[str]] = {}
+        _index_lp_registry_row_into_cache(row=self._row(token_id=self.TOKEN_ID_A), cache=cache)
+        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == {self.TOKEN_ID_A}
 
         with caplog.at_level("WARNING"):
-            _index_lp_registry_row_into_cache(
-                row=self._row(token_id=self.TOKEN_ID_B),
-                cache=cache,
-                ambiguous=ambiguous,
-            )
-        # Entry dropped from cache for every UniV3 family slug.
+            _index_lp_registry_row_into_cache(row=self._row(token_id=self.TOKEN_ID_B), cache=cache)
         for slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
-            assert (slug, self.CHAIN, self.POOL) not in cache
-            assert (slug, self.CHAIN, self.POOL) in ambiguous
-        # WARNING logged — at least one mention of the collision.
-        assert any("multiple OPEN NFTs" in rec.message for rec in caplog.records)
-
-    def test_post_collision_subsequent_row_does_not_re_seed(self) -> None:
-        # Once a (chain, pool) is ambiguous, a third row with yet another
-        # token_id for the same key MUST NOT re-seed the cache.
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
-        _index_lp_registry_row_into_cache(
-            row=self._row(token_id=self.TOKEN_ID_A),
-            cache=cache,
-            ambiguous=ambiguous,
+            assert cache[(slug, self.CHAIN, self.POOL)] == {self.TOKEN_ID_A, self.TOKEN_ID_B}
+        assert not any("multiple OPEN NFTs" in rec.message for rec in caplog.records), (
+            "VIB-4301: legitimate co-pool opens must not emit the spurious multi-NFT warning"
         )
-        _index_lp_registry_row_into_cache(
-            row=self._row(token_id=self.TOKEN_ID_B),
-            cache=cache,
-            ambiguous=ambiguous,
-        )
-        # Now a third row, different token id again.
-        third_token = "1111111"
-        _index_lp_registry_row_into_cache(
-            row=self._row(token_id=third_token),
-            cache=cache,
-            ambiguous=ambiguous,
-        )
-        for slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
-            assert (slug, self.CHAIN, self.POOL) not in cache
 
     def test_different_pools_do_not_collide(self) -> None:
         # Two different pools on the same chain → both seed independently.
-        cache: dict[tuple[str, str, str], str] = {}
-        ambiguous: set[tuple[str, str, str]] = set()
+        cache: dict[tuple[str, str, str], set[str]] = {}
         _index_lp_registry_row_into_cache(
-            row=self._row(pool=self.POOL, token_id=self.TOKEN_ID_A),
-            cache=cache,
-            ambiguous=ambiguous,
+            row=self._row(pool=self.POOL, token_id=self.TOKEN_ID_A), cache=cache
         )
         _index_lp_registry_row_into_cache(
-            row=self._row(pool=self.POOL_OTHER, token_id=self.TOKEN_ID_B),
-            cache=cache,
-            ambiguous=ambiguous,
+            row=self._row(pool=self.POOL_OTHER, token_id=self.TOKEN_ID_B), cache=cache
         )
-        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == self.TOKEN_ID_A
-        assert cache[("uniswap_v3", self.CHAIN, self.POOL_OTHER)] == self.TOKEN_ID_B
-        assert ambiguous == set()
+        assert cache[("uniswap_v3", self.CHAIN, self.POOL)] == {self.TOKEN_ID_A}
+        assert cache[("uniswap_v3", self.CHAIN, self.POOL_OTHER)] == {self.TOKEN_ID_B}
 
 
 # ---------------------------------------------------------------------------
@@ -286,13 +229,13 @@ class TestRefreshLpRegistryIdCache:
         ]
         runner = self._runner_with_state_manager(rows)
         await _refresh_lp_registry_id_cache(runner, "dep-1")
-        # All UniV3 family slugs populated.
+        # All UniV3 family slugs populated (VIB-4301: value is a set).
         for slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
             assert (
                 runner._lp_registry_id_cache[
                     (slug, "arbitrum", "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443")
                 ]
-                == "5467895"
+                == {"5467895"}
             )
 
     @pytest.mark.asyncio
@@ -336,10 +279,10 @@ class TestRefreshLpRegistryIdCache:
         assert any("Registry-id cache refresh failed" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_collision_propagates_through_orchestrator(self) -> None:
-        # Two rows for the same (chain, pool) with different token_ids →
-        # cache entry dropped (audit P2 propagation through the
-        # orchestrator).
+    async def test_co_pool_rows_accumulate_through_orchestrator(self) -> None:
+        # VIB-4301: two rows for the same (chain, pool) with different
+        # token_ids accumulate into the set (no drop) — both legs are
+        # represented and the reader returns None (auto-inject only on N==1).
         pool = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
         rows = [
             {"chain": "arbitrum", "payload": {"token_id": "5467895", "pool_address": pool}},
@@ -348,7 +291,7 @@ class TestRefreshLpRegistryIdCache:
         runner = self._runner_with_state_manager(rows)
         await _refresh_lp_registry_id_cache(runner, "dep-1")
         for slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
-            assert (slug, "arbitrum", pool) not in runner._lp_registry_id_cache
+            assert runner._lp_registry_id_cache[(slug, "arbitrum", pool)] == {"5467895", "9999999"}
 
     @pytest.mark.asyncio
     async def test_state_manager_returns_none_treated_as_iterable_safely(
@@ -364,3 +307,55 @@ class TestRefreshLpRegistryIdCache:
         runner = self._runner_with_state_manager([])
         await _refresh_lp_registry_id_cache(runner, "dep-empty")
         assert runner._lp_registry_id_cache == {}
+
+
+# ---------------------------------------------------------------------------
+# _sync_lookup consumer semantics (VIB-4301): single → token, N>1 → None
+# ---------------------------------------------------------------------------
+
+
+class TestSyncLookupSetSemantics:
+    """The installed sync lookup auto-injects only when exactly one open NFT
+    lives in the pool. With a legitimate co-pool (N>1) it returns None so the
+    strategy's own ``position_id`` on the close intent wins — never a guessed
+    leg."""
+
+    POOL = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
+    CHAIN = "arbitrum"
+
+    async def _install(self, cache: dict) -> Any:
+        from almanak.framework.strategies.lp_position_tracker import LPPositionTracker
+
+        captured: dict[str, Any] = {}
+
+        class _Tracker(LPPositionTracker):
+            def attach_registry_lookup(self, lookup: Any) -> None:  # type: ignore[override]
+                captured["lookup"] = lookup
+
+        runner = SimpleNamespace()
+        sm = MagicMock()
+        sm.get_position_registry_open_rows = AsyncMock(return_value=[])
+        runner.state_manager = sm
+        tracker = _Tracker()
+        await _install_registry_lookup_for_lp_tracker(runner, tracker, "dep-1")
+        # The installer primes an empty cache via the (empty) refresh; override
+        # with our seeded set-cache to exercise the lookup directly.
+        runner._lp_registry_id_cache = cache
+        return captured["lookup"]
+
+    @pytest.mark.asyncio
+    async def test_single_open_returns_token(self) -> None:
+        cache = {("uniswap_v3", self.CHAIN, self.POOL): {"42"}}
+        lookup = await self._install(cache)
+        assert lookup(protocol="uniswap_v3", chain=self.CHAIN, pool=self.POOL) == "42"
+
+    @pytest.mark.asyncio
+    async def test_co_pool_returns_none(self) -> None:
+        cache = {("uniswap_v3", self.CHAIN, self.POOL): {"42", "999"}}
+        lookup = await self._install(cache)
+        assert lookup(protocol="uniswap_v3", chain=self.CHAIN, pool=self.POOL) is None
+
+    @pytest.mark.asyncio
+    async def test_missing_pool_returns_none(self) -> None:
+        lookup = await self._install({})
+        assert lookup(protocol="uniswap_v3", chain=self.CHAIN, pool=self.POOL) is None

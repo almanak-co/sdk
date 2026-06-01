@@ -800,8 +800,19 @@ def _cell_g3_yield_ledger(pos_events: list[dict[str, Any]], acct_events: list[di
             yields.append(("fees", r.get("event_type"), r.get("fees_token0"), r.get("fees_token1")))
     for r in acct_events:
         p = _json(r.get("payload_json"))
-        if p.get("realized_pnl_usd"):
-            yields.append(("realized_pnl", r.get("event_type"), p.get("realized_pnl_usd")))
+        # VIB-4905 (F1): for SWAP, prefer ``realized_pnl_usd_matched``
+        # (matched-portion PnL, populated on partial matches under v2 contract)
+        # over legacy ``realized_pnl_usd`` (null on partial under v1).  Other
+        # event types still read ``realized_pnl_usd`` per their own contracts.
+        # Keeps this diagnostic in lockstep with dashboard +
+        # ``_cell_g6_reconciliation``'s SWAP-bucket precedence.
+        rpnl_for_yield = (
+            p.get("realized_pnl_usd_matched")
+            if r.get("event_type") == "SWAP" and p.get("realized_pnl_usd_matched") is not None
+            else p.get("realized_pnl_usd")
+        )
+        if rpnl_for_yield:
+            yields.append(("realized_pnl", r.get("event_type"), rpnl_for_yield))
         # ``augment_accounting_payload`` projects lending events onto the
         # AttemptNo17 spec field names (``interest_paid_usd`` for REPAY,
         # ``interest_accrued_usd`` for WITHDRAW). Counting only the legacy
@@ -1005,10 +1016,19 @@ def _cell_g6_reconciliation(  # noqa: C901
         et = r.get("event_type")
         rpnl = _dec(p.get("realized_pnl_usd"))
         if et == "SWAP":
-            if rpnl is None:
+            # VIB-4905 (F1): SWAP bucket prefers ``realized_pnl_usd_matched``
+            # (matched-portion PnL, populated on partial matches too) over
+            # legacy ``realized_pnl_usd`` (null on partial under the v1
+            # contract).  Keeps the G6 SWAP bucket in lockstep with the
+            # dashboard's ``compute_cost_stack`` precedence — same precedence,
+            # same number on the same DB.  Pre-v2 payloads only carry the
+            # legacy key; the ``is not None`` fall-through handles both.
+            matched = _dec(p.get("realized_pnl_usd_matched"))
+            rpnl_swap = matched if matched is not None else rpnl
+            if rpnl_swap is None:
                 null_swap_rpnl += 1
             else:
-                sum_swap += rpnl
+                sum_swap += rpnl_swap
             amt_in_usd = _dec(p.get("amount_in_usd"))
             if amt_in_usd is not None:
                 notional_traded += abs(amt_in_usd)
@@ -2476,6 +2496,18 @@ def _cells_lending(  # noqa: C901
         # realized_pnl_usd shouldn't FAIL the loop-leg cell. Filter to swaps
         # whose token_in matches a borrowed asset before checking nulls.
         loop_leg_payloads = [p for p in swap_payloads if (p.get("token_in") or "").upper() in borrow_assets]
+        # VIB-4905 (F1) — INTENTIONAL DIVERGENCE from the G6/G3 precedence
+        # walk: L6 stays on legacy ``realized_pnl_usd`` deliberately.  L6's
+        # invariant is stricter than G6's reconciliation — every loop-leg
+        # SWAP MUST fully match against accumulated BORROW/WITHDRAW basis
+        # credits because the wallet-basis store (VIB-3964 v3) mints
+        # acquisition lots on BORROW and consumes them on REPAY/SUPPLY.  A
+        # partial-match loop-leg SWAP signals that the basis store missed a
+        # credit somewhere — exactly the failure mode L6 must surface.
+        # Migrating to the matched-portion precedence walk would mask that
+        # by counting the partial-match as a successful loop leg.  Pre-V2
+        # payloads only carry ``realized_pnl_usd`` anyway, so the legacy
+        # field is the safer signal here.
         null_loop_leg_pnl = sum(1 for p in loop_leg_payloads if p.get("realized_pnl_usd") is None)
 
         if not borrow_assets or repay_count == 0:

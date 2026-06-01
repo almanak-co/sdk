@@ -48,7 +48,7 @@ Esto detecta automáticamente tu plataforma (Claude Code, Codex, Cursor, Copilot
 almanak strat demo
 ```
 
-Esto muestra un menú interactivo con 13 estrategias de demostración funcionales. Elige una y se copia en tu directorio actual, lista para ejecutar. También puedes saltar el menú:
+Esto muestra un menú interactivo con estrategias de demostración funcionales. Elige una y se copia en tu directorio actual, lista para ejecutar. También puedes saltar el menú:
 
 ```bash
 almanak strat demo --name uniswap_rsi

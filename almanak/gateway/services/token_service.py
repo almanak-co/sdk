@@ -22,7 +22,8 @@ from urllib.parse import quote as _url_quote
 
 import grpc
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import Chain, ChainFamily
 from almanak.framework.data.tokens import (
     InvalidTokenAddressError,
     ResolvedToken,
@@ -1454,8 +1455,11 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        # Dynamic resolution fallback
-        is_solana = chain.lower() == "solana"
+        # Dynamic resolution fallback. ``chain`` is already pre-validated by
+        # ``validate_chain`` above, but use ``try_resolve`` defensively so an
+        # allowlist drift can never raise here (matches legacy behaviour).
+        chain_descriptor = ChainRegistry.try_resolve(chain)
+        is_solana = chain_descriptor is not None and chain_descriptor.family is ChainFamily.SOLANA
         # EVM address: 0x-prefixed 42-char hex
         is_evm_address = bool(_EVM_ADDRESS_RE.match(token))
         # Solana mint: base58, 32-44 chars (no 0, O, I, l) -- use strict base58 pattern to
@@ -1604,8 +1608,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Solana: route through the Solana-specific lookup chain (Jupiter,
         # then direct SPL mint account RPC read). ERC-20 ABI queries are
         # EVM-only and would just time out against an SPL mint account
-        # layout.
-        if chain.lower() == "solana":
+        # layout. ``chain`` is pre-validated by ``validate_chain`` above;
+        # ``try_resolve`` keeps the lookup defensive against allowlist drift.
+        chain_descriptor = ChainRegistry.try_resolve(chain)
+        if chain_descriptor is not None and chain_descriptor.family is ChainFamily.SOLANA:
             try:
                 result = await self._try_solana_mint_lookup(address)
             except TimeoutError:

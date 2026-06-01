@@ -219,6 +219,9 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="uniswap_v4",
+            # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork ->
+            # estimated price; opt in so the money-safety guard doesn't block the open.
+            protocol_params={"allow_estimated_price": True},
         )
 
     def _create_close_intent(self, position_id: str) -> Intent:

@@ -43,9 +43,10 @@ from typing import Any
 from web3 import AsyncHTTPProvider, AsyncWeb3
 
 from almanak.connectors._base.gateway_capabilities import PoolKeyCacheError
-from almanak.core.contracts import UNISWAP_V4
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
+
+from ..addresses import UNISWAP_V4
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,91 @@ DEFAULT_BACKFILL_BLOCKS = 50_000
 # The cap prevents a single rogue lookup against an unknown pool from
 # DoS-ing the upstream archive node.
 HISTORICAL_BACKFILL_WINDOW = 50_000
+
+# VIB-4536 (Finding 3) — per-process DoS guard on the *seed-miss log-scan
+# fallback*, NOT a tuning knob for the happy path.
+#
+# The primary V4 PoolKey discovery path is the canonical seed registry
+# (VIB-4534, SHIPPED — see :mod:`almanak.connectors.uniswap_v4.gateway.canonical_pools`
+# and :meth:`V4PoolKeyCache.register_canonical`). The seed pre-populates the
+# cache at gateway boot with deterministically-computed PoolKeys for curated
+# pools, so a lookup for any seeded pool resolves O(1) with zero RPC — that is
+# the intended primary path today.
+#
+# This 500k-block cap only bounds the *fallback* taken when the seed misses
+# (an un-curated pool) and the cache must scan ``Initialize`` logs on-chain to
+# derive the PoolKey. Without it, a lookup for an unknown pool on a long-lived
+# chain could walk the historical-expansion pass back toward the PoolManager
+# deploy block, issuing an unbounded number of ``eth_getLogs`` calls and
+# exhausting the provider rate-limit budget on a single doomed miss. The cap
+# is therefore a blast-radius limit on the log-scan fallback: any pool we
+# expect to resolve cheaply belongs in the canonical seed, not behind a
+# 500k-block scan.
 MAX_HISTORICAL_BACKFILL_BLOCKS = 500_000
+
+# Substrings (matched case-insensitively) that mark an ``eth_getLogs`` failure
+# as a *response-size / range-too-wide* error — the ONLY error family for which
+# bisecting the block range is the correct recourse. Every entry must be an
+# UNAMBIGUOUS size/range/result-count cap phrasing; a marker that can also
+# appear in a transient error is a bug (it would bisect into the transient
+# failure, the exact storm this module prevents). Observed provider phrasings:
+#   - Alchemy:        "Log response size exceeded"   -> "response size" / "log response"
+#   - Infura/generic: "query returned more than N results" -> "query returned more than"
+#                     "block range is too large"     -> "block range" / "range too large"
+#                     "too many results"             -> "too many results"
+#                     "query timeout exceeded"       -> hint to narrow the range (size-shaped)
+#
+# DELIBERATELY EXCLUDED (VIB-4536 review — gemini HIGH / CodeRabbit Major):
+# bare ``"limit exceeded"`` / ``"exceeds the limit"`` were removed. They are
+# NOT size phrasings — they match transient rate/billing/quota errors such as
+# "rate limit exceeded", "request limit exceeded", "credit limit exceeded",
+# and "compute units per second limit exceeded". A rate-limited provider is
+# the worst case to bisect into (it multiplies the breach), so those must
+# fail fast. If a result-count cap ever needs a marker, make it specific
+# (e.g. "result limit" / "response limit"), never the bare word "limit".
+_RESPONSE_SIZE_ERROR_MARKERS: tuple[str, ...] = (
+    "response size",
+    "log response",
+    "block range",
+    "query returned more than",
+    "more than 10000 results",
+    "too many results",
+    "query timeout exceeded",
+    "range too large",
+)
+
+# Substrings that mark a failure as transient rate/billing/quota/compute-limit
+# pressure. These are ALWAYS transient (fail-fast) and must never be treated as
+# a size cap, even if a future ``_RESPONSE_SIZE_ERROR_MARKERS`` entry happens to
+# also match the text. Checked first in ``_is_response_size_error`` as a
+# belt-and-suspenders guard against the marker-breadth bug recurring.
+_RATE_LIMIT_ERROR_MARKERS: tuple[str, ...] = (
+    "rate limit",
+    "request limit",
+    "credit limit",
+    "compute unit",
+    "too many requests",
+)
+
+
+def _is_response_size_error(exc: BaseException) -> bool:
+    """Return ``True`` if ``exc`` looks like a response-size / range-too-wide cap.
+
+    VIB-4536 (Finding 1). Only this error family justifies bisecting the
+    ``eth_getLogs`` block range; everything else is transient transport /
+    unknown and is surfaced immediately by the caller rather than retried
+    across ~50-100 doomed sub-ranges.
+
+    Matching is a case-insensitive substring check against
+    ``_RESPONSE_SIZE_ERROR_MARKERS``, but a rate/billing/quota/compute-limit
+    error (``_RATE_LIMIT_ERROR_MARKERS``) short-circuits to ``False`` first:
+    those are transient and bisecting into a rate-limited provider only
+    multiplies the breach (VIB-4536 review — gemini HIGH / CodeRabbit Major).
+    """
+    text = str(exc).lower()
+    if any(marker in text for marker in _RATE_LIMIT_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in _RESPONSE_SIZE_ERROR_MARKERS)
 
 
 class V4CanonicalSeedCollisionError(RuntimeError):
@@ -558,10 +643,49 @@ class V4PoolKeyCache:
         """Fetch Initialize logs across [from_block, to_block], bisecting on
         provider response-size errors.
 
-        Returns the aggregated raw log list on success, or ``None`` if any
-        sub-window fails after reaching the minimum chunk size — that's a
-        genuine transport / configuration failure, not a size issue, and the
-        caller must NOT advance the scan watermark.
+        VIB-4536 (Finding 1) — error families are distinguished:
+
+        * **Response-size / range-too-wide cap** (``_is_response_size_error``):
+          the only family bisection can recover. The window is halved and
+          retried until each chunk is small enough, or until the
+          ``min_chunk_blocks`` floor (see the ``min_chunk_blocks`` arg below).
+        * **Everything else** (transient transport, timeout, TLS reset, plain
+          rate limit, malformed response): NOT bisected. For a genuine
+          transient failure every sub-range fails the same way, so bisecting
+          just issues ~50-100 doomed ``eth_getLogs`` calls and burns the
+          provider rate-limit budget before surfacing the same failure. We
+          short-circuit to ``None`` immediately, chaining the original
+          exception into the log so operators see the real cause on the first
+          failure rather than after a storm of retries.
+
+          This deliberately also stops bisecting the opaque
+          ``-32603 Fork Error: Transport(HttpError)`` wrapper, which on an
+          Anvil + Alchemy fork can hide a size cap that halving *would* clear.
+          That is an accepted tradeoff, not an oversight: on real Alchemy the
+          size cap is clearly labeled and still bisects; the opaque wrapper
+          only appears on forks, where curated pools resolve via the VIB-4534
+          canonical seed without any scan. See the inline comment at the
+          ``except`` site for the full rationale.
+
+        Args:
+            min_chunk_blocks: VIB-4536 (Finding 2) — smallest block span the
+                bisection will attempt before giving up. This is the floor of
+                the size-error recursion: a single window this wide that *still*
+                trips the provider's response cap returns ``None`` with no
+                further recourse — an operator-facing cliff. In practice
+                ``Initialize`` events are sparse enough that the 1k-block
+                default stays well under provider caps, so the cliff is not
+                expected to bite; if it ever does (e.g. a chain with a
+                pathological burst of pool creations in one window), the V1
+                recourse is a per-block fallback or a narrower topic filter.
+                That fallback is intentionally NOT implemented here — the floor
+                is documented rather than removed.
+
+        Returns the aggregated raw log list on success, or ``None`` on any
+        non-recoverable failure (a non-size error, or a size error still
+        tripping at the ``min_chunk_blocks`` floor). The ``None`` contract is
+        unchanged: the caller must NOT advance the scan watermark. Only the
+        *speed* at which a non-size failure is reported changes.
         """
         address = AsyncWeb3.to_checksum_address(pool_manager)
         # Stack-based iterative bisection — keeps memory bounded and
@@ -581,14 +705,41 @@ class V4PoolKeyCache:
                     }
                 )
             except Exception as exc:  # noqa: BLE001
-                # Bisect on any failure as long as the window can still be
-                # halved above the min chunk. Many providers report
-                # response-size issues with a variety of error strings
+                # VIB-4536 (Finding 1) — distinguish error families. Only a
+                # response-size / range-too-wide cap is recoverable by bisecting
                 # (Alchemy: "Log response size exceeded"; Infura/Quicknode:
-                # different wording; some clients raise on `code: -32602`
-                # nested inside `-32603 Fork Error: Transport(HttpError)`
-                # — observed on Anvil + Alchemy fork). Cheaper to bisect
-                # than to enumerate provider error taxonomies.
+                # different wording). For a *genuine* transient transport error
+                # (RPC timeout, TLS reset, plain rate limit, malformed response)
+                # every sub-range would fail the same way, so bisecting just
+                # issues ~50-100 doomed retries that burn the provider
+                # rate-limit budget — we fail fast instead.
+                #
+                # KNOWN TRADEOFF (intentional reversal of a prior workaround):
+                # the opaque `-32603 Fork Error: Transport(HttpError)` wrapper
+                # is NOT bisected here, even though it can wrap an Alchemy size
+                # cap behind Anvil's fork proxy (where halving WOULD succeed).
+                # On real Alchemy (production) the size cap arrives clearly
+                # labeled ("Log response size exceeded") and still matches ->
+                # bisects correctly; the opaque wrapper only appears on Anvil
+                # forks. On a fork, the curated pools resolve via the VIB-4534
+                # canonical seed (canonical_pools.seed_canonical_pools, wired at
+                # MarketServiceServicer._pool_key_cache boot) with zero scan, so
+                # an un-seeded fork pool needing a large historical scan failing
+                # fast here is the accepted tradeoff — not a production path. If
+                # a fork test ever needs an un-seeded pool resolved by log-scan,
+                # this is the line to revisit (fork-aware unwrapping).
+                if not _is_response_size_error(exc):
+                    logger.warning(
+                        "V4PoolKeyCache: eth_getLogs failed with a non-size error "
+                        "chain=%s pool_manager=%s [%d..%d]; not bisecting: %s",
+                        chain,
+                        pool_manager,
+                        lo,
+                        hi,
+                        exc,
+                        exc_info=exc,
+                    )
+                    return None
                 span = hi - lo + 1
                 if span > min_chunk_blocks:
                     mid = lo + span // 2 - 1
@@ -597,8 +748,8 @@ class V4PoolKeyCache:
                     pending.append((mid + 1, hi))
                     pending.append((lo, mid))
                     logger.info(
-                        "V4PoolKeyCache: eth_getLogs window [%d..%d] failed, bisecting to "
-                        "[%d..%d] + [%d..%d] (chain=%s, exc=%s)",
+                        "V4PoolKeyCache: eth_getLogs window [%d..%d] exceeded the "
+                        "response cap, bisecting to [%d..%d] + [%d..%d] (chain=%s, exc=%s)",
                         lo,
                         hi,
                         lo,
@@ -609,9 +760,11 @@ class V4PoolKeyCache:
                         type(exc).__name__,
                     )
                     continue
+                # Response cap still tripped at the smallest window — the
+                # documented min-chunk cliff (see the ``min_chunk_blocks`` arg).
                 logger.warning(
-                    "V4PoolKeyCache: eth_getLogs failed chain=%s pool_manager=%s [%d..%d] "
-                    "at min chunk size (span=%d): %s",
+                    "V4PoolKeyCache: eth_getLogs still exceeds the response cap "
+                    "chain=%s pool_manager=%s [%d..%d] at min chunk size (span=%d): %s",
                     chain,
                     pool_manager,
                     lo,
@@ -634,5 +787,6 @@ __all__ = [
     "V4CanonicalSeedCollisionError",
     "V4PoolKeyCache",
     "_decode_initialize_log",
+    "_is_response_size_error",
     "_normalize_pool_id",
 ]

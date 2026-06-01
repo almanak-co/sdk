@@ -14,6 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.framework.backtesting.pnl.data_provider import (
+    HistoricalDataConfig,
+    MarketState,
+)
 from almanak.framework.backtesting.pnl.providers.aggregated import (
     AggregatedDataProvider,
     FallbackStats,
@@ -21,6 +25,7 @@ from almanak.framework.backtesting.pnl.providers.aggregated import (
     PriceWithSource,
     ProviderConfig,
 )
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 
 class MockProvider:
@@ -612,9 +617,7 @@ class TestLoggingBehavior:
             provider_names=["primary", "secondary"],
         )
 
-        with caplog.at_level(
-            logging.INFO, logger="almanak.framework.backtesting.pnl.providers.aggregated"
-        ):
+        with caplog.at_level(logging.INFO, logger="almanak.framework.backtesting.pnl.providers.aggregated"):
             timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
             await aggregated.get_price_with_source("ETH", timestamp)
 
@@ -672,7 +675,76 @@ class TestAsyncContextManager:
         provider.close.assert_called_once()
 
 
+class TestIterateEmptyOrUnavailableFallback:
+    """Tests that an unavailable iterate() provider triggers fallback.
+
+    Regression guard for VIB-4859: a provider whose ``iterate()`` raises
+    ``DataSourceUnavailable`` (e.g. TWAP before the gateway-side series
+    capability lands in VIB-4870) must NOT short-circuit the aggregator into
+    a silent zero-tick backtest. The aggregator must fall back to the next
+    iterate-capable provider, or to manual ``get_price()`` iteration.
+    """
+
+    @staticmethod
+    def _config():
+        return HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 2, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["ETH"],
+            chains=["arbitrum"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_raising_iterate_falls_back_to_next_provider(self):
+        """First provider's iterate() raises → second provider's rows are used."""
+
+        class RaisingIterateProvider(MockProvider):
+            async def iterate(self, config):
+                raise DataSourceUnavailable(source="gateway", reason="no series capability")
+                yield  # pragma: no cover - keeps this an async generator
+
+        class YieldingIterateProvider(MockProvider):
+            async def iterate(self, config):
+                ts = config.start_time
+                yield (
+                    ts,
+                    MarketState(timestamp=ts, prices={"ETH": Decimal("3000")}, ohlcv={}, chain="arbitrum"),
+                )
+
+        primary = RaisingIterateProvider("twap")
+        secondary = YieldingIterateProvider("subgraph")
+        aggregated = AggregatedDataProvider(
+            providers=[primary, secondary],
+            provider_names=["twap", "subgraph"],
+        )
+
+        rows = [item async for item in aggregated.iterate(self._config())]
+
+        assert len(rows) == 1
+        assert rows[0][1].prices["ETH"] == Decimal("3000")
+
+    @pytest.mark.asyncio
+    async def test_raising_iterate_falls_back_to_manual_when_no_other_iterator(self):
+        """Sole iterate provider raising → aggregator falls back to manual get_price()."""
+
+        class RaisingIterateProvider(MockProvider):
+            async def iterate(self, config):
+                raise DataSourceUnavailable(source="gateway", reason="no series capability")
+                yield  # pragma: no cover - keeps this an async generator
+
+        provider = RaisingIterateProvider("twap", price=Decimal("2500"))
+        aggregated = AggregatedDataProvider(providers=[provider], provider_names=["twap"])
+
+        rows = [item async for item in aggregated.iterate(self._config())]
+
+        # Manual fallback emits one MarketState per interval (3 points over [0h, 2h]).
+        assert len(rows) == 3
+        assert all(row[1].prices["ETH"] == Decimal("2500") for row in rows)
+
+
 __all__ = [
+    "TestIterateEmptyOrUnavailableFallback",
     "TestFallbackWhenPrimaryFails",
     "TestAllProvidersFailing",
     "TestDataSourceTracking",

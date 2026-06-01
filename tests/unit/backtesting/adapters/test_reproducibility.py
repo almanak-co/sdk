@@ -66,7 +66,7 @@ class TestLPAdapterReproducibility:
 
     def test_update_position_uses_simulation_timestamp(self) -> None:
         """Verify update_position uses the simulation timestamp for position.last_updated."""
-        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp"))
+        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True))
 
         # Create LP position
         position = SimulatedPosition.lp(
@@ -98,7 +98,7 @@ class TestLPAdapterReproducibility:
 
     def test_two_runs_produce_identical_last_updated(self) -> None:
         """Two runs with same config produce identical position timestamps."""
-        config = LPBacktestConfig(strategy_type="lp")
+        config = LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True)
         adapter1 = LPBacktestAdapter(config)
         adapter2 = LPBacktestAdapter(config)
 
@@ -391,7 +391,7 @@ class TestExplicitTimestampOverride:
 
     def test_lp_explicit_timestamp_overrides_market_state(self) -> None:
         """Explicit timestamp parameter takes precedence over market_state.timestamp."""
-        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp"))
+        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True))
 
         position = SimulatedPosition.lp(
             token0="ETH",

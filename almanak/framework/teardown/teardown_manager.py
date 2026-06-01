@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
 from almanak.framework.teardown.config import TeardownConfig
+from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
 from almanak.framework.teardown.models import (
     ApprovalRequest,
     ApprovalResponse,
@@ -46,6 +47,7 @@ from almanak.framework.teardown.models import (
     TeardownStatus,
     calculate_max_acceptable_loss,
 )
+from almanak.framework.teardown.oracle_warmup import warm_and_validate_oracle
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import (
     EscalatingSlippageManager,
@@ -194,6 +196,46 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
     except TypeError:
         return None
     return None
+
+
+def _teardown_chain(intents: list[Any]) -> str | None:
+    """Best-effort chain for the teardown plan, for native-gas-token warming.
+
+    Reads the ``chain`` field from the first intent that carries one. Handles
+    both decompiled ``Intent`` objects (``execute`` path) and serialized intent
+    dicts (``resume`` path). Returns ``None`` when no intent declares a chain;
+    the warm step then skips native-gas warming.
+    """
+    for intent in intents:
+        chain = intent.get("chain") if isinstance(intent, dict) else getattr(intent, "chain", None)
+        if isinstance(chain, str) and chain.strip():
+            return chain.strip()
+    return None
+
+
+def _intents_requiring_pricing(intents: list[Any], market: Any) -> list[Any]:
+    """Drop intents that ``_execute_intents`` will skip as a no-op.
+
+    The oracle warm + validate (VIB-4842) pre-flight should only require prices
+    for intents that will actually compile. A zero-balance ``amount='all'`` swap
+    is short-circuited downstream (``_zero_balance_swap_skip_reason``) and never
+    reaches the compiler, so demanding a price for its tokens would fail the
+    pre-flight for an operation that does nothing. Mirroring the executor's skip
+    logic here keeps the two lanes consistent.
+    """
+    return [intent for intent in intents if _zero_balance_swap_skip_reason(intent, market) is None]
+
+
+def _warm_oracle_best_effort(market: Any, executable: list[Any], chain: str | None) -> dict[str, Any] | None:
+    """Warm the oracle without failing loud (resume-past-progress path).
+
+    VIB-4842 Codex review P1: on a resume where some closing intents have
+    already landed on-chain, the fail-loud pre-flight gate would block the next
+    risk-reducing intent — a violation of teardown's inverted-failure semantics
+    (AGENTS.md §Teardown). We still warm the cache for the remaining intents,
+    but a still-incomplete oracle only logs and the warmed dict is returned.
+    """
+    return warm_and_validate_oracle(market, executable, chain, raise_on_missing=False)
 
 
 @dataclass
@@ -451,11 +493,16 @@ class TeardownManager:
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
 
-            # Extract real prices from market for accurate compilation
-            price_oracle = None
-            if market is not None and hasattr(market, "get_price_oracle_dict"):
-                fetched = market.get_price_oracle_dict()
-                price_oracle = fetched if fetched is not None else None
+            # Step 5.5 (VIB-4842): Warm + validate the price oracle BEFORE
+            # compile. A fresh MarketSnapshot has an empty price cache, so
+            # ``get_price_oracle_dict()`` would return {} and the compiler would
+            # fail three layers down with a generic ValueError. This is a
+            # pre-flight check — no closing intent has executed yet, so failing
+            # loud here cannot strand a partially-unwound position. Only warm
+            # tokens for intents that will actually execute (zero-balance no-op
+            # swaps are skipped downstream, so their tokens are not required).
+            executable = _intents_requiring_pricing(intents, market)
+            price_oracle = warm_and_validate_oracle(market, executable, _teardown_chain(executable))
 
             # Step 6: Execute intents with safety guardrails
             result = await self._execute_intents(
@@ -628,6 +675,21 @@ class TeardownManager:
 
         logger.info(f"Resuming teardown {state.teardown_id}")
 
+        # Codex re-audit P1 (VIB-4842): the oracle GATE and the resume INDEX read
+        # the SAME progress counters, but the staleness/regeneration branch below
+        # resets ``completed_intents``/``current_intent_index`` to 0 so the resume
+        # INDEX re-runs the full regenerated plan. That reset also zeroes the
+        # signal the GATE needs. A partially-unwound *regenerated* teardown (old-
+        # plan closes already on-chain) would then read zeroed counters, wrongly
+        # take the fail-loud pre-flight path, and RAISE on an unpriceable
+        # regenerated close — blocking the remaining risk-reducing intents
+        # (violates teardown's inverted-failure semantics; AGENTS.md §Teardown).
+        #
+        # Decouple the two signals: capture whether ANY on-chain progress existed
+        # BEFORE any reset, and let the GATE consume this captured flag. The
+        # resume INDEX keeps consuming the (possibly-reset) live counters.
+        had_prior_progress = state.completed_intents > 0 or state.current_intent_index > 0
+
         # Staleness check
         age_seconds = (datetime.now(UTC) - state.updated_at).total_seconds()
         if age_seconds > self.config.staleness_threshold_seconds:
@@ -642,6 +704,18 @@ class TeardownManager:
                     raise
             state.pending_intents_json = json.dumps([i.to_dict() for i in intents])
             state.current_intent_index = 0
+            # Codex re-audit P1: the freshly generated plan is a brand-new
+            # intent list with zero completed work, so reset the progress
+            # counter too. ``resume_from_index`` below floors at
+            # ``max(current_intent_index, completed_intents)``; without this
+            # reset the stale ``completed_intents = N`` from the OLD plan would
+            # make the resumed run start at index N of the NEW plan, skipping
+            # the first N regenerated closes (or marking teardown COMPLETE when
+            # the new plan is shorter than N) and stranding on-chain risk. Only
+            # reset here on the regeneration path — the non-regeneration resume
+            # (same plan, e.g. completed_intents=1/current_intent_index=0) must
+            # keep ``completed_intents`` so it still skips finished intents.
+            state.completed_intents = 0
 
         # Parse intents from state
         intents_data = json.loads(state.pending_intents_json) if state.pending_intents_json else []
@@ -650,14 +724,80 @@ class TeardownManager:
             logger.info(f"No pending intents for {state.teardown_id}")
             return None
 
-        # Extract real prices from market
-        price_oracle = None
-        if market is not None and hasattr(market, "get_price_oracle_dict"):
-            fetched = market.get_price_oracle_dict()
-            price_oracle = fetched if fetched is not None else None
+        # VIB-4842: Warm + validate the oracle on resume too — a restarted
+        # runner has a fresh MarketSnapshot, so the cache is empty.
+        #
+        # Codex review P1: the *loud* validate-and-fail gate is a PRE-FLIGHT
+        # check — it may only fail loud when NO closing intent has executed yet.
+        # On a resume that has already made progress (some intents landed
+        # on-chain), failing loud here would block the next risk-reducing intent
+        # and strand a partially-unwound position — exactly the inverted-failure
+        # semantics teardown forbids (AGENTS.md §Teardown; blueprint 14
+        # §loud-but-non-blocking).
+        #
+        # Codex re-audit P1: ``current_intent_index`` is persisted BEFORE
+        # executing intent ``i`` (it marks "about to run i", not "finished i")
+        # and is never advanced after a success — only ``completed_intents`` is
+        # bumped post-execution. So after a restart where the first intent
+        # (``i == 0``) already landed on-chain, the persisted state can have
+        # ``completed_intents > 0`` while ``current_intent_index`` is still 0.
+        # Gating the loud branch on the index alone would misread that very
+        # common "made progress on intent 0" state as a fresh start and could
+        # block the next risk-reducing intent. The authoritative progress signal
+        # is ``completed_intents`` (incremented on both the success and the
+        # zero-balance-skip paths). Treat the run as a genuine fresh start —
+        # safe to fail loud — ONLY when there is no on-chain progress at all:
+        # ``completed_intents == 0`` AND ``current_intent_index == 0``.
+        #
+        # Codex re-audit P1 (VIB-4842): use ``had_prior_progress`` captured at the
+        # TOP of resume() — BEFORE the staleness/regeneration branch may have
+        # reset the live counters to 0. Re-reading ``state.completed_intents`` /
+        # ``state.current_intent_index`` here would, on a regenerated stale
+        # teardown that DID make prior on-chain progress, see the just-zeroed
+        # counters and wrongly take the fail-loud path. The captured flag keeps
+        # the GATE decision tied to genuine prior progress, fully decoupled from
+        # the resume INDEX (which legitimately reads the reset counters so the
+        # regenerated plan runs from index 0).
+        #
+        # Any progress → warm best-effort (populate the cache for the remaining
+        # intents) but DO NOT raise: fall back to the legacy lenient fetch so a
+        # still-incomplete oracle cannot halt the unwind.
+        executable = _intents_requiring_pricing(intents_data, market)
+        teardown_chain = _teardown_chain(executable)
+        if had_prior_progress:
+            logger.info(
+                "Resuming teardown %s past prior progress (current completed=%d, intent index=%d) — "
+                "warming oracle best-effort; the fail-loud pre-flight gate is skipped "
+                "to preserve teardown's inverted-failure semantics.",
+                state.teardown_id,
+                state.completed_intents,
+                state.current_intent_index,
+            )
+            price_oracle = _warm_oracle_best_effort(market, executable, teardown_chain)
+        else:
+            price_oracle = warm_and_validate_oracle(market, executable, teardown_chain)
 
         # Continue execution from where we left off
         positions = strategy.get_open_positions()
+
+        # Codex re-audit P1: resume must start at the next UNFINISHED intent,
+        # never re-run a completed one. ``current_intent_index`` is persisted
+        # BEFORE executing intent ``i`` (it marks "about to run i") and is never
+        # advanced after a success — only ``completed_intents`` is bumped
+        # post-execution (success path: ``completed_intents = succeeded`` after
+        # the per-intent commit; zero-balance-skip path: same assignment after
+        # ``succeeded += 1``). So ``completed_intents`` equals the count of fully
+        # handled intents = the index of the next unfinished intent, while
+        # ``current_intent_index`` lags it by one whenever a restart happens
+        # mid-loop after an intent already landed on-chain (e.g. intent 0
+        # committed → completed_intents=1 but current_intent_index=0). Starting
+        # from the raw index alone would re-execute that completed closing
+        # action (a second LP_CLOSE / withdraw), which the per-intent zero-
+        # balance skip does NOT cover for non-``amount='all'`` closers.
+        # Take the floor at ``completed_intents`` to skip finished work, but
+        # keep ``current_intent_index`` in the max() so a legitimately larger
+        # persisted index is still honored.
+        resume_from_index = max(state.current_intent_index, state.completed_intents)
 
         return await self._execute_intents(
             teardown_id=state.teardown_id,
@@ -668,7 +808,7 @@ class TeardownManager:
             teardown_state=state,
             on_approval_needed=on_approval_needed,
             on_progress=on_progress,
-            start_from_index=state.current_intent_index,
+            start_from_index=resume_from_index,
             price_oracle=price_oracle,
             market=market,
         )
@@ -1072,21 +1212,44 @@ class TeardownManager:
                             actual_slippage=actual_slippage,
                         )
                     else:
-                        logger.error(f"Intent {intent_index + 1}/{len(intents)} execution failed: {exec_result.error}")
+                        # VIB-4532 / VIB-4664 / VIB-4258: classify the revert so a
+                        # deterministic failure (insufficient balance, contract-arg,
+                        # ERC-721 not-approved) short-circuits and a transport/RPC
+                        # blip retries at the same level — instead of every failure
+                        # escalating slippage to the operator-approval gate.
+                        revert_class, disposition = classify_teardown_failure(exec_result.error)
+                        logger.error(
+                            "Intent %d/%d execution failed [%s -> %s]: %s",
+                            intent_index + 1,
+                            len(intents),
+                            revert_class.value,
+                            disposition.value,
+                            exec_result.error,
+                        )
                         return ExecutionAttempt(
                             success=False,
                             slippage_used=slippage,
                             actual_slippage=Decimal("0"),
                             error=exec_result.error,
+                            retryable=disposition != Disposition.NON_RETRYABLE,
+                            disposition=disposition.value,
                         )
 
                 except Exception as e:
-                    logger.exception(f"Exception during intent execution: {e}")
+                    revert_class, disposition = classify_teardown_failure(str(e))
+                    logger.exception(
+                        "Exception during intent execution [%s -> %s]: %s",
+                        revert_class.value,
+                        disposition.value,
+                        e,
+                    )
                     return ExecutionAttempt(
                         success=False,
                         slippage_used=slippage,
                         actual_slippage=Decimal("0"),
                         error=str(e),
+                        retryable=disposition != Disposition.NON_RETRYABLE,
+                        disposition=disposition.value,
                     )
 
             # Extract strategy-configured slippage from the intent so the

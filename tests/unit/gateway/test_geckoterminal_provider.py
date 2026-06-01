@@ -172,6 +172,47 @@ class TestGetOHLCV:
         assert isinstance(candles[0].volume, Decimal)
 
     @pytest.mark.asyncio
+    async def test_include_empty_intervals_adds_query_param(self, provider: GeckoTerminalOHLCVProvider) -> None:
+        """VIB-4875: the flag is sent to GeckoTerminal as include_empty_intervals=true."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=mock_response)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        await provider.get_ohlcv(
+            "WETH", timeframe="1h", limit=100, pool_address="0xabc123", chain="ethereum",
+            include_empty_intervals=True,
+        )
+
+        params = mock_session.get.call_args.kwargs["params"]
+        assert params["include_empty_intervals"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_include_empty_intervals_omitted_by_default(self, provider: GeckoTerminalOHLCVProvider) -> None:
+        """Default (False) keeps the request byte-identical to legacy behaviour."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=mock_response)
+        mock_session.closed = False
+        provider._session = mock_session
+
+        await provider.get_ohlcv("WETH", timeframe="1h", limit=100, pool_address="0xabc123", chain="ethereum")
+
+        params = mock_session.get.call_args.kwargs["params"]
+        assert "include_empty_intervals" not in params
+
+    @pytest.mark.asyncio
     async def test_fetch_with_search(self, provider: GeckoTerminalOHLCVProvider) -> None:
         """Fetch OHLCV by searching for pool first."""
         search_resp = AsyncMock()

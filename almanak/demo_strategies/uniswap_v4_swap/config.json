@@ -24,8 +24,5 @@
         "ETH": 100,
         "WETH": 1,
         "USDC": 10000
-    },
-    "qa": {
-        "sidecar_skip_ticket": "VIB-4543"
     }
 }

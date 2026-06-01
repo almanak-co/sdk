@@ -99,7 +99,7 @@ class TestRegistry:
 
     @pytest.mark.parametrize(
         "slug",
-        ["uniswap_v3", "agni_finance", "sushiswap_v3"],
+        ["uniswap_v3", "agni_finance", "pancakeswap_v3", "sushiswap_v3"],
     )
     def test_v3_forks_registered(self, slug: str) -> None:
         """All V3-fork slugs share the canonical NPM ABI and reuse the
@@ -115,14 +115,15 @@ class TestRegistry:
         # All V3-fork slugs resolve to the same callable.
         assert get_teardown_post_condition(slug) is _uniswap_v3_post_condition
 
-    def test_pancakeswap_v3_not_registered(self) -> None:
-        """PancakeSwap V3 has connector coverage for swaps but no NPM
-        registered in ``contracts.py`` today. Registering the hook
-        without an NPM would silently fail-closed every PancakeSwap V3
-        teardown — worse than not registering. Documents the gap so a
-        future NPM addition lands the registration in the same change.
+    def test_pancakeswap_v3_registered(self) -> None:
+        """PancakeSwap V3 is now registered (VIB-4902). Its NPM lives under the
+        ``nft`` key in ``addresses.py``; ``_resolve_v3_position_manager`` reads
+        both ``position_manager`` and ``nft`` so the hook resolves a real NPM
+        and on-chain teardown verification runs (previously it fell closed and
+        Pancake LP teardowns silently skipped on-chain verification).
         """
-        assert not has_teardown_post_condition("pancakeswap_v3")
+        assert has_teardown_post_condition("pancakeswap_v3")
+        assert get_teardown_post_condition("pancakeswap_v3") is _uniswap_v3_post_condition
 
     def test_aerodrome_not_registered_by_uniswap_v3_hook(self) -> None:
         """Aerodrome volatile/stable pools use ERC-20 LP tokens, not NFTs.
@@ -539,17 +540,19 @@ def _v3_protocol_chain_pairs() -> list[tuple[str, str]]:
 
     Read the protocol→registry mapping straight from
     ``post_conditions._V3_PROTOCOL_TO_REGISTRY`` and the per-chain entries
-    from ``almanak.core.contracts``. Adding a new V3-fork to the
-    production mapping (e.g. PancakeSwap V3 once its NPM lands in
-    ``contracts.py``) automatically extends this parameterization — no
-    test edit required.
+    from the owning connector's ``addresses.py``. Adding a new V3-fork to
+    the production mapping (e.g. PancakeSwap V3 once its NPM lands in the
+    connector's address table) automatically extends this parameterization —
+    no test edit required.
     """
-    from almanak.core import contracts as _contracts
+    import importlib
+
     from almanak.framework.teardown.post_conditions import _V3_PROTOCOL_TO_REGISTRY
 
     pairs: list[tuple[str, str]] = []
-    for protocol, registry_name in _V3_PROTOCOL_TO_REGISTRY.items():
-        registry = getattr(_contracts, registry_name, {})
+    for protocol, (module_name, attr_name) in _V3_PROTOCOL_TO_REGISTRY.items():
+        mod = importlib.import_module(module_name)
+        registry = getattr(mod, attr_name, {})
         for chain in registry:
             pairs.append((protocol, chain))
     return pairs

@@ -117,6 +117,159 @@ def _first_tx_hash(result: Any) -> str | None:
     return tx or None
 
 
+class PositionEventNotPersistedError(RuntimeError):
+    """Raised inside :func:`_emit_teardown_position_event` when
+    ``save_position_event`` returns falsy. Caught by ``commit_teardown_intent``
+    and converted to a deferred-log row — NEVER propagated out of the teardown
+    lane (VIB-4895 / blueprint 27 §14.1 loud-but-never-block contract)."""
+
+
+async def _emit_teardown_position_event(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    intent: AnyIntent,
+    *,
+    enriched_result: Any,
+    chain: str,
+    deployment_id: str,
+    teardown_cycle_id: str,
+    ledger_entry_id: str | None,
+    price_oracle: dict[str, Any] | None,
+    pre_state: dict[str, Any] | None,
+    post_state: dict[str, Any] | None,
+) -> None:
+    """VIB-4895 — emit a ``position_events`` row for a teardown intent (Lane B).
+
+    The teardown commit lane (``TeardownManager`` → ``commit_teardown_intent``)
+    OWNS the ``position_events`` emit here instead of inheriting the iteration
+    lane's transitive emit inside ``_write_ledger_entry`` — which the caller
+    suppresses via ``emit_position_event=False``. Owning the emit lets the
+    teardown lane apply its inverted failure contract (loud-but-never-block,
+    blueprint 27-accounting.md §14.1) rather than the iteration lane's
+    halt-on-failure semantics, and — crucially — avoids the **duplicate** CLOSE
+    row that would land if BOTH the transitive emit and this explicit emit fired
+    (``PositionEvent.id`` is a random UUID, so ``save_position_event``'s
+    ``INSERT OR IGNORE`` keyed on ``id`` does not dedupe two independent builds).
+    ``position_events`` is one of the five surfaces teardown must populate.
+
+    This mirrors the iteration lane's :py:meth:`StrategyRunner.
+    _emit_position_event_for_intent` body (build → seed cache → save) and
+    reuses the VIB-4839 durable-hydration fallback
+    (:py:meth:`StrategyRunner._hydrate_lp_close_from_durable_store`) so the
+    teardown lane gets the same cold-cache LP_CLOSE carry-forward correctness on
+    hosted / restart shapes.
+
+    **Failure semantics — Lane B, NOT Lane C.** The iteration-lane emit raises
+    :class:`AccountingPersistenceError` in live mode to halt the loop (correct
+    for iteration). Teardown inverts that: a position-event write failure must
+    be recorded into the deferred-write log and surfaced via
+    ``accounting_degraded`` but **never** block the next risk-reducing intent.
+    This helper does NOT itself swallow failures — it lets the underlying writer
+    error (or :class:`PositionEventNotPersistedError` on a falsy save) propagate
+    to its **single** caller, ``commit_teardown_intent`` Step 2b, which wraps the
+    call in a ``try/except`` that converts the raise into a ``position_event``
+    deferred-log row. The never-propagate-out-of-the-lane contract therefore
+    holds at the ``commit_teardown_intent`` boundary, not inside this helper.
+
+    Raises
+    ------
+    PositionEventNotPersistedError
+        When ``save_position_event`` returns falsy.
+    Exception
+        Any error raised by the underlying writers / builder. The caller MUST
+        catch (see ``commit_teardown_intent`` Step 2b) — this helper is never
+        called from anywhere else.
+    """
+    from ..intents.vocabulary import IntentType
+    from ..observability.position_events import build_position_event_from_intent
+
+    state_manager = getattr(runner, "state_manager", None)
+    if state_manager is None or not hasattr(state_manager, "save_position_event"):
+        return
+
+    # VIB-4085 — wallet address scopes lending position_id. Mirror the
+    # iteration lane's runtime-config-first / strategy-fallback precedence.
+    wallet_address = (
+        getattr(getattr(runner, "_runtime_config", None), "wallet_address", "")
+        or getattr(strategy, "wallet_address", "")
+        or ""
+    )
+
+    recent_open_events = getattr(runner, "_recent_open_events", None)
+
+    # VIB-4839 — durable-storage fallback for the LP_CLOSE carry-forward, mirrored
+    # from ``_emit_position_event_for_intent``. Position-id precedence MUST match
+    # ``position_events._seed_event`` (result first, then intent). ``intent`` is
+    # the ``AnyIntent`` union which does not uniformly expose ``position_id``, so
+    # use ``getattr(..., "") or ""`` on both surfaces.
+    if (
+        recent_open_events is not None
+        and getattr(intent, "intent_type", None) == IntentType.LP_CLOSE
+        and hasattr(runner, "_hydrate_lp_close_from_durable_store")
+    ):
+        result_pid = str(getattr(enriched_result, "position_id", "") or "")
+        intent_pid = str(getattr(intent, "position_id", "") or "")
+        lp_position_id = result_pid or intent_pid
+        if lp_position_id:
+            key = (lp_position_id, "LP")
+            if key not in recent_open_events:
+                durable_payload = await runner._hydrate_lp_close_from_durable_store(
+                    deployment_id=deployment_id,
+                    position_id=lp_position_id,
+                )
+                if durable_payload is not None:
+                    recent_open_events[key] = durable_payload
+
+    pos_event = build_position_event_from_intent(
+        deployment_id=deployment_id,
+        intent=intent,
+        result=enriched_result,
+        ledger_entry_id=ledger_entry_id or "",
+        chain=chain,
+        price_oracle=price_oracle,
+        recent_open_events=recent_open_events,
+        post_state=post_state,
+        pre_state=pre_state,
+        wallet_address=wallet_address,
+    )
+    if pos_event is None:
+        # SWAP / ENSURE_BALANCE / BRIDGE etc. don't produce position events.
+        return
+
+    pos_event.cycle_id = teardown_cycle_id
+    # Mirror Lane C (strategy_runner._emit_position_event_for_intent): stamp the
+    # centralised tri-state mode (dry_run / live / paper) so a dry_run teardown
+    # isn't mislabelled "paper". `_derive_execution_mode()` returns a StrEnum
+    # that persists as its bare label.
+    pos_event.execution_mode = runner._derive_execution_mode()
+
+    saved = await state_manager.save_position_event(pos_event)
+    if not saved:
+        # Lane B never raises on a falsy save — surface it loudly so the caller
+        # records a deferred-log row, then return without running attribution
+        # side-effects (stamping entry-state for an event not on disk drifts
+        # ``position_state_snapshots``).
+        raise PositionEventNotPersistedError(
+            f"save_position_event returned falsy for {pos_event.event_type} "
+            f"{pos_event.position_type} position={pos_event.position_id}"
+        )
+
+    logger.debug(
+        "commit_teardown_intent: position event %s emitted for %s (position=%s)",
+        pos_event.event_type,
+        pos_event.position_type,
+        pos_event.position_id,
+    )
+
+    # Mirror the iteration lane: only update the recent-open cache on save
+    # success, then run OPEN/CLOSE attribution side-effects (both best-effort
+    # on the runner side — they degrade attribution but never raise here).
+    if pos_event.position_id and hasattr(runner, "_update_recent_open_events_cache"):
+        runner._update_recent_open_events_cache(pos_event)
+    if hasattr(runner, "_run_position_event_attribution"):
+        await runner._run_position_event_attribution(pos_event)
+
+
 async def commit_teardown_intent(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -341,6 +494,16 @@ async def commit_teardown_intent(
                 )
 
             try:
+                # VIB-4895 — ``emit_position_event=False``: the iteration lane emits
+                # the ``position_events`` row transitively from inside
+                # ``_write_ledger_entry`` on a successful chain TX. The teardown lane
+                # owns that emit explicitly in Step 2b below (loud-but-never-block).
+                # Without this flag BOTH paths fire and a duplicate CLOSE row lands
+                # (``PositionEvent.id`` is a random UUID, so the ``INSERT OR IGNORE``
+                # in ``save_position_event`` does not dedupe the two builds). Letting
+                # the ledger write skip the emit also keeps ``ledger_entry_id`` intact
+                # when only the position-event write fails, so Step 3 outbox still
+                # fires and the degraded reason is labelled ``position_event``.
                 ledger_entry_id = await runner._write_ledger_entry(
                     strategy,
                     intent,
@@ -349,6 +512,7 @@ async def commit_teardown_intent(
                     price_oracle=teardown_price_oracle,
                     pre_state=pre_state_dict,
                     post_state=post_state_dict,
+                    emit_position_event=False,
                 )
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(
@@ -360,6 +524,51 @@ async def commit_teardown_intent(
                     exc_info=True,
                 )
                 _record("ledger", exc)
+
+            # ----- Step 2b: position event (VIB-4895) ------------------------
+            # The teardown lane OWNS the ``position_events`` emit explicitly here,
+            # rather than inheriting the iteration lane's transitive emit inside
+            # ``_write_ledger_entry`` (suppressed above via
+            # ``emit_position_event=False``). Owning it lets the teardown lane apply
+            # its inverted failure contract (loud-but-never-block, blueprint 27
+            # §14.1) instead of the iteration lane's halt-on-failure semantics, and
+            # avoids the duplicate CLOSE row that double-emitting would produce. We
+            # reuse the runner's VIB-4839 durable hydration so cold-cache LP_CLOSE
+            # carry-forward works on the hosted / restart shape this lane fires on.
+            #
+            # Loud-but-never-block (blueprint 27 §14.1): a position-event write
+            # failure becomes a ``position_event`` deferred-log row and sets
+            # ``accounting_degraded``; it MUST NOT propagate and strand the next
+            # risk-reducing intent. The emit step itself runs even when the
+            # ledger write degraded (ledger_entry_id is None) — position_events
+            # is the IL/PnL bracket source, more important to capture than its
+            # FK; ``build_position_event_from_intent`` accepts an empty
+            # ledger_entry_id.
+            try:
+                chain_for_emit = getattr(strategy, "chain", "") or getattr(runner.config, "chain", "") or ""
+                await _emit_teardown_position_event(
+                    runner,
+                    strategy,
+                    intent,
+                    enriched_result=enriched_result,
+                    chain=chain_for_emit,
+                    deployment_id=deployment_id,
+                    teardown_cycle_id=teardown_cycle_id,
+                    ledger_entry_id=ledger_entry_id,
+                    price_oracle=teardown_price_oracle,
+                    pre_state=pre_state_dict,
+                    post_state=post_state_dict,
+                )
+            except Exception as exc:  # noqa: BLE001 — never propagate (Lane B)
+                logger.error(
+                    "commit_teardown_intent: position-event emit failed for %s/%s tx=%s: %s",
+                    deployment_id,
+                    intent_type or "unknown-intent",
+                    tx_hash or "-",
+                    exc,
+                    exc_info=True,
+                )
+                _record("position_event", exc, ledger_entry_id=ledger_entry_id)
 
             # ----- Step 3: outbox + fire processor ---------------------------
             if ledger_entry_id:
@@ -425,6 +634,7 @@ async def commit_teardown_intent(
 
 
 __all__ = [
+    "PositionEventNotPersistedError",
     "TeardownCommitOutcome",
     "commit_teardown_intent",
 ]

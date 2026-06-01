@@ -75,17 +75,41 @@ logger = logging.getLogger(__name__)
 # Lazy import to avoid circular-dependency issues at module load time.
 # _check_decimal_unit_soft_fail is called only inside build_position_event_from_intent.
 def _decimal_unit_soft_fail(event: "PositionEvent") -> None:  # noqa: F821
-    """Run the W1-5 decimal-unit soft-fail guard over the LP fee fields."""
+    """Run the W1-5 decimal-unit soft-fail guard over the LP fee fields.
+
+    Threads ``chain`` plus token symbol + decimals through to the guard so
+    the decimals-aware rule can catch the production-bug magnitudes from
+    Appendix B LP-2 (e.g. WETH 18-dp ``75817134186`` and USDC 6-dp ``148``).
+    Token resolution is best-effort: unknown tokens fall back to the
+    magnitude rule.
+    """
     from almanak.framework.accounting.decimal_guards import _check_decimal_unit_soft_fail
 
     payload = {
         "fees_token0": event.fees_token0,
         "fees_token1": event.fees_token1,
     }
+
+    token_symbols_map: dict[str, str] = {}
+    token_decimals_map: dict[str, int] = {}
+    chain_lc = (event.chain or "").lower()
+    for side, sym in (("token0", event.token0), ("token1", event.token1)):
+        if not sym:
+            continue
+        token_symbols_map[side] = sym
+        # Lookup via the existing resolver helper used elsewhere in this
+        # module — best-effort, returns ``None`` on miss.  We never raise.
+        dec = _resolve_token_decimals(sym, chain_lc)
+        if dec is not None:
+            token_decimals_map[side] = dec
+
     _check_decimal_unit_soft_fail(
         payload,
         event_id=event.id,
         event_type=event.event_type,
+        chain=chain_lc or None,
+        token_decimals_map=token_decimals_map or None,
+        token_symbols_map=token_symbols_map or None,
     )
 
 
@@ -524,6 +548,46 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
         if fee is not None:
             event.fees_token1 = str(fee)
             break
+
+    _stamp_lp_close_fee_taxonomy(event, lp_close)
+
+
+def _stamp_lp_close_fee_taxonomy(event: PositionEvent, lp_close: Any) -> None:
+    """VIB-4848 (T8) — stamp ``fee_separation_method`` / ``fee_confidence``
+    onto ``event.attribution_json``.
+
+    Mirrors the ``funding_fee_usd`` sidecar pattern from ``_apply_perp``.
+    Pulls values from the ``LPCloseData`` post-init inference when the
+    parser did not set explicit ones; ``"UNKNOWN"`` survives only for
+    hand-built fixtures that bypass the dataclass.
+
+    Gated to ``event_type == "CLOSE"`` — ``_apply_lp_close`` Phase δ also
+    runs for ``LP_COLLECT_FEES`` intents (which materialise the same
+    Burn / Collect events), but those produce ``COLLECT_FEES`` position
+    events for which the close-only fee-separation taxonomy is not
+    meaningful and would leak CLOSE semantics into downstream
+    attribution.
+    """
+    if event.event_type != "CLOSE":
+        return
+    method = getattr(lp_close, "fee_separation_method", None)
+    confidence = getattr(lp_close, "fee_confidence", None)
+    if not (method or confidence):
+        return
+    try:
+        existing = json.loads(event.attribution_json or "{}")
+        if not isinstance(existing, dict):
+            existing = {}
+        if method:
+            existing["fee_separation_method"] = str(method)
+        if confidence:
+            existing["fee_confidence"] = str(confidence)
+        event.attribution_json = json.dumps(existing)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Failed to stamp fee_separation_method/fee_confidence into attribution_json",
+            exc_info=True,
+        )
 
 
 def _apply_swap_fallback(event: PositionEvent, ctx: IntentEventContext) -> None:
@@ -1206,57 +1270,258 @@ def _apply_lp_close_columns(
         _apply_lp_close_value_usd(event, price_oracle, chain=ctx.chain)
 
 
-def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:
-    """VIB-3919 — value_usd at CLOSE = received amount0 × price0 +
-    received amount1 × price1.
+@dataclass(frozen=True)
+class LpCloseValueResult:
+    """Outcome of :func:`compute_lp_close_value_usd`.
 
-    Mirrors ``_apply_lp_open_value_usd`` but reads the CLOSE-time
-    received amounts (already populated by ``_apply_lp_close``) instead
-    of the OPEN-time deposit amounts. Fails closed: if either price is
-    missing or decimals can't be resolved, ``value_usd`` stays "".
+    ``value_usd`` is the empty string on every fail-closed path (Empty ≠
+    Zero — never a fabricated ``"0"``). When ``value_usd`` is non-empty the
+    decimals + prices used to compute it are returned so the caller can
+    stamp dependent enrichments (e.g. ``fees_total_usd``) without re-running
+    the resolver / oracle lookup. ``skip_reason`` is ``None`` on success and
+    one of the documented sentinels on a fail-closed path.
     """
-    if event.event_type != "CLOSE" or event.position_type != "LP":
-        return
-    if event.value_usd:
-        return
-    amount0_str = event.amount0
-    amount1_str = event.amount1
-    token0 = (event.token0 or "").upper()
-    token1 = (event.token1 or "").upper()
+
+    value_usd: str = ""
+    decimals0: int | None = None
+    decimals1: int | None = None
+    price0: Decimal | None = None
+    price1: Decimal | None = None
+    skip_reason: str | None = None
+
+
+def compute_lp_close_value_usd(
+    token0: str,
+    token1: str,
+    amount0: str | None,
+    amount1: str | None,
+    price_oracle: dict,
+    chain: str = "",
+    *,
+    position_id: str = "",
+) -> LpCloseValueResult:
+    """VIB-3919 / VIB-4896 — pure ``value_usd`` math for an LP_CLOSE.
+
+    ``value_usd`` at CLOSE = received amount0 × price0 + received amount1 ×
+    price1. Mirrors ``_apply_lp_open_value_usd`` but reads the CLOSE-time
+    received amounts. **Fails closed**: if a token is missing, an amount is
+    missing, decimals can't be resolved, or a price is unavailable, the
+    returned ``value_usd`` stays ``""`` — never fabricated to ``0`` (Empty ≠
+    Zero per CLAUDE.md §Accounting).
+
+    Extracted from ``_apply_lp_close_value_usd`` (VIB-4896) so the offline
+    repair CLI (``almanak strat repair-teardown-lp-close``) and the runner's
+    iteration / teardown lanes share one implementation of the decimal/price
+    math. Behaviour is preserved verbatim — same upper-casing, same tolerant
+    ``price_usd``/``price`` + lower-case fallback price lookup, same
+    structured WARNs (each carrying ``position_id``/``chain``) on every
+    early-exit branch so a silent empty value_usd never hides in production
+    again (the May-22 ``lp_triple`` rerun bug).
+    """
+    token0 = (token0 or "").upper()
+    token1 = (token1 or "").upper()
+    amount0_str = amount0
+    amount1_str = amount1
     if not (amount0_str and amount1_str and token0 and token1):
-        return
+        logger.warning(
+            "lp_close_value_usd.skipped reason=missing_tokens_or_amounts "
+            "position_id=%s chain=%s have_token0=%s have_token1=%s "
+            "have_amount0=%s have_amount1=%s",
+            position_id,
+            chain,
+            bool(token0),
+            bool(token1),
+            bool(amount0_str),
+            bool(amount1_str),
+        )
+        return LpCloseValueResult(skip_reason="missing_tokens_or_amounts")
     try:
         from decimal import Decimal as _D
 
         from almanak.framework.data.tokens.resolver import get_token_resolver
 
         resolver = get_token_resolver()
-        ti0 = resolver.resolve(token0, chain=chain)
-        ti1 = resolver.resolve(token1, chain=chain)
-        if ti0 is None or ti1 is None:
-            return
+        # ``resolver.resolve`` raises ``TokenNotFoundError`` (etc.) on miss —
+        # it never returns ``None``.  Catch the specific resolver-failure
+        # shape here so the operator gets the precise
+        # ``token_decimals_unresolved`` reason rather than the generic
+        # ``arithmetic_or_resolver_error`` tail at the bottom of this
+        # function. (Gemini code-assist on PR #2490 caught the original
+        # ``is None`` check as dead code.)
+        try:
+            ti0 = resolver.resolve(token0, chain=chain, log_errors=False)
+            ti1 = resolver.resolve(token1, chain=chain, log_errors=False)
+        except Exception as resolver_err:  # noqa: BLE001 — fail-closed: empty stays empty
+            logger.warning(
+                "lp_close_value_usd.skipped reason=token_decimals_unresolved "
+                "position_id=%s chain=%s token0=%s token1=%s err=%s",
+                position_id,
+                chain,
+                token0,
+                token1,
+                resolver_err,
+            )
+            return LpCloseValueResult(skip_reason="token_decimals_unresolved")
         a0 = _D(str(amount0_str)) / _D(10**ti0.decimals)
         a1 = _D(str(amount1_str)) / _D(10**ti1.decimals)
 
-        # Tolerant price lookup (matches _apply_lp_open_value_usd).
+        # Tolerant price lookup — mirrors VIB-3885 helper used by category
+        # handlers and ``_apply_lp_open_value_usd`` at L1478. ``sym`` is
+        # already upper-cased above, so the OPEN path uses ``sym.lower()`` as
+        # the second fallback for oracles that key on lowercase symbols.
+        # Likewise accepts both ``price_usd`` and ``price`` keys on nested
+        # entries. (CodeRabbit Major on PR #2490 — the prior ``sym.upper()``
+        # fallback was dead and the single ``price_usd`` key diverged from
+        # the OPEN helper.)
         def _price(sym: str) -> _D | None:
-            entry = price_oracle.get(sym) or price_oracle.get(sym.upper())
+            entry = price_oracle.get(sym) or price_oracle.get(sym.lower())
             if entry is None:
                 return None
             if isinstance(entry, dict):
-                p = entry.get("price_usd")
-                return _D(str(p)) if p is not None else None
+                p = entry.get("price_usd") or entry.get("price")
+                if p is None:
+                    return None
+                try:
+                    return _D(str(p))
+                except Exception:  # noqa: BLE001
+                    return None
             try:
-                return _D(str(entry))
+                d = _D(str(entry))
             except Exception:  # noqa: BLE001
                 return None
+            return d if d.is_finite() else None
 
         p0, p1 = _price(token0), _price(token1)
         if p0 is None or p1 is None:
-            return
-        event.value_usd = str(a0 * p0 + a1 * p1)
+            logger.warning(
+                "lp_close_value_usd.skipped reason=price_oracle_miss "
+                "position_id=%s chain=%s token0=%s token1=%s have_price0=%s have_price1=%s",
+                position_id,
+                chain,
+                token0,
+                token1,
+                p0 is not None,
+                p1 is not None,
+            )
+            return LpCloseValueResult(skip_reason="price_unavailable")
+        return LpCloseValueResult(
+            value_usd=str(a0 * p0 + a1 * p1),
+            decimals0=ti0.decimals,
+            decimals1=ti1.decimals,
+            price0=p0,
+            price1=p1,
+        )
     except Exception:  # noqa: BLE001 — best-effort enrichment
-        logger.debug("LP_CLOSE value_usd compute failed", exc_info=True)
+        # VIB-4839 — escalate from debug to warning. A swallowed exception
+        # here is observationally indistinguishable from the silent missing-
+        # token early-return that hid the lp_triple bug, so it must surface.
+        logger.warning(
+            "lp_close_value_usd.skipped reason=arithmetic_or_resolver_error position_id=%s chain=%s",
+            position_id,
+            chain,
+            exc_info=True,
+        )
+        return LpCloseValueResult(skip_reason="arithmetic_or_resolver_error")
+
+
+def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:
+    """VIB-3919 — set ``event.value_usd`` from the close-time received amounts.
+
+    Thin wrapper around :func:`compute_lp_close_value_usd` (VIB-4896): reads
+    the CLOSE-time amounts off the event, delegates the decimal/price math,
+    and — on success — writes ``value_usd`` and stamps ``fees_total_usd``.
+    Fails closed exactly as before: ``value_usd`` stays "" on any missing
+    input (Empty ≠ Zero per CLAUDE.md §Accounting).
+    """
+    if event.event_type != "CLOSE" or event.position_type != "LP":
+        return
+    if event.value_usd:
+        return
+    result = compute_lp_close_value_usd(
+        event.token0 or "",
+        event.token1 or "",
+        event.amount0,
+        event.amount1,
+        price_oracle,
+        chain=chain,
+        position_id=event.position_id,
+    )
+    if not result.value_usd:
+        return
+    event.value_usd = result.value_usd
+    # decimals + prices are always populated alongside a non-empty value_usd.
+    if (
+        result.decimals0 is not None
+        and result.decimals1 is not None
+        and result.price0 is not None
+        and result.price1 is not None
+    ):
+        _stamp_lp_close_fees_total_usd(event, result.decimals0, result.decimals1, result.price0, result.price1)
+
+
+def _load_attribution_dict(event: PositionEvent) -> dict:
+    """Return ``event.attribution_json`` as a dict, tolerating malformed JSON.
+
+    Centralised so callers do not have to repeat the try / non-dict
+    coalesce — the result is a dict that can be mutated and re-serialised
+    via ``json.dumps``. Used by the VIB-4848 close-event enrichers.
+    """
+    try:
+        existing = json.loads(event.attribution_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(existing, dict):
+        return {}
+    return existing
+
+
+def _fees_unmeasured(raw: Any) -> bool:
+    """Empty ≠ Zero guard for ``PositionEvent.fees_token0`` / ``fees_token1``.
+
+    ``PositionEvent`` columns default to the empty string ``""`` (the
+    column default survives the SQLite round-trip when no parser populated
+    the field).  Both ``None`` and ``""`` signal "unmeasured" and must be
+    skipped before they reach ``Decimal(str(...))`` and crash with
+    ``InvalidOperation``.  An explicit ``"0"`` is measured zero and is
+    *not* unmeasured.
+    """
+    return raw is None or raw == ""
+
+
+def _stamp_lp_close_fees_total_usd(
+    event: PositionEvent,
+    decimals0: int,
+    decimals1: int,
+    price0: Decimal,
+    price1: Decimal,
+) -> None:
+    """VIB-4848 (T9) — stamp ``fees_total_usd`` onto attribution_json.
+
+    Only SEPARATE/EXACT closes (UniV3 / PancakeSwap V3 / SushiSwap V3 /
+    Aerodrome Slipstream) get a non-None ``fees_total_usd`` stamp:
+    BUNDLED closes (UniV4 / Fluid / Aerodrome V1) have no measured fee
+    separation, so emitting a value here would silently substitute a
+    fabricated zero for an unmeasured observation (Empty ≠ Zero). The
+    downstream ``attribute_lp`` uses this stamp to recover the
+    principal-only V_lp before computing IL.
+    """
+    existing = _load_attribution_dict(event)
+    method = str(existing.get("fee_separation_method") or "").upper()
+    if method != "SEPARATE":
+        return
+    if _fees_unmeasured(event.fees_token0) or _fees_unmeasured(event.fees_token1):
+        return
+    try:
+        f0 = Decimal(str(event.fees_token0)) / Decimal(10**decimals0)
+        f1 = Decimal(str(event.fees_token1)) / Decimal(10**decimals1)
+    except (InvalidOperation, ValueError):
+        logger.debug(
+            "LP_CLOSE fees_total_usd compute failed (decimal parse)",
+            exc_info=True,
+        )
+        return
+    existing["fees_total_usd"] = str(f0 * price0 + f1 * price1)
+    event.attribution_json = json.dumps(existing)
 
 
 def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:

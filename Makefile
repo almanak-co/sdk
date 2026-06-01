@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation
+.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation scan-coupling scan-coupling-report scan-coupling-baseline
 
 # Load .env file if it exists
 -include .env
@@ -86,6 +86,31 @@ check-deployment-id-proto-surface:
 check-connector-chains:
 	uv run python scripts/ci/check_connector_chains.py
 
+# Chain/protocol coupling scanner (VIB-4851 / VIB-4852). Re-scans the
+# repo for chain- and protocol-coupled code outside its canonical home
+# and compares against the committed baseline. CI ratchet gate: any
+# net-new finding fails the build; refactors that shrink the count
+# pass without re-baselining.
+#
+# Local workflow:
+#   make scan-coupling             # check against committed baseline (CI mode)
+#   make scan-coupling-report      # regenerate the dated Markdown report
+#   make scan-coupling-baseline    # refresh the committed baseline JSON
+#                                  # (only after eliminating net-new findings
+#                                  # or having them approved as intentional)
+SCAN_COUPLING_BASELINE := docs/internal/audits/chain-protocol-coupling-baseline.json
+
+scan-coupling:
+	uv run python scripts/ci/scan_chain_protocol_coupling.py \
+		--check-against $(SCAN_COUPLING_BASELINE)
+
+scan-coupling-report:
+	uv run python scripts/ci/scan_chain_protocol_coupling.py --print-summary
+
+scan-coupling-baseline:
+	uv run python scripts/ci/scan_chain_protocol_coupling.py \
+		--baseline $(SCAN_COUPLING_BASELINE)
+
 # Gateway protocol-isolation guard (VIB-4812 / epic VIB-4808).
 # Fails CI on protocol-keyed dispatch shapes inside ``almanak/gateway/**``:
 #   * ``if protocol/venue/dex == "<protocol>":`` equality dispatch
@@ -108,6 +133,28 @@ test-unit:
 
 # Alias for test-unit
 test: test-unit
+
+# VIB-4728 POOL-9 (VIB-4757) acceptance pack — 9 gateway tests + 2 framework
+# mirror tests aggregated under @pytest.mark.acceptance_pack. The frozen
+# collect-only snapshot at
+# tests/gateway/services/test_pool_history_acceptance_pack.EXPECTED.txt is
+# diff-guarded so a regression (test renamed/removed/relocated) fails the
+# gate before the run starts. See docs/internal/uat-cards/VIB-4728.md §D5.A.
+.PHONY: test-acceptance-pack
+test-acceptance-pack:
+	@echo "Running VIB-4728 POOL-9 acceptance pack..."
+	@# Pass --import-mode=importlib to BOTH invocations so the collect-only
+	@# snapshot and the live run resolve module IDs the same way (pr-auditor
+	@# 2026-05-28 flagged the asymmetric default: collect-only fell back to
+	@# pytest default 'prepend' after `-o "addopts="` wiped the pytest.ini
+	@# `--import-mode=append`; the live run used `importlib`. Today the
+	@# file basenames are unique so the snapshot matched, but the symmetry
+	@# matters for future tests that share basenames across dirs).
+	@uv run pytest -m acceptance_pack --collect-only -q --import-mode=importlib -o "addopts=" 2>&1 \
+		| grep -E '^tests/.*::' | sort > /tmp/pool9-collected.txt
+	@diff -u tests/gateway/services/test_pool_history_acceptance_pack.EXPECTED.txt /tmp/pool9-collected.txt \
+		|| (echo "FAIL: acceptance-pack collection set drifted from EXPECTED snapshot. Update snapshot deliberately if intentional." && exit 1)
+	@uv run pytest -m acceptance_pack -v --import-mode=importlib -o "addopts=" -p no:cacheprovider
 
 # Run connector tests (consolidated under tests/unit/connectors/ — the inline
 # per-connector tests/ directories were merged into the central tree;

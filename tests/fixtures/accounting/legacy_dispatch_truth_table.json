@@ -69,6 +69,7 @@
         "il_usd": null,
         "hodl_value_usd": null,
         "position_hash": null,
+        "position_id": null,
         "schema_version": 1,
         "primitive_version": 1
       }
@@ -105,6 +106,7 @@
         "il_usd": null,
         "hodl_value_usd": null,
         "position_hash": null,
+        "position_id": null,
         "schema_version": 1,
         "primitive_version": 1
       }
@@ -230,13 +232,16 @@
         "effective_price": null,
         "slippage_bps": null,
         "realized_pnl_usd": null,
+        "realized_pnl_usd_matched": null,
+        "unmatched_amount_in": null,
+        "unmatched_proceeds_usd": null,
         "cost_basis_recorded": false,
         "gas_usd": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "missing prices in price_inputs_json: USDC price, WETH price; swap amounts unmeasured (token decimals could not be resolved by receipt parser)",
         "swap_position_key": "swap:arbitrum:0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
         "schema_version": 1,
-        "primitive_version": 1
+        "primitive_version": 2
       }
     },
     {

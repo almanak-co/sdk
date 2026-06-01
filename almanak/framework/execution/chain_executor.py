@@ -44,7 +44,10 @@ from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.types import TxParams, Wei
 
 from almanak.core.chains import ChainRegistry
-from almanak.framework.execution.config import CHAIN_IDS, ConfigurationError
+from almanak.core.chains._helpers import (
+    receipt_timeout_for as _receipt_timeout_for,
+)
+from almanak.framework.execution.config import ConfigurationError
 from almanak.framework.execution.gas.constants import DEFAULT_GAS_BUFFER
 from almanak.framework.execution.interfaces import (
     ExecutionError,
@@ -117,15 +120,11 @@ def _parse_insufficient_funds_error(error_msg: str) -> tuple[int, int]:
     return 0, 0
 
 
-# Per-chain receipt confirmation timeout overrides (seconds).
-# These chains are significantly slower than L2s on Anvil forks.
-# Users can override per-strategy with TX_TIMEOUT_SECONDS env var or
-# tx_timeout_seconds in the runtime config.
-CHAIN_RECEIPT_TIMEOUTS: dict[str, int] = {
-    "bsc": 300,  # BSC Anvil forks: quoter ~60-80s, gas estimate ~155s
-    "avalanche": 180,  # Avalanche also slower than L2s
-}
-DEFAULT_RECEIPT_TIMEOUT: int = 120
+# VIB-4857 (W5): ``DEFAULT_RECEIPT_TIMEOUT`` / ``_receipt_timeout_for`` live
+# in :mod:`almanak.core.chains._helpers` so consumers above the framework
+# layer (notably ``almanak.config.runtime``) can read the same value
+# without an ``almanak.config → almanak.framework`` upward import. Re-
+# exported above via ``from almanak.core.chains._helpers import ...``.
 
 
 def _native_symbol_for(chain: str) -> str:
@@ -174,18 +173,20 @@ class ChainExecutorConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration."""
-        # Validate chain
+        # Validate chain. VIB-4857 (W5): ChainRegistry is the SSOT and also
+        # the alias resolver — "bnb" / "binance" / etc. all normalise to
+        # the canonical descriptor name here.
         if not self.chain:
             raise ConfigurationError(field="chain", reason="Chain cannot be empty")
 
-        chain_lower = self.chain.lower()
-        if chain_lower not in CHAIN_IDS:
-            valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
+        descriptor = ChainRegistry.try_resolve(self.chain)
+        if descriptor is None:
+            valid_chains = ", ".join(ChainRegistry.names())
             raise ConfigurationError(
                 field="chain",
                 reason=f"Unsupported chain '{self.chain}'. Valid chains: {valid_chains}",
             )
-        self.chain = chain_lower
+        self.chain = descriptor.name
 
         # Validate RPC URL
         if not self.rpc_url:
@@ -202,7 +203,7 @@ class ChainExecutorConfig:
         # Apply chain-specific receipt timeout default when not explicitly set.
         # Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
         if self.tx_timeout_seconds is None:
-            self.tx_timeout_seconds = CHAIN_RECEIPT_TIMEOUTS.get(self.chain, DEFAULT_RECEIPT_TIMEOUT)
+            self.tx_timeout_seconds = _receipt_timeout_for(self.chain)
 
 
 @dataclass
@@ -317,20 +318,21 @@ class ChainExecutor:
             ConfigurationError: If chain or RPC URL is invalid
             SigningError: If private key is invalid
         """
-        # Validate and normalize chain
+        # Validate and normalize chain. VIB-4857 (W5): ChainRegistry is
+        # the SSOT and the alias resolver.
         if not chain:
             raise ConfigurationError(field="chain", reason="Chain cannot be empty")
 
-        chain_lower = chain.lower()
-        if chain_lower not in CHAIN_IDS:
-            valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is None:
+            valid_chains = ", ".join(ChainRegistry.names())
             raise ConfigurationError(
                 field="chain",
                 reason=f"Unsupported chain '{chain}'. Valid chains: {valid_chains}",
             )
 
-        self._chain = chain_lower
-        self._chain_id = CHAIN_IDS[chain_lower]
+        self._chain = descriptor.name
+        self._chain_id = descriptor.chain_id
         self._rpc_url = rpc_url
         self._max_gas_price_gwei = max_gas_price_gwei
         self._tx_timeout_seconds = tx_timeout_seconds
@@ -342,7 +344,7 @@ class ChainExecutor:
         if gas_buffer_multiplier is not None:
             self._gas_buffer_multiplier = gas_buffer_multiplier
         else:
-            self._gas_buffer_multiplier = _gas_buffer_for(chain_lower)
+            self._gas_buffer_multiplier = _gas_buffer_for(self._chain)
 
         # Initialize account from private key
         try:

@@ -4710,6 +4710,86 @@ class CoinGeckoMarketChartRangeResponse(_message.Message):
 Global___CoinGeckoMarketChartRangeResponse: _TypeAlias = CoinGeckoMarketChartRangeResponse  # noqa: Y015
 
 @_typing.final
+class CoinGeckoOHLCVRequest(_message.Message):
+    """CoinGecko CEX-reference OHLCV (VIB-4847). Second CEX-capable provider in the
+    router's cex_primary failover chain. Candles are price-only (no volume).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TOKEN_FIELD_NUMBER: _builtins.int
+    TIMEFRAME_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    token: _builtins.str
+    """Token symbol (e.g., "WETH", "ARB")"""
+    timeframe: _builtins.str
+    """Candle timeframe (1h, 4h, 1d — sub-hour is below CoinGecko's 30m native floor)"""
+    limit: _builtins.int
+    """Number of candles (most-recent N)"""
+    quote: _builtins.str
+    """Quote currency (default "USD"; CoinGecko OHLC is fiat-quoted)"""
+    def __init__(
+        self,
+        *,
+        token: _builtins.str = ...,
+        timeframe: _builtins.str = ...,
+        limit: _builtins.int = ...,
+        quote: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CoinGeckoOHLCVRequest: _TypeAlias = CoinGeckoOHLCVRequest  # noqa: Y015
+
+@_typing.final
+class CoinGeckoOHLCVCandle(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    OPEN_FIELD_NUMBER: _builtins.int
+    HIGH_FIELD_NUMBER: _builtins.int
+    LOW_FIELD_NUMBER: _builtins.int
+    CLOSE_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix timestamp in seconds (candle start)"""
+    open: _builtins.str
+    high: _builtins.str
+    low: _builtins.str
+    close: _builtins.str
+    """No volume field: CoinGecko OHLC carries price-only candles."""
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        open: _builtins.str = ...,
+        high: _builtins.str = ...,
+        low: _builtins.str = ...,
+        close: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "high", b"high", "low", b"low", "open", b"open", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CoinGeckoOHLCVCandle: _TypeAlias = CoinGeckoOHLCVCandle  # noqa: Y015
+
+@_typing.final
+class CoinGeckoOHLCVResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CANDLES_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___CoinGeckoOHLCVCandle]: ...
+    def __init__(
+        self,
+        *,
+        candles: _abc.Iterable[Global___CoinGeckoOHLCVCandle] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CoinGeckoOHLCVResponse: _TypeAlias = CoinGeckoOHLCVResponse  # noqa: Y015
+
+@_typing.final
 class TheGraphQueryRequest(_message.Message):
     """=============================================================================
     TheGraph Integration Messages
@@ -5459,6 +5539,596 @@ class PoolHistoryResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PoolHistoryResponse: _TypeAlias = PoolHistoryResponse  # noqa: Y015
+
+@_typing.final
+class LendingRatePoint(_message.Message):
+    """-----------------------------------------------------------------------------
+    Common point messages (the four data shapes)
+    -----------------------------------------------------------------------------
+
+    All Decimal fields are encoded as strings — same convention as
+    PoolHistoryResponse / FundingRateResponse / PriceResponse. Empty string
+    means "unmeasured by this provider for this row"; NEVER substitute "0".
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    SUPPLY_APY_PCT_FIELD_NUMBER: _builtins.int
+    BORROW_APY_PCT_FIELD_NUMBER: _builtins.int
+    UTILIZATION_PCT_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC."""
+    supply_apy_pct: _builtins.str
+    """Supply APY as a percentage (e.g. "5.25" = 5.25%). Empty when the
+    upstream / connector didn't measure this side. Decimal-as-string.
+    """
+    borrow_apy_pct: _builtins.str
+    """Borrow APY as a percentage. Empty when not measured. Decimal-as-string."""
+    utilization_pct: _builtins.str
+    """Pool utilisation as a percentage (0.0 - 100.0). Empty when the
+    upstream doesn't expose utilisation (some subgraphs). Decimal-as-string.
+    """
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        supply_apy_pct: _builtins.str = ...,
+        borrow_apy_pct: _builtins.str = ...,
+        utilization_pct: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["borrow_apy_pct", b"borrow_apy_pct", "supply_apy_pct", b"supply_apy_pct", "timestamp", b"timestamp", "utilization_pct", b"utilization_pct"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LendingRatePoint: _TypeAlias = LendingRatePoint  # noqa: Y015
+
+@_typing.final
+class FundingRatePoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    RATE_HOURLY_FIELD_NUMBER: _builtins.int
+    RATE_ANNUALIZED_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC."""
+    rate_hourly: _builtins.str
+    """Hourly funding rate as a decimal (e.g. "0.00001" = 0.001%/h).
+    Decimal-as-string. Empty when the upstream didn't report this point.
+    """
+    rate_annualized: _builtins.str
+    """Annualised funding rate (rate_hourly * 8760). Convenience field —
+    connectors MAY leave it empty if the connector body doesn't
+    pre-compute it; the framework reader can derive it client-side.
+    """
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        rate_hourly: _builtins.str = ...,
+        rate_annualized: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___FundingRatePoint: _TypeAlias = FundingRatePoint  # noqa: Y015
+
+@_typing.final
+class DexTwapPoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    TICK_OBSERVATION_COUNT_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC. For a single fetch this is the gateway-side
+    observation timestamp; for a series it's the bucket boundary.
+    """
+    price: _builtins.str
+    """TWAP price (quote / base, in human-readable units). Decimal-as-string."""
+    tick_observation_count: _builtins.int
+    """Uniswap-V3-style sanity-check field — number of observations the
+    pool's ring-buffer had over the requested window. 0 when the
+    connector doesn't expose an analogous counter.
+    """
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        price: _builtins.str = ...,
+        tick_observation_count: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "tick_observation_count", b"tick_observation_count", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexTwapPoint: _TypeAlias = DexTwapPoint  # noqa: Y015
+
+@_typing.final
+class DexVolumePoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    VOLUME_USD_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC, aligned to the requested ``interval_secs``."""
+    volume_usd: _builtins.str
+    """Trading volume over the bucket, in USD. Decimal-as-string.
+    Empty when the upstream subgraph didn't measure this row.
+    """
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        volume_usd: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["timestamp", b"timestamp", "volume_usd", b"volume_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexVolumePoint: _TypeAlias = DexVolumePoint  # noqa: Y015
+
+@_typing.final
+class GetLendingRateCurrentRequest(_message.Message):
+    """-----------------------------------------------------------------------------
+    Request / response envelopes
+    -----------------------------------------------------------------------------
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    ASSET_SYMBOL_FIELD_NUMBER: _builtins.int
+    SIDE_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    """Required. Lending protocol identifier — one per registered
+    ``GatewayLendingRateHistoryCapability`` connector
+    (``"aave_v3"``, ``"compound_v3"``, ``"morpho_blue"``, …).
+    Empty / unknown values -> INVALID_ARGUMENT.
+    """
+    chain: _builtins.str
+    """Required. Chain name. Validator + dispatcher consult the
+    ``lending_supported_chains()`` declaration on the matching
+    connector; unsupported pairs -> INVALID_ARGUMENT.
+    """
+    asset_symbol: _builtins.str
+    """Required. Asset symbol (e.g. ``"USDC"``, ``"WETH"``). The framework
+    already keys lending rate queries by symbol — the connector resolves
+    address-of-asset using its own ``GatewayAddressCapability`` mapping.
+    """
+    side: _builtins.str
+    """Required. ``"supply"`` or ``"borrow"`` — matches
+    ``RateMonitor.get_lending_rate(side=...)``.
+    """
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        asset_symbol: _builtins.str = ...,
+        side: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "protocol", b"protocol", "side", b"side"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLendingRateCurrentRequest: _TypeAlias = GetLendingRateCurrentRequest  # noqa: Y015
+
+@_typing.final
+class GetLendingRateHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    ASSET_SYMBOL_FIELD_NUMBER: _builtins.int
+    SIDE_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    """Required. See GetLendingRateCurrentRequest."""
+    chain: _builtins.str
+    asset_symbol: _builtins.str
+    side: _builtins.str
+    start_ts: _builtins.int
+    """Required. Unix seconds, UTC. Validator rejects start_ts <= 0,
+    end_ts <= 0, start_ts >= end_ts with INVALID_ARGUMENT.
+    """
+    end_ts: _builtins.int
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        asset_symbol: _builtins.str = ...,
+        side: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "end_ts", b"end_ts", "protocol", b"protocol", "side", b"side", "start_ts", b"start_ts"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLendingRateHistoryRequest: _TypeAlias = GetLendingRateHistoryRequest  # noqa: Y015
+
+@_typing.final
+class LendingRatePointResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    ASSET_SYMBOL_FIELD_NUMBER: _builtins.int
+    SIDE_FIELD_NUMBER: _builtins.int
+    POINT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    IS_LIVE_DATA_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    """Echoed identity (normalised)."""
+    chain: _builtins.str
+    asset_symbol: _builtins.str
+    side: _builtins.str
+    source: _builtins.str
+    """Provider that served the response: ``"on_chain"`` | ``"the_graph"`` |
+    ``"defillama"`` | … On failure: ``""`` or ``"none"``.
+    """
+    is_live_data: _builtins.bool
+    success: _builtins.bool
+    """Dual-channel envelope — see header comment for RateHistoryService."""
+    error: _builtins.str
+    @_builtins.property
+    def point(self) -> Global___LendingRatePoint:
+        """The single point. Always populated on success=true."""
+
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        asset_symbol: _builtins.str = ...,
+        side: _builtins.str = ...,
+        point: Global___LendingRatePoint | None = ...,
+        source: _builtins.str = ...,
+        is_live_data: _builtins.bool = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "error", b"error", "is_live_data", b"is_live_data", "point", b"point", "protocol", b"protocol", "side", b"side", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LendingRatePointResponse: _TypeAlias = LendingRatePointResponse  # noqa: Y015
+
+@_typing.final
+class LendingRateHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    ASSET_SYMBOL_FIELD_NUMBER: _builtins.int
+    SIDE_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    chain: _builtins.str
+    asset_symbol: _builtins.str
+    side: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___LendingRatePoint]:
+        """Time-series, strictly ordered by ``timestamp`` ascending. Empty
+        ONLY when success=false (no silent zero-fill).
+        """
+
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        asset_symbol: _builtins.str = ...,
+        side: _builtins.str = ...,
+        points: _abc.Iterable[Global___LendingRatePoint] | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "error", b"error", "points", b"points", "protocol", b"protocol", "side", b"side", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LendingRateHistoryResponse: _TypeAlias = LendingRateHistoryResponse  # noqa: Y015
+
+@_typing.final
+class GetFundingRateHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    MARKET_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    """Required. Venue identifier matching
+    ``GatewayFundingHistoryCapability.funding_venue()``
+    (``"hyperliquid"``, ``"gmx_v2"``).
+    """
+    market: _builtins.str
+    """Required. Market symbol (e.g. ``"ETH-USD"``)."""
+    chain: _builtins.str
+    """Chain (for on-chain venues; may be empty for off-chain like
+    Hyperliquid). Validator accepts empty but rejects unknown values
+    for on-chain venues that declared a chain set.
+    """
+    start_ts: _builtins.int
+    """Required. Unix seconds, UTC."""
+    end_ts: _builtins.int
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        market: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "end_ts", b"end_ts", "market", b"market", "start_ts", b"start_ts", "venue", b"venue"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetFundingRateHistoryRequest: _TypeAlias = GetFundingRateHistoryRequest  # noqa: Y015
+
+@_typing.final
+class FundingRateHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    MARKET_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    market: _builtins.str
+    chain: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___FundingRatePoint]: ...
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        market: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        points: _abc.Iterable[Global___FundingRatePoint] | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "market", b"market", "points", b"points", "source", b"source", "success", b"success", "venue", b"venue"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___FundingRateHistoryResponse: _TypeAlias = FundingRateHistoryResponse  # noqa: Y015
+
+@_typing.final
+class GetDexTwapRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    SECS_AGO_START_FIELD_NUMBER: _builtins.int
+    SECS_AGO_END_FIELD_NUMBER: _builtins.int
+    AS_OF_BLOCK_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    """Required. DEX identifier matching
+    ``GatewayDexTwapCapability.dex_name()`` on the connector
+    (``"uniswap_v3"``, ``"pancakeswap_v3"``, ``"sushiswap_v3"``,
+    ``"aerodrome"``). Empty / unknown -> INVALID_ARGUMENT.
+    """
+    chain: _builtins.str
+    """Required. Chain name."""
+    pool_address: _builtins.str
+    """Required. Pool contract address (case-insensitive for EVM)."""
+    secs_ago_start: _builtins.int
+    """Required. Window endpoints in seconds-ago (matches Uniswap V3
+    ``observe(secondsAgos)`` semantics). ``secs_ago_start`` is the
+    older boundary, ``secs_ago_end`` is the newer boundary. Validator
+    rejects secs_ago_start <= secs_ago_end and any negative values.
+    """
+    secs_ago_end: _builtins.int
+    as_of_block: _builtins.int
+    """Optional. When > 0, pins the observation to this archive block.
+    When 0, uses the current chain head.
+    """
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        secs_ago_start: _builtins.int = ...,
+        secs_ago_end: _builtins.int = ...,
+        as_of_block: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["as_of_block", b"as_of_block", "chain", b"chain", "dex", b"dex", "pool_address", b"pool_address", "secs_ago_end", b"secs_ago_end", "secs_ago_start", b"secs_ago_start"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetDexTwapRequest: _TypeAlias = GetDexTwapRequest  # noqa: Y015
+
+@_typing.final
+class DexTwapPointResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    POINT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def point(self) -> Global___DexTwapPoint: ...
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        point: Global___DexTwapPoint | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "error", b"error", "point", b"point", "pool_address", b"pool_address", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexTwapPointResponse: _TypeAlias = DexTwapPointResponse  # noqa: Y015
+
+@_typing.final
+class GetDexTwapSeriesRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    INTERVAL_SECS_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    start_ts: _builtins.int
+    """Required. Unix seconds, UTC."""
+    end_ts: _builtins.int
+    interval_secs: _builtins.int
+    """Required. Spacing between consecutive TWAP samples in seconds.
+    Validator rejects <= 0.
+    """
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        interval_secs: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "end_ts", b"end_ts", "interval_secs", b"interval_secs", "pool_address", b"pool_address", "start_ts", b"start_ts"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetDexTwapSeriesRequest: _TypeAlias = GetDexTwapSeriesRequest  # noqa: Y015
+
+@_typing.final
+class DexTwapHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___DexTwapPoint]: ...
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        points: _abc.Iterable[Global___DexTwapPoint] | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "error", b"error", "points", b"points", "pool_address", b"pool_address", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexTwapHistoryResponse: _TypeAlias = DexTwapHistoryResponse  # noqa: Y015
+
+@_typing.final
+class GetDexVolumeHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    INTERVAL_SECS_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    start_ts: _builtins.int
+    end_ts: _builtins.int
+    interval_secs: _builtins.int
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        interval_secs: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "end_ts", b"end_ts", "interval_secs", b"interval_secs", "pool_address", b"pool_address", "start_ts", b"start_ts"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetDexVolumeHistoryRequest: _TypeAlias = GetDexVolumeHistoryRequest  # noqa: Y015
+
+@_typing.final
+class DexVolumeHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___DexVolumePoint]: ...
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        points: _abc.Iterable[Global___DexVolumePoint] | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "error", b"error", "points", b"points", "pool_address", b"pool_address", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexVolumeHistoryResponse: _TypeAlias = DexVolumeHistoryResponse  # noqa: Y015
 
 @_typing.final
 class ListStrategiesRequest(_message.Message):
@@ -9360,6 +10030,7 @@ class GeckoTerminalOHLCVRequest(_message.Message):
     LIMIT_FIELD_NUMBER: _builtins.int
     POOL_ADDRESS_FIELD_NUMBER: _builtins.int
     QUOTE_FIELD_NUMBER: _builtins.int
+    INCLUDE_EMPTY_INTERVALS_FIELD_NUMBER: _builtins.int
     token: _builtins.str
     """Token symbol (e.g., "ALMANAK", "WETH")"""
     chain: _builtins.str
@@ -9372,6 +10043,8 @@ class GeckoTerminalOHLCVRequest(_message.Message):
     """Explicit pool address (optional)"""
     quote: _builtins.str
     """Quote currency (default "USD")"""
+    include_empty_intervals: _builtins.bool
+    """Backfill no-trade intervals as continuous buckets (default false)"""
     def __init__(
         self,
         *,
@@ -9381,8 +10054,9 @@ class GeckoTerminalOHLCVRequest(_message.Message):
         limit: _builtins.int = ...,
         pool_address: _builtins.str = ...,
         quote: _builtins.str = ...,
+        include_empty_intervals: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "include_empty_intervals", b"include_empty_intervals", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GeckoTerminalOHLCVRequest: _TypeAlias = GeckoTerminalOHLCVRequest  # noqa: Y015

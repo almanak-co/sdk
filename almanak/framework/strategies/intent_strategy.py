@@ -256,6 +256,19 @@ class IntentStrategy(StrategyBase[ConfigT]):
         # indicators are wired. Its cache is cleared per iteration in
         # create_market_snapshot() to match _macd_cache / _atr_cache lifetimes.
         self._ohlcv_dedup_provider: Any | None = None
+
+        # VIB-4843 FR-5001: per-iteration MarketSnapshot memo. The runner
+        # pre-warms ONE snapshot's _price_cache; decide(), the post-decide
+        # portfolio valuation (PortfolioValuer / Track-C), and any other path
+        # that calls create_market_snapshot() must reuse that SAME instance so
+        # the warm cache is not thrown away (the redundant-CoinGecko-call bug).
+        # The memo is keyed by an iteration token the runner stamps via
+        # begin_market_snapshot_iteration(); a short TTL guards against serving
+        # a stale snapshot across iterations when no token is stamped (e.g. a
+        # strategy author calling create_market_snapshot() directly in a test).
+        self._cached_market_snapshot: MarketSnapshot | None = None
+        self._cached_market_snapshot_token: object | None = None
+        self._cached_market_snapshot_at: float | None = None
         self._multi_dex_service: Any | None = None
         self._rate_monitor: Any | None = None
         self._funding_rate_provider: Any | None = None
@@ -844,8 +857,90 @@ class IntentStrategy(StrategyBase[ConfigT]):
             return list(metadata.supported_chains)
         return [self._chain]
 
+    def begin_market_snapshot_iteration(self, token: object) -> None:
+        """Open a new per-iteration MarketSnapshot scope (VIB-4843 FR-5001).
+
+        The runner calls this once at the top of each ``run_iteration`` with a
+        token unique to the iteration (the ``cycle_id``). Subsequent
+        ``create_market_snapshot()`` calls within the same iteration — pre-warm,
+        ``decide()``, and post-decide portfolio valuation — return the SAME
+        instance so the pre-warmed ``_price_cache`` is reused instead of thrown
+        away. Passing a new token (or ``None``) invalidates the memo.
+
+        Idempotent: re-stamping the current token is a no-op so the runner can
+        call it defensively without dropping a warm snapshot mid-iteration.
+        """
+        if token is not None and token == getattr(self, "_cached_market_snapshot_token", None):
+            return
+        self._cached_market_snapshot = None
+        self._cached_market_snapshot_token = token
+        self._cached_market_snapshot_at = None
+
+    def _market_snapshot_cache_ttl_seconds(self) -> float:
+        """Resolve the per-iteration snapshot memo TTL (seconds).
+
+        Default ~5s (matching the data-layer balance/OHLCV short-cache TTLs)
+        guards against serving a stale snapshot across iterations when no
+        iteration token is stamped — e.g. a strategy author calling
+        ``create_market_snapshot()`` directly in a tight loop or a test.
+        Configurable via ``market_snapshot_cache_ttl_seconds``.
+        """
+        try:
+            return float(self.get_config("market_snapshot_cache_ttl_seconds", 5.0))
+        except (TypeError, ValueError):
+            return 5.0
+
     def create_market_snapshot(self) -> MarketSnapshot:
-        """Create a market snapshot for the current iteration.
+        """Return the per-iteration market snapshot, building one if needed.
+
+        VIB-4843 FR-5001: memoizes the snapshot per iteration so pre-warm →
+        ``decide()`` → portfolio valuation all share ONE instance (and its
+        ``_price_cache``). Reuse is keyed by the iteration token the runner
+        stamps via :meth:`begin_market_snapshot_iteration`.
+
+        Two invalidation regimes, never both:
+
+        * **Iteration-token stamped** (the runner's per-iteration ``cycle_id``):
+          the token IS the lifetime. The memo survives for the WHOLE iteration —
+          pre-warm → decide() → portfolio valuation — regardless of wall-clock,
+          because :meth:`begin_market_snapshot_iteration` invalidates it the
+          moment the next iteration stamps a new token. Applying a TTL here would
+          drop the warm ``_price_cache`` mid-iteration on a slow ``decide()`` and
+          defeat the dedup (the Codex VIB-4843 finding).
+        * **No token stamped** (direct callers / tests): a short TTL bounds reuse
+          so prices are never served stale across loops with no iteration scope.
+
+        Builds via :meth:`_build_market_snapshot`; see its docstring for the
+        builder-contract details. Override ``_build_market_snapshot`` (not this
+        method) to customize how market data is populated, so the memo still
+        applies.
+        """
+        import time
+
+        # Defensive getattr: some test/legacy construction paths build the
+        # strategy via ``object.__new__`` and bypass ``__init__`` (the memo
+        # attributes are then absent). Treat a missing memo as "no cache".
+        cached = getattr(self, "_cached_market_snapshot", None)
+        if cached is not None:
+            token = getattr(self, "_cached_market_snapshot_token", None)
+            if token is not None:
+                # Iteration-scoped: the cycle_id token bounds the lifetime, so
+                # the snapshot is stable for the full iteration. TTL does not
+                # apply — only a new iteration token (re)builds.
+                return cached
+            # Token-less: bound reuse by the short TTL.
+            cached_at = getattr(self, "_cached_market_snapshot_at", None)
+            within_ttl = cached_at is None or (time.monotonic() - cached_at) < self._market_snapshot_cache_ttl_seconds()
+            if within_ttl:
+                return cached
+
+        snapshot = self._build_market_snapshot()
+        self._cached_market_snapshot = snapshot
+        self._cached_market_snapshot_at = time.monotonic()
+        return snapshot
+
+    def _build_market_snapshot(self) -> MarketSnapshot:
+        """Construct a fresh MarketSnapshot (cold cache).
 
         Routes through ``MarketSnapshotBuilder.for_strategy_runner`` so the
         snapshot's ``runtime_surface`` is correctly stamped — direct
@@ -856,12 +951,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
         the multi-chain providers and ``aave_health_factor_provider`` through
         the canonical class.
 
-        Override this method to customize how market data is populated.
+        VIB-4843: this is the per-iteration mint. The per-strategy OHLCV
+        deduper cache is cleared HERE (not in the memoizing wrapper) so it
+        resets exactly once per fresh snapshot — matching the per-iteration
+        lifetime of the ``_macd_cache`` / ``_atr_cache`` dicts (VIB-3783) —
+        rather than on every cache-hit reuse within the same iteration.
         """
         # VIB-3783: clear the per-strategy OHLCV deduper cache at the start of
         # each iteration so we coalesce within an iteration but always refetch
-        # between iterations. This matches the per-iteration lifetime of the
-        # _macd_cache / _atr_cache dicts on MarketSnapshot.
+        # between iterations.
         if self._ohlcv_dedup_provider is not None:
             self._ohlcv_dedup_provider.clear()
 

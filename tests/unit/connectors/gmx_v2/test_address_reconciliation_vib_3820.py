@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.contracts import GMX_V2
+from almanak.connectors.gmx_v2.addresses import GMX_V2
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
 
 # Canonical-to-adapter key aliases for semantically equivalent fields whose

@@ -494,7 +494,7 @@ class TestPositionManagerAddressesSource:
         registry — the regression that motivated VIB-3893 / the Aerodrome
         refactor in PR #2241.
         """
-        from almanak.core.contracts import PANCAKESWAP_V3
+        from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
 
         for chain, entry in PANCAKESWAP_V3.items():
             expected = entry["nft"].lower()

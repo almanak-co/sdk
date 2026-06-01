@@ -4,530 +4,767 @@ These are extracted from compiler.py for file-size management.
 All symbols remain importable from ``almanak.framework.intents.compiler``.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 # =============================================================================
 # Constants
 # =============================================================================
 
-# Default gas estimates per operation type (used as fallback for all chains)
-# Note: approve is set high (80K) to handle proxy contracts like Avalanche native USDC
-DEFAULT_GAS_ESTIMATES: dict[str, int] = {
+# Baseline gas estimates for chain-level common primitives (VIB-4858 / W6).
+#
+# Note: ``approve`` is set high (80K) to handle proxy contracts like
+# Avalanche native USDC. ``swap_simple`` / ``swap_multi_hop`` are the
+# DefaultSwapAdapter fallback used when a connector-owned adapter does not
+# override ``estimate_gas`` — they intentionally stay generic.
+_BASELINE_GAS_ESTIMATES: dict[str, int] = {
     "approve": 80000,
     "swap_simple": 200000,  # Increased from 120k - USDC proxy contracts need ~180k+
     "swap_multi_hop": 350000,  # Increased from 200k - Arbitrum swaps use more gas
     "wrap_eth": 30000,
     "unwrap_eth": 30000,
-    # LP operations
-    "lp_mint": 500000,  # Uniswap V3 mint new position (wide ranges need more gas)
-    "lp_increase_liquidity": 200000,  # Add liquidity to existing position
-    "lp_decrease_liquidity": 250000,  # Remove liquidity from position (extra buffer for Arbitrum)
-    "lp_collect": 200000,  # Collect fees/tokens (buffer for fee growth updates)
-    "lp_burn": 100000,  # Burn position NFT (if fully withdrawn)
-    # Lending operations (Aave V3 on Arbitrum uses ~220k+ for supply due to hooks/incentives)
-    "lending_supply": 300000,  # Supply collateral to lending protocol
-    "lending_borrow": 450000,  # Borrow tokens from lending protocol (Aave needs ~310k+)
-    "lending_repay": 250000,  # Repay borrowed tokens
-    "lending_withdraw": 250000,  # Withdraw supplied collateral
-    # Flash loan operations (Aave)
-    "flash_loan": 500000,  # Multi-asset flash loan base gas
-    "flash_loan_simple": 300000,  # Single-asset flash loan base gas
-    # Flash loan operations (Balancer)
-    "balancer_flash_loan": 400000,  # Balancer multi-token flash loan base gas
-    "balancer_flash_loan_simple": 250000,  # Balancer single-token flash loan base gas
-    "bridge_deposit": 800000,  # Cross-chain bridge deposit tx (quote-dependent, Across can exceed 675K)
-    # MetaMorpho vault operations (ERC-4626)
-    "vault_deposit": 200000,  # MetaMorpho deposit (approve handled separately)
-    "vault_redeem": 250000,  # MetaMorpho redeem (multi-market withdrawal)
 }
 
-# Chain-specific gas overrides for operations that need different estimates
-# Ethereum mainnet has proxy tokens (USDC, USDT) requiring extra delegatecall gas
-CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = {
-    "ethereum": {
-        "swap_simple": 180000,  # Proxy tokens like USDC need ~150k+, add buffer
-        "swap_multi_hop": 300000,
-    },
-    "avalanche": {
-        "swap_simple": 180000,  # Native USDC is also a proxy
-    },
-    "bsc": {
-        "lp_decrease_liquidity": 400000,  # BNB Uniswap V3 uses more gas for LP ops
-        "lp_collect": 300000,
-        "lp_burn": 150000,
-    },
-    "mantle": {
-        # Mantle gas units are ~2000x higher than L1 equivalents (a Uniswap V3 swap
-        # uses ~150k on L1 but ~340M on Mantle). Gas prices are proportionally lower
-        # (~0.02 Gwei), so actual cost in MNT is comparable to other L2s (~$0.006/swap).
-        # Fallback values when simulation (Tenderly/Alchemy) is unavailable.
-        # Measured via cast estimate: USDC approve ~203M, wrap ~118M, unwrap ~146M.
-        "approve": 250_000_000,
-        "swap_simple": 500_000_000,
-        "swap_multi_hop": 800_000_000,
-        "wrap_eth": 200_000_000,
-        "unwrap_eth": 200_000_000,
-        "lp_mint": 1_000_000_000,
-        "lp_increase_liquidity": 400_000_000,
-        "lp_decrease_liquidity": 500_000_000,
-        "lp_collect": 400_000_000,
-        "lp_burn": 200_000_000,
-        "lending_supply": 600_000_000,
-        "lending_borrow": 900_000_000,
-        "vault_deposit": 400_000_000,
-    },
-}
+
+# Legacy back-compat merged view of every gas estimate the framework knows.
+#
+# VIB-4858 (W6): the per-protocol half of this dict moved onto each owning
+# connector's ``gas_estimate_provider.py`` and is resolved through
+# ``STRATEGY_GAS_ESTIMATE_REGISTRY``. This module-level dict is preserved as
+# a derived merged view (baseline ∪ every registered connector's keys, with
+# the baseline winning on overlap) so downstream SDK consumers that still do
+# ``from almanak.framework.intents.compiler_constants import DEFAULT_GAS_ESTIMATES``
+# and index protocol actions directly (``DEFAULT_GAS_ESTIMATES["lp_mint"]``)
+# keep working byte-equivalent. Mutating it has no production effect — to
+# change a connector's estimate, edit the connector's
+# ``gas_estimate_provider.py``.
+#
+# Each per-protocol integer is resolved through the connector's
+# ``gas_estimate(action, chain="")`` with an empty ``chain`` placeholder; the
+# pre-W6 dict had no chain dimension, so this matches the legacy semantic
+# (callers that needed per-chain overrides went through ``get_gas_estimate``,
+# not this dict).
+def _build_default_gas_estimates() -> dict[str, int]:
+    """Materialize the legacy ``DEFAULT_GAS_ESTIMATES`` shape from the registry.
+
+    Imports the strategy-side gas-estimate registry lazily — that module's
+    boot ``_register_all()`` is what populates every connector's keys, and
+    importing it at module load is safe (no back-cycle to compiler_constants).
+    """
+    from almanak.connectors._strategy_base.gas_estimate_registry import (
+        GasEstimateRegistryError,
+    )
+    from almanak.connectors._strategy_gas_estimate_registry import (
+        STRATEGY_GAS_ESTIMATE_REGISTRY,
+    )
+
+    merged: dict[str, int] = {}
+    for action in sorted(STRATEGY_GAS_ESTIMATE_REGISTRY.actions()):
+        # ``chain=""`` is the no-chain placeholder. Every current connector
+        # ignores ``chain`` and returns a flat integer; for connectors that
+        # specialise (e.g. Aave V3 incentive hooks), the ``get_gas_estimate``
+        # call path threads the real chain through — this dict is only for
+        # legacy SDK consumers that pre-W6 did not have a chain dimension.
+        #
+        # ``actions()`` only yields keys some connector publishes, so
+        # ``lookup`` is guaranteed non-``None`` here. Fail loudly rather than
+        # mask a ``None`` (or a stray ``0``) into the public dict — a zero gas
+        # estimate would silently underprice every transaction for that action
+        # and break the byte-equivalence contract. (CodeRabbit PR #2477.)
+        estimate = STRATEGY_GAS_ESTIMATE_REGISTRY.lookup(action, "")
+        if estimate is None:
+            raise GasEstimateRegistryError(
+                f"registry published action {action!r} via actions() but "
+                f"lookup(action, '') returned None — registry invariant broken"
+            )
+        merged[action] = estimate
+    # Baseline wins on overlap — the W6 design forbids a connector claiming
+    # a baseline key (enforced by ``test_w6_gas_estimate_byte_equivalence``)
+    # so this branch is defensive, but it keeps the merge order obvious.
+    merged.update(_BASELINE_GAS_ESTIMATES)
+    return merged
+
+
+DEFAULT_GAS_ESTIMATES: dict[str, int] = _build_default_gas_estimates()
 
 
 def get_gas_estimate(chain: str, operation: str) -> int:
     """Get gas estimate for an operation, with chain-specific overrides.
 
+    Resolution order (preserved byte-equivalent across W5 + W6):
+
+    1. **Per-chain override** — ``ChainDescriptor.gas.operation_overrides``
+       (owned by ``almanak/core/chains/<chain>.py`` per W5). Wins
+       whenever the descriptor publishes the operation.
+    2. **Per-protocol connector estimate** — looked up via
+       ``STRATEGY_GAS_ESTIMATE_REGISTRY`` (VIB-4858 / W6). Each connector
+       owns the action keys it publishes; the registry routes
+       ``operation`` to its owning connector's
+       ``gas_estimate(action, chain)`` method.
+    3. **Baseline default** — ``DEFAULT_GAS_ESTIMATES.get(operation, 120000)``
+       for chain-level common primitives (approve, wrap_eth, unwrap_eth,
+       swap_simple, swap_multi_hop). ``120000`` is the historical
+       unknown-action fallback the legacy ``dict.get(operation, 120000)``
+       expression produced.
+
     Args:
-        chain: Target blockchain (ethereum, arbitrum, bsc, etc.)
-        operation: Operation type (swap_simple, approve, etc.)
+        chain: Target blockchain (ethereum, arbitrum, bsc, etc.). May be
+            an alias — ``ChainRegistry.try_resolve`` handles the lookup.
+        operation: Operation type (``swap_simple``, ``approve``,
+            ``lp_mint``, ``lending_supply``, ``balancer_flash_loan``, …).
 
     Returns:
-        Gas estimate in units
+        Gas estimate in units.
     """
-    # Normalize chain name (e.g., "bnb" -> "bsc")
-    try:
-        from almanak.core.constants import resolve_chain_name
+    # Lazy import to avoid a cycle with almanak.core (W5: was previously
+    # done unconditionally for resolve_chain_name; now the registry IS
+    # the alias resolver).
+    from almanak.core.chains import ChainRegistry
 
-        chain = resolve_chain_name(chain)
-    except (ValueError, ImportError):
-        pass
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is not None and descriptor.gas.operation_overrides is not None:
+        override = descriptor.gas.operation_overrides.get(operation)
+        if override is not None:
+            return override
 
-    # Check chain-specific override first
-    if chain in CHAIN_GAS_OVERRIDES:
-        if operation in CHAIN_GAS_OVERRIDES[chain]:
-            return CHAIN_GAS_OVERRIDES[chain][operation]
+    # VIB-4858 (W6): consult the per-protocol gas-estimate registry
+    # before the baseline default. Importing here keeps the boot-time
+    # graph free of a strategy_base->framework cycle (the registration
+    # site imports each connector's provider module which transitively
+    # imports framework symbols).
+    from almanak.connectors._strategy_gas_estimate_registry import (
+        STRATEGY_GAS_ESTIMATE_REGISTRY,
+    )
 
-    # Fall back to default
-    return DEFAULT_GAS_ESTIMATES.get(operation, 120000)
+    estimate = STRATEGY_GAS_ESTIMATE_REGISTRY.lookup(operation, chain)
+    if estimate is not None:
+        return estimate
+
+    # Fall back to baseline default (chain-level common primitives,
+    # ``approve``/``wrap_eth``/``unwrap_eth``/``swap_simple``/``swap_multi_hop``)
+    # or the unknown-action fallback 120000 for anything else.
+    return _BASELINE_GAS_ESTIMATES.get(operation, 120000)
 
 
-# Protocol router addresses per chain
-# Note: Using SwapRouter02 for Uniswap V3 (7-param struct, no deadline)
-PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
+# Legacy back-compat re-export of the per-(chain, operation) overrides.
+#
+# VIB-4857 (W5): the per-chain data now lives on
+# ``ChainDescriptor.gas.operation_overrides`` (Optional[Mapping[str, int]]).
+# This module-level dict is preserved as a derived read-only view so
+# downstream SDK consumers that still do
+# ``from almanak.framework.intents.compiler_constants import CHAIN_GAS_OVERRIDES``
+# (or via the ``compiler`` re-export) keep working. Mutating it has no
+# production effect — to change a chain's overrides, edit the descriptor
+# under ``almanak/core/chains/<chain>.py``.
+def _build_chain_gas_overrides() -> dict[str, dict[str, int]]:
+    """Materialize the legacy ``CHAIN_GAS_OVERRIDES`` shape from the registry."""
+    from almanak.core.chains import ChainRegistry
+
+    overrides: dict[str, dict[str, int]] = {}
+    for descriptor in ChainRegistry.all():
+        if descriptor.gas.operation_overrides is not None:
+            overrides[descriptor.name] = dict(descriptor.gas.operation_overrides)
+    return overrides
+
+
+CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = _build_chain_gas_overrides()
+
+
+# Protocol router / LP-position-manager addresses per chain.
+#
+# VIB-4872 (W6-followup): per-protocol address tables now live on each
+# connector's ``addresses.py`` module. The legacy module-level dicts
+# below are preserved as derived read-only views so downstream SDK
+# consumers (compiler / swap adapter / synthetic intents / permission
+# discovery) keep working unchanged.
+#
+# Two sources contribute to each derived view:
+#
+# 1. Connector ``addresses.py`` (canonical, per-connector kind vocabulary).
+# 2. A small ``_LEGACY_*`` overlay for routers that have no dedicated
+#    connector folder today (uniswap_v2 router, 1inch aggregator,
+#    sushiswap V2 router, quickswap V2 router, pancakeswap_v2 router).
+#    Overlay entries are pure pre-refactor literals: byte-equivalence is
+#    preserved.
+#
+# NOTE (VIB-4874): the Uniswap V4 PositionManager was *removed* from the
+# overlay and now derives from ``uniswap_v4/addresses.py`` like every
+# other connector-owned address. The overlay had advertised a single
+# garbled value (``0xBd2165...e83b24``) across all chains that is not a
+# deployed contract anywhere; the per-chain connector values are the
+# canonical, on-chain-verified PositionManager addresses.
+
+
+# (protocol, connector-addresses-dict-import-path, kind-in-connector-dict)
+# tuples for the address dicts derived directly from connector data. The
+# kind name is the connector's internal vocabulary (W1 / VIB-4853); the
+# central dict re-keys by protocol so the legacy lookup shape stays
+# unchanged.
+def _build_protocol_routers() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from connector data + overlay."""
+    from almanak.connectors.aerodrome.addresses import AERODROME
+    from almanak.connectors.camelot.addresses import CAMELOT
+    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+
+    routers: dict[str, dict[str, str]] = {}
+
+    # (protocol, connector-dict, kind)
+    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
+        ("uniswap_v3", UNISWAP_V3, "swap_router"),
+        ("sushiswap_v3", SUSHISWAP_V3, "swap_router"),
+        ("pancakeswap_v3", PANCAKESWAP_V3, "swap_router"),
+        ("agni_finance", AGNI_FINANCE, "swap_router"),
+        ("aerodrome", AERODROME, "router"),
+        ("camelot", CAMELOT, "swap_router"),
+    )
+    for protocol, table, kind in sources:
+        for chain, kinds in table.items():
+            if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
+                continue
+            address = kinds.get(kind)
+            if address is None:
+                continue
+            routers.setdefault(chain, {})[protocol] = address
+
+    # Optimism's Velodrome V2 router is the same as the Aerodrome router
+    # on Optimism. The legacy dict carried both keys for VIB-4389 (the
+    # Zodiac permissions manifest generator looks up under both names);
+    # preserve that exact shape.
+    optimism = routers.get("optimism")
+    if optimism is not None and "aerodrome" in optimism:
+        optimism.setdefault("velodrome", optimism["aerodrome"])
+
+    # Legacy routers without a dedicated connector folder. Kept as a
+    # pre-refactor literal overlay so byte-equivalence holds — see the
+    # block comment at the top of this section.
+    for chain, protocol_to_addr in _LEGACY_PROTOCOL_ROUTERS.items():
+        for protocol, address in protocol_to_addr.items():
+            routers.setdefault(chain, {}).setdefault(protocol, address)
+
+    return routers
+
+
+def _build_lp_position_managers() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``LP_POSITION_MANAGERS`` shape from connector data + overlay."""
+    from almanak.connectors.aerodrome.addresses import AERODROME
+    from almanak.connectors.camelot.addresses import CAMELOT
+    from almanak.connectors.fluid.addresses import FLUID
+    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+    from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
+    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
+    managers: dict[str, dict[str, str]] = {}
+
+    # (protocol, connector-dict, kind). traderjoe_v2 surfaces its
+    # LBRouter under ``router`` (Liquidity Book uses the router for LP);
+    # the legacy ``LP_POSITION_MANAGERS`` slot historically held that
+    # address because synthetic intents look up the LBRouter from
+    # ``LP_POSITION_MANAGERS[chain][protocol]``. PancakeSwap V3 uses
+    # ``nft`` (its kind name in pancakeswap_v3/addresses.py); Aerodrome
+    # exposes ``router`` for the fungible-LP path on base/optimism.
+    # uniswap_v4 derives its PositionManager from the connector's own
+    # per-chain ``position_manager`` kind (VIB-4874) — the central dict
+    # previously carried a single garbled CREATE2-style value across all
+    # chains, which is not a deployed contract on any chain. See the
+    # anti-drift test in tests/unit/connectors/uniswap_v4/.
+    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
+        ("uniswap_v3", UNISWAP_V3, "position_manager"),
+        ("uniswap_v4", UNISWAP_V4, "position_manager"),
+        ("sushiswap_v3", SUSHISWAP_V3, "position_manager"),
+        ("pancakeswap_v3", PANCAKESWAP_V3, "nft"),
+        ("agni_finance", AGNI_FINANCE, "position_manager"),
+        ("aerodrome", AERODROME, "router"),
+        ("aerodrome_slipstream", AERODROME, "cl_nft"),
+        ("traderjoe_v2", TRADERJOE_V2, "router"),
+        ("camelot", CAMELOT, "position_manager"),
+        ("fluid", FLUID, "dex_factory"),
+    )
+    for protocol, table, kind in sources:
+        for chain, kinds in table.items():
+            if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
+                continue
+            address = kinds.get(kind)
+            if address is None:
+                continue
+            managers.setdefault(chain, {})[protocol] = address
+
+    return managers
+
+
+# Per-(protocol, chain) exclusions: the connector's ``addresses.py`` may
+# legitimately publish data for more chains than the central
+# ``PROTOCOL_ROUTERS`` dict has historically surfaced. SushiSwap V3 on
+# Avalanche, for instance, has a deployed router but was removed from the
+# legacy dict because of unusable on-chain liquidity (VIB-2069); Uniswap
+# V3 on Blast is published in the connector but the central dict never
+# surfaced it. The derived view honours those exclusions to preserve
+# byte-equivalence at the compile-time lookup boundary.
+_PROTOCOL_ROUTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("sushiswap_v3", "avalanche"),  # VIB-2069: zero usable liquidity
+        ("uniswap_v3", "blast"),  # blast not in legacy PROTOCOL_ROUTERS
+    }
+)
+
+
+# Legacy router overlay: protocols / chains where the central dict
+# advertises a router/manager that has no connector-folder home today.
+# Editing this overlay is a stopgap; the strategic move is to either
+# create the matching connector folder + ``addresses.py`` and drop the
+# overlay entry, or to retire the entry if no consumer uses it.
+_LEGACY_PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     "ethereum": {
-        "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-        "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
-        "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
-        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
-        "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
-        "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
-        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-        "camelot": "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18",  # Algebra V3 SwapRouter (VIB-1636)
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "optimism": {
-        "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        "sushiswap_v3": "0x8516944E89f296eb6473d79aED1Ba12088016c9e",  # SushiSwap V3 SwapRouter
-        "velodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
-        # "aerodrome" alias required so the Zodiac permissions manifest generator
-        # (synthetic_intents._build_swap_intents) can find the router when the
-        # protocol is already normalised via protocol_aliases ("velodrome" ->
-        # "aerodrome"). Both keys point to the same Velodrome V2 Router. (VIB-4389)
-        "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "polygon": {
-        "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        "sushiswap_v3": "0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3",  # SushiSwap V3 SwapRouter
         "quickswap": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
-    "base": {
-        "uniswap_v3": "0x2626664c2603336E57B271c5C0b26F421741e481",
-        "sushiswap_v3": "0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4",  # SushiSwap V3 SwapRouter
-        "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
-        "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
-    },
-    "avalanche": {
-        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
-        "uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",  # SwapRouter02
-        # sushiswap_v3 removed: ~54% price impact on $100, on-chain reverts on $10 (VIB-2069)
-    },
     "bsc": {
-        "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
-        "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
-        "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",  # SushiSwap V3 SwapRouter
-        # traderjoe_v2: connector compiler owns Liquidity Book swaps (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
-    "linea": {
-        "uniswap_v3": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",  # SwapRouter02
-        "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter
-    },
-    "mantle": {
-        "agni_finance": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni Finance SwapRouter
-        "uniswap_v3": "0x738fD6d10bCc05c230388B4027CAd37f82fe2AF2",  # SwapRouter02 (Uniswap Governance — non-canonical)
-    },
-    "xlayer": {
-        "uniswap_v3": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",  # SwapRouter02 (Governance Proposal 67)
-    },
-    "monad": {
-        "uniswap_v3": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
-    },
-    "zerog": {
-        "uniswap_v3": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",  # JAINE DEX SwapRouter02 (Uniswap V3 fork)
-    },
 }
 
-# Uniswap V3 NonfungiblePositionManager addresses per chain
-LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
-    },
-    "arbitrum": {
-        "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
-        "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
-        "fluid": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",  # Fluid DexFactory (pools resolved dynamically)
-    },
-    "optimism": {
-        "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
-        # Velodrome V2 uses the Router for liquidity operations (fungible LP tokens, same as Aerodrome)
-        "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",  # Velodrome V2 Router
-    },
-    "polygon": {
-        "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
-    },
-    "base": {
-        "uniswap_v3": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
-        # Aerodrome uses the Router for liquidity operations (fungible LP tokens)
-        "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",  # Aerodrome Router
-        "aerodrome_slipstream": "0x827922686190790b37229fd06084350E74485b72",  # Slipstream NonfungiblePositionManager
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-    },
-    "avalanche": {
-        "uniswap_v3": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        # sushiswap_v3 removed: zero usable liquidity (VIB-2069)
-        # TraderJoe V2 uses the LBRouter for liquidity operations (not NFT-based)
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter2
-    },
-    "bsc": {
-        "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
-        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
-    },
-    "linea": {
-        "uniswap_v3": "0x4615C383F85D0a2BbED973d83ccecf5CB7121463",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-    },
-    "mantle": {
-        "agni_finance": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NFT Position Manager
-        "uniswap_v3": "0x5911cB3633e764939edc2d92b7e1ad375Bb57649",  # NonfungiblePositionManager (Uniswap Governance — non-canonical)
-    },
-    "xlayer": {
-        "uniswap_v3": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical deployment (Governance Proposal 67)
-    },
-    "monad": {
-        "uniswap_v3": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",  # NonfungiblePositionManager — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
-    },
-    "zerog": {
-        "uniswap_v3": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # JAINE DEX NonfungiblePositionManager (Uniswap V3 fork)
-    },
-}
+PROTOCOL_ROUTERS: dict[str, dict[str, str]] = _build_protocol_routers()
+LP_POSITION_MANAGERS: dict[str, dict[str, str]] = _build_lp_position_managers()
 
-# Chain-specific token addresses for fee tier selection in swaps
-# Used by DefaultSwapAdapter to determine optimal fee tiers for common pairs
-CHAIN_TOKENS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "usdt": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "wbtc": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-        "dai": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-    },
-    "arbitrum": {
-        "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # Native USDC
-        "usdc_bridged": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e
-        "usdt": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-        "weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "wbtc": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-    },
-    "optimism": {
-        "usdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-        "usdt": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
-        "weth": "0x4200000000000000000000000000000000000006",
-    },
-    "polygon": {
-        "usdc": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-        "usdt": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-        "weth": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-    },
-    "base": {
-        "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "weth": "0x4200000000000000000000000000000000000006",
-    },
-    "avalanche": {
-        "usdc": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-        "usdt": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
-        "wavax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-    },
-    "bsc": {
-        "usdc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
-        "usdt": "0x55d398326f99059fF775485246999027B3197955",
-        "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-        "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-    },
-    "linea": {
-        "usdc": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
-        "usdt": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
-        "weth": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
-    },
-    "sonic": {
-        "usdc": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
-        "weth": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
-        "ws": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
-    },
-    "mantle": {
-        "usdc": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
-        "usdt": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
-        "weth": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
-        "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-    },
-    "xlayer": {
-        "usdc": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
-        "usdt": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
-        "weth": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
-        "wokb": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
-        "xeth": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
-        "xbtc": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
-        "usdg": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",
-        "usdt0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-    },
-    "monad": {
-        "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-        "weth": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
-        "wmon": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
-        "wbtc": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-    },
-}
 
-# Supported fee tiers by protocol for exactInputSingle-style swaps.
-SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = {
-    "uniswap_v3": (100, 500, 3000, 10000),
-    "sushiswap_v3": (100, 500, 3000, 10000),
-    "pancakeswap_v3": (100, 500, 2500, 10000),
-    "agni_finance": (100, 500, 2500, 3000, 10000),
-}
+# =============================================================================
+# NFT Position Manager (NPM) address views — migration backfill consumer
+# =============================================================================
+#
+# VIB-4864 (W2-followup): the migration backfill
+# (``almanak/framework/migration/backfill.py``) used to reach directly into
+# each connector's ``receipt_parser`` module for the chain -> NPM address maps
+# (a ``framework -> connector.receipt_parser`` cross-layer coupling). The NPM
+# address is value-bearing — it is the emitter component of an LP position's
+# ``physical_identity_hash`` — so the lookups must be byte-equivalent to the
+# pre-VIB-4864 parser maps.
+#
+# These derived views reproduce the parser maps EXACTLY, but source from each
+# connector's self-contained ``addresses.py`` (W1 / VIB-4853) rather than the
+# parser module. The framework's ``compiler_constants`` is the sanctioned
+# connector-data aggregation point (same pattern as ``LP_POSITION_MANAGERS`` /
+# ``PROTOCOL_ROUTERS``), so the backfill imports from here.
+#
+# Casing is preserved per-family to stay byte-equivalent with each consumer:
+#   * UniV3 canonical family -> original (EIP-55) case, matching the
+#     uniswap_v3 parser's ``POSITION_MANAGER_ADDRESSES`` literal.
+#   * PancakeSwap V3 / Slipstream -> lowercased, matching those parsers'
+#     ``_build_*`` helpers (which ``.lower()`` at view-build time).
+# (Casing is hash-irrelevant downstream — ``physical_identity_hash_univ3``
+# lowercases the emitter before hashing — but the views match each consumer's
+# legacy return value exactly so the byte-equivalence harness stays green.)
 
-# Chain-specific fee tier overrides. Uniswap V3 forks on some chains support
-# additional fee tiers beyond their base protocol definition.
+
+# Chains the uniswap_v3 connector publishes a ``position_manager`` for that
+# the legacy UniV3 backfill NPM map never surfaced. The parser's hand-curated
+# ``POSITION_MANAGER_ADDRESSES`` literal predates these connector additions;
+# surfacing them here would silently widen the backfill's supported-chain set
+# (Empty != Zero — an unrecognised chain must keep returning ``None``). Honour
+# the curated subset to preserve byte-equivalence.
+_UNIV3_NPM_CHAIN_EXCLUSIONS: frozenset[str] = frozenset({"blast", "linea"})
+
+
+def _build_univ3_nft_position_managers() -> dict[str, str]:
+    """Materialize the canonical UniV3-family ``{chain: NPM}`` map.
+
+    Byte-equivalent to ``uniswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``:
+    the canonical Uniswap V3 ``position_manager`` per chain, with Agni Finance
+    overlaying Mantle (Agni rides on the uniswap_v3 connector and deploys its
+    own NPM there), the ``bnb`` alias of ``bsc`` preserved, and the curated
+    chain subset honoured (see ``_UNIV3_NPM_CHAIN_EXCLUSIONS``). Returns
+    original-case (EIP-55) addresses.
+    """
+    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+
+    managers: dict[str, str] = {}
+    # Lowercase the chain keys (consistent with the PancakeSwap / Slipstream
+    # builders below) so a future mixed-case chain name in the connector
+    # tables can't slip past ``_UNIV3_NPM_CHAIN_EXCLUSIONS`` or a downstream
+    # ``.strip().lower()`` lookup. The connector tables are lowercase today,
+    # so this is byte-equivalent.
+    for chain, kinds in UNISWAP_V3.items():
+        chain_lower = chain.lower()
+        if chain_lower in _UNIV3_NPM_CHAIN_EXCLUSIONS:
+            continue
+        address = kinds.get("position_manager")
+        if address:
+            managers[chain_lower] = address
+    # Agni Finance overlays Mantle with its own NPM (the parser literal pins
+    # the Agni address for ``mantle``, not the canonical Uniswap V3 one).
+    for chain, kinds in AGNI_FINANCE.items():
+        chain_lower = chain.lower()
+        if chain_lower in _UNIV3_NPM_CHAIN_EXCLUSIONS:
+            continue
+        address = kinds.get("position_manager")
+        if address:
+            managers[chain_lower] = address
+    # Preserve the historical ``bnb`` alias of ``bsc``.
+    if "bsc" in managers and "bnb" not in managers:
+        managers["bnb"] = managers["bsc"]
+    return managers
+
+
+def _build_pancakeswap_v3_nft_position_managers() -> dict[str, str]:
+    """Materialize PancakeSwap V3 ``{chain: NPM}`` (lowercased, ``bnb`` alias).
+
+    Byte-equivalent to
+    ``pancakeswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``.
+    """
+    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+
+    managers: dict[str, str] = {}
+    for chain, kinds in PANCAKESWAP_V3.items():
+        nft = kinds.get("nft")
+        if nft:
+            managers[chain.lower()] = nft.lower()
+    if "bsc" in managers and "bnb" not in managers:
+        managers["bnb"] = managers["bsc"]
+    return managers
+
+
+def _build_slipstream_nft_position_managers() -> dict[str, str]:
+    """Materialize Aerodrome / Velodrome Slipstream ``{chain: NPM}`` (lowercased).
+
+    Byte-equivalent to ``aerodrome.receipt_parser._SLIPSTREAM_NPM_ADDRESSES``.
+    """
+    from almanak.connectors.aerodrome.addresses import AERODROME
+
+    managers: dict[str, str] = {}
+    for chain, kinds in AERODROME.items():
+        cl_nft = kinds.get("cl_nft")
+        if cl_nft:
+            managers[chain.lower()] = cl_nft.lower()
+    return managers
+
+
+# Canonical UniV3-family NPM map (uniswap_v3 / sushiswap_v3 / agni_finance —
+# Sushi V3 shares the canonical Uniswap V3 NPM on every chain it supports).
+UNIV3_NFT_POSITION_MANAGERS: dict[str, str] = _build_univ3_nft_position_managers()
+
+# PancakeSwap V3 ships its own NPM at a different address than canonical
+# UniV3 on the same chain.
+PANCAKESWAP_V3_NFT_POSITION_MANAGERS: dict[str, str] = _build_pancakeswap_v3_nft_position_managers()
+
+# Aerodrome / Velodrome Slipstream NPM (Base today; Optimism unpopulated).
+SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str] = _build_slipstream_nft_position_managers()
+
+
+def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
+    """Union of every UniV3-shape DEX connector's LP-grouping membership.
+
+    VIB-4864 (W2-followup): replaces the hardcoded ``_UNIV3_LP_PROTOCOLS``
+    frozenset that lived in the migration backfill. Each connector declares
+    the protocol slugs it implements with the ``univ3_lp@v1`` grouping policy
+    in its ``lp_constants.py``; this aggregates the union. Mirrors the
+    VIB-4872 ``AAVE_V2_FORKS`` derivation. ``frozenset`` (not ``set``) so a
+    downstream ``protocol in UNIV3_LP_GROUPING_PROTOCOLS`` consumer cannot
+    silently widen the family by mutation.
+    """
+    from almanak.connectors.aerodrome.lp_constants import (
+        UNIV3_LP_GROUPING_PROTOCOLS as _aero_lp,
+    )
+    from almanak.connectors.pancakeswap_v3.lp_constants import (
+        UNIV3_LP_GROUPING_PROTOCOLS as _pcs_lp,
+    )
+    from almanak.connectors.sushiswap_v3.lp_constants import (
+        UNIV3_LP_GROUPING_PROTOCOLS as _sushi_lp,
+    )
+    from almanak.connectors.uniswap_v3.lp_constants import (
+        UNIV3_LP_GROUPING_PROTOCOLS as _uni_lp,
+    )
+
+    return frozenset(_uni_lp | _sushi_lp | _pcs_lp | _aero_lp)
+
+
+# Protocol slugs using the Uniswap-V3-shape LP grouping policy
+# (``univ3_lp@v1``) — NFT-position-manager-keyed concentrated liquidity.
+UNIV3_LP_GROUPING_PROTOCOLS: frozenset[str] = _build_univ3_lp_grouping_protocols()
+
+# Chain-specific known-tokens catalogue.
+#
+# VIB-4872 (W6-followup): per-chain entries now live on
+# ``ChainDescriptor.tokens`` (Optional[Mapping[str, str]] keyed by
+# lowercase symbol). The module-level dict below is preserved as a
+# derived read-only view so downstream SDK consumers that still do
+# ``from almanak.framework.intents.compiler_constants import CHAIN_TOKENS``
+# keep working. Mutating it has no production effect — to change a
+# chain's known-tokens map, edit the descriptor under
+# ``almanak/core/chains/<chain>.py``.
+#
+# Used by ``DefaultSwapAdapter`` (fee-tier selection for common pairs)
+# and Zodiac permission discovery (``almanak/framework/permissions/
+# synthetic_intents._get_chain_tokens``).
+
+
+def _build_chain_tokens() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``CHAIN_TOKENS`` shape from the registry."""
+    from almanak.core.chains import ChainRegistry
+
+    tokens: dict[str, dict[str, str]] = {}
+    for descriptor in ChainRegistry.all():
+        if descriptor.tokens is not None:
+            tokens[descriptor.name] = dict(descriptor.tokens)
+    return tokens
+
+
+CHAIN_TOKENS: dict[str, dict[str, str]] = _build_chain_tokens()
+
+# Swap-router classification + fee-tier metadata.
+#
+# VIB-4872 (W6-followup): per-DEX-connector data now lives in each
+# connector's ``swap_constants.py``:
+#
+# * ``almanak/connectors/uniswap_v3/swap_constants.py``     (uniswap_v3 + agni_finance)
+# * ``almanak/connectors/sushiswap_v3/swap_constants.py``   (sushiswap_v3)
+# * ``almanak/connectors/pancakeswap_v3/swap_constants.py`` (pancakeswap_v3)
+# * ``almanak/connectors/camelot/swap_constants.py``        (camelot — Algebra V1.9)
+#
+# The legacy module-level dicts / frozensets below are preserved as
+# derived read-only views aggregated at view-build time. Mutating them
+# has no production effect; edit the connector's ``swap_constants.py``
+# to change behaviour.
+
+
+def _swap_constants_sources() -> tuple[Any, ...]:
+    """Lazy-import every DEX connector's ``swap_constants`` module.
+
+    Returns the modules themselves so the per-dict aggregator helpers
+    below can pluck whichever symbol they need without each helper
+    re-paying the import cost.
+    """
+    from almanak.connectors.pancakeswap_v3 import swap_constants as _pcsv3_sc
+    from almanak.connectors.sushiswap_v3 import swap_constants as _sushi_sc
+    from almanak.connectors.uniswap_v3 import swap_constants as _uni_sc
+
+    return (_uni_sc, _sushi_sc, _pcsv3_sc)
+
+
+def _build_swap_fee_tiers() -> dict[str, tuple[int, ...]]:
+    tiers: dict[str, tuple[int, ...]] = {}
+    for source in _swap_constants_sources():
+        for protocol, entry in source.SWAP_FEE_TIERS.items():
+            if protocol in tiers and tiers[protocol] != entry:
+                raise ValueError(
+                    f"protocol {protocol!r} has conflicting SWAP_FEE_TIERS contributions: {tiers[protocol]} vs {entry}"
+                )
+            tiers[protocol] = entry
+    return tiers
+
+
+def _build_default_swap_fee_tier() -> dict[str, int]:
+    defaults: dict[str, int] = {}
+    for source in _swap_constants_sources():
+        for protocol, fee in source.DEFAULT_SWAP_FEE_TIER.items():
+            if protocol in defaults and defaults[protocol] != fee:
+                raise ValueError(
+                    f"protocol {protocol!r} has conflicting DEFAULT_SWAP_FEE_TIER contributions: "
+                    f"{defaults[protocol]} vs {fee}"
+                )
+            defaults[protocol] = fee
+    return defaults
+
+
+def _build_swap_router_v1_protocols() -> frozenset[str]:
+    members: set[str] = set()
+    for source in _swap_constants_sources():
+        members |= source.SWAP_ROUTER_V1_PROTOCOLS
+    return frozenset(members)
+
+
+def _build_swap_router_v1_chain_overrides() -> dict[str, frozenset[str]]:
+    overrides: dict[str, set[str]] = {}
+    for source in _swap_constants_sources():
+        for chain, protocols in source.SWAP_ROUTER_V1_CHAIN_OVERRIDES.items():
+            overrides.setdefault(chain, set()).update(protocols)
+    return {chain: frozenset(protos) for chain, protos in overrides.items()}
+
+
+def _build_swap_router_algebra_protocols() -> frozenset[str]:
+    from almanak.connectors.camelot.swap_constants import SWAP_ROUTER_ALGEBRA_PROTOCOLS as _ca
+
+    return _ca
+
+
+SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = _build_swap_fee_tiers()
+
+# Chain-specific fee-tier overrides. Empty today; reserved for cases
+# where a V3 fork on a specific chain supports additional fee tiers
+# beyond the base protocol's contribution. Kept as a derived view so
+# the lookup shape stays available for the consumer in
+# ``_strategy_base/base/swap_adapter.py``.
 SWAP_FEE_TIERS_CHAIN: dict[tuple[str, str], tuple[int, ...]] = {}
 
-DEFAULT_SWAP_FEE_TIER: dict[str, int] = {
-    "uniswap_v3": 3000,
-    "sushiswap_v3": 3000,
-    "pancakeswap_v3": 2500,
-    "agni_finance": 3000,  # Agni Finance on Mantle: heuristic picks 500 for USDC/WETH pairs, 3000 is safer default for others
-}
+DEFAULT_SWAP_FEE_TIER: dict[str, int] = _build_default_swap_fee_tier()
 
-# Protocols using the original SwapRouter interface (8-param exactInputSingle WITH deadline).
-# All other protocols use SwapRouter02 interface (7-param WITHOUT deadline).
-SWAP_ROUTER_V1_PROTOCOLS: frozenset[str] = frozenset({"sushiswap_v3"})
+# Protocols using the original SwapRouter interface (8-param
+# ``exactInputSingle`` WITH deadline). All other V3 forks use
+# SwapRouter02 (7-param, no deadline).
+SWAP_ROUTER_V1_PROTOCOLS: frozenset[str] = _build_swap_router_v1_protocols()
 
-# Chain-specific overrides: some chains use V3 forks with V1-style routers (e.g., Agni on Mantle).
-# Maps chain -> set of protocols that use the V1 router interface on that chain.
-SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = {
-    "mantle": frozenset({"agni_finance"}),  # Agni Finance uses original SwapRouter (with deadline)
-    "zerog": frozenset({"uniswap_v3"}),  # Jaine DEX SwapRouter accepts only the V1 8-arg form
-}
+# Chain-specific overrides: V3 forks that use the V1-style router on a
+# specific chain (e.g., Agni on Mantle).
+SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = _build_swap_router_v1_chain_overrides()
 
 # Protocols using the Algebra V1.9 router interface (VIB-1636).
-# exactInputSingle((address,address,address,uint256,uint256,uint256,uint160)) -> 0xbc651188
-# Struct: tokenIn, tokenOut, recipient, deadline, amountIn, amountOutMinimum, limitSqrtPrice
-# NOTE: Algebra has no `fee` parameter — fees are determined dynamically by the pool.
-SWAP_ROUTER_ALGEBRA_PROTOCOLS: frozenset[str] = frozenset({"camelot"})
+# exactInputSingle((address,address,address,uint256,uint256,uint256,uint160))
+# Selector ``0xbc651188``. Algebra has no ``fee`` parameter — fees are
+# determined dynamically by the pool.
+SWAP_ROUTER_ALGEBRA_PROTOCOLS: frozenset[str] = _build_swap_router_algebra_protocols()
 
 # Quoter addresses used for AUTO fee tier selection.
-SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0x64e8802FE490fa7cc61d3463958199161Bb608A7",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-    },
-    "arbitrum": {
-        "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-        # Camelot V3 (Algebra V1.9) Quoter — VIB-3750.
-        # Algebra-style ABI (no fee tier param, no struct):
-        #   quoteExactInputSingle(address tokenIn, address tokenOut,
-        #                         uint256 amountIn, uint160 limitSqrtPrice)
-        #     -> (uint256 amountOut, uint16 fee)
-        # Source: https://docs.camelot.exchange/contracts/amm-v3/deployed-contracts
-        "camelot": "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E",
-    },
-    "optimism": {
-        "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-    },
-    "polygon": {
-        "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
-    },
-    "base": {
-        "uniswap_v3": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-    },
-    "avalanche": {
-        "uniswap_v3": "0xbe0F5544EC67e9B3b2D979aaA43f18Fd87E6257F",
-        # sushiswap_v3 removed: zero usable liquidity (VIB-2069)
-    },
-    "bsc": {
-        "uniswap_v3": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",  # QuoterV2
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",  # PCS V3 Quoter
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",  # SushiSwap V3 Quoter
-    },
-    "bnb": {  # Alias for "bsc" (VIB-708 unification)
-        "uniswap_v3": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
-    },
-    "linea": {
-        "uniswap_v3": "0x42bE4D6527829FeFA1493e1fb9F3676d2425C3C1",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-    },
-    "mantle": {
-        "agni_finance": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni Finance QuoterV2
-        "uniswap_v3": "0xdD489C75be1039ec7d843A6aC2Fd658350B067Cf",  # QuoterV2 (Uniswap Governance — non-canonical)
-    },
-    "xlayer": {
-        "uniswap_v3": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",  # QuoterV2 (Governance Proposal 67)
-    },
-    "monad": {
-        "uniswap_v3": "0x661E93cca42AfacB172121EF892830cA3b70F08d",  # QuoterV2 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
-    },
-    "zerog": {
-        "uniswap_v3": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02",  # JAINE DEX QuoterV2 (Uniswap V3 fork)
-    },
-}
-
-# Aave V3 Pool addresses per chain
-LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "aave_v3": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-        "radiant_v2": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
-        # Spark is an Aave V3 fork — same pool interface, Spark-specific deployment.
-        # Address mirrors SPARK_POOL_ADDRESSES in almanak/connectors/spark/adapter.py.
-        "spark": "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
-    },
-    "arbitrum": {
-        "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-        # radiant_v2 intentionally absent — pool is a stub on arbitrum.
-        # See #1842 / #1847 / #1889 and tests/unit/connectors/test_radiant_v2.py.
-    },
-    "optimism": {
-        "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-    },
-    "polygon": {
-        "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-    },
-    "base": {
-        "aave_v3": "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
-    },
-    "avalanche": {
-        "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-    },
-    "bsc": {
-        "aave_v3": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
-    },
-    "sonic": {
-        "aave_v3": "0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3",
-    },
-    "linea": {
-        "aave_v3": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
-    },
-    "plasma": {
-        "aave_v3": "0x925a2A7214Ed92428B5b1B090F80b25700095e12",
-    },
-    "mantle": {
-        "aave_v3": "0x458F293454fE0d67EC0655f3672301301DD51422",
-    },
-    "xlayer": {
-        "aave_v3": "0xE3F3Caefdd7180F884c01E57f65Df979Af84f116",
-    },
-}
-
-# PoolDataProvider addresses per chain/protocol. Used by the lending pre-flight
-# checks to call `getReserveConfigurationData(asset)` and surface frozen/inactive
-# reserves as typed compile-time errors (VIB-3701, VIB-3749).
 #
-# Aave V2 and Aave V3 share the `getReserveConfigurationData(address)` selector
-# and ABI-encoded return layout, so the same pre-flight code works for both.
-# Radiant V2 is an Aave V2 fork — only Ethereum has a working deployment:
-#   - Ethereum Pool 0xA950...ED07, AaveProtocolDataProvider 0x362f...3813.
-#     Pool is active; the pre-flight gives us a fast fail when the operator
-#     picks an asset whose reserve has been retired.
-#   - Arbitrum: deliberately absent. The Radiant V2 LendingPool proxy on
-#     Arbitrum was reduced to a stub implementation after the Oct 2024 attack
-#     and the framework excludes radiant_v2/arbitrum at every layer. See
-#     ``LENDING_POOL_ADDRESSES`` above and issues #1842 / #1847 / #1889.
-LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "aave_v3": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
-        "radiant_v2": "0x362f3BB63Cff83bd169aE1793979E9e537993813",
-    },
-    "arbitrum": {
-        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-        # radiant_v2 intentionally absent — see comment above and
-        # LENDING_POOL_ADDRESSES.
-    },
-    "optimism": {
-        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    },
-    "polygon": {
-        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    },
-    "base": {
-        "aave_v3": "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac",
-    },
-    "avalanche": {
-        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    },
-    "bsc": {
-        "aave_v3": "0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328",
-    },
-    "sonic": {
-        "aave_v3": "0xc0a344397cfa89dF1e1d3e4fb330834D789cF2CD",
-    },
-    "linea": {
-        "aave_v3": "0x47cd4b507B81cB831669c71c7077f4daF6762FF4",
-    },
-    "plasma": {
-        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    },
-    "mantle": {
-        "aave_v3": "0x487c5c669D9eee6057C44973207101276cf73b68",
-    },
-    "xlayer": {
-        "aave_v3": "0x6C505C31714f14e8af2A03633EB2Cdfb4959138F",
-    },
-}
+# VIB-4872 (W6-followup): per-protocol quoter addresses now live on each
+# connector's ``addresses.py`` module (W1 / VIB-4853 vocabulary —
+# ``quoter_v2`` for Uniswap V3 forks, ``quoter`` for PancakeSwap V3 /
+# Camelot Algebra V1.9). Legacy module-level dict preserved as a derived
+# read-only view; the ``bnb`` alias for ``bsc`` is built at view-build
+# time so the existing ``SWAP_QUOTER_ADDRESSES["bnb"]`` lookups (per the
+# VIB-708 unification) keep working.
+
+
+# Per-(protocol, chain) exclusions for SWAP_QUOTER_ADDRESSES. SushiSwap V3
+# on Optimism / Avalanche had its quoter dropped from the legacy central
+# dict even though the connector publishes the address (Optimism has no
+# Sushi quoter entry in the legacy dict; Avalanche tracks the same
+# VIB-2069 liquidity-impact exclusion as PROTOCOL_ROUTERS / LP managers).
+# Uniswap V3 on Blast was never surfaced in the legacy quoter dict either.
+_SWAP_QUOTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("sushiswap_v3", "avalanche"),
+        ("sushiswap_v3", "optimism"),
+        ("uniswap_v3", "blast"),
+    }
+)
+
+
+def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``SWAP_QUOTER_ADDRESSES`` shape from connector data."""
+    from almanak.connectors.camelot.addresses import CAMELOT
+    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+
+    quoters: dict[str, dict[str, str]] = {}
+
+    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
+        ("uniswap_v3", UNISWAP_V3, "quoter_v2"),
+        ("sushiswap_v3", SUSHISWAP_V3, "quoter_v2"),
+        ("pancakeswap_v3", PANCAKESWAP_V3, "quoter"),
+        ("agni_finance", AGNI_FINANCE, "quoter_v2"),
+        ("camelot", CAMELOT, "quoter"),
+    )
+    for protocol, table, kind in sources:
+        for chain, kinds in table.items():
+            if (protocol, chain) in _SWAP_QUOTER_EXCLUSIONS:
+                continue
+            address = kinds.get(kind)
+            if address is None:
+                continue
+            quoters.setdefault(chain, {})[protocol] = address
+
+    # The bsc / bnb alias unification (VIB-708): the legacy dict carries
+    # a ``"bnb"`` mirror of every ``"bsc"`` quoter so callers that pass
+    # the alias resolve. Replicate by copying the bsc map; both keys
+    # point at the same address values, no behaviour change.
+    bsc = quoters.get("bsc")
+    if bsc is not None:
+        quoters["bnb"] = dict(bsc)
+
+    return quoters
+
+
+SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = _build_swap_quoter_addresses()
+
+# Lending pool + data-provider addresses per chain/protocol.
+#
+# VIB-4872 (W6-followup): the per-(chain, protocol) lending address tables
+# now live on each lending connector's ``addresses.py`` module:
+#
+# * ``almanak/connectors/aave_v3/addresses.py``    -> ``AAVE_V3``
+# * ``almanak/connectors/radiant_v2/addresses.py`` -> ``RADIANT_V2``
+# * ``almanak/connectors/spark/addresses.py``      -> ``SPARK``
+#
+# Each connector publishes its own contract-kind vocabulary (``pool`` /
+# ``pool_data_provider`` / ``oracle``). The legacy module-level dicts
+# below are preserved as derived read-only views so downstream SDK
+# consumers that import them directly keep working; mutating them has no
+# production effect.
+#
+# Aave V2 and Aave V3 share the ``getReserveConfigurationData(address)``
+# selector + ABI-encoded return layout, so the same pre-flight code works
+# for both. Radiant V2 is an Aave V2 fork — only Ethereum has a working
+# deployment (Arbitrum's pool was reduced to a stub after Oct 2024; see
+# #1842 / #1847 / #1889 and the Radiant connector's ``addresses.py``).
+
+
+def _build_lending_pool_addresses() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``LENDING_POOL_ADDRESSES`` shape from connector data."""
+    from almanak.connectors.aave_v3.addresses import AAVE_V3
+    from almanak.connectors.radiant_v2.addresses import RADIANT_V2
+    from almanak.connectors.spark.addresses import SPARK
+
+    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (
+        ("aave_v3", AAVE_V3),
+        ("radiant_v2", RADIANT_V2),
+        ("spark", SPARK),
+    )
+
+    pools: dict[str, dict[str, str]] = {}
+    for protocol, table in sources:
+        for chain, kinds in table.items():
+            pool = kinds.get("pool")
+            if pool is None:
+                continue
+            pools.setdefault(chain, {})[protocol] = pool
+    return pools
+
+
+def _build_lending_pool_data_providers() -> dict[str, dict[str, str]]:
+    """Materialize the legacy ``LENDING_POOL_DATA_PROVIDERS`` shape from connector data.
+
+    Spark intentionally omitted — the legacy central dict only carried
+    aave_v3 + radiant_v2 entries for the lending pre-flight; preserving
+    that exact shape avoids accidentally widening the surface as part of
+    a pure-data-move refactor. Adding Spark to the pre-flight surface is
+    tracked as a separate decision (the Spark adapter already owns its
+    own ``pool_data_provider`` address via ``addresses.SPARK``).
+    """
+    from almanak.connectors.aave_v3.addresses import AAVE_V3
+    from almanak.connectors.radiant_v2.addresses import RADIANT_V2
+
+    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (
+        ("aave_v3", AAVE_V3),
+        ("radiant_v2", RADIANT_V2),
+    )
+
+    providers: dict[str, dict[str, str]] = {}
+    for protocol, table in sources:
+        for chain, kinds in table.items():
+            provider = kinds.get("pool_data_provider")
+            if provider is None:
+                continue
+            providers.setdefault(chain, {})[protocol] = provider
+    return providers
+
+
+LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = _build_lending_pool_addresses()
+LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = _build_lending_pool_data_providers()
 
 # Standard ERC20 function selectors
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -574,11 +811,39 @@ NFT_POSITION_COLLECT_SELECTOR = "0xfc6f7865"
 # burn(tokenId): burn position NFT (requires position to be empty)
 NFT_POSITION_BURN_SELECTOR = "0x42966c68"
 
-# Aave V2 forks (use deposit() instead of supply(), otherwise same ABI).
-AAVE_V2_FORKS = {"radiant_v2"}
 
-# Protocols that share the Aave V3 lending pool interface (same ABI, different addresses).
-AAVE_COMPATIBLE_PROTOCOLS = {"aave_v3"} | AAVE_V2_FORKS
+# Aave V2 forks (use ``deposit()`` instead of ``supply()``, otherwise same ABI).
+#
+# VIB-4872 (W6-followup): per-connector membership now lives in each
+# lending connector's ``lending_constants.py``. The derived module-level
+# frozenset below is the union of every V2-fork connector's contribution.
+# CodeRabbit (PR #2478): the derived set is read-only by contract — keep
+# it as a ``frozenset`` rather than ``set`` so accidental mutation by a
+# downstream consumer raises rather than silently widening the family.
+# ``set == frozenset`` semantically (equality, ``in`` membership) so the
+# pre-refactor consumers' ``protocol in AAVE_V2_FORKS`` branches are
+# byte-equivalent at the lookup boundary.
+def _build_aave_v2_forks() -> frozenset[str]:
+    from almanak.connectors.radiant_v2.lending_constants import AAVE_V2_FORK_PROTOCOLS
+
+    return frozenset(AAVE_V2_FORK_PROTOCOLS)
+
+
+AAVE_V2_FORKS: frozenset[str] = _build_aave_v2_forks()
+
+
+# Protocols sharing the Aave V3 lending-pool interface (same ABI,
+# different addresses). VIB-4872: derived from the V3-family connector
+# membership + the V2-fork set (V2 forks share the V3 read surface; the
+# compile-time selector branch handles the ``deposit`` vs ``supply``
+# difference). Same ``frozenset`` immutability as ``AAVE_V2_FORKS``.
+def _build_aave_compatible_protocols() -> frozenset[str]:
+    from almanak.connectors.aave_v3.lending_constants import AAVE_V3_FAMILY_PROTOCOLS
+
+    return frozenset(AAVE_V3_FAMILY_PROTOCOLS) | AAVE_V2_FORKS
+
+
+AAVE_COMPATIBLE_PROTOCOLS: frozenset[str] = _build_aave_compatible_protocols()
 
 # Aave V2 Pool function selectors (used by V2 forks: Radiant V2, etc.)
 # deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
@@ -608,15 +873,24 @@ AAVE_VARIABLE_RATE_MODE = 2  # Variable rate (stable rate deprecated on Aave V3)
 # flashLoan(address recipient, address[] tokens, uint256[] amounts, bytes userData)
 BALANCER_FLASH_LOAN_SELECTOR = "0x5c38449e"
 
-# Balancer Vault addresses (same on all chains - Balancer uses deterministic deployment)
-BALANCER_VAULT_ADDRESSES: dict[str, str] = {
-    "ethereum": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "arbitrum": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "optimism": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "polygon": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "base": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-    "avalanche": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
-}
+# Balancer Vault addresses per chain.
+#
+# VIB-4872 (W6-followup): now owned by
+# ``almanak/connectors/balancer_v2/addresses.py`` (the Balancer V2 Vault
+# is a CREATE2 deterministic deployment so every chain pins the same
+# address). The legacy module-level dict below is preserved as a derived
+# read-only view so downstream SDK consumers (and the strategy-side
+# adapter import) keep working unchanged.
+
+
+def _build_balancer_vault_addresses() -> dict[str, str]:
+    """Materialize the legacy ``BALANCER_VAULT_ADDRESSES`` shape from connector data."""
+    from almanak.connectors.balancer_v2.addresses import BALANCER_V2
+
+    return {chain: kinds["vault"] for chain, kinds in BALANCER_V2.items() if "vault" in kinds}
+
+
+BALANCER_VAULT_ADDRESSES: dict[str, str] = _build_balancer_vault_addresses()
 
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1

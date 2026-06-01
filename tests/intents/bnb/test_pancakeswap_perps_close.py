@@ -50,7 +50,7 @@ pytestmark = pytest.mark.no_zodiac(
     )
 )
 
-from almanak.core.contracts import PANCAKESWAP_PERPS
+from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
 from almanak.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
     build_close_transaction,

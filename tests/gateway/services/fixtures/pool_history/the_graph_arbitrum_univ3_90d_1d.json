@@ -1,0 +1,552 @@
+{
+  "meta": {
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3",
+    "resolution": "1d",
+    "start_ts": 1699920000,
+    "rows": 90,
+    "snapshot0_tvl": "4000000.0"
+  },
+  "poolDayDatas": [
+    {
+      "date": 1699920000,
+      "tvlUSD": "4000000.0",
+      "volumeUSD": "50000.0",
+      "feesUSD": "500.0"
+    },
+    {
+      "date": 1700006400,
+      "tvlUSD": "4000001.0",
+      "volumeUSD": "50001.0",
+      "feesUSD": "501.0"
+    },
+    {
+      "date": 1700092800,
+      "tvlUSD": "4000002.0",
+      "volumeUSD": "50002.0",
+      "feesUSD": "502.0"
+    },
+    {
+      "date": 1700179200,
+      "tvlUSD": "4000003.0",
+      "volumeUSD": "50003.0",
+      "feesUSD": "503.0"
+    },
+    {
+      "date": 1700265600,
+      "tvlUSD": "4000004.0",
+      "volumeUSD": "50004.0",
+      "feesUSD": "504.0"
+    },
+    {
+      "date": 1700352000,
+      "tvlUSD": "4000005.0",
+      "volumeUSD": "50005.0",
+      "feesUSD": "505.0"
+    },
+    {
+      "date": 1700438400,
+      "tvlUSD": "4000006.0",
+      "volumeUSD": "50006.0",
+      "feesUSD": "506.0"
+    },
+    {
+      "date": 1700524800,
+      "tvlUSD": "4000007.0",
+      "volumeUSD": "50007.0",
+      "feesUSD": "507.0"
+    },
+    {
+      "date": 1700611200,
+      "tvlUSD": "4000008.0",
+      "volumeUSD": "50008.0",
+      "feesUSD": "508.0"
+    },
+    {
+      "date": 1700697600,
+      "tvlUSD": "4000009.0",
+      "volumeUSD": "50009.0",
+      "feesUSD": "509.0"
+    },
+    {
+      "date": 1700784000,
+      "tvlUSD": "4000010.0",
+      "volumeUSD": "50010.0",
+      "feesUSD": "510.0"
+    },
+    {
+      "date": 1700870400,
+      "tvlUSD": "4000011.0",
+      "volumeUSD": "50011.0",
+      "feesUSD": "511.0"
+    },
+    {
+      "date": 1700956800,
+      "tvlUSD": "4000012.0",
+      "volumeUSD": "50012.0",
+      "feesUSD": "512.0"
+    },
+    {
+      "date": 1701043200,
+      "tvlUSD": "4000013.0",
+      "volumeUSD": "50013.0",
+      "feesUSD": "513.0"
+    },
+    {
+      "date": 1701129600,
+      "tvlUSD": "4000014.0",
+      "volumeUSD": "50014.0",
+      "feesUSD": "514.0"
+    },
+    {
+      "date": 1701216000,
+      "tvlUSD": "4000015.0",
+      "volumeUSD": "50015.0",
+      "feesUSD": "515.0"
+    },
+    {
+      "date": 1701302400,
+      "tvlUSD": "4000016.0",
+      "volumeUSD": "50016.0",
+      "feesUSD": "516.0"
+    },
+    {
+      "date": 1701388800,
+      "tvlUSD": "4000017.0",
+      "volumeUSD": "50017.0",
+      "feesUSD": "517.0"
+    },
+    {
+      "date": 1701475200,
+      "tvlUSD": "4000018.0",
+      "volumeUSD": "50018.0",
+      "feesUSD": "518.0"
+    },
+    {
+      "date": 1701561600,
+      "tvlUSD": "4000019.0",
+      "volumeUSD": "50019.0",
+      "feesUSD": "519.0"
+    },
+    {
+      "date": 1701648000,
+      "tvlUSD": "4000020.0",
+      "volumeUSD": "50020.0",
+      "feesUSD": "520.0"
+    },
+    {
+      "date": 1701734400,
+      "tvlUSD": "4000021.0",
+      "volumeUSD": "50021.0",
+      "feesUSD": "521.0"
+    },
+    {
+      "date": 1701820800,
+      "tvlUSD": "4000022.0",
+      "volumeUSD": "50022.0",
+      "feesUSD": "522.0"
+    },
+    {
+      "date": 1701907200,
+      "tvlUSD": "4000023.0",
+      "volumeUSD": "50023.0",
+      "feesUSD": "523.0"
+    },
+    {
+      "date": 1701993600,
+      "tvlUSD": "4000024.0",
+      "volumeUSD": "50024.0",
+      "feesUSD": "524.0"
+    },
+    {
+      "date": 1702080000,
+      "tvlUSD": "4000025.0",
+      "volumeUSD": "50025.0",
+      "feesUSD": "525.0"
+    },
+    {
+      "date": 1702166400,
+      "tvlUSD": "4000026.0",
+      "volumeUSD": "50026.0",
+      "feesUSD": "526.0"
+    },
+    {
+      "date": 1702252800,
+      "tvlUSD": "4000027.0",
+      "volumeUSD": "50027.0",
+      "feesUSD": "527.0"
+    },
+    {
+      "date": 1702339200,
+      "tvlUSD": "4000028.0",
+      "volumeUSD": "50028.0",
+      "feesUSD": "528.0"
+    },
+    {
+      "date": 1702425600,
+      "tvlUSD": "4000029.0",
+      "volumeUSD": "50029.0",
+      "feesUSD": "529.0"
+    },
+    {
+      "date": 1702512000,
+      "tvlUSD": "4000030.0",
+      "volumeUSD": "50030.0",
+      "feesUSD": "530.0"
+    },
+    {
+      "date": 1702598400,
+      "tvlUSD": "4000031.0",
+      "volumeUSD": "50031.0",
+      "feesUSD": "531.0"
+    },
+    {
+      "date": 1702684800,
+      "tvlUSD": "4000032.0",
+      "volumeUSD": "50032.0",
+      "feesUSD": "532.0"
+    },
+    {
+      "date": 1702771200,
+      "tvlUSD": "4000033.0",
+      "volumeUSD": "50033.0",
+      "feesUSD": "533.0"
+    },
+    {
+      "date": 1702857600,
+      "tvlUSD": "4000034.0",
+      "volumeUSD": "50034.0",
+      "feesUSD": "534.0"
+    },
+    {
+      "date": 1702944000,
+      "tvlUSD": "4000035.0",
+      "volumeUSD": "50035.0",
+      "feesUSD": "535.0"
+    },
+    {
+      "date": 1703030400,
+      "tvlUSD": "4000036.0",
+      "volumeUSD": "50036.0",
+      "feesUSD": "536.0"
+    },
+    {
+      "date": 1703116800,
+      "tvlUSD": "4000037.0",
+      "volumeUSD": "50037.0",
+      "feesUSD": "537.0"
+    },
+    {
+      "date": 1703203200,
+      "tvlUSD": "4000038.0",
+      "volumeUSD": "50038.0",
+      "feesUSD": "538.0"
+    },
+    {
+      "date": 1703289600,
+      "tvlUSD": "4000039.0",
+      "volumeUSD": "50039.0",
+      "feesUSD": "539.0"
+    },
+    {
+      "date": 1703376000,
+      "tvlUSD": "4000040.0",
+      "volumeUSD": "50040.0",
+      "feesUSD": "540.0"
+    },
+    {
+      "date": 1703462400,
+      "tvlUSD": "4000041.0",
+      "volumeUSD": "50041.0",
+      "feesUSD": "541.0"
+    },
+    {
+      "date": 1703548800,
+      "tvlUSD": "4000042.0",
+      "volumeUSD": "50042.0",
+      "feesUSD": "542.0"
+    },
+    {
+      "date": 1703635200,
+      "tvlUSD": "4000043.0",
+      "volumeUSD": "50043.0",
+      "feesUSD": "543.0"
+    },
+    {
+      "date": 1703721600,
+      "tvlUSD": "4000044.0",
+      "volumeUSD": "50044.0",
+      "feesUSD": "544.0"
+    },
+    {
+      "date": 1703808000,
+      "tvlUSD": "4000045.0",
+      "volumeUSD": "50045.0",
+      "feesUSD": "545.0"
+    },
+    {
+      "date": 1703894400,
+      "tvlUSD": "4000046.0",
+      "volumeUSD": "50046.0",
+      "feesUSD": "546.0"
+    },
+    {
+      "date": 1703980800,
+      "tvlUSD": "4000047.0",
+      "volumeUSD": "50047.0",
+      "feesUSD": "547.0"
+    },
+    {
+      "date": 1704067200,
+      "tvlUSD": "4000048.0",
+      "volumeUSD": "50048.0",
+      "feesUSD": "548.0"
+    },
+    {
+      "date": 1704153600,
+      "tvlUSD": "4000049.0",
+      "volumeUSD": "50049.0",
+      "feesUSD": "549.0"
+    },
+    {
+      "date": 1704240000,
+      "tvlUSD": "4000050.0",
+      "volumeUSD": "50050.0",
+      "feesUSD": "550.0"
+    },
+    {
+      "date": 1704326400,
+      "tvlUSD": "4000051.0",
+      "volumeUSD": "50051.0",
+      "feesUSD": "551.0"
+    },
+    {
+      "date": 1704412800,
+      "tvlUSD": "4000052.0",
+      "volumeUSD": "50052.0",
+      "feesUSD": "552.0"
+    },
+    {
+      "date": 1704499200,
+      "tvlUSD": "4000053.0",
+      "volumeUSD": "50053.0",
+      "feesUSD": "553.0"
+    },
+    {
+      "date": 1704585600,
+      "tvlUSD": "4000054.0",
+      "volumeUSD": "50054.0",
+      "feesUSD": "554.0"
+    },
+    {
+      "date": 1704672000,
+      "tvlUSD": "4000055.0",
+      "volumeUSD": "50055.0",
+      "feesUSD": "555.0"
+    },
+    {
+      "date": 1704758400,
+      "tvlUSD": "4000056.0",
+      "volumeUSD": "50056.0",
+      "feesUSD": "556.0"
+    },
+    {
+      "date": 1704844800,
+      "tvlUSD": "4000057.0",
+      "volumeUSD": "50057.0",
+      "feesUSD": "557.0"
+    },
+    {
+      "date": 1704931200,
+      "tvlUSD": "4000058.0",
+      "volumeUSD": "50058.0",
+      "feesUSD": "558.0"
+    },
+    {
+      "date": 1705017600,
+      "tvlUSD": "4000059.0",
+      "volumeUSD": "50059.0",
+      "feesUSD": "559.0"
+    },
+    {
+      "date": 1705104000,
+      "tvlUSD": "4000060.0",
+      "volumeUSD": "50060.0",
+      "feesUSD": "560.0"
+    },
+    {
+      "date": 1705190400,
+      "tvlUSD": "4000061.0",
+      "volumeUSD": "50061.0",
+      "feesUSD": "561.0"
+    },
+    {
+      "date": 1705276800,
+      "tvlUSD": "4000062.0",
+      "volumeUSD": "50062.0",
+      "feesUSD": "562.0"
+    },
+    {
+      "date": 1705363200,
+      "tvlUSD": "4000063.0",
+      "volumeUSD": "50063.0",
+      "feesUSD": "563.0"
+    },
+    {
+      "date": 1705449600,
+      "tvlUSD": "4000064.0",
+      "volumeUSD": "50064.0",
+      "feesUSD": "564.0"
+    },
+    {
+      "date": 1705536000,
+      "tvlUSD": "4000065.0",
+      "volumeUSD": "50065.0",
+      "feesUSD": "565.0"
+    },
+    {
+      "date": 1705622400,
+      "tvlUSD": "4000066.0",
+      "volumeUSD": "50066.0",
+      "feesUSD": "566.0"
+    },
+    {
+      "date": 1705708800,
+      "tvlUSD": "4000067.0",
+      "volumeUSD": "50067.0",
+      "feesUSD": "567.0"
+    },
+    {
+      "date": 1705795200,
+      "tvlUSD": "4000068.0",
+      "volumeUSD": "50068.0",
+      "feesUSD": "568.0"
+    },
+    {
+      "date": 1705881600,
+      "tvlUSD": "4000069.0",
+      "volumeUSD": "50069.0",
+      "feesUSD": "569.0"
+    },
+    {
+      "date": 1705968000,
+      "tvlUSD": "4000070.0",
+      "volumeUSD": "50070.0",
+      "feesUSD": "570.0"
+    },
+    {
+      "date": 1706054400,
+      "tvlUSD": "4000071.0",
+      "volumeUSD": "50071.0",
+      "feesUSD": "571.0"
+    },
+    {
+      "date": 1706140800,
+      "tvlUSD": "4000072.0",
+      "volumeUSD": "50072.0",
+      "feesUSD": "572.0"
+    },
+    {
+      "date": 1706227200,
+      "tvlUSD": "4000073.0",
+      "volumeUSD": "50073.0",
+      "feesUSD": "573.0"
+    },
+    {
+      "date": 1706313600,
+      "tvlUSD": "4000074.0",
+      "volumeUSD": "50074.0",
+      "feesUSD": "574.0"
+    },
+    {
+      "date": 1706400000,
+      "tvlUSD": "4000075.0",
+      "volumeUSD": "50075.0",
+      "feesUSD": "575.0"
+    },
+    {
+      "date": 1706486400,
+      "tvlUSD": "4000076.0",
+      "volumeUSD": "50076.0",
+      "feesUSD": "576.0"
+    },
+    {
+      "date": 1706572800,
+      "tvlUSD": "4000077.0",
+      "volumeUSD": "50077.0",
+      "feesUSD": "577.0"
+    },
+    {
+      "date": 1706659200,
+      "tvlUSD": "4000078.0",
+      "volumeUSD": "50078.0",
+      "feesUSD": "578.0"
+    },
+    {
+      "date": 1706745600,
+      "tvlUSD": "4000079.0",
+      "volumeUSD": "50079.0",
+      "feesUSD": "579.0"
+    },
+    {
+      "date": 1706832000,
+      "tvlUSD": "4000080.0",
+      "volumeUSD": "50080.0",
+      "feesUSD": "580.0"
+    },
+    {
+      "date": 1706918400,
+      "tvlUSD": "4000081.0",
+      "volumeUSD": "50081.0",
+      "feesUSD": "581.0"
+    },
+    {
+      "date": 1707004800,
+      "tvlUSD": "4000082.0",
+      "volumeUSD": "50082.0",
+      "feesUSD": "582.0"
+    },
+    {
+      "date": 1707091200,
+      "tvlUSD": "4000083.0",
+      "volumeUSD": "50083.0",
+      "feesUSD": "583.0"
+    },
+    {
+      "date": 1707177600,
+      "tvlUSD": "4000084.0",
+      "volumeUSD": "50084.0",
+      "feesUSD": "584.0"
+    },
+    {
+      "date": 1707264000,
+      "tvlUSD": "4000085.0",
+      "volumeUSD": "50085.0",
+      "feesUSD": "585.0"
+    },
+    {
+      "date": 1707350400,
+      "tvlUSD": "4000086.0",
+      "volumeUSD": "50086.0",
+      "feesUSD": "586.0"
+    },
+    {
+      "date": 1707436800,
+      "tvlUSD": "4000087.0",
+      "volumeUSD": "50087.0",
+      "feesUSD": "587.0"
+    },
+    {
+      "date": 1707523200,
+      "tvlUSD": "4000088.0",
+      "volumeUSD": "50088.0",
+      "feesUSD": "588.0"
+    },
+    {
+      "date": 1707609600,
+      "tvlUSD": "4000089.0",
+      "volumeUSD": "50089.0",
+      "feesUSD": "589.0"
+    }
+  ]
+}

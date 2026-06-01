@@ -1066,6 +1066,81 @@ class TestBridgedTokenAliases:
         assert token.address.lower() == "0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be"
 
     # =========================================================================
+    # BSC BTCB (Binance-Peg BTC) — must report decimals=18, not 8.
+    #
+    # The contract at 0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c is BTCB
+    # (Binance-Peg BTC, 18 decimals on-chain), not WBTC (which is an
+    # Ethereum-native 8-decimal wrapper at a different address). Prior to this
+    # fix the registry recorded that address under WBTC with decimals=8,
+    # producing a 10^10 mis-scale for any BSC holder. BTC and WBTC remain
+    # accepted via bsc-scoped aliases for legacy callers, but they MUST route
+    # to the BTCB record with decimals=18.
+    # =========================================================================
+
+    def test_btcb_resolves_on_bsc_with_18_decimals(self, temp_cache_file):
+        """BTCB on BSC must resolve at 18 decimals (on-chain truth)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("BTCB", "bsc")
+
+        assert token.symbol == "BTCB"
+        assert token.decimals == 18
+        assert token.chain == Chain.BSC
+        assert token.address.lower() == "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
+
+    def test_btc_alias_on_bsc_routes_to_btcb(self, temp_cache_file):
+        """'BTC' on BSC is an alias for BTCB and must inherit 18 decimals."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("BTC", "bsc")
+
+        assert token.symbol == "BTCB"
+        assert token.decimals == 18
+        assert token.address.lower() == "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
+
+    def test_wbtc_on_bsc_is_legacy_alias_for_btcb(self, temp_cache_file):
+        """Legacy callers using 'WBTC' on BSC must still resolve, but to the
+        BTCB record (18 decimals). Without back-compat they would silently
+        break; without routing to BTCB they would silently mis-scale 10^10."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("WBTC", "bsc")
+
+        assert token.symbol == "BTCB"
+        assert token.decimals == 18
+        assert token.address.lower() == "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
+
+    @pytest.mark.parametrize(
+        "chain,expected_address_prefix",
+        [
+            ("ethereum", "0x2260fac5"),
+            ("arbitrum", "0x2f2a2543"),
+            ("optimism", "0x68f180fc"),
+            ("polygon", "0x1bfd6703"),
+            ("avalanche", "0x50b75456"),
+        ],
+    )
+    def test_wbtc_on_other_chains_remains_8_decimal_wrapped_btc(
+        self, temp_cache_file, chain, expected_address_prefix
+    ):
+        """The BSC rename must NOT affect WBTC on any other chain — it stays
+        the canonical 8-decimal ERC-20 wrapper at its native address."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("WBTC", chain)
+
+        assert token.symbol == "WBTC"
+        assert token.decimals == 8
+        assert token.address.lower().startswith(expected_address_prefix)
+
+    def test_btcb_on_avalanche_still_routes_to_btc_b(self, temp_cache_file):
+        """Adding a global BTCB record for BSC must NOT shadow the Avalanche
+        BTCB alias → BTC.b mapping (VIB-1362)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("BTCB", "avalanche")
+
+        assert token.symbol == "BTC.B"
+        assert token.decimals == 8
+        assert token.chain == Chain.AVALANCHE
+        assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
+
+    # =========================================================================
     # Cross-chain consistency
     # =========================================================================
 

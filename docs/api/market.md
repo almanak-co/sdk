@@ -46,6 +46,30 @@ def decide(self, market: MarketSnapshot) -> Intent:
     # ... use analytics
 ```
 
+The same HOLD contract applies to `market.pool_history(...)` — backed by
+`PoolHistoryReader` over the gateway-side `PoolHistoryService` (VIB-4728).
+In a backtest the injected `NullPoolHistoryReader` raises
+`DataSourceUnavailable("backtest")` on every call; in a live run a gateway
+outage or "pool not found across all providers" surfaces as the same
+typed error. The same catch-and-HOLD or let-it-propagate discipline
+applies:
+
+```python
+def decide(self, market: MarketSnapshot) -> Intent:
+    try:
+        history = market.pool_history(
+            pool_address,
+            chain=self.chain,
+            start_date=self.lookback_start,
+            resolution="1h",
+            protocol="uniswap_v3",
+        )
+    except DataSourceUnavailable:
+        # Correct: HOLD on backtest or gateway-down; do NOT default to zeros.
+        return Intent.hold(reason="pool history unavailable")
+    # ... use history.value (list[PoolSnapshot])
+```
+
 ## Return-type DTOs
 
 ::: almanak.framework.market.models

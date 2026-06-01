@@ -67,6 +67,31 @@ DEFAULT_SINGLE_SOURCE_PRICE_CEILING = Decimal("10_000_000")  # $10M per token
 # set. Add a token here only if every chain's "<symbol>" is a USD-pegged stable.
 STABLECOIN_FALLBACK_TOKENS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E"})
 
+# VIB-4841 / FR-5002 — the canonical USD peg value returned by the proactive
+# stablecoin fast-path. Decimal so it composes cleanly with downstream math.
+STABLECOIN_PEG_PRICE = Decimal("1.00")
+
+# How often the proactive peg fast-path runs a Chainlink on-chain sanity check
+# (1 in N peg-served calls). The check confirms the stable is still trading at
+# ~$1.00 on-chain; when it detects a de-peg the fast-path FAILS CLOSED — it does
+# not return the peg (see ``_maybe_stablecoin_peg``). Kept low-frequency to
+# honour the whole point of the fast-path (don't hit upstream every iteration).
+# Operators tune it via ``ALMANAK_GATEWAY_STABLECOIN_CHAINLINK_CHECK_INTERVAL``.
+DEFAULT_STABLECOIN_CHAINLINK_CHECK_INTERVAL = 50
+
+# Tolerance band (fraction) for the periodic Chainlink peg sanity check. A
+# stable whose on-chain price drifts more than this from $1.00 is treated as a
+# potential de-peg: the fast-path then fails closed (it does NOT return the
+# peg). 2% mirrors the aggregator's outlier threshold.
+STABLECOIN_PEG_DEVIATION_THRESHOLD = 0.02
+
+# Wall-clock budget for the on-chain peg sanity check. The fast-path's whole
+# point is low latency, so a slow RPC must not stall it: we bound the inline
+# ``get_price`` await with this timeout. On timeout the check is treated as
+# "could not run" — the peg is still returned (best-effort) — but a check that
+# DOES complete and detects a de-peg makes the fast-path fail closed.
+STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS = 1.5
+
 # Address-keyed fallback for stablecoins whose symbol clashes with non-stables.
 # Polymarket V2 collateral pUSD (Polygon ``0xC011...82DFB``) is enforced 1:1 vs
 # USDC.e/USDC at the on-chain Onramp, but the bare "PUSD" symbol is also used
@@ -244,6 +269,9 @@ class PriceAggregator:
         stale_confidence_penalty: float = DEFAULT_STALE_CONFIDENCE_PENALTY,
         partial_failure_penalty: float = DEFAULT_PARTIAL_FAILURE_CONFIDENCE_PENALTY,
         magnitude_outlier_ratio: float = DEFAULT_MAGNITUDE_OUTLIER_RATIO,
+        *,
+        stablecoin_verify: bool = False,
+        stablecoin_chainlink_check_interval: int = DEFAULT_STABLECOIN_CHAINLINK_CHECK_INTERVAL,
     ) -> None:
         """Initialize the PriceAggregator.
 
@@ -256,6 +284,25 @@ class PriceAggregator:
                 misconfiguration (wrong units/decimals) and raise AllDataSourcesFailed
                 instead of averaging garbage values. Default 100× (e.g., $3,400 vs $12.28B
                 wstETH case triggers at ~3,600,000×). Set higher to allow more divergence.
+            stablecoin_verify: VIB-4841 / FR-5002. When False (default), a
+                stable/USD pair short-circuits to the $1.00 peg without any
+                upstream call (the peg is what the aggregator returns anyway
+                after outlier-discarding). When True, the proactive fast-path is
+                disabled and every stablecoin price goes through the full
+                multi-source aggregate — use when you must verify the live peg
+                (e.g. de-peg monitoring). Off by default to cut the per-iteration
+                price-call count. Operators set
+                ``ALMANAK_GATEWAY_STABLECOIN_VERIFY=true`` to flip it.
+            stablecoin_chainlink_check_interval: When the fast-path is active,
+                run an on-chain Chainlink peg sanity check on 1-in-N peg-served
+                calls (default 50). The check is latency-bounded
+                (``STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS``). When it completes and
+                detects a de-peg the fast-path FAILS CLOSED — it returns the live
+                on-chain price, or falls through to the full multi-source
+                aggregate if no usable on-chain price is available; it never
+                masks a de-peg by returning $1.00. When the check times out or
+                cannot run, the peg is returned best-effort. Non-positive values
+                disable the periodic check.
 
         Raises:
             ValueError: If sources list is empty
@@ -269,6 +316,21 @@ class PriceAggregator:
         self._partial_failure_penalty = partial_failure_penalty
         self._magnitude_outlier_ratio = magnitude_outlier_ratio
         self._single_source_price_ceiling = DEFAULT_SINGLE_SOURCE_PRICE_CEILING
+
+        # VIB-4841 / FR-5002 stablecoin peg fast-path configuration.
+        self._stablecoin_verify = stablecoin_verify
+        self._stablecoin_chainlink_check_interval = stablecoin_chainlink_check_interval
+        # Counter of peg-served calls; drives the 1-in-N Chainlink sanity check.
+        self._stablecoin_peg_calls = 0
+        # VIB-4841 (Codex re-audit): per-token de-peg latch. With the 1-in-N
+        # check, a stable that de-pegs on the sampled call would otherwise be
+        # served at $1.00 again for the next ~N-1 (non-sampled) calls. Once a
+        # de-peg is detected we LATCH the token (keyed by upper-cased symbol):
+        # while latched the peg fast-path is suppressed (every call falls
+        # through to the live price / full aggregate) AND the on-chain sanity
+        # check runs every call so recovery is detected promptly. The latch is
+        # cleared when the on-chain price returns within the peg threshold.
+        self._depegged_tokens: set[str] = set()
 
         # Health metrics per source
         self._health_metrics: dict[str, SourceHealthMetrics] = {
@@ -285,6 +347,8 @@ class PriceAggregator:
                 "sources": [s.source_name for s in sources],
                 "outlier_threshold": outlier_threshold,
                 "magnitude_outlier_ratio": magnitude_outlier_ratio,
+                "stablecoin_verify": stablecoin_verify,
+                "stablecoin_chainlink_check_interval": stablecoin_chainlink_check_interval,
             },
         )
 
@@ -317,6 +381,15 @@ class PriceAggregator:
         Raises:
             AllDataSourcesFailed: If all sources fail to provide data
         """
+        # VIB-4841 / FR-5002: proactive stablecoin peg fast-path. A stable/USD
+        # pair returns $1.00 immediately without any upstream call (the peg is
+        # what the aggregate returns anyway after outlier-discarding). Disabled
+        # when stablecoin_verify is set. A low-frequency Chainlink sanity check
+        # still runs to surface a de-peg.
+        peg_result = await self._maybe_stablecoin_peg(token, quote, resolved_token)
+        if peg_result is not None:
+            return peg_result
+
         logger.debug(
             "Getting aggregated price for %s/%s from %d sources",
             token,
@@ -406,6 +479,245 @@ class PriceAggregator:
             confidence=confidence,
             stale=stale,
         )
+
+    async def _maybe_stablecoin_peg(
+        self,
+        token: str,
+        quote: str,
+        resolved_token: ResolvedToken | None,
+    ) -> PriceResult | None:
+        """Return the $1.00 peg for a stable/USD pair, or None to fall through.
+
+        VIB-4841 / FR-5002. Short-circuits the multi-source aggregate for
+        USD-pegged stablecoins: with the fast-path active we return the peg
+        without any upstream price call (CoinGecko/Binance/DexScreener were
+        being hit every iteration only to confirm ~$1.00). The aggregator's own
+        all-sources-failed fallback already returns $1.00 for these tokens, so
+        the fast-path doesn't change the value — only the cost.
+
+        Returns ``None`` (fall through to the full aggregate) when:
+          - ``stablecoin_verify`` is set (operator wants the live peg verified), or
+          - the quote currency isn't USD, or
+          - the token isn't a recognised fallback stablecoin, or
+          - the periodic on-chain sanity check detects a de-peg but could not
+            obtain a usable live price to return in the peg's place, or
+          - the token is currently LATCHED as de-pegged (the on-chain check
+            could not confirm recovery on this call) — fall through so every
+            call gets the real price, not just the sampled one.
+
+        Fail-closed de-peg handling (VIB-4841, Codex review): a low-frequency,
+        latency-bounded Chainlink on-chain sanity check runs on the fast-path.
+        When it COMPLETES and detects the stable trading off-peg, the fast-path
+        must NOT mask the de-peg by returning $1.00 — instead it returns the
+        live on-chain price, or (if that price is unusable) falls through to the
+        full multi-source aggregate. The peg is only returned when the check
+        passes, times out, or cannot run AND the token is not latched.
+
+        De-peg latch (VIB-4841, Codex re-audit): detecting a de-peg on the
+        sampled call is not enough — with the 1-in-N cadence the next ~N-1 calls
+        would skip the check and serve $1.00 again for a known-de-pegged token.
+        So a detected de-peg LATCHES the token: while latched the peg is
+        suppressed on EVERY call and the on-chain check runs every call (not
+        just 1-in-N) so recovery is detected promptly. The latch clears when the
+        on-chain price returns within ``STABLECOIN_PEG_DEVIATION_THRESHOLD``.
+        """
+        if self._stablecoin_verify:
+            return None
+        if quote.upper() != "USD":
+            return None
+        if not is_stablecoin_for_fallback(token, resolved_token):
+            return None
+
+        self._stablecoin_peg_calls += 1
+        # Latency-bounded on-chain sanity check. Runs on the 1-in-N cadence for
+        # healthy tokens, but EVERY call while a token is latched de-pegged.
+        # Returns the live price when a de-peg is detected (also sets the latch),
+        # else None (passed -> latch cleared / timed out / could not run / not
+        # this call's turn). Whether the peg may be served also depends on the
+        # latch state AFTER the check (see below).
+        depeg_price = await self._maybe_check_stablecoin_peg_onchain(token, resolved_token)
+        if depeg_price is not None:
+            # Fail closed: a confirmed de-peg must never be masked by the peg.
+            if depeg_price > 0:
+                logger.warning(
+                    "Stablecoin %s/%s fast-path returning LIVE on-chain price %s instead of the "
+                    "$1.00 peg — de-peg detected by the on-chain sanity check.",
+                    token,
+                    quote,
+                    depeg_price,
+                )
+                return PriceResult(
+                    price=depeg_price,
+                    source="onchain",
+                    timestamp=datetime.now(UTC),
+                    confidence=0.9,
+                    stale=False,
+                )
+            # De-peg detected but no usable live price — fall through to the
+            # full multi-source aggregate rather than returning the peg.
+            logger.warning(
+                "Stablecoin %s/%s de-peg detected but on-chain price unusable (%s); "
+                "falling through to the full multi-source aggregate.",
+                token,
+                quote,
+                depeg_price,
+            )
+            return None
+
+        # No de-peg confirmed on THIS call. If the token is still latched as
+        # de-pegged (the check was skipped/timed-out/errored this call and so
+        # could not confirm recovery), do NOT serve the peg — fall through to
+        # the full aggregate so the caller gets the real price every call, not
+        # just on sampled calls. The latch only clears when a completed on-chain
+        # check shows the price back within threshold (handled in the check).
+        if token.upper() in self._depegged_tokens:
+            logger.warning(
+                "Stablecoin %s/%s is LATCHED de-pegged; suppressing the $1.00 peg "
+                "fast-path and falling through to the full multi-source aggregate "
+                "until an on-chain check confirms recovery.",
+                token,
+                quote,
+            )
+            return None
+
+        logger.debug(
+            "Stablecoin peg fast-path for %s/%s -> %s (no upstream call; "
+            "set ALMANAK_GATEWAY_STABLECOIN_VERIFY=true to verify live)",
+            token,
+            quote,
+            STABLECOIN_PEG_PRICE,
+        )
+        return PriceResult(
+            price=STABLECOIN_PEG_PRICE,
+            source="stablecoin_peg",
+            timestamp=datetime.now(UTC),
+            confidence=0.95,
+            stale=False,
+        )
+
+    async def _maybe_check_stablecoin_peg_onchain(
+        self,
+        token: str,
+        resolved_token: ResolvedToken | None,
+    ) -> Decimal | None:
+        """Verify the stable is ~$1.00 on-chain on the 1-in-N cadence (or every
+        call while the token is latched de-pegged) and maintain the de-peg latch.
+
+        Latency-bounded, fail-closed de-peg detector for the fast-path. Reads
+        the live price from the on-chain (Chainlink) source if one is wired into
+        the aggregator, bounding the inline await with
+        ``STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS`` so a slow RPC cannot stall the
+        "fast" path.
+
+        Cadence: runs on the 1st, (1+N)th, (1+2N)th, ... peg-served call for a
+        healthy token. While the token is LATCHED de-pegged the cadence is
+        overridden and the check runs on EVERY call so recovery is detected
+        promptly (VIB-4841, Codex re-audit).
+
+        Latch maintenance (VIB-4841, Codex re-audit):
+            - On a completed check that detects a de-peg, the token is added to
+              ``self._depegged_tokens`` (keyed by upper-cased symbol).
+            - On a completed check that shows the price back within
+              ``STABLECOIN_PEG_DEVIATION_THRESHOLD``, the token is removed from
+              the latch (recovery), so the peg fast-path resumes.
+            - A check that times out / errors / is skipped does NOT change the
+              latch — a latched token stays latched until a check confirms
+              recovery.
+
+        Returns:
+            - The live on-chain :class:`Decimal` price when the check COMPLETES
+              and detects a de-peg (drift past ``STABLECOIN_PEG_DEVIATION_THRESHOLD``).
+              The caller fails closed on this — it must not return the peg.
+            - ``None`` when the check passes (on-peg), is skipped (not this
+              call's turn and not latched, no on-chain source wired, interval
+              disabled), times out, or the source errors. The caller then serves
+              the peg best-effort UNLESS the token is still latched.
+
+        Never raises. Egress here is correct: this is the gateway layer and the
+        on-chain source already owns its RPC path.
+        """
+        interval = self._stablecoin_chainlink_check_interval
+        latched = token.upper() in self._depegged_tokens
+        # While latched, the check runs every call (override the cadence) so a
+        # re-peg is detected promptly and the fast-path can resume. A non-latched
+        # token with a disabled interval skips the check entirely.
+        if not latched:
+            if interval <= 0:
+                return None
+            # Run on the 1st, (1+N)th, (1+2N)th, ... peg-served call so the very
+            # first fast-path hit is sanity-checked, then every Nth thereafter.
+            # ``(calls - 1) % interval`` is 0 on exactly those calls and, unlike
+            # ``calls % interval == 1``, also fires every call when interval == 1.
+            if (self._stablecoin_peg_calls - 1) % interval != 0:
+                return None
+
+        onchain_source = next(
+            (s for s in self._sources if s.source_name in ("onchain", "onchain_chainlink")),
+            None,
+        )
+        if onchain_source is None:
+            return None
+
+        try:
+            # Latency-bounded: a slow RPC must not stall the fast-path. On
+            # timeout we treat the check as "could not run" and return the peg
+            # best-effort (the 1-in-N cadence keeps steady-state latency low).
+            result = await asyncio.wait_for(
+                onchain_source.get_price(token, "USD", resolved_token=resolved_token),
+                timeout=STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.debug(
+                "Stablecoin peg on-chain sanity check timed out for %s after %.1fs; returning the peg best-effort.",
+                token,
+                STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS,
+            )
+            return None
+        except Exception as exc:
+            # On-chain feed unavailable (no RPC, no feed, Anvil) — not a de-peg
+            # signal, so stay quiet at DEBUG. The peg is still returned upstream.
+            logger.debug(
+                "Stablecoin peg on-chain sanity check skipped for %s: %s",
+                token,
+                exc,
+            )
+            return None
+
+        deviation = abs(result.price - STABLECOIN_PEG_PRICE) / STABLECOIN_PEG_PRICE
+        if deviation > Decimal(str(STABLECOIN_PEG_DEVIATION_THRESHOLD)):
+            # Latch the de-peg so subsequent (non-sampled) calls keep failing
+            # closed instead of resuming the $1.00 fast-path.
+            self._depegged_tokens.add(token.upper())
+            logger.warning(
+                "Stablecoin %s may be DE-PEGGED: Chainlink reports %s (%.2f%% off $1.00 peg). "
+                "Fast-path is FAILING CLOSED and the token is now LATCHED — every subsequent call "
+                "returns the live on-chain price or falls through to the full aggregate until an "
+                "on-chain check confirms recovery.",
+                token,
+                result.price,
+                float(deviation) * 100,
+            )
+            return result.price
+
+        # On-peg: clear any prior latch so the fast-path resumes. ``discard``
+        # is a no-op when the token was never latched.
+        if token.upper() in self._depegged_tokens:
+            self._depegged_tokens.discard(token.upper())
+            logger.warning(
+                "Stablecoin %s has RE-PEGGED: Chainlink=%s (within %.1f%% of $1.00). "
+                "Clearing the de-peg latch — the $1.00 peg fast-path resumes.",
+                token,
+                result.price,
+                STABLECOIN_PEG_DEVIATION_THRESHOLD * 100,
+            )
+        else:
+            logger.debug(
+                "Stablecoin peg sanity check OK for %s: Chainlink=%s (within %.1f%% of $1.00)",
+                token,
+                result.price,
+                STABLECOIN_PEG_DEVIATION_THRESHOLD * 100,
+            )
+        return None
 
     async def _fetch_all_sources(
         self,

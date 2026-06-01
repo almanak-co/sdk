@@ -105,5 +105,68 @@ class TestLPCloseDataToDict:
             "current_tick",
             "pool_address",
             "source",
+            # VIB-4848 (T8) — fee separation taxonomy
+            "fee_separation_method",
+            "fee_confidence",
         ):
             assert key in d, f"to_dict missing required key {key!r}"
+
+
+class TestLPCloseDataFeeSeparationTaxonomy:
+    """VIB-4848 (T8) — ``fee_separation_method`` + ``fee_confidence``."""
+
+    def test_default_inference_bundled_when_fees_unmeasured(self) -> None:
+        # Both fees None ⇒ parser did not separate ⇒ BUNDLED. Confidence
+        # stays UNKNOWN since no estimator wired yet.
+        data = LPCloseData(amount0_collected=100, amount1_collected=200)
+        assert data.fee_separation_method == "BUNDLED"
+        assert data.fee_confidence == "UNKNOWN"
+
+    def test_default_inference_separate_when_fees_measured(self) -> None:
+        # Numeric (incl. zero) fee on at least one leg ⇒ parser DID
+        # separate ⇒ SEPARATE/EXACT.
+        data = LPCloseData(amount0_collected=100, amount1_collected=200, fees0=5, fees1=7)
+        assert data.fee_separation_method == "SEPARATE"
+        assert data.fee_confidence == "EXACT"
+
+    def test_default_inference_separate_with_measured_zero(self) -> None:
+        # Measured zero on a leg still counts as SEPARATE (Empty ≠ Zero).
+        data = LPCloseData(amount0_collected=100, amount1_collected=200, fees0=0, fees1=0)
+        assert data.fee_separation_method == "SEPARATE"
+        assert data.fee_confidence == "EXACT"
+
+    def test_default_inference_separate_with_one_leg_measured(self) -> None:
+        # One leg measured, other unmeasured ⇒ still SEPARATE (we have
+        # evidence the parser supports separation).
+        data = LPCloseData(amount0_collected=100, amount1_collected=200, fees0=3)
+        assert data.fee_separation_method == "SEPARATE"
+        assert data.fee_confidence == "EXACT"
+
+    def test_explicit_parser_value_wins_over_inference(self) -> None:
+        # A parser that knows it bundles but happens to emit a numeric
+        # fee (e.g. extracted from a different log) can still override.
+        data = LPCloseData(
+            amount0_collected=100,
+            amount1_collected=200,
+            fees0=10,
+            fees1=20,
+            fee_separation_method="BUNDLED",
+            fee_confidence="ESTIMATED",
+        )
+        assert data.fee_separation_method == "BUNDLED"
+        assert data.fee_confidence == "ESTIMATED"
+
+    def test_to_dict_round_trips_taxonomy(self) -> None:
+        d = LPCloseData(
+            amount0_collected=100,
+            amount1_collected=200,
+            fees0=10,
+            fees1=20,
+        ).to_dict()
+        assert d["fee_separation_method"] == "SEPARATE"
+        assert d["fee_confidence"] == "EXACT"
+
+    def test_to_dict_bundled_default(self) -> None:
+        d = LPCloseData(amount0_collected=100, amount1_collected=200).to_dict()
+        assert d["fee_separation_method"] == "BUNDLED"
+        assert d["fee_confidence"] == "UNKNOWN"

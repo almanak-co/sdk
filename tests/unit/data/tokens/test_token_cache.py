@@ -11,6 +11,7 @@ This module tests the TokenCacheManager class, covering:
 """
 
 import asyncio
+import json
 import tempfile
 import threading
 import time
@@ -322,6 +323,84 @@ class TestDiskCacheLayer:
             content = cache_file.read_text()
             assert "USDC" in content
             assert "WETH" in content
+
+    # =========================================================================
+    # Schema-version migration (PR #2505 / BTCB-on-BSC decimals fix)
+    #
+    # The registry's view of BSC's BTCB contract changed from `WBTC` /
+    # `decimals=8` (off-by-10^10 mis-scale) to `BTCB` / `decimals=18`. Any user
+    # whose disk cache predates the fix could continue to serve the buggy
+    # entry indefinitely because cache.get() is checked BEFORE the static
+    # registry. The schema-version bump (v1 → v2) drops the stale file on
+    # load so the next put() rewrites from the corrected registry.
+    # =========================================================================
+
+    def test_disk_cache_drops_on_version_mismatch(self):
+        """A pre-v2 cache file must be dropped and not served back to callers."""
+        from almanak.framework.data.tokens.cache import DISK_CACHE_SCHEMA_VERSION
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_file = Path(tmpdir) / "token_cache.json"
+            # Write a stale v1 cache containing the exact buggy entry the fix
+            # is meant to invalidate: bsc:WBTC at the BTCB address with the
+            # old 8-decimal record.
+            stale = {
+                "version": 1,
+                "updated_at": "2026-05-01T00:00:00",
+                "tokens": {
+                    "bsc:WBTC": {
+                        "symbol": "WBTC",
+                        "address": "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+                        "decimals": 8,
+                        "chain": "BSC",
+                        "chain_id": 56,
+                        "name": "Wrapped Bitcoin",
+                        "is_stablecoin": False,
+                        "resolved_at": "2026-05-01T00:00:00",
+                    },
+                    "bsc:0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c": {
+                        "symbol": "WBTC",
+                        "address": "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+                        "decimals": 8,
+                        "chain": "BSC",
+                        "chain_id": 56,
+                        "name": "Wrapped Bitcoin",
+                        "is_stablecoin": False,
+                        "resolved_at": "2026-05-01T00:00:00",
+                    },
+                },
+            }
+            cache_file.write_text(json.dumps(stale))
+
+            cache = TokenCacheManager(cache_file=cache_file)
+            # Either lookup must MISS the disk cache (returns None) — proof
+            # that the stale entries did not survive the load.
+            assert cache.get("bsc", symbol="WBTC") is None
+            assert (
+                cache.get(
+                    "bsc",
+                    address="0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+                )
+                is None
+            )
+            # Sanity: the loader did wipe the disk view.
+            assert cache._disk_cache == {}
+
+        assert DISK_CACHE_SCHEMA_VERSION >= 2
+
+    def test_disk_cache_writes_current_schema_version(self):
+        """Anything we persist now must carry the current schema version so
+        a future bump can mechanically invalidate it."""
+        from almanak.framework.data.tokens.cache import DISK_CACHE_SCHEMA_VERSION
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_file = Path(tmpdir) / "token_cache.json"
+            cache = TokenCacheManager(cache_file=cache_file)
+            cache.put(make_resolved_token())
+            cache.flush()
+
+            persisted = json.loads(cache_file.read_text())
+            assert persisted["version"] == DISK_CACHE_SCHEMA_VERSION
 
 
 class TestLRUEviction:

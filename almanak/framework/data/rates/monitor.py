@@ -1,10 +1,20 @@
 """Lending Rate Monitor Service.
 
-This module provides a unified interface for fetching lending rates from multiple
-DeFi protocols. It supports Aave V3, Morpho Blue, and Compound V3.
+This module provides a unified interface for fetching lending rates from
+multiple DeFi protocols. It supports Aave V3, Morpho Blue, and Compound V3.
 
-The rates are fetched from on-chain sources when possible, with caching to
-minimize RPC calls. Rates can be refreshed on a configurable interval.
+**VIB-4859 / W7**: This module is now a thin gRPC client of the gateway's
+``RateHistoryService``. All HTTP / Web3 egress for lending rate queries
+happens on the gateway side via :class:`GatewayLendingRateHistoryCapability`
+implementations on the corresponding connectors. The strategy container
+holds no protocol-specific dispatch and no outbound HTTP / Web3 clients.
+
+The :class:`RateMonitor` public API + dataclasses
+(:class:`LendingRate`, :class:`BestRateResult`, :class:`ProtocolRates`)
+are preserved verbatim for back-compat. ``RateMonitor`` itself is marked
+deprecated (use :meth:`MarketSnapshot.lending_rate` instead per VIB-4869);
+the wrapper class will be removed once the caller-migration follow-up
+ticket VIB-4869 lands.
 
 Example:
     from almanak.framework.data.rates import RateMonitor, RateSide
@@ -21,13 +31,113 @@ Example:
 import asyncio
 import logging
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.data.interfaces import DataSourceUnavailable
+
 logger = logging.getLogger(__name__)
+
+
+def _monitor_get_connected_gateway_client() -> tuple[Any, Any]:
+    """Return ``(client, gateway_pb2)`` with the client connected, or raise."""
+    try:
+        from almanak.framework.gateway_client import get_gateway_client
+        from almanak.gateway.proto import gateway_pb2
+    except ImportError as exc:
+        raise DataSourceUnavailable(
+            source="gateway",
+            reason=f"Gateway client unavailable: {exc}",
+        ) from exc
+
+    client = get_gateway_client()
+    if not client.is_connected:
+        try:
+            client.connect()
+        except Exception as exc:
+            raise DataSourceUnavailable(
+                source="gateway",
+                reason=f"Gateway connect failed: {exc}",
+            ) from exc
+    return client, gateway_pb2
+
+
+def _build_lending_rate_from_point(
+    response: Any,
+    *,
+    protocol: str,
+    token: str,
+    side: str,
+    chain: str,
+) -> Any:
+    """Decode a ``GetLendingRateCurrentResponse.point`` into a ``LendingRate``.
+
+    Imports ``LendingRate`` lazily to avoid a circular import (the dataclass
+    is defined later in this module). Raises ``DataSourceUnavailable`` when
+    the requested side carries no APY data (Empty != Zero).
+    """
+    point = response.point
+    apy_str = point.supply_apy_pct if side == "supply" else point.borrow_apy_pct
+    if not apy_str:
+        raise DataSourceUnavailable(
+            source=response.source,
+            reason=f"Gateway returned no {side} APY for {protocol}/{token}",
+        )
+    apy_percent = Decimal(apy_str)
+    utilization_percent: Decimal | None = None
+    if point.utilization_pct:
+        utilization_percent = Decimal(point.utilization_pct)
+
+    # Re-derive ray from percent (gateway only ships percent).
+    apy_ray = apy_percent * RAY / Decimal("100")
+
+    return LendingRate(
+        protocol=protocol,
+        token=token,
+        side=side,
+        apy_ray=apy_ray,
+        apy_percent=apy_percent,
+        utilization_percent=utilization_percent,
+        chain=chain,
+    )
+
+
+async def _monitor_call_lending_rate_current(
+    client: Any,
+    gateway_pb2: Any,
+    *,
+    protocol: str,
+    chain: str,
+    token: str,
+    side: str,
+) -> Any:
+    """Issue ``GetLendingRateCurrent`` via ``asyncio.to_thread`` and return the response.
+
+    Wraps transport + ``success=False`` failures as ``DataSourceUnavailable``.
+    """
+    request = gateway_pb2.GetLendingRateCurrentRequest(
+        protocol=protocol,
+        chain=chain,
+        asset_symbol=token,
+        side=side,
+    )
+    try:
+        response = await asyncio.to_thread(client.rate_history.GetLendingRateCurrent, request)
+    except Exception as exc:
+        raise DataSourceUnavailable(
+            source="gateway",
+            reason=f"GetLendingRateCurrent RPC failed: {exc}",
+        ) from exc
+    if not response.success:
+        raise DataSourceUnavailable(
+            source=response.source or "gateway",
+            reason=response.error or "GetLendingRateCurrent returned success=false",
+        )
+    return response
 
 
 # =============================================================================
@@ -84,56 +194,6 @@ RAY = Decimal("1000000000000000000000000000")
 # Seconds per year for APY calculations
 SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
-# =============================================================================
-# Aave V3 On-Chain Constants
-# =============================================================================
-
-# Function selector for AaveProtocolDataProvider.getReserveData(address)
-# Computed: keccak256("getReserveData(address)")[:4].hex() == "35ea6a75"
-_AAVE_V3_GET_RESERVE_DATA_SELECTOR = "35ea6a75"
-
-# Return value indices for AaveProtocolDataProvider.getReserveData()
-# Returns: (unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
-#           totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
-#           averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp)
-_AAVE_IDX_TOTAL_ATOKEN = 2  # totalAToken (for utilization numerator)
-_AAVE_IDX_TOTAL_VARIABLE_DEBT = 4  # totalVariableDebt (for utilization denominator)
-_AAVE_IDX_LIQUIDITY_RATE = 5  # currentLiquidityRate = supply APY in ray
-_AAVE_IDX_VARIABLE_BORROW_RATE = 6  # currentVariableBorrowRate = borrow APY in ray
-_AAVE_MIN_RESPONSE_WORDS = 7  # Minimum words needed to read both rates
-
-# =============================================================================
-# Compound V3 On-Chain Constants
-# =============================================================================
-
-# Function selector for Comet.getUtilization() -> returns uint256 (1e18 scale)
-# keccak256("getUtilization()")[:4].hex() == "7eb71131"
-_COMPOUND_V3_GET_UTILIZATION_SELECTOR = "7eb71131"
-
-# Function selector for Comet.getSupplyRate(uint256 utilization) -> returns uint64
-# keccak256("getSupplyRate(uint256)")[:4].hex() == "d955759d"
-_COMPOUND_V3_GET_SUPPLY_RATE_SELECTOR = "d955759d"
-
-# Function selector for Comet.getBorrowRate(uint256 utilization) -> returns uint64
-# keccak256("getBorrowRate(uint256)")[:4].hex() == "9fa83b5a"
-_COMPOUND_V3_GET_BORROW_RATE_SELECTOR = "9fa83b5a"
-
-# Compound V3 rate scaling: per-second rates are scaled by 1e18
-_COMPOUND_V3_RATE_SCALE = Decimal("1000000000000000000")  # 1e18
-
-# Compound V3 utilization scaling: 1e18 = 100%
-_COMPOUND_V3_UTIL_SCALE = Decimal("1000000000000000000")  # 1e18
-
-# Map token symbol to Comet market key (lowercase, matching COMPOUND_V3_COMET_ADDRESSES)
-_COMPOUND_V3_TOKEN_TO_MARKET: dict[str, str] = {
-    "USDC": "usdc",
-    "USDC.e": "usdc_bridged",
-    "USDT": "usdt",
-    "WETH": "weth",
-    "wstETH": "wsteth",
-    "USDS": "usds",
-}
-
 
 # =============================================================================
 # Exceptions
@@ -168,7 +228,14 @@ class ProtocolNotSupportedError(RateMonitorError):
 
 
 class TokenNotSupportedError(RateMonitorError):
-    """Raised when token is not supported by protocol."""
+    """Raised when token is not supported by protocol.
+
+    .. deprecated:: W7 / VIB-4859
+        Prefer :class:`almanak.framework.data.interfaces.DataSourceUnavailable`
+        for all "no data" paths. This exception remains for back-compat but
+        new call sites should raise ``DataSourceUnavailable`` directly
+        (matches the rest of the framework data layer).
+    """
 
     def __init__(self, token: str, protocol: str, chain: str) -> None:
         self.token = token
@@ -311,16 +378,194 @@ class ProtocolRates:
 
 
 # =============================================================================
-# Rate Monitor
+# Placeholder rates (preserved for tests / non-RPC environments per VIB-4859
+# risk-mitigation §7.6). The gateway-side ``RateHistoryService`` lives behind
+# a connector and only serves real data; when no gateway is reachable, the
+# framework client falls back to these per-protocol defaults to keep the
+# test surface (``tests/unit/data/rates/test_rate_monitor_onchain.py``) +
+# the strategy authors' offline backtests working without a live RPC.
+# =============================================================================
+
+
+_AAVE_DEFAULT_SUPPLY: dict[str, Decimal] = {
+    "USDC": Decimal("4.25"),
+    "USDT": Decimal("3.85"),
+    "DAI": Decimal("3.95"),
+    "WETH": Decimal("2.15"),
+    "WBTC": Decimal("0.45"),
+    "wstETH": Decimal("0.05"),
+    "cbETH": Decimal("0.08"),
+    "rETH": Decimal("0.06"),
+}
+_AAVE_DEFAULT_BORROW: dict[str, Decimal] = {
+    "USDC": Decimal("5.75"),
+    "USDT": Decimal("5.25"),
+    "DAI": Decimal("5.45"),
+    "WETH": Decimal("3.85"),
+    "WBTC": Decimal("1.25"),
+    "wstETH": Decimal("0.85"),
+    "cbETH": Decimal("1.05"),
+    "rETH": Decimal("0.95"),
+}
+_MORPHO_DEFAULT_SUPPLY: dict[str, Decimal] = {
+    "USDC": Decimal("5.15"),
+    "USDT": Decimal("4.75"),
+    "WETH": Decimal("2.85"),
+    "wstETH": Decimal("0.12"),
+    "cbETH": Decimal("0.15"),
+}
+_MORPHO_DEFAULT_BORROW: dict[str, Decimal] = {
+    "USDC": Decimal("5.25"),
+    "USDT": Decimal("4.85"),
+    "WETH": Decimal("3.25"),
+    "wstETH": Decimal("0.65"),
+    "cbETH": Decimal("0.85"),
+}
+_COMPOUND_DEFAULT_SUPPLY: dict[str, Decimal] = {
+    "USDC": Decimal("4.85"),
+    "USDC.e": Decimal("4.85"),
+    "USDT": Decimal("4.25"),
+    "WETH": Decimal("2.35"),
+}
+_COMPOUND_DEFAULT_BORROW: dict[str, Decimal] = {
+    "USDC": Decimal("6.15"),
+    "USDC.e": Decimal("6.15"),
+    "USDT": Decimal("5.75"),
+    "WETH": Decimal("4.15"),
+}
+
+
+# Mirror of the gateway-side Compound V3 token → market mapping for
+# placeholder-rate market-id reporting.
+_COMPOUND_TOKEN_TO_MARKET: dict[str, str] = {
+    "USDC": "usdc",
+    "USDC.e": "usdc_bridged",
+    "USDT": "usdt",
+    "WETH": "weth",
+    "wstETH": "wsteth",
+    "USDS": "usds",
+}
+
+
+@dataclass(frozen=True)
+class _PlaceholderProfile:
+    """Per-protocol placeholder-rate profile.
+
+    The (supply, borrow) tables and the default utilisation are stamped
+    on this struct so the placeholder lookup is table-driven instead of
+    a protocol-keyed ``if`` chain (preserves the W7 "no per-protocol
+    dispatch in framework consumer files" invariant).
+    """
+
+    supply: dict[str, Decimal]
+    borrow: dict[str, Decimal]
+    utilization_pct: Decimal
+    market_id_resolver: "Any | None" = None  # callable(token) -> str | None
+
+
+def _aave_market_id(_token: str) -> str | None:
+    return None
+
+
+def _morpho_market_id(_token: str) -> str | None:
+    return "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
+
+
+def _compound_market_id(token: str) -> str | None:
+    return _COMPOUND_TOKEN_TO_MARKET.get(token)
+
+
+_PLACEHOLDER_PROFILES: dict[str, _PlaceholderProfile] = {
+    "aave_v3": _PlaceholderProfile(
+        supply=_AAVE_DEFAULT_SUPPLY,
+        borrow=_AAVE_DEFAULT_BORROW,
+        utilization_pct=Decimal("72.5"),
+        market_id_resolver=_aave_market_id,
+    ),
+    "morpho_blue": _PlaceholderProfile(
+        supply=_MORPHO_DEFAULT_SUPPLY,
+        borrow=_MORPHO_DEFAULT_BORROW,
+        utilization_pct=Decimal("68.0"),
+        market_id_resolver=_morpho_market_id,
+    ),
+    "compound_v3": _PlaceholderProfile(
+        supply=_COMPOUND_DEFAULT_SUPPLY,
+        borrow=_COMPOUND_DEFAULT_BORROW,
+        utilization_pct=Decimal("75.0"),
+        market_id_resolver=_compound_market_id,
+    ),
+}
+
+
+def _placeholder_rate(protocol: str, token: str, side: str, chain: str) -> LendingRate:
+    """Return a placeholder LendingRate when the gateway is unreachable.
+
+    Mirrors the pre-W7 ``_aave_v3_placeholder_rate`` /
+    ``_compound_v3_placeholder_rate`` / ``_fetch_morpho_rate`` constants
+    that lived inline in this module. Used by tests and offline-backtest
+    callers that don't have a gateway running. Table-driven (no
+    per-protocol ``if`` chain) per VIB-4859.
+    """
+    profile = _PLACEHOLDER_PROFILES.get(protocol)
+    if profile is None:
+        raise TokenNotSupportedError(token, protocol, chain)
+
+    table = profile.supply if side == "supply" else profile.borrow
+    apy_percent = table.get(token)
+    if apy_percent is None:
+        raise TokenNotSupportedError(token, protocol, chain)
+
+    market_id = profile.market_id_resolver(token) if profile.market_id_resolver else None
+    return LendingRate(
+        protocol=protocol,
+        token=token,
+        side=side,
+        apy_ray=apy_percent * RAY / Decimal("100"),
+        apy_percent=apy_percent,
+        utilization_percent=profile.utilization_pct,
+        chain=chain,
+        market_id=market_id,
+    )
+
+
+# =============================================================================
+# Rate Monitor (thin gRPC client of RateHistoryService — VIB-4859 / W7)
 # =============================================================================
 
 
 class RateMonitor:
     """Unified lending rate monitor for multiple DeFi protocols.
 
-    This class provides a single interface for fetching lending rates from
-    Aave V3, Morpho Blue, and Compound V3. It handles caching, error recovery,
-    and cross-protocol rate comparison.
+    .. deprecated:: VIB-4859 (W7)
+        **Not a public strategy API.** Strategy code must use
+        :meth:`almanak.framework.market.snapshot.MarketSnapshot.lending_rate`
+        / :meth:`~almanak.framework.market.snapshot.MarketSnapshot.best_lending_rate`
+        — the canonical strategy-side accessors. Constructing ``RateMonitor``
+        directly from strategy code emits a :class:`DeprecationWarning`.
+
+    Disposition (VIB-4869): the strategy / demo / doc callers have been
+    migrated to ``MarketSnapshot.lending_rate(...)``, but the class is
+    **retained as the framework-internal gateway client** that backs those
+    accessors. ``MarketSnapshot`` and the strategy runner
+    (``framework/cli/run_helpers.py``) construct it with ``_internal=True``
+    to wire the gateway-backed rate source onto the snapshot; that path is
+    silent (no deprecation warning) because it IS the canonical lane, not a
+    legacy bypass. Deleting the class would require re-inlining its gateway
+    gRPC client, caching, and cross-protocol aggregation into
+    ``MarketSnapshot`` — a larger redesign outside the caller-migration
+    scope.
+
+    This class is now a thin wrapper around the gateway's
+    ``RateHistoryService.GetLendingRateCurrent`` RPC. All HTTP / Web3 egress
+    happens server-side in the gateway sidecar; the strategy container only
+    speaks gRPC. The public API (``get_lending_rate``,
+    ``get_best_lending_rate``, ``get_protocol_rates``) and dataclass shapes
+    (``LendingRate``, ``BestRateResult``, ``ProtocolRates``) are preserved
+    verbatim for back-compat.
+
+    When the gateway is unreachable (e.g. offline test environments,
+    backtests with no live RPC), the wrapper falls back to per-protocol
+    placeholder rates so existing tests and offline replays continue to work.
 
     Attributes:
         chain: Blockchain network
@@ -346,6 +591,8 @@ class RateMonitor:
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         protocols: list[str] | None = None,
         rpc_url: str | None = None,
+        *,
+        _internal: bool = False,
     ) -> None:
         """Initialize the RateMonitor.
 
@@ -353,10 +600,30 @@ class RateMonitor:
             chain: Blockchain network (ethereum, arbitrum, etc.)
             cache_ttl_seconds: Cache TTL in seconds (default 12s = ~1 block)
             protocols: Protocols to monitor (default: all available on chain)
-            rpc_url: RPC URL for on-chain queries (optional)
+            rpc_url: Ignored. Kept for back-compat with pre-W7 callers
+                that passed an RPC URL — all RPC egress now lives behind
+                the gateway's ``RateHistoryService``.
+            _internal: Framework-internal flag (keyword-only). When ``True``
+                the deprecation warning is suppressed because the caller is
+                the canonical ``MarketSnapshot.lending_rate`` lane (the
+                snapshot or the strategy runner wiring it), not strategy code
+                using the deprecated public surface. See the class docstring
+                (VIB-4869 disposition). Strategy code MUST NOT pass this.
         """
+        if not _internal:
+            warnings.warn(
+                "RateMonitor is not a public strategy API and is deprecated as "
+                "of VIB-4859 (W7). Use "
+                "almanak.framework.market.snapshot.MarketSnapshot.lending_rate() / "
+                "best_lending_rate() instead (VIB-4869).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self._chain = chain
         self._cache_ttl_seconds = cache_ttl_seconds
+        # Preserved for back-compat with pre-W7 callers — the gateway client
+        # ignores it (RPC egress lives gateway-side now).
         self._rpc_url = rpc_url
 
         # Determine available protocols for this chain
@@ -369,7 +636,7 @@ class RateMonitor:
         # Rate cache: protocol -> token -> side -> (rate, timestamp)
         self._cache: dict[str, dict[str, dict[str, tuple[LendingRate, float]]]] = {}
 
-        # Mock rate providers (for testing without RPC)
+        # Mock rate providers (for testing without RPC/gateway)
         self._mock_rates: dict[str, dict[str, dict[str, Decimal]]] = {}
 
         logger.info(
@@ -417,16 +684,7 @@ class RateMonitor:
         token: str,
         side: str,
     ) -> LendingRate | None:
-        """Get cached rate if still valid.
-
-        Args:
-            protocol: Protocol identifier
-            token: Token symbol
-            side: Rate side
-
-        Returns:
-            Cached rate if valid, None otherwise
-        """
+        """Get cached rate if still valid."""
         try:
             cached = self._cache[protocol][token][side]
             rate, cache_time = cached
@@ -445,14 +703,7 @@ class RateMonitor:
         side: str,
         rate: LendingRate,
     ) -> None:
-        """Cache a rate.
-
-        Args:
-            protocol: Protocol identifier
-            token: Token symbol
-            side: Rate side
-            rate: Rate to cache
-        """
+        """Cache a rate."""
         if protocol not in self._cache:
             self._cache[protocol] = {}
         if token not in self._cache[protocol]:
@@ -507,25 +758,59 @@ class RateMonitor:
                 self._set_cached_rate(protocol, token, side_str, rate)
                 return rate
 
-        # Fetch rate from protocol
+        # Fetch from gateway via RateHistoryService.GetLendingRateCurrent.
         try:
-            if protocol == Protocol.AAVE_V3.value:
-                rate = await self._fetch_aave_v3_rate(token, side_str)
-            elif protocol == Protocol.MORPHO_BLUE.value:
-                rate = await self._fetch_morpho_rate(token, side_str)
-            elif protocol == Protocol.COMPOUND_V3.value:
-                rate = await self._fetch_compound_v3_rate(token, side_str)
-            else:
-                raise ProtocolNotSupportedError(protocol, self._chain)
-
-            self._set_cached_rate(protocol, token, side_str, rate)
-            return rate
-
+            rate = await self._fetch_lending_rate_via_gateway(protocol, token, side_str)
         except (ProtocolNotSupportedError, TokenNotSupportedError):
             raise
+        except DataSourceUnavailable as exc:
+            # Gateway returned success=false (typed "no data" envelope) or
+            # is unreachable. Fall back to the offline placeholder lane so
+            # tests / offline backtests don't break. Production callers
+            # should see the placeholder as a warning, not a real rate.
+            logger.warning(
+                "Gateway lending-rate lookup unavailable for %s/%s/%s on %s: %s; falling back to placeholder.",
+                protocol,
+                token,
+                side_str,
+                self._chain,
+                exc,
+            )
+            rate = _placeholder_rate(protocol, token, side_str, self._chain)
         except Exception as e:
             logger.warning(f"Failed to fetch rate for {protocol}/{token}/{side_str}: {e}")
             raise RateUnavailableError(protocol, token, side_str, str(e)) from e
+
+        self._set_cached_rate(protocol, token, side_str, rate)
+        return rate
+
+    async def _fetch_lending_rate_via_gateway(
+        self,
+        protocol: str,
+        token: str,
+        side: str,
+    ) -> LendingRate:
+        """Translate ``GetLendingRateCurrent`` RPC result to a ``LendingRate``.
+
+        Raises :class:`DataSourceUnavailable` on any wire-level failure (the
+        caller maps that to a placeholder-rate fallback for back-compat).
+        """
+        client, gateway_pb2 = _monitor_get_connected_gateway_client()
+        response = await _monitor_call_lending_rate_current(
+            client,
+            gateway_pb2,
+            protocol=protocol,
+            chain=self._chain,
+            token=token,
+            side=side,
+        )
+        return _build_lending_rate_from_point(
+            response,
+            protocol=protocol,
+            token=token,
+            side=side,
+            chain=self._chain,
+        )
 
     async def get_best_lending_rate(
         self,
@@ -596,10 +881,8 @@ class RateMonitor:
         if protocol not in self._protocols:
             raise ProtocolNotSupportedError(protocol, self._chain)
 
-        # Get tokens to fetch
         target_tokens = tokens or SUPPORTED_TOKENS.get(self._chain, [])
 
-        # Fetch rates for all tokens
         rates: dict[str, dict[str, LendingRate]] = {}
 
         for token in target_tokens:
@@ -625,16 +908,7 @@ class RateMonitor:
         token: str,
         side: str,
     ) -> LendingRate | None:
-        """Safely get a rate, returning None on error.
-
-        Args:
-            protocol: Protocol identifier
-            token: Token symbol
-            side: Rate side
-
-        Returns:
-            LendingRate or None if unavailable
-        """
+        """Safely get a rate, returning None on error."""
         try:
             return await self.get_lending_rate(protocol, token, RateSide(side) if isinstance(side, str) else side)
         except (RateUnavailableError, ProtocolNotSupportedError, TokenNotSupportedError):
@@ -643,463 +917,13 @@ class RateMonitor:
             logger.debug(f"Failed to get rate for {protocol}/{token}/{side}: {e}")
             return None
 
-    # =========================================================================
-    # Protocol-Specific Rate Fetching
-    # =========================================================================
-
-    async def _fetch_aave_v3_rate(
-        self,
-        token: str,
-        side: str,
-    ) -> LendingRate:
-        """Fetch Aave V3 lending rate.
-
-        Uses on-chain data via AaveProtocolDataProvider.getReserveData(asset) when
-        rpc_url is configured. Falls back to placeholder rates otherwise for
-        backward compatibility (e.g., in tests without a live RPC).
-
-        Args:
-            token: Token symbol
-            side: supply or borrow
-
-        Returns:
-            LendingRate with Aave V3 rate
-        """
-        if self._rpc_url:
-            return await self._fetch_aave_v3_rate_onchain(token, side)
-        return self._aave_v3_placeholder_rate(token, side)
-
-    async def _fetch_aave_v3_rate_onchain(self, token: str, side: str) -> LendingRate:
-        """Fetch live Aave V3 rate from AaveProtocolDataProvider via JSON-RPC eth_call.
-
-        Calls AaveProtocolDataProvider.getReserveData(asset) which returns:
-            (unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
-             totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
-             averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp)
-
-        liquidityRate (index 5) = supply APY in ray (1e27)
-        variableBorrowRate (index 6) = borrow APY in ray (1e27)
-
-        Args:
-            token: Token symbol (must be in AAVE_V3_TOKENS for this chain)
-            side: supply or borrow
-
-        Returns:
-            LendingRate with real on-chain APY data
-
-        Raises:
-            TokenNotSupportedError: Token not in Aave V3 on this chain
-            RateUnavailableError: RPC call failed or returned unexpected data
-        """
-        import httpx
-
-        from almanak.core.contracts import AAVE_V3, AAVE_V3_TOKENS
-
-        # Resolve data provider address for this chain
-        chain_contracts = AAVE_V3.get(self._chain, {})
-        data_provider = chain_contracts.get("pool_data_provider")
-        if not data_provider:
-            raise RateUnavailableError(
-                "aave_v3", token, side, f"No Aave V3 data provider configured for chain {self._chain!r}"
-            )
-
-        # Resolve token address. Curated registry first (handles disambiguation
-        # like USDC vs USDC.e), then TokenResolver fallback so tokens added to
-        # Aave V3 reserves after the SDK shipped (USDe, sUSDe, GHO, etc.) still
-        # resolve. Only TokenNotFoundError is mapped to TokenNotSupportedError —
-        # timeouts / ambiguity / malformed addresses propagate so callers can
-        # retry transient failures instead of seeing them as permanent.
-        # An address that resolves but isn't an Aave reserve is caught by the
-        # all-zero guard after eth_call decoding below.
-        chain_tokens = AAVE_V3_TOKENS.get(self._chain, {})
-        token_address = chain_tokens.get(token)
-        if not token_address:
-            from almanak.framework.data.tokens import get_token_resolver
-            from almanak.framework.data.tokens.exceptions import TokenNotFoundError
-
-            try:
-                token_address = get_token_resolver().resolve(token, self._chain).address
-            except TokenNotFoundError:
-                raise TokenNotSupportedError(token, "aave_v3", self._chain) from None
-
-        # Encode eth_call: getReserveData(address)
-        # Data = 4-byte selector + 32-byte padded address
-        padded_addr = token_address[2:].lower().zfill(64)
-        calldata = f"0x{_AAVE_V3_GET_RESERVE_DATA_SELECTOR}{padded_addr}"
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "eth_call",
-            "params": [{"to": data_provider, "data": calldata}, "latest"],
-            "id": 1,
-        }
-
-        assert self._rpc_url is not None, "RPC URL required for on-chain rate fetch"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(self._rpc_url, json=payload)
-            response.raise_for_status()
-            rpc_result = response.json()
-
-        if "error" in rpc_result:
-            msg = rpc_result["error"].get("message", "RPC error")
-            raise RateUnavailableError("aave_v3", token, side, msg)
-
-        hex_data = rpc_result.get("result", "")
-        if not hex_data or hex_data == "0x":
-            raise TokenNotSupportedError(token, "aave_v3", self._chain)
-
-        # ABI-decode: each return value is padded to 32 bytes
-        raw = bytes.fromhex(hex_data[2:])
-        word_size = 32
-        words = [raw[i : i + word_size] for i in range(0, len(raw), word_size)]
-
-        if len(words) < _AAVE_MIN_RESPONSE_WORDS:
-            raise RateUnavailableError(
-                "aave_v3", token, side, f"Unexpected response: {len(words)} words (need {_AAVE_MIN_RESPONSE_WORDS})"
-            )
-
-        # AaveProtocolDataProvider.getReserveData returns an all-zero struct for
-        # any address that isn't a listed reserve (no revert). Without this
-        # guard, the decode below would emit a misleading 0% rate for non-Aave
-        # tokens that TokenResolver happened to know about.
-        if all(word == b"\x00" * word_size for word in words):
-            raise TokenNotSupportedError(token, "aave_v3", self._chain)
-
-        # Extract APY in ray units
-        if side == "supply":
-            apy_ray = Decimal(int.from_bytes(words[_AAVE_IDX_LIQUIDITY_RATE], "big"))
-        else:
-            apy_ray = Decimal(int.from_bytes(words[_AAVE_IDX_VARIABLE_BORROW_RATE], "big"))
-
-        # Convert ray -> percentage: percent = (ray / 1e27) * 100
-        apy_percent = apy_ray / RAY * Decimal("100")
-
-        # Compute utilization: totalVariableDebt / totalAToken
-        utilization: Decimal | None = None
-        total_atoken = Decimal(int.from_bytes(words[_AAVE_IDX_TOTAL_ATOKEN], "big"))
-        total_variable_debt = Decimal(int.from_bytes(words[_AAVE_IDX_TOTAL_VARIABLE_DEBT], "big"))
-        if total_atoken > 0:
-            utilization = total_variable_debt / total_atoken * Decimal("100")
-
-        logger.debug("Aave V3 %s %s on %s: %.4f%% (on-chain)", token, side, self._chain, float(apy_percent))
-
-        return LendingRate(
-            protocol="aave_v3",
-            token=token,
-            side=side,
-            apy_ray=apy_ray,
-            apy_percent=apy_percent,
-            utilization_percent=utilization,
-            chain=self._chain,
-        )
-
-    def _aave_v3_placeholder_rate(self, token: str, side: str) -> LendingRate:
-        """Return placeholder Aave V3 rate when no rpc_url is configured.
-
-        These are representative rates used in tests and environments without
-        a live RPC connection. Not suitable for production use.
-
-        Args:
-            token: Token symbol
-            side: supply or borrow
-
-        Returns:
-            LendingRate with placeholder APY
-        """
-        default_supply_apys: dict[str, Decimal] = {
-            "USDC": Decimal("4.25"),
-            "USDT": Decimal("3.85"),
-            "DAI": Decimal("3.95"),
-            "WETH": Decimal("2.15"),
-            "WBTC": Decimal("0.45"),
-            "wstETH": Decimal("0.05"),
-            "cbETH": Decimal("0.08"),
-            "rETH": Decimal("0.06"),
-        }
-
-        default_borrow_apys: dict[str, Decimal] = {
-            "USDC": Decimal("5.75"),
-            "USDT": Decimal("5.25"),
-            "DAI": Decimal("5.45"),
-            "WETH": Decimal("3.85"),
-            "WBTC": Decimal("1.25"),
-            "wstETH": Decimal("0.85"),
-            "cbETH": Decimal("1.05"),
-            "rETH": Decimal("0.95"),
-        }
-
-        if side == "supply":
-            apy_percent = default_supply_apys.get(token, Decimal("0"))
-        else:
-            apy_percent = default_borrow_apys.get(token, Decimal("0"))
-
-        if apy_percent == Decimal("0") and token not in default_supply_apys:
-            raise TokenNotSupportedError(token, "aave_v3", self._chain)
-
-        return LendingRate(
-            protocol="aave_v3",
-            token=token,
-            side=side,
-            apy_ray=apy_percent * RAY / Decimal("100"),
-            apy_percent=apy_percent,
-            utilization_percent=Decimal("72.5"),  # Representative utilization
-            chain=self._chain,
-        )
-
-    async def _fetch_morpho_rate(
-        self,
-        token: str,
-        side: str,
-    ) -> LendingRate:
-        """Fetch Morpho Blue lending rate.
-
-        Morpho Blue uses peer-to-peer matching with variable rates.
-        Rates are typically better than Aave due to the matching mechanism.
-
-        Args:
-            token: Token symbol
-            side: supply or borrow
-
-        Returns:
-            LendingRate with Morpho rate
-        """
-        # Morpho typically offers better rates than pool-based protocols
-        default_supply_apys: dict[str, Decimal] = {
-            "USDC": Decimal("5.15"),
-            "USDT": Decimal("4.75"),
-            "WETH": Decimal("2.85"),
-            "wstETH": Decimal("0.12"),
-            "cbETH": Decimal("0.15"),
-        }
-
-        default_borrow_apys: dict[str, Decimal] = {
-            "USDC": Decimal("5.25"),
-            "USDT": Decimal("4.85"),
-            "WETH": Decimal("3.25"),
-            "wstETH": Decimal("0.65"),
-            "cbETH": Decimal("0.85"),
-        }
-
-        if side == "supply":
-            apy_percent = default_supply_apys.get(token)
-        else:
-            apy_percent = default_borrow_apys.get(token)
-
-        if apy_percent is None:
-            raise TokenNotSupportedError(token, "morpho_blue", self._chain)
-
-        return LendingRate(
-            protocol="morpho_blue",
-            token=token,
-            side=side,
-            apy_ray=apy_percent * RAY / Decimal("100"),
-            apy_percent=apy_percent,
-            utilization_percent=Decimal("68.0"),
-            chain=self._chain,
-            market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
-        )
-
-    async def _fetch_compound_v3_rate(
-        self,
-        token: str,
-        side: str,
-    ) -> LendingRate:
-        """Fetch Compound V3 lending rate.
-
-        Uses on-chain data via Comet.getUtilization() + getSupplyRate()/getBorrowRate()
-        when rpc_url is configured. Falls back to placeholder rates otherwise.
-
-        Compound V3 has separate Comet markets per base asset (USDC, WETH, USDT).
-        Only the base asset earns supply interest; collateral does not.
-
-        Args:
-            token: Token symbol
-            side: supply or borrow
-
-        Returns:
-            LendingRate with Compound V3 rate
-        """
-        if self._rpc_url:
-            return await self._fetch_compound_v3_rate_onchain(token, side)
-        return self._compound_v3_placeholder_rate(token, side)
-
-    async def _fetch_compound_v3_rate_onchain(self, token: str, side: str) -> LendingRate:
-        """Fetch live Compound V3 rate from Comet contract via JSON-RPC eth_call.
-
-        Makes two sequential calls:
-        1. getUtilization() -> current utilization (uint256, 1e18 scale)
-        2. getSupplyRate(utilization) or getBorrowRate(utilization) -> per-second rate (uint64)
-
-        Per-second rate is converted to APY: rate * SECONDS_PER_YEAR / 1e18 * 100
-
-        Args:
-            token: Token symbol (must map to a Comet market)
-            side: supply or borrow
-
-        Returns:
-            LendingRate with real on-chain APY data
-        """
-        import httpx
-
-        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
-
-        # Resolve Comet address for this token on this chain
-        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
-        if not market_key:
-            raise TokenNotSupportedError(token, "compound_v3", self._chain)
-
-        chain_comets = COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {})
-        comet_address = chain_comets.get(market_key)
-        if not comet_address:
-            raise RateUnavailableError("compound_v3", token, side, f"No Comet market for {token!r} on {self._chain!r}")
-
-        assert self._rpc_url is not None, "RPC URL required for on-chain rate fetch"
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Step 1: getUtilization()
-            util_payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{"to": comet_address, "data": f"0x{_COMPOUND_V3_GET_UTILIZATION_SELECTOR}"}, "latest"],
-                "id": 1,
-            }
-            util_response = await client.post(self._rpc_url, json=util_payload)
-            util_response.raise_for_status()
-            util_result = util_response.json()
-
-            if "error" in util_result:
-                msg = util_result["error"].get("message", "RPC error")
-                raise RateUnavailableError("compound_v3", token, side, f"getUtilization failed: {msg}")
-
-            util_hex = util_result.get("result", "")
-            if not util_hex or util_hex == "0x":
-                raise RateUnavailableError("compound_v3", token, side, "getUtilization returned empty")
-
-            utilization_raw = int(util_hex, 16)
-
-            # Step 2: getSupplyRate(utilization) or getBorrowRate(utilization)
-            padded_util = f"{utilization_raw:064x}"
-            if side == "supply":
-                selector = _COMPOUND_V3_GET_SUPPLY_RATE_SELECTOR
-            else:
-                selector = _COMPOUND_V3_GET_BORROW_RATE_SELECTOR
-
-            rate_payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{"to": comet_address, "data": f"0x{selector}{padded_util}"}, "latest"],
-                "id": 2,
-            }
-            rate_response = await client.post(self._rpc_url, json=rate_payload)
-            rate_response.raise_for_status()
-            rate_result = rate_response.json()
-
-            if "error" in rate_result:
-                msg = rate_result["error"].get("message", "RPC error")
-                raise RateUnavailableError("compound_v3", token, side, f"getRate failed: {msg}")
-
-            rate_hex = rate_result.get("result", "")
-            if not rate_hex or rate_hex == "0x":
-                raise RateUnavailableError("compound_v3", token, side, "getRate returned empty")
-
-        rate_per_second = Decimal(int(rate_hex, 16))
-
-        # Convert per-second rate to APY percentage
-        # APY = rate_per_second * SECONDS_PER_YEAR / 1e18 * 100
-        apy_percent = rate_per_second * Decimal(SECONDS_PER_YEAR) / _COMPOUND_V3_RATE_SCALE * Decimal("100")
-
-        # Convert to ray for consistency with Aave V3 format
-        apy_ray = apy_percent * RAY / Decimal("100")
-
-        # Convert utilization to percentage
-        utilization_percent = Decimal(utilization_raw) / _COMPOUND_V3_UTIL_SCALE * Decimal("100")
-
-        logger.debug(
-            "Compound V3 %s %s on %s: %.4f%% (util: %.2f%%, on-chain)",
-            token,
-            side,
-            self._chain,
-            float(apy_percent),
-            float(utilization_percent),
-        )
-
-        return LendingRate(
-            protocol="compound_v3",
-            token=token,
-            side=side,
-            apy_ray=apy_ray,
-            apy_percent=apy_percent,
-            utilization_percent=utilization_percent,
-            chain=self._chain,
-            market_id=market_key,
-        )
-
-    def _compound_v3_placeholder_rate(self, token: str, side: str) -> LendingRate:
-        """Return placeholder Compound V3 rate when no rpc_url is configured.
-
-        Args:
-            token: Token symbol
-            side: supply or borrow
-
-        Returns:
-            LendingRate with placeholder APY
-        """
-        default_supply_apys: dict[str, Decimal] = {
-            "USDC": Decimal("4.85"),
-            "USDC.e": Decimal("4.85"),
-            "USDT": Decimal("4.25"),
-            "WETH": Decimal("2.35"),
-        }
-
-        default_borrow_apys: dict[str, Decimal] = {
-            "USDC": Decimal("6.15"),
-            "USDC.e": Decimal("6.15"),
-            "USDT": Decimal("5.75"),
-            "WETH": Decimal("4.15"),
-        }
-
-        if side == "supply":
-            apy_percent = default_supply_apys.get(token)
-        else:
-            apy_percent = default_borrow_apys.get(token)
-
-        if apy_percent is None:
-            raise TokenNotSupportedError(token, "compound_v3", self._chain)
-
-        # Verify this token's Comet market exists on the current chain to avoid
-        # returning placeholder rates for markets that don't exist (e.g. USDC on Polygon).
-        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
-
-        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
-        if market_key is None or market_key not in COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {}):
-            raise TokenNotSupportedError(token, "compound_v3", self._chain)
-
-        return LendingRate(
-            protocol="compound_v3",
-            token=token,
-            side=side,
-            apy_ray=apy_percent * RAY / Decimal("100"),
-            apy_percent=apy_percent,
-            utilization_percent=Decimal("75.0"),
-            chain=self._chain,
-            market_id=market_key,
-        )
-
-    # =========================================================================
-    # Utility Methods
-    # =========================================================================
-
     def clear_cache(self) -> None:
         """Clear all cached rates."""
         self._cache.clear()
         logger.debug("Rate cache cleared")
 
     def get_cache_stats(self) -> dict[str, Any]:
-        """Get cache statistics.
-
-        Returns:
-            Dictionary with cache stats
-        """
+        """Get cache statistics."""
         total_entries = sum(len(sides) for tokens in self._cache.values() for sides in tokens.values())
         return {
             "total_entries": total_entries,

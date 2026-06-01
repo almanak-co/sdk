@@ -440,7 +440,7 @@ def test_registry_payload_carries_univ3_identity_bag() -> None:
 
 
 def test_matching_policy_version_matches_runtime_constant() -> None:
-    """D1.S6 — goldens stamp MATCHING_POLICY_VERSIONS[Primitive.LP] (== 3)."""
+    """D1.S6 — goldens stamp MATCHING_POLICY_VERSIONS[Primitive.LP] (== 4)."""
     expected = MATCHING_POLICY_VERSIONS[Primitive.LP]
     for fix in _LP_FIXTURE_NAMES:
         row = _load_registry_row(fix)

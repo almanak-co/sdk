@@ -145,6 +145,9 @@ def _register_all() -> None:
     from almanak.connectors.raydium.gateway.provider import (
         RaydiumGatewayConnector,
     )
+    from almanak.connectors.sushiswap_v3.gateway.provider import (
+        SushiSwapV3GatewayConnector,
+    )
     from almanak.connectors.traderjoe_v2.gateway.provider import (
         TraderJoeV2GatewayConnector,
     )
@@ -192,6 +195,36 @@ def _register_all() -> None:
     # Uniswap V3 + Enso already registered above; Curve is added here
     # since it has no other capability surface yet.
     GATEWAY_REGISTRY.register(CurveGatewayConnector())
+    # W1 (VIB-4853) — GatewayAddressCapability scaffolds for connectors
+    # that didn't have a gateway-side provider yet. SushiSwap V3 only
+    # publishes per-chain addresses; the strategy-side intent code still
+    # lives in the connector folder.
+    GATEWAY_REGISTRY.register(SushiSwapV3GatewayConnector())
+    # Agni Finance is a Uniswap V3 fork on Mantle that reuses the V3
+    # parser; the addresses live under ``connectors/uniswap_v3/addresses.py``.
+    # Registering it as a distinct gateway-side connector lets non-
+    # connector callers (e.g. teardown discovery, pool validation,
+    # ContractRegistry) resolve Agni's addresses through the capability
+    # interface instead of importing the dict by name.
+    from almanak.connectors.uniswap_v3.gateway.agni_provider import (
+        AgniFinanceGatewayConnector,
+    )
+
+    GATEWAY_REGISTRY.register(AgniFinanceGatewayConnector())
+
+    # W1 (VIB-4853) — Morpho Blue + Aster Perps scaffolds. Both already
+    # have strategy-side connector code under their respective folders;
+    # the gateway-side scaffold exists solely to publish addresses
+    # through :class:`GatewayAddressCapability`.
+    from almanak.connectors.aster_perps.gateway.provider import (
+        AsterPerpsGatewayConnector,
+    )
+    from almanak.connectors.morpho_blue.gateway.provider import (
+        MorphoBlueGatewayConnector,
+    )
+
+    GATEWAY_REGISTRY.register(MorphoBlueGatewayConnector())
+    GATEWAY_REGISTRY.register(AsterPerpsGatewayConnector())
 
 
 _register_all()

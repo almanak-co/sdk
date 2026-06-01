@@ -18,24 +18,43 @@ discriminate refresh failures (the cache raises
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayAddressCapability,
     GatewayPoolKeyCacheCapability,
     PoolKeyCacheProtocol,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
+from ..addresses import UNISWAP_V4
 from .canonical_pools import seed_canonical_pool_keys
 from .pool_key_cache import V4PoolKeyCache
 
 
-class UniswapV4GatewayConnector(GatewayConnector, GatewayPoolKeyCacheCapability):
+class UniswapV4GatewayConnector(
+    GatewayConnector,
+    GatewayAddressCapability,
+    GatewayPoolKeyCacheCapability,
+):
     """Gateway-side connector for Uniswap V4."""
 
     protocol: ClassVar[ProtocolName] = ProtocolName("uniswap_v4")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
+
+    def addresses_for(self, chain: str) -> Mapping[str, str]:
+        """Return the Uniswap V4 contract addresses for ``chain`` (or empty)."""
+        return UNISWAP_V4.get(chain, {})
+
+    def address_supported_chains(self) -> frozenset[str]:
+        """Chains for which Uniswap V4 addresses are registered."""
+        return frozenset(UNISWAP_V4.keys())
+
+    # The CLI support matrix renders Uniswap V4's swap + LP rows on every
+    # V4 chain; the chain list comes from the strategy-side manifest's
+    # ``matrix_entries`` field (see ``almanak/connectors/uniswap_v4/__init__.py``).
 
     def build_cache(self, *, network: str) -> PoolKeyCacheProtocol:
         """Construct a V4 pool-key cache and pre-seed canonical PoolKeys.

@@ -24,7 +24,7 @@ import logging
 
 import pytest
 
-from almanak.core.contracts import UNISWAP_V4
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.connectors.uniswap_v4.hooks import compute_position_hash
 from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,

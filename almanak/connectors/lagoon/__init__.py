@@ -86,7 +86,13 @@ def _register_once() -> None:
         from almanak.framework.intents.vocabulary import IntentType
 
         register_connector(
-            name="lagoon", intents=(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM), chains=("ethereum", "base")
+            name="lagoon",
+            intents=(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM),
+            chains=("ethereum", "base"),
+            # Hidden from ``almanak info matrix`` — no demo or intent test yet,
+            # and the matrix has never surfaced Lagoon. Re-add a MatrixEntry
+            # row once a Lagoon vault demo lands. VIB-4856.
+            matrix_entries=(),
         )
     except Exception:
         _registered = False

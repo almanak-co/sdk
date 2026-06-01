@@ -1,176 +1,95 @@
 """Curve Finance historical volume provider.
 
-This module provides a historical volume data provider for Curve Finance pools
-across multiple chains. It implements the HistoricalVolumeProvider interface
-and fetches data from The Graph's Messari Curve Finance subgraphs.
+**VIB-4859 / W7 (VIB-4870)**: this module is now a thin gRPC client of
+the gateway's ``RateHistoryService.GetDexVolumeHistory`` RPC. The
+TheGraph subgraph HTTP egress that lived here (in the old shared subgraph
+client) has moved into the gateway sidecar — the Curve connector's
+:class:`GatewayDexVolumeCapability` owns the Messari-schema
+``liquidityPoolDailySnapshots`` subgraph query (``dailyVolumeUSD`` keyed
+by ``pool``, with the ``day`` field carrying days-since-epoch). The
+gateway converts the Messari day-number back to unix seconds, so the
+consumer sees the same midnight-UTC timestamps the pre-W7 provider built.
+The strategy container holds no subgraph URLs, no API key, and opens no
+socket.
 
-Curve Finance is a multi-token AMM optimized for stablecoin and similar asset
-swaps. The subgraphs use Messari's standardized DEX schema with
-`liquidityPoolDailySnapshots` for daily volume data.
-
-Key Features:
-    - Supports Ethereum and Optimism chains (decentralized network)
-    - Arbitrum and Polygon pending subgraph deployment on decentralized network
-    - Uses Messari's standardized DEX schema (liquidityPoolDailySnapshots)
-    - Handles multi-token pools (3pool, tricrypto, etc.)
-    - Integrates with SubgraphClient for rate limiting and retry logic
-    - Returns VolumeResult with HIGH confidence for subgraph data
-    - Falls back to LOW confidence results when data unavailable
-
-Example:
-    from almanak.framework.backtesting.pnl.providers.dex import (
-        CurveVolumeProvider,
-    )
-    from almanak.core.enums import Chain
-    from datetime import date
-
-    provider = CurveVolumeProvider()
-
-    # Fetch volume for a Curve 3pool on Ethereum
-    async with provider:
-        volumes = await provider.get_volume(
-            pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
-            chain=Chain.ETHEREUM,
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 1, 31),
-        )
-        for vol in volumes:
-            print(f"{vol.source_info.timestamp}: ${vol.value}")
+The :class:`CurveVolumeProvider` public API, the ``CURVE_SUBGRAPH_IDS`` /
+``SUPPORTED_CHAINS`` tables and the ``DATA_SOURCE`` constant are preserved
+for back-compat.
 """
 
+from __future__ import annotations
+
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from almanak.core.enums import Chain
 
-from ...types import DataConfidence, DataSourceInfo, VolumeResult
+from ...types import VolumeResult
 from ..base import HistoricalVolumeProvider
-from ..subgraph_client import (
-    SubgraphClient,
-    SubgraphClientConfig,
-    SubgraphQueryError,
-    SubgraphRateLimitError,
-)
+from ._gateway_volume import fetch_volume_via_gateway
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Curve Finance Subgraph IDs (Messari standardized schema)
+# Curve Finance Subgraph IDs (Messari schema — preserved for back-compat)
 # =============================================================================
-
-# Subgraph deployment IDs for Curve Finance on various chains
-# These are Messari's standardized DEX subgraphs on The Graph's decentralized network
-# Source: https://thegraph.com/explorer - search "Curve Finance"
+#
+# The authoritative copies now live on the Curve connector's
+# ``GatewayDexVolumeCapability``. Arbitrum / Polygon are on the hosted
+# service (deprecated), not the decentralized network yet — Ethereum and
+# Optimism only, preserved verbatim from pre-W7.
 CURVE_SUBGRAPH_IDS: dict[Chain, str] = {
-    # Ethereum Mainnet - Messari Curve Finance subgraph
     Chain.ETHEREUM: "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
-    # Optimism - Messari Curve Finance Optimism subgraph
     Chain.OPTIMISM: "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
-    # Note: Arbitrum and Polygon subgraphs are on hosted service (deprecated),
-    # not yet migrated to decentralized network. Will be added when available.
 }
 
 # Supported chains for this provider
 SUPPORTED_CHAINS: list[Chain] = list(CURVE_SUBGRAPH_IDS.keys())
 
-# Data source identifier
+# Data source identifier (stamped on each VolumeResult — preserves the
+# pre-W7 provenance string for byte-equivalence with backtest fixtures).
 DATA_SOURCE = "curve_messari_subgraph"
 
-# GraphQL query for fetching liquidity pool daily snapshots (Messari schema)
-# Curve uses Messari's standardized DEX schema which differs from Uniswap's native schema
-LIQUIDITY_POOL_DAILY_SNAPSHOTS_QUERY = """
-query GetLiquidityPoolDailySnapshots($poolAddress: String!, $startDay: Int!, $endDay: Int!) {
-    liquidityPoolDailySnapshots(
-        first: 1000
-        where: {
-            pool: $poolAddress
-            day_gte: $startDay
-            day_lte: $endDay
-        }
-        orderBy: day
-        orderDirection: asc
-    ) {
-        id
-        day
-        dailyVolumeUSD
-        totalValueLockedUSD
-        cumulativeVolumeUSD
-    }
-}
-"""
+# Gateway routing key (the connector's ``GatewayDexVolumeCapability.dex_name``).
+_GATEWAY_DEX = "curve"
 
 
 # =============================================================================
-# CurveVolumeProvider
+# CurveVolumeProvider (thin gRPC client — VIB-4859 / W7)
 # =============================================================================
 
 
 class CurveVolumeProvider(HistoricalVolumeProvider):
-    """Historical volume provider for Curve Finance pools.
+    """Historical volume provider for Curve Finance pools — gateway-backed.
 
-    Fetches daily volume data from The Graph's Messari Curve Finance subgraphs
-    for Ethereum and Optimism chains. Uses the standardized Messari DEX schema
-    with `liquidityPoolDailySnapshots` entity.
-
-    Curve Finance is a multi-token AMM specialized for efficient stablecoin and
-    similar asset swaps with low slippage. Pools can have 2-5+ tokens.
-
-    Attributes:
-        client: SubgraphClient for querying The Graph
-        fallback_volume: Volume to return when subgraph data unavailable
-
-    Example:
-        provider = CurveVolumeProvider()
-
-        # Use as async context manager
-        async with provider:
-            volumes = await provider.get_volume(
-                pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
-                chain=Chain.ETHEREUM,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-            )
-
-        # Or manually close
-        provider = CurveVolumeProvider()
-        try:
-            volumes = await provider.get_volume(...)
-        finally:
-            await provider.close()
+    Issues a ``GetDexVolumeHistory`` RPC for daily volume on Ethereum and
+    Optimism. All TheGraph egress (and the Messari day-number → unix-second
+    conversion) lives gateway-side via :class:`GatewayDexVolumeCapability`.
     """
 
     def __init__(
         self,
-        client: SubgraphClient | None = None,
+        client: Any | None = None,
         fallback_volume: Decimal = Decimal("0"),
         requests_per_minute: int = 100,
     ) -> None:
         """Initialize the Curve volume provider.
 
         Args:
-            client: Optional SubgraphClient instance. If None, creates one
-                    using THEGRAPH_API_KEY from environment.
-            fallback_volume: Volume to return when subgraph data unavailable.
-                            Default is 0, indicating no data.
-            requests_per_minute: Rate limit for subgraph requests. Default 100.
+            client: Ignored (kept for back-compat). Egress lives gateway-side.
+            fallback_volume: Ignored (kept for back-compat). A "no data"
+                subgraph raises :class:`DataSourceUnavailable` instead of a
+                silent-zero row.
+            requests_per_minute: Ignored (kept for back-compat).
         """
-        if client is not None:
-            self._client = client
-            self._owns_client = False
-        else:
-            config = SubgraphClientConfig(requests_per_minute=requests_per_minute)
-            self._client = SubgraphClient(config=config)
-            self._owns_client = True
-
         self._fallback_volume = fallback_volume
 
         logger.debug(
-            "Initialized CurveVolumeProvider: supported_chains=%s, fallback_volume=%s",
+            "Initialized CurveVolumeProvider (gateway-backed): supported_chains=%s",
             [c.value for c in SUPPORTED_CHAINS],
-            fallback_volume,
         )
 
     @property
@@ -179,95 +98,16 @@ class CurveVolumeProvider(HistoricalVolumeProvider):
         return SUPPORTED_CHAINS.copy()
 
     async def close(self) -> None:
-        """Close the subgraph client and release resources."""
-        if self._owns_client:
-            await self._client.close()
+        """No-op shutdown hook (no owned client to close)."""
         logger.debug("CurveVolumeProvider closed")
 
-    async def __aenter__(self) -> "CurveVolumeProvider":
+    async def __aenter__(self) -> CurveVolumeProvider:
         """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit: close the client."""
         await self.close()
-
-    def _get_subgraph_id(self, chain: Chain) -> str | None:
-        """Get the subgraph ID for a chain.
-
-        Args:
-            chain: The blockchain to get subgraph ID for
-
-        Returns:
-            Subgraph deployment ID or None if chain not supported
-        """
-        return CURVE_SUBGRAPH_IDS.get(chain)
-
-    def _date_to_day_number(self, d: date) -> int:
-        """Convert a date to days since Unix epoch.
-
-        Messari schema uses `day` field as days since Unix epoch (not timestamp).
-
-        Args:
-            d: Date to convert
-
-        Returns:
-            Days since Unix epoch (January 1, 1970)
-        """
-        epoch = date(1970, 1, 1)
-        return (d - epoch).days
-
-    def _day_number_to_datetime(self, day: int) -> datetime:
-        """Convert day number (days since epoch) to datetime.
-
-        Args:
-            day: Days since Unix epoch
-
-        Returns:
-            Datetime at start of that day (UTC)
-        """
-        epoch = datetime(1970, 1, 1, tzinfo=UTC)
-        return epoch + timedelta(days=day)
-
-    def _create_fallback_result(self, d: date) -> VolumeResult:
-        """Create a fallback VolumeResult with LOW confidence.
-
-        Args:
-            d: Date for the result
-
-        Returns:
-            VolumeResult with fallback volume and LOW confidence
-        """
-        return VolumeResult(
-            value=self._fallback_volume,
-            source_info=DataSourceInfo(
-                source="fallback",
-                confidence=DataConfidence.LOW,
-                timestamp=datetime.combine(d, datetime.min.time(), tzinfo=UTC),
-            ),
-        )
-
-    def _parse_volume_data(self, snapshot: dict[str, Any]) -> VolumeResult:
-        """Parse subgraph response into VolumeResult.
-
-        Args:
-            snapshot: Raw data from subgraph liquidityPoolDailySnapshots query
-
-        Returns:
-            VolumeResult with HIGH confidence
-        """
-        day_number = int(snapshot.get("day", 0))
-        day_dt = self._day_number_to_datetime(day_number)
-        volume_usd = Decimal(str(snapshot.get("dailyVolumeUSD", "0")))
-
-        return VolumeResult(
-            value=volume_usd,
-            source_info=DataSourceInfo(
-                source=DATA_SOURCE,
-                confidence=DataConfidence.HIGH,
-                timestamp=day_dt,
-            ),
-        )
 
     async def get_volume(
         self,
@@ -276,144 +116,27 @@ class CurveVolumeProvider(HistoricalVolumeProvider):
         start_date: date,
         end_date: date,
     ) -> list[VolumeResult]:
-        """Fetch historical volume data for a Curve pool.
-
-        Queries The Graph's Messari Curve Finance subgraph for daily volume data
-        (liquidityPoolDailySnapshots) within the specified date range.
-
-        Args:
-            pool_address: The pool contract address (checksummed or lowercase).
-            chain: The blockchain the pool is on. Must be one of:
-                   ETHEREUM, OPTIMISM (more chains pending).
-            start_date: Start of date range (inclusive).
-            end_date: End of date range (inclusive).
-
-        Returns:
-            List of VolumeResult objects, one per day with available data.
-            Returns HIGH confidence results from subgraph data.
-            Returns LOW confidence fallback results if subgraph unavailable.
+        """Fetch historical daily volume for a Curve pool via the gateway.
 
         Raises:
             ValueError: If chain is not supported.
-
-        Example:
-            volumes = await provider.get_volume(
-                pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
-                chain=Chain.ETHEREUM,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-            )
-            for vol in volumes:
-                if vol.source_info.confidence == DataConfidence.HIGH:
-                    print(f"Real volume: ${vol.value}")
+            DataSourceUnavailable: gateway unreachable / RPC failed / the
+                subgraph returned no or errored data (no silent zero-fill).
         """
-        # Validate chain
-        subgraph_id = self._get_subgraph_id(chain)
-        if subgraph_id is None:
+        if chain not in CURVE_SUBGRAPH_IDS:
             raise ValueError(
                 f"Unsupported chain: {chain}. Supported chains: {[c.value for c in SUPPORTED_CHAINS]}. "
                 f"Note: Arbitrum and Polygon support pending subgraph migration to decentralized network."
             )
 
-        # Normalize pool address
-        pool_address_lower = pool_address.lower()
-
-        # Convert dates to day numbers (Messari schema uses days since epoch)
-        start_day = self._date_to_day_number(start_date)
-        end_day = self._date_to_day_number(end_date)
-
-        logger.info(
-            "Fetching Curve volume: chain=%s, pool=%s..., start=%s, end=%s",
-            chain.value,
-            pool_address_lower[:10],
-            start_date,
-            end_date,
+        return await fetch_volume_via_gateway(
+            dex=_GATEWAY_DEX,
+            chain=chain,
+            pool_address=pool_address,
+            start_date=start_date,
+            end_date=end_date,
+            data_source=DATA_SOURCE,
         )
-
-        try:
-            # Query subgraph
-            data = await self._client.query(
-                subgraph_id=subgraph_id,
-                query=LIQUIDITY_POOL_DAILY_SNAPSHOTS_QUERY,
-                variables={
-                    "poolAddress": pool_address_lower,
-                    "startDay": start_day,
-                    "endDay": end_day,
-                },
-            )
-
-            snapshots = data.get("liquidityPoolDailySnapshots", [])
-
-            if not snapshots:
-                logger.warning(
-                    "No volume data from Curve subgraph: chain=%s, pool=%s..., range=%s to %s",
-                    chain.value,
-                    pool_address_lower[:10],
-                    start_date,
-                    end_date,
-                )
-                # Return fallback results for the date range
-                return self._generate_fallback_results(start_date, end_date)
-
-            # Parse results
-            results = [self._parse_volume_data(snapshot) for snapshot in snapshots]
-
-            logger.info(
-                "Fetched %d days of Curve volume: chain=%s, pool=%s...",
-                len(results),
-                chain.value,
-                pool_address_lower[:10],
-            )
-
-            return results
-
-        except SubgraphRateLimitError as e:
-            logger.warning(
-                "Subgraph rate limit exceeded: chain=%s, pool=%s...: %s",
-                chain.value,
-                pool_address_lower[:10],
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
-
-        except SubgraphQueryError as e:
-            logger.error(
-                "Subgraph query error: chain=%s, pool=%s...: %s",
-                chain.value,
-                pool_address_lower[:10],
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
-
-        except Exception as e:
-            logger.error(
-                "Unexpected error fetching Curve volume: chain=%s, pool=%s...: %s",
-                chain.value,
-                pool_address_lower[:10],
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
-
-    def _generate_fallback_results(
-        self,
-        start_date: date,
-        end_date: date,
-    ) -> list[VolumeResult]:
-        """Generate fallback results for a date range.
-
-        Args:
-            start_date: Start date
-            end_date: End date
-
-        Returns:
-            List of VolumeResult with LOW confidence fallback values
-        """
-        results = []
-        current = start_date
-        while current <= end_date:
-            results.append(self._create_fallback_result(current))
-            current += timedelta(days=1)
-        return results
 
 
 __all__ = [

@@ -51,7 +51,7 @@ from . import (  # noqa: F401  (side-effect imports — registration)
     xlayer,
     zerog,
 )
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import ChainRegistry, register_chain
 
 # Runtime cross-check: every Chain enum member must have a descriptor.
@@ -85,6 +85,7 @@ __all__ = [
     "ChainRegistry",
     "GasProfile",
     "NativeToken",
+    "RpcProfile",
     "Timeouts",
     "register_chain",
 ]

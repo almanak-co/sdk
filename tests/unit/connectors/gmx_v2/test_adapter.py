@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.contracts import GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 
 from almanak.connectors.gmx_v2.adapter import (
     DEFAULT_EXECUTION_FEE,

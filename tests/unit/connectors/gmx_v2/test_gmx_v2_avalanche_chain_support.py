@@ -95,7 +95,7 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     from decimal import Decimal
     from unittest.mock import MagicMock
 
-    from almanak.core.contracts import GMX_V2_TOKENS
+    from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
     from almanak.framework.intents.compiler import IntentCompiler
     from almanak.framework.intents.compiler_models import CompilationStatus
     from almanak.framework.intents.vocabulary import PerpOpenIntent

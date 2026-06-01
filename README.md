@@ -44,7 +44,7 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 - **Multi-Chain Support**: 17 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma (chain configs present; protocol coverage pending).
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
-- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 29 built-in tools and policy-enforced safety (BYO LLM API key)
+- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 38 built-in tools and policy-enforced safety (BYO LLM API key)
 - **Production-Ready**: Built-in alerting, stuck detection, emergency management, and canary deployments
 
 ## Installation
@@ -115,10 +115,13 @@ class MyStrategy(IntentStrategy):
 | `SwapIntent` | Token swaps on DEXs |
 | `HoldIntent` | No action, wait for next cycle |
 | `LPOpenIntent` / `LPCloseIntent` | Open/close liquidity positions |
+| `CollectFeesIntent` | Collect accrued fees on an open LP position |
 | `BorrowIntent` / `RepayIntent` | Borrow/repay on lending protocols |
 | `SupplyIntent` / `WithdrawIntent` | Supply/withdraw from lending protocols |
 | `StakeIntent` / `UnstakeIntent` | Stake/unstake tokens |
 | `PerpOpenIntent` / `PerpCloseIntent` | Open/close perpetuals positions |
+| `BridgeIntent` | Cross-chain asset bridging |
+| `VaultDepositIntent` / `VaultRedeemIntent` | Deposit into / redeem from ERC-4626-style vaults |
 | `FlashLoanIntent` | Flash loan operations |
 | `PredictionBuyIntent` / `PredictionSellIntent` / `PredictionRedeemIntent` | Prediction market trading |
 
@@ -141,6 +144,13 @@ almanak strat new              # Create new strategy from template
 almanak strat run --once       # Run single iteration (auto-starts gateway)
 almanak strat run --network anvil --once  # Run on local Anvil fork (auto-starts Anvil + gateway)
 almanak strat run --network anvil --dashboard  # Run with live dashboard
+
+# Strategy reporting (reads the persisted local SQLite state DB; no gateway call)
+almanak strat pnl -s <deployment_id>          # Per-strategy PnL breakdown (human text)
+almanak strat pnl -s <deployment_id> --json   # Same payload as machine-readable JSON
+#   JSON is version-stamped (`schema_version`) and includes `net_strategy_nav_usd`
+#   (positive position value minus lending debt; equals total_value_usd when the
+#   strategy holds no borrow positions).
 
 # Backtesting
 almanak strat backtest pnl     # Historical price simulation

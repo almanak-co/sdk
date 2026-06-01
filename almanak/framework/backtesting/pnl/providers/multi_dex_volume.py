@@ -5,6 +5,18 @@ DEX-specific provider based on protocol or pool detection. It implements the
 HistoricalVolumeProvider interface and provides a unified entry point for
 fetching historical volume data across multiple DEX protocols.
 
+**VIB-4859 / W7 (VIB-4870)**: the per-DEX providers this aggregator routes
+to are now thin gRPC clients of ``RateHistoryService.GetDexVolumeHistory``.
+The aggregator therefore holds no subgraph HTTP client and opens no
+socket — all TheGraph egress lives gateway-side. Routing-level mismatches
+(unknown protocol / unsupported chain / undetectable protocol) still
+return LOW-confidence fallback rows: these are *configuration* mismatches
+that never reach a data source, so the "no silent zeros" rule (which
+governs empty/errored *subgraph* responses) does not apply to them. A
+genuine "subgraph returned nothing / errored" surfaces as
+:class:`DataSourceUnavailable` raised by the per-DEX provider and
+propagates to the caller (no silent zero-fill).
+
 Supported Protocols:
     - Uniswap V3 (Ethereum, Arbitrum, Base, Optimism, Polygon)
     - SushiSwap V3 (Ethereum)
@@ -21,7 +33,6 @@ Example:
     from almanak.core.enums import Chain, Protocol
     from datetime import date
 
-    # With explicit protocol
     provider = MultiDEXVolumeProvider()
     async with provider:
         volumes = await provider.get_volume(
@@ -31,15 +42,6 @@ Example:
             end_date=date(2024, 1, 31),
             protocol=Protocol.UNISWAP_V3,
         )
-
-    # With string protocol identifier
-    volumes = await provider.get_volume(
-        pool_address="0x...",
-        chain=Chain.BASE,
-        start_date=date(2024, 1, 1),
-        end_date=date(2024, 1, 31),
-        protocol="aerodrome",
-    )
 """
 
 import logging
@@ -67,7 +69,6 @@ from .dex import (
     TraderJoeV2VolumeProvider,
     UniswapV3VolumeProvider,
 )
-from .subgraph_client import SubgraphClient, SubgraphClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -135,14 +136,15 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
     When no protocol is specified, the provider will use chain-based heuristics
     to attempt protocol detection (e.g., Base chain pools default to Aerodrome).
 
+    The DEX-specific providers are gateway-backed gRPC clients (VIB-4870);
+    this aggregator opens no socket and holds no subgraph client.
+
     Attributes:
         providers: Dictionary mapping protocol identifiers to provider instances
-        fallback_volume: Volume to return when no provider is available
+        fallback_volume: Volume to return for routing-level mismatches
 
     Example:
         provider = MultiDEXVolumeProvider()
-
-        # With Protocol enum
         async with provider:
             volumes = await provider.get_volume(
                 pool_address="0x...",
@@ -151,15 +153,6 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 end_date=date(2024, 1, 31),
                 protocol=Protocol.UNISWAP_V3,
             )
-
-        # With string identifier
-        volumes = await provider.get_volume(
-            pool_address="0x...",
-            chain=Chain.ETHEREUM,
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 1, 31),
-            protocol="curve",
-        )
     """
 
     def __init__(
@@ -170,38 +163,33 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """Initialize the Multi-DEX volume provider.
 
         Args:
-            fallback_volume: Volume to return when no provider is available.
-                            Default is 0, indicating no data.
-            requests_per_minute: Rate limit for subgraph requests. Default 100.
+            fallback_volume: Volume returned for routing-level mismatches
+                (unknown protocol / unsupported chain / undetectable
+                protocol). Default is 0, indicating no data. NOTE: a genuine
+                empty/errored subgraph no longer falls back here — the
+                per-DEX provider raises :class:`DataSourceUnavailable`.
+            requests_per_minute: Ignored (kept for back-compat). Rate
+                limiting now lives on the gateway side.
         """
         self._fallback_volume = fallback_volume
         self._requests_per_minute = requests_per_minute
-
-        # Create shared subgraph client for efficiency
-        config = SubgraphClientConfig(requests_per_minute=requests_per_minute)
-        self._shared_client = SubgraphClient(config=config)
 
         # Lazy-initialized provider instances
         self._providers: dict[str, HistoricalVolumeProvider] = {}
 
         logger.debug(
-            "Initialized MultiDEXVolumeProvider: fallback_volume=%s, requests_per_minute=%s",
+            "Initialized MultiDEXVolumeProvider (gateway-backed): fallback_volume=%s",
             fallback_volume,
-            requests_per_minute,
         )
 
     async def close(self) -> None:
         """Close all provider instances and release resources."""
-        # Close all initialized providers
         for protocol_id, provider in self._providers.items():
             try:
                 if hasattr(provider, "close"):
                     await provider.close()
             except Exception as e:
                 logger.warning("Error closing provider %s: %s", protocol_id, e)
-
-        # Close shared client
-        await self._shared_client.close()
 
         logger.debug("MultiDEXVolumeProvider closed")
 
@@ -259,12 +247,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             logger.warning("No provider found for protocol: %s", protocol_id)
             return None
 
-        # Create provider instance with shared client
+        # Create provider instance (gateway-backed — no shared subgraph client).
         try:
-            provider = provider_class(  # type: ignore[call-arg]
-                client=self._shared_client,
-                fallback_volume=self._fallback_volume,
-            )
+            provider = provider_class(fallback_volume=self._fallback_volume)  # type: ignore[call-arg]
             self._providers[protocol_id] = provider
             logger.debug("Created provider for protocol: %s", protocol_id)
             return provider
@@ -301,6 +286,10 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
 
     def _create_fallback_result(self, d: date) -> VolumeResult:
         """Create a fallback VolumeResult with LOW confidence.
+
+        Used only for routing-level mismatches (unknown protocol /
+        unsupported chain / undetectable protocol) — NOT for empty/errored
+        subgraph responses, which raise :class:`DataSourceUnavailable`.
 
         Args:
             d: Date for the result
@@ -348,9 +337,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
     ) -> list[VolumeResult]:
         """Fetch historical volume data by routing to the correct provider.
 
-        Routes the query to the appropriate DEX-specific provider based on
-        the protocol parameter. If no protocol is specified, attempts to
-        detect based on chain.
+        Routes the query to the appropriate DEX-specific (gateway-backed)
+        provider based on the protocol parameter. If no protocol is
+        specified, attempts to detect based on chain.
 
         Args:
             pool_address: The pool contract address (checksummed or lowercase).
@@ -361,36 +350,15 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                      If None, attempts to detect based on chain.
 
         Returns:
-            List of VolumeResult objects, one per day with available data.
-            Returns HIGH confidence results from subgraph data when available.
-            Returns LOW confidence fallback results when provider unavailable.
+            List of HIGH-confidence VolumeResult objects from the gateway.
+            Returns LOW-confidence fallback results ONLY for routing-level
+            mismatches (no protocol / unknown protocol / unsupported chain).
 
-        Example:
-            # With explicit protocol
-            volumes = await provider.get_volume(
-                pool_address="0x...",
-                chain=Chain.ARBITRUM,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-                protocol=Protocol.UNISWAP_V3,
-            )
-
-            # With string protocol
-            volumes = await provider.get_volume(
-                pool_address="0x...",
-                chain=Chain.ETHEREUM,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-                protocol="balancer",
-            )
-
-            # Auto-detect protocol
-            volumes = await provider.get_volume(
-                pool_address="0x...",
-                chain=Chain.BASE,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-            )  # Will use Aerodrome for Base chain
+        Raises:
+            DataSourceUnavailable: when the resolved provider's gateway call
+                fails or the subgraph returned no / errored data. The
+                pre-W7 silent ``Decimal("0")`` LOW row for an empty/errored
+                subgraph is intentionally removed (VIB-4859 decision 4).
         """
         # Normalize protocol identifier
         protocol_id = self._get_protocol_id(protocol)
@@ -405,7 +373,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                     chain.value,
                 )
 
-        # If still no protocol, return fallback
+        # If still no protocol, return fallback (routing mismatch)
         if protocol_id is None:
             logger.warning(
                 "Could not determine protocol for chain=%s, pool=%s..., returning fallback",
@@ -424,7 +392,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        # Check if chain is supported by this protocol
+        # Check if chain is supported by this protocol (routing mismatch)
         chain_support = PROTOCOL_CHAIN_SUPPORT.get(protocol_id, {})
         if chain not in chain_support:
             logger.warning(
@@ -434,32 +402,21 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        # Route to the specific provider
+        # Route to the specific (gateway-backed) provider. A gateway failure
+        # or an empty/errored subgraph raises DataSourceUnavailable, which
+        # propagates to the caller — no silent zero-fill.
         logger.info(
             "Routing volume query to %s: chain=%s, pool=%s...",
             protocol_id,
             chain.value,
             pool_address[:10],
         )
-
-        try:
-            results = await provider.get_volume(
-                pool_address=pool_address,
-                chain=chain,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            return results
-
-        except Exception as e:
-            logger.error(
-                "Error from %s provider: chain=%s, pool=%s...: %s",
-                protocol_id,
-                chain.value,
-                pool_address[:10],
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
+        return await provider.get_volume(
+            pool_address=pool_address,
+            chain=chain,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
     def get_supported_protocols(self) -> list[str]:
         """Get list of supported protocol identifiers.
@@ -490,4 +447,5 @@ __all__ = [
     "PROTOCOL_PROVIDER_MAP",
     "STRING_PROTOCOL_MAP",
     "PROTOCOL_CHAIN_SUPPORT",
+    "FALLBACK_DATA_SOURCE",
 ]

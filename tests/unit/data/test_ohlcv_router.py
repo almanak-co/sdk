@@ -143,10 +143,13 @@ class TestProviderChains:
     """Tests for provider chain ordering."""
 
     def test_cex_primary_chain(self):
-        assert _PROVIDER_CHAINS["cex_primary"] == ["binance", "coingecko", "defillama"]
+        # VIB-4847: defillama removed (no provider wired); coingecko is the
+        # real second CEX provider.
+        assert _PROVIDER_CHAINS["cex_primary"] == ["binance", "coingecko"]
 
     def test_defi_primary_chain(self):
-        assert _PROVIDER_CHAINS["defi_primary"] == ["geckoterminal", "defillama", "binance"]
+        # VIB-4847: defillama removed from the middle tier (no provider wired).
+        assert _PROVIDER_CHAINS["defi_primary"] == ["geckoterminal", "binance"]
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +327,13 @@ class TestOHLCVRouter:
         """When primary provider fails, falls back to next in chain."""
         router = OHLCVRouter()
         gecko = _mock_provider("geckoterminal", fail=True)
-        defillama = _mock_provider("defillama")
+        binance = _mock_provider("binance")
         router.register_provider(gecko)
-        router.register_provider(defillama)
+        router.register_provider(binance)
 
-        # DeFi-primary: gecko -> defillama -> binance
+        # DeFi-primary chain (VIB-4847): gecko -> binance
         envelope = router.get_ohlcv("OBSCUREDEFI/USDC", chain="base")
-        assert envelope.meta.source == "defillama"
+        assert envelope.meta.source == "binance"
 
     def test_all_providers_fail_raises(self):
         """When all providers fail, raises DataSourceUnavailable."""
@@ -386,12 +389,13 @@ class TestOHLCVRouter:
         """Provider returning empty candles is skipped."""
         router = OHLCVRouter()
         gecko = _mock_provider("geckoterminal", candles=[])
-        defillama = _mock_provider("defillama")
+        binance = _mock_provider("binance")
         router.register_provider(gecko)
-        router.register_provider(defillama)
+        router.register_provider(binance)
 
+        # DeFi-primary chain (VIB-4847): gecko (empty) -> binance
         envelope = router.get_ohlcv("OBSCUREDEFI/USDC", chain="base")
-        assert envelope.meta.source == "defillama"
+        assert envelope.meta.source == "binance"
 
     def test_accepts_instrument_object(self):
         """OHLCVRouter accepts an Instrument directly."""
@@ -712,7 +716,7 @@ class TestOHLCVRouterEdgeCases:
         binance = _mock_provider("binance")
         router.register_provider(binance)
 
-        # defi_primary: gecko (empty) -> defillama (not registered) -> binance (success)
+        # defi_primary chain (VIB-4847): gecko (empty) -> binance (success)
         envelope = router.get_ohlcv("OBSCUREDEFI/USDC", chain="base")
         assert envelope.meta.source == "binance"
 

@@ -34,8 +34,8 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
 
-from almanak.core.contracts import PENDLE as _PENDLE_REGISTRY
-from almanak.core.contracts import PENDLE_TOKENS as _PENDLE_TOKENS
+from .addresses import PENDLE as _PENDLE_REGISTRY
+from .addresses import PENDLE_TOKENS as _PENDLE_TOKENS
 
 logger = logging.getLogger(__name__)
 

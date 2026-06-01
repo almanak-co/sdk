@@ -157,7 +157,7 @@ class TestHookFlags:
 
 class TestLPConstants:
     def test_position_manager_addresses_exist(self):
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         for chain, addr in POSITION_MANAGER_ADDRESSES.items():
             expected = UNISWAP_V4[chain]["position_manager"].lower()
             assert addr.lower() == expected, f"PositionManager on {chain} mismatch"
@@ -513,6 +513,8 @@ class TestAdapterLPCompilation:
             range_lower=Decimal("1500"),
             range_upper=Decimal("2500"),
             protocol="uniswap_v4",
+            # No rpc_url on this adapter → estimated price; opt in (VIB-2180).
+            protocol_params={"allow_estimated_price": True},
         )
 
         price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
@@ -633,8 +635,10 @@ class TestAdapterLPCompilation:
             adapter._parse_pool("WETH-USDC")
 
 
-    def test_compile_lp_open_estimated_price_uses_30pct_slippage(self, adapter):
-        """When on-chain sqrtPrice is unavailable, the adapter uses a 30% slippage buffer."""
+    def test_compile_lp_open_estimated_price_uses_estimated_floor(self, adapter):
+        """When on-chain sqrtPrice is unavailable, an estimated-price LP open with
+        explicit opt-in uses the 10% estimated-price slippage floor (VIB-2180,
+        was a silent 30% override pre-VIB-2180)."""
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         intent = LPOpenIntent(
@@ -644,16 +648,18 @@ class TestAdapterLPCompilation:
             range_lower=Decimal("1500"),
             range_upper=Decimal("2500"),
             protocol="uniswap_v4",
+            # Knowingly using estimated price (no rpc_url) → opt in to the floor.
+            protocol_params={"allow_estimated_price": True},
         )
 
         price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
-        # adapter has no rpc_url -> used_onchain_price=False -> 30% buffer
+        # adapter has no rpc_url -> used_onchain_price=False -> estimated-price floor
         bundle = adapter.compile_lp_open_intent(intent, price_oracle)
 
         assert bundle.intent_type == "LP_OPEN"
         assert len(bundle.transactions) > 0
-        # Verify 30% slippage is recorded in metadata
-        assert bundle.metadata.get("effective_slippage_bps") == 3000
+        # Verify the 10% estimated-price floor is recorded in metadata.
+        assert bundle.metadata.get("effective_slippage_bps") == 1000
 
     def test_compile_lp_open_onchain_price_uses_5pct_slippage(self, mock_resolver):
         """When on-chain sqrtPrice is available, the adapter uses a 5% slippage buffer."""
@@ -696,7 +702,10 @@ class TestAdapterLPCompilation:
 
 
 class TestReceiptParserLP:
-    POSITION_MANAGER = "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24"
+    # Real Ethereum V4 deployment addresses (VIB-4874: was a garbled
+    # non-contract 0xBd2165...e83b24). POOL_MANAGER is Ethereum's; pair
+    # POSITION_MANAGER with Ethereum's posm so the fixture is consistent.
+    POSITION_MANAGER = "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
     POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
 
     @pytest.fixture()
@@ -770,7 +779,7 @@ class TestReceiptParserLP:
 
     def test_extract_position_id_fallback_known_v4_pm(self, parser):
         """Single ERC-721 mint from a known V4 PM (different chain) used as fallback."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         log = self._mint_transfer_log(token_id=999)
         # Use ethereum's PM (known V4 PM, but not arbitrum's configured PM)
@@ -923,9 +932,24 @@ class TestCompilerV4LPRouting:
             assert routed_intent is intent
 
     def test_v4_in_lp_position_managers(self):
-        """Verify V4 PositionManager is in LP_POSITION_MANAGERS for supported chains."""
+        """Anti-drift (VIB-4874): the central ``LP_POSITION_MANAGERS`` view
+        must surface, for every chain the connector publishes, the exact
+        per-chain V4 PositionManager from ``uniswap_v4/addresses.py``.
+
+        Previously the central dict carried a single garbled value
+        (``0xBd2165...e83b24``) across all chains — not a deployed contract
+        anywhere. The connector now owns the per-chain addresses and the
+        central view derives from it, so a future edit to one source
+        without the other fails here.
+        """
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
 
-        for chain in ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"]:
+        for chain, addrs in UNISWAP_V4.items():
+            expected = addrs["position_manager"]
             assert "uniswap_v4" in LP_POSITION_MANAGERS[chain], f"uniswap_v4 missing from {chain}"
-            assert LP_POSITION_MANAGERS[chain]["uniswap_v4"].lower() == "0xbd216513d74c8cf14cf4747e6aae6fdf64e83b24"
+            actual = LP_POSITION_MANAGERS[chain]["uniswap_v4"]
+            assert actual.lower() == expected.lower(), (
+                f"LP_POSITION_MANAGERS[{chain!r}]['uniswap_v4'] ({actual!r}) drifted "
+                f"from uniswap_v4/addresses.py position_manager ({expected!r})"
+            )

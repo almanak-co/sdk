@@ -632,13 +632,14 @@ class TestUpdateLpRegistryIdCache:
             token_id=42,
             is_open=True,
         )
+        # VIB-4301: value is the SET of open token_ids for the key.
         for slug in _UNIV3_LP_PROTOCOLS:
-            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == "42"
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"42"}
 
     def test_close_evicts_matching_entry(self) -> None:
         from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
 
-        cache = {(slug, self.CHAIN, self.POOL): "42" for slug in _UNIV3_LP_PROTOCOLS}
+        cache = {(slug, self.CHAIN, self.POOL): {"42"} for slug in _UNIV3_LP_PROTOCOLS}
         runner = self._runner(cache)
         StrategyRunner._update_lp_registry_id_cache(
             runner,
@@ -647,14 +648,15 @@ class TestUpdateLpRegistryIdCache:
             token_id=42,
             is_open=False,
         )
+        # Last leg removed ⇒ key dropped entirely.
         for slug in _UNIV3_LP_PROTOCOLS:
             assert (slug, self.CHAIN, self.POOL) not in runner._lp_registry_id_cache
 
     def test_close_does_not_evict_non_matching_token_id(self) -> None:
-        # Audit P2: another live position holds this key — leave it.
+        # Another live position holds this key — leave it.
         from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
 
-        cache = {(slug, self.CHAIN, self.POOL): "999" for slug in _UNIV3_LP_PROTOCOLS}
+        cache = {(slug, self.CHAIN, self.POOL): {"999"} for slug in _UNIV3_LP_PROTOCOLS}
         runner = self._runner(cache)
         StrategyRunner._update_lp_registry_id_cache(
             runner,
@@ -665,31 +667,40 @@ class TestUpdateLpRegistryIdCache:
         )
         # Cache still holds 999 for every slug.
         for slug in _UNIV3_LP_PROTOCOLS:
-            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == "999"
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"999"}
 
-    def test_open_collision_drops_entry_and_warns(self, caplog) -> None:
-        # Audit P2: OPEN with different token_id at same key → drop entry.
+    def test_co_pool_open_accumulates_without_warning(self, caplog) -> None:
+        # VIB-4301: a SECOND open in the same pool no longer drops the entry or
+        # warns — both token_ids coexist in the set. Closing one leaves the
+        # other in place.
         from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
 
-        cache = {(slug, self.CHAIN, self.POOL): "999" for slug in _UNIV3_LP_PROTOCOLS}
-        runner = self._runner(cache)
+        runner = self._runner({})
         with caplog.at_level("WARNING"):
             StrategyRunner._update_lp_registry_id_cache(
-                runner,
-                chain=self.CHAIN,
-                pool_addr=self.POOL,
-                token_id=42,
-                is_open=True,
+                runner, chain=self.CHAIN, pool_addr=self.POOL, token_id=999, is_open=True
+            )
+            StrategyRunner._update_lp_registry_id_cache(
+                runner, chain=self.CHAIN, pool_addr=self.POOL, token_id=42, is_open=True
             )
         for slug in _UNIV3_LP_PROTOCOLS:
-            assert (slug, self.CHAIN, self.POOL) not in runner._lp_registry_id_cache
-        assert any("multi-NFT collision" in rec.message for rec in caplog.records)
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"999", "42"}
+        assert not any("multi-NFT" in rec.message for rec in caplog.records), (
+            "VIB-4301: a legitimate co-pool open must not emit the spurious multi-NFT warning"
+        )
+
+        # Close one leg ⇒ the other survives.
+        StrategyRunner._update_lp_registry_id_cache(
+            runner, chain=self.CHAIN, pool_addr=self.POOL, token_id=999, is_open=False
+        )
+        for slug in _UNIV3_LP_PROTOCOLS:
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"42"}
 
     def test_open_idempotent_when_token_id_same(self) -> None:
-        # OPEN with same token_id at same key → leaves cache as-is.
+        # OPEN with same token_id at same key → set unchanged (idempotent add).
         from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
 
-        cache = {(slug, self.CHAIN, self.POOL): "42" for slug in _UNIV3_LP_PROTOCOLS}
+        cache = {(slug, self.CHAIN, self.POOL): {"42"} for slug in _UNIV3_LP_PROTOCOLS}
         runner = self._runner(dict(cache))
         StrategyRunner._update_lp_registry_id_cache(
             runner,
@@ -699,7 +710,7 @@ class TestUpdateLpRegistryIdCache:
             is_open=True,
         )
         for slug in _UNIV3_LP_PROTOCOLS:
-            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == "42"
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"42"}
 
     def test_empty_pool_address_no_op(self) -> None:
         # No pool_addr → still ensure cache attr is set (never crash).
@@ -727,7 +738,7 @@ class TestUpdateLpRegistryIdCache:
         )
         assert hasattr(runner, "_lp_registry_id_cache")
         for slug in _UNIV3_LP_PROTOCOLS:
-            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == "42"
+            assert runner._lp_registry_id_cache[(slug, self.CHAIN, self.POOL)] == {"42"}
 
 
 # ---------------------------------------------------------------------------

@@ -566,11 +566,12 @@ class TestCoinGeckoPriceSourceRateLimit:
         assert exc_info.value.retry_after > 0
 
     def test_rate_limit_updates_backoff(self) -> None:
-        """Test rate limit updates backoff state.
+        """Test a 429 records exactly one rate-limit hit and opens the cooldown.
 
-        ``get_price`` makes one bounded retry after a 429 (1s pause); both
-        attempts call ``record_rate_limit`` when the mock returns 429 for
-        every call. The retry behaviour is covered in detail by
+        VIB-4841: the source fails fast on a 429 (single HTTP attempt, no
+        retry/sleep), so a single throttled call records exactly one
+        ``consecutive_429s`` and ``backoff_seconds`` follows ``2 ** (1 - 1) =
+        1.0``. The cooldown circuit breaker is covered in detail by
         ``tests/gateway/test_coingecko_retry.py``."""
         source = CoinGeckoPriceSource(cache_ttl=30)
 
@@ -585,18 +586,17 @@ class TestCoinGeckoPriceSourceRateLimit:
             with pytest.raises(DataSourceRateLimited):
                 run_async(source.get_price("ETH", "USD"))
 
-        # Two attempts × one record_rate_limit each = 2 consecutive_429s.
-        # backoff_seconds follows 2 ** (consecutive_429s - 1) = 2 ** 1 = 2.0,
-        # capped at max_backoff_seconds (10.0). Asserting the actual value
-        # locks in the exponential math, not just the increment count.
-        assert source._rate_limit_state.consecutive_429s == 2
-        assert source._rate_limit_state.backoff_seconds == 2.0
+        # Single fail-fast attempt → exactly one record_rate_limit call.
+        assert source._rate_limit_state.consecutive_429s == 1
+        assert source._rate_limit_state.backoff_seconds == 1.0
+        # The cooldown window is now open.
+        assert source._rate_limit_state.cooldown_remaining() > 0
 
     def test_rate_limit_increments_metrics(self) -> None:
-        """Test rate limit increments rate limit metrics.
+        """Test a 429 increments the rate-limit metric exactly once.
 
-        Two attempts under the bounded retry, both 429 → the metric counter
-        records both. Single-attempt success-after-retry is covered in
+        Single fail-fast attempt → one 429 recorded. The cooldown-skip path
+        (subsequent calls fast-failing without a network request) is covered in
         ``tests/gateway/test_coingecko_retry.py``."""
         source = CoinGeckoPriceSource(cache_ttl=30)
 
@@ -611,7 +611,7 @@ class TestCoinGeckoPriceSourceRateLimit:
             with pytest.raises(DataSourceRateLimited):
                 run_async(source.get_price("ETH", "USD"))
 
-        assert source._metrics.rate_limits == 2
+        assert source._metrics.rate_limits == 1
 
 
 # =============================================================================

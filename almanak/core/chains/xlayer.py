@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -27,6 +27,25 @@ DESCRIPTOR = register_chain(
             tx_confirmation=120,
             grpc_execute=300,
         ),
+        rpc=RpcProfile(
+            public_rpc="https://rpc.xlayer.tech",
+            alchemy_prefix="xlayer",
+            anvil_port=8557,
+        ),
+        # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
+        tokens={
+            "usdc": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+            "usdt": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
+            "weth": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+            "wokb": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+            "xeth": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+            "xbtc": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
+            "usdg": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",
+            # Intentional alias to the same USD₮0 address — both keys are
+            # surfaced for callers that pass the explicit USDT0 / LayerZero
+            # designation. Mirrors the legacy CHAIN_TOKENS shape.
+            "usdt0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+        },
         aliases=(),
     )
 )

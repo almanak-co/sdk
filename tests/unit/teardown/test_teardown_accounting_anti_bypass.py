@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 TEARDOWN_MANAGER = ROOT / "almanak" / "framework" / "teardown" / "teardown_manager.py"
 RUNNER_TEARDOWN = ROOT / "almanak" / "framework" / "runner" / "runner_teardown.py"
+TEARDOWN_COMMIT = ROOT / "almanak" / "framework" / "runner" / "teardown_commit.py"
 CLI_TEARDOWN = ROOT / "almanak" / "framework" / "cli" / "teardown.py"
 # PR #2093: execute_teardown was refactored from a 880-LOC click body
 # (CC=89) into a thin orchestrator that delegates to typed helpers in
@@ -137,6 +138,111 @@ def test_t14_orchestrator_execute_followed_by_commit_in_source_order():
     assert min(commit_lines) > min(execute_lines), (
         "Source-order anti-bypass tripped: a commit_teardown_intent call is "
         "BEFORE the orchestrator.execute it should follow."
+    )
+
+
+# ---------------------------------------------------------------------------
+# VIB-4895 — commit_teardown_intent (Lane B) emits position_events
+# ---------------------------------------------------------------------------
+
+
+def test_vib4895_commit_teardown_intent_emits_position_events():
+    """``commit_teardown_intent`` (Lane B) must drive a ``position_events``
+    write, not just enrich → ledger → outbox → sidecar.
+
+    Before VIB-4895, Lane B (``TeardownManager`` → ``commit_teardown_intent``)
+    ran the four-step commit pipeline but NEVER wrote ``position_events``. A
+    multi-chain teardown therefore landed LP_CLOSE / PERP_CLOSE / lending-close
+    TXs on-chain while writing zero CLOSE rows — silently breaking close-time
+    IL/PnL attribution. ``position_events`` is one of the five surfaces
+    teardown must populate (CLAUDE.md §Teardown; blueprint 27-accounting.md
+    §14.1).
+
+    This guard is static (AST over ``teardown_commit.py``): it asserts the
+    module both builds a position event (``build_position_event_from_intent``)
+    AND persists it (``save_position_event``). A regression that drops the
+    emit — e.g. deleting Step 2b — fails this test before it ships.
+    """
+    src = TEARDOWN_COMMIT.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(TEARDOWN_COMMIT))
+
+    references_build = False
+    references_save = False
+    for sub in ast.walk(tree):
+        # ``build_position_event_from_intent(...)`` — bare name call.
+        if isinstance(sub, ast.Name) and sub.id == "build_position_event_from_intent":
+            references_build = True
+        # ``state_manager.save_position_event(...)`` — attribute access.
+        if isinstance(sub, ast.Attribute) and sub.attr == "save_position_event":
+            references_save = True
+
+    assert references_build, (
+        "VIB-4895 anti-bypass: teardown_commit.py no longer references "
+        "build_position_event_from_intent — Lane B teardown closes will write "
+        "zero position_events rows (silent IL/PnL break). See blueprint "
+        "27-accounting.md §14.1 and CLAUDE.md §Teardown."
+    )
+    assert references_save, (
+        "VIB-4895 anti-bypass: teardown_commit.py no longer references "
+        "save_position_event — Lane B teardown closes will write zero "
+        "position_events rows (silent IL/PnL break). See blueprint "
+        "27-accounting.md §14.1 and CLAUDE.md §Teardown."
+    )
+
+
+def test_vib4895_commit_teardown_intent_position_event_emit_is_caught():
+    """The Step 2b position-event emit in ``commit_teardown_intent`` MUST be
+    wrapped so a write failure becomes a deferred-log row, never a propagated
+    halt (blueprint 27 §14.1 loud-but-never-block contract — teardown's first
+    job is removing on-chain risk).
+
+    Static check: the ``_emit_teardown_position_event`` call inside
+    ``commit_teardown_intent`` must sit inside a ``try`` whose handler calls
+    ``_record(...)`` with the ``"position_event"`` kind. This pins the inverted
+    failure semantics against a regression that lets the emit propagate.
+    """
+    src = TEARDOWN_COMMIT.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(TEARDOWN_COMMIT))
+    fn = _find_function(tree, "commit_teardown_intent")
+
+    found_guarded_emit = False
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        # Does this try-body call _emit_teardown_position_event?
+        calls_emit = any(
+            isinstance(c, ast.Call)
+            and (
+                (isinstance(c.func, ast.Name) and c.func.id == "_emit_teardown_position_event")
+            )
+            for stmt in node.body
+            for c in ast.walk(stmt)
+        )
+        if not calls_emit:
+            continue
+        # Does a handler record the position_event kind?
+        records_position_event = any(
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
+            and c.func.id == "_record"
+            and c.args
+            and isinstance(c.args[0], ast.Constant)
+            and c.args[0].value == "position_event"
+            for handler in node.handlers
+            for stmt in handler.body
+            for c in ast.walk(stmt)
+        )
+        if records_position_event:
+            found_guarded_emit = True
+            break
+
+    assert found_guarded_emit, (
+        "VIB-4895: the _emit_teardown_position_event call in "
+        "commit_teardown_intent must be wrapped in try/except that records a "
+        "'position_event' deferred-log row via _record(...). Teardown's "
+        "loud-but-never-block contract (blueprint 27 §14.1) requires the emit "
+        "failure to degrade-but-continue, not propagate and strand the next "
+        "risk-reducing intent."
     )
 
 

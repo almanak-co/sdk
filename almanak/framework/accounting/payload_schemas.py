@@ -99,19 +99,43 @@ MATCHING_POLICY_VERSION = 3
 #
 # Every Primitive value MUST appear here so a writer lookup never KeyError-s.
 MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
-    Primitive.LP: 3,
-    # VIB-4477: V4 starts its lot-matching stream fresh — no historical V4 rows
-    # exist (V0 lands with this change). Same FIFO policy as Primitive.LP today;
-    # the parallel slot exists so a future V4-specific algorithm change (e.g.
-    # fee separation lands and the lot model gains a fee leg) cannot retro-
-    # baseline the V3 fixture set.
-    Primitive.LP_V4: 1,
+    # VIB-4848: v4→v5. The LP close handler / attributor now branches
+    # explicitly on a ``fee_separation_method`` taxonomy stamped on
+    # ``LPCloseData`` and the close-event ``attribution_json`` sidecar
+    # (SEPARATE / BUNDLED / UNKNOWN + EXACT / ESTIMATED / UNKNOWN
+    # confidence). The position_events ``compute_impermanent_loss`` now
+    # subtracts the SEPARATE/EXACT close fees from V_lp before IL — the
+    # accounting_events lane has done this since VIB-4319; v5 closes the
+    # symmetric gap on the attribution lane. Per-lifecycle ``attribute_lp``
+    # also folds mid-life ``LP_COLLECT_FEES`` into ``net_pnl_usd``.
+    # VIB-4275 (v3→v4) lot-matching invariant remains in effect: the LP
+    # close→open resolver still filters same-``position_key`` candidates
+    # by a per-position discriminator (NFT token id) and FAILS CLOSED to
+    # ``None`` when it cannot uniquely identify the closing leg's open.
+    Primitive.LP: 5,
+    # VIB-4848: v1→v2. V4 is the canonical BUNDLED-fees protocol so the
+    # taxonomy + IL-adjustment behaviour applies symmetrically; the
+    # parallel slot keeps V4 fixtures from regressing on the V3 stream.
+    # VIB-4477 originally landed V4 at v1 with the same FIFO matching as
+    # Primitive.LP — the per-primitive slot exists so V4 can evolve
+    # independently. T8 lands the same taxonomy on both primitives, so
+    # both bump together.
+    Primitive.LP_V4: 2,
     Primitive.LENDING: 3,
     Primitive.CDP: 1,
     Primitive.LIQUIDATION: 1,
     Primitive.PERP: 1,
     Primitive.UTILITY: 1,
-    Primitive.SWAP: 3,
+    # VIB-4905 (v3→v4): partial-match SWAPs now surface a matched-portion
+    # realized PnL alongside the unmatched amount/proceeds rather than
+    # discarding the matched portion entirely when ``_unmatched > 0``.
+    # The matching algorithm itself is unchanged — FIFO consumes lots
+    # exactly as before; the bump tracks the contract change at the
+    # writer / payload boundary (a partial-match payload now carries
+    # ``realized_pnl_usd_matched`` + ``unmatched_amount_in`` +
+    # ``unmatched_proceeds_usd``, where v3 emitted ``realized_pnl_usd=None``
+    # and dropped the matched value on the floor).
+    Primitive.SWAP: 4,
     Primitive.VAULT: 1,
     Primitive.STAKING: 1,
     Primitive.BRIDGE: 1,
@@ -151,7 +175,13 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.LIQUIDATION: PRIMITIVE_VERSION_DEFAULT,
     Primitive.PERP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.UTILITY: PRIMITIVE_VERSION_DEFAULT,
-    Primitive.SWAP: PRIMITIVE_VERSION_DEFAULT,
+    # VIB-4905 (v1→v2): SwapEventPayload contract extension — additive
+    # three-field bundle for partial-match disposals
+    # (``realized_pnl_usd_matched`` / ``unmatched_amount_in`` /
+    # ``unmatched_proceeds_usd``).  Bump documents the new emitter contract
+    # at the primitive level (separate from the matching-policy bump above
+    # — see module docstring for the policy/contract split).
+    Primitive.SWAP: 2,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,
@@ -429,6 +459,25 @@ class SwapEventPayload(_Versioned):
     effective_price: Decimal | None = None
     slippage_bps: Decimal | None = None
     realized_pnl_usd: Decimal | None = None
+    # VIB-4905 (F1): matched-portion realized PnL.  Populated even on
+    # partial-match disposals where ``realized_pnl_usd`` (legacy field) is
+    # forced to ``None`` because ``_unmatched > 0``.  Computed as
+    # ``matched_proceeds_usd - cost_basis_consumed`` where
+    # ``matched_proceeds_usd`` is the pro-rated USD share of
+    # ``amount_in_usd`` attributable to the matched leg.  ``None`` when no
+    # prior basis exists for ``token_in`` (nothing was matched).
+    realized_pnl_usd_matched: Decimal | None = None
+    # VIB-4905 (F1): the portion of ``amount_in`` that could not be matched
+    # against existing FIFO basis lots (caller spent more than the basis
+    # store has recorded — e.g. tokens acquired before the accounting
+    # system was deployed, or a shared-wallet residual the system never
+    # saw).  ``None`` when matching was skipped entirely (no basis store,
+    # unmeasured amounts).  ``Decimal("0")`` is a full match.
+    unmatched_amount_in: Decimal | None = None
+    # VIB-4905 (F1): the USD proceeds attributable to the unmatched portion
+    # of ``amount_in``.  Pro-rated from ``amount_in_usd``.  ``None`` when
+    # amount_in_usd is unavailable (price oracle missed).
+    unmatched_proceeds_usd: Decimal | None = None
     cost_basis_recorded: bool | None = None
     gas_usd: Decimal | None = None
     confidence: ConfidenceLiteral

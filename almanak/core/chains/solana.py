@@ -9,8 +9,18 @@ compute-unit + priority-fee accounting, not gas multipliers).
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
+
+# Solana cluster URLs. Solana names networks by *cluster* (mainnet-beta,
+# devnet, testnet) instead of by EIP-155 chain id, so this lives alongside
+# the descriptor rather than inside ``RpcProfile``. Consumed by
+# ``almanak.gateway.utils.rpc_provider.SOLANA_CLUSTER_URLS``.
+SOLANA_CLUSTERS: dict[str, str] = {
+    "mainnet-beta": "https://api.mainnet-beta.solana.com",
+    "devnet": "https://api.devnet.solana.com",
+    "testnet": "https://api.testnet.solana.com",
+}
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
@@ -34,6 +44,13 @@ DESCRIPTOR = register_chain(
         timeouts=Timeouts(
             tx_confirmation=None,
             grpc_execute=None,
+        ),
+        rpc=RpcProfile(
+            # ``public_rpc`` mirrors ``SOLANA_CLUSTERS["mainnet-beta"]``
+            # so the generic ``PUBLIC_RPC_URLS`` lookup works for Solana too.
+            public_rpc="https://api.mainnet-beta.solana.com",
+            alchemy_prefix="solana",
+            anvil_port=8899,
         ),
         aliases=("sol",),
     )

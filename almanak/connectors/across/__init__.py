@@ -89,8 +89,16 @@ def _register_once() -> None:
         from almanak.connectors._strategy_base.registry import register_connector
         from almanak.framework.intents.vocabulary import IntentType
 
+        # Across is bridge-only. Strategy ``chains`` historically listed
+        # five core EVM chains; the matrix has rendered Linea as well
+        # since the SpokePool went live there. Include Linea here so the
+        # derived matrix row matches the CLI baseline. (Zksync is in
+        # ``ACROSS_CHAIN_IDS`` but is intentionally excluded from
+        # ``KNOWN_VENUES``.)
         register_connector(
-            name="across", intents=(IntentType.BRIDGE,), chains=("ethereum", "arbitrum", "base", "optimism", "polygon")
+            name="across",
+            intents=(IntentType.BRIDGE,),
+            chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "linea"),
         )
     except Exception:
         _registered = False

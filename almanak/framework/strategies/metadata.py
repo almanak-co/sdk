@@ -29,8 +29,9 @@ class StrategyDataRequirements:
         indicators: Wire OHLCV + full indicator suite including RSI, MACD, Bollinger,
             Stochastic, ATR, MA, ADX, OBV, CCI, Ichimoku. Set True if the strategy
             calls any market.rsi(), market.macd(), market.bollinger(), etc.
-        lending_rates: Wire RateMonitor. Set True if the strategy calls
-            market.lending_rate() or market.best_lending_rate().
+        lending_rates: Wire the gateway-backed lending-rate source onto the
+            snapshot. Set True if the strategy calls market.lending_rate() or
+            market.best_lending_rate().
         funding_rates: Wire GatewayFundingRateProvider. Set True if the strategy
             calls market.funding_rate().
     """

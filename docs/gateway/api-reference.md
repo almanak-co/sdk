@@ -12,12 +12,13 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
-| IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
+| IntegrationService | 13 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
 | DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Feature-flagged off by default; enable via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` |
+| RateHistoryService | 6 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX volume history (VIB-4859 / W7). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -914,6 +915,43 @@ Get price chart data for a date range.
 rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse)
 ```
 
+### CoinGeckoGetOHLCV
+
+Get CEX-reference OHLCV candles from CoinGecko (VIB-4847). Second CEX-capable
+provider in the OHLCV router's `cex_primary` failover chain. Candles are
+price-only (no volume); `1h`/`4h`/`1d` timeframes only — sub-hour requests are
+below CoinGecko's 30m native floor.
+
+```protobuf
+rpc CoinGeckoGetOHLCV(CoinGeckoOHLCVRequest) returns (CoinGeckoOHLCVResponse)
+```
+
+**Request:**
+```protobuf
+message CoinGeckoOHLCVRequest {
+  string token = 1;       // Token symbol (e.g., "WETH", "ARB")
+  string timeframe = 2;   // Candle timeframe (1h, 4h, 1d)
+  int32 limit = 3;        // Number of candles (most-recent N)
+  string quote = 4;       // Quote currency (default "USD"; CoinGecko OHLC is fiat-quoted)
+}
+```
+
+**Response:**
+```protobuf
+message CoinGeckoOHLCVCandle {
+  int64 timestamp = 1;    // Unix timestamp in seconds (candle start)
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  // No volume field: CoinGecko OHLC carries price-only candles.
+}
+
+message CoinGeckoOHLCVResponse {
+  repeated CoinGeckoOHLCVCandle candles = 1;
+}
+```
+
 ### GeckoTerminalGetOHLCV
 
 Get DEX OHLCV data from GeckoTerminal for on-chain pool pricing.
@@ -1307,6 +1345,109 @@ message PoolHistoryResponse {
 **Soft caps** are operator-tunable via `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_{1H,4H,1D}`
 (defaults: 90, 180, 730 days). When a request exceeds a cap the handler returns
 a `CAP_EXCEEDED` truncation and a `next_start_ts` hint for the next chunk.
+
+## RateHistoryService
+
+VIB-4859 / W7 of epic VIB-4851. Lending APY (live + historical), perpetual
+funding-rate history, DEX TWAP (single observation + series), and DEX trading
+volume history. Replaces the strategy-side HTTP / GraphQL / Web3 egress that
+used to live in `framework/data/rates/{monitor,history}.py` and
+`framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}` — all of which
+violated the gateway-boundary rule. After W7, those framework readers are
+thin gRPC clients of this service.
+
+Dispatcher pattern mirrors `FundingRateService` / `PoolAnalyticsService`: the
+servicer resolves `(protocol, venue, dex)` → capability provider at
+construction time (O(1) lookup per request), validates the request shape, and
+delegates to the connector. Connectors implement
+`GatewayLendingRateHistoryCapability` / `GatewayFundingHistoryCapability` /
+`GatewayDexTwapCapability` / `GatewayDexVolumeCapability`. Adding a new
+implementer is a connector-folder change with zero gateway-service edits.
+
+Error semantics — dual-channel wire shape:
+
+- `status OK + success=true` → fresh data in the envelope.
+- `status OK + success=false` → framework raises `DataSourceUnavailable`
+  (no silent zero-fill, no default-rate fallback).
+- non-OK status (`INVALID_ARGUMENT` / `UNAVAILABLE` / …) → framework raises
+  `DataSourceUnavailable`; `__cause__` preserves the `grpc.RpcError`.
+
+### GetLendingRateCurrent
+
+Single-point live lending rate (supply or borrow APY + utilisation) via the
+connector's on-chain path (e.g. Aave V3's
+`AaveProtocolDataProvider.getReserveData(asset)`).
+
+```protobuf
+rpc GetLendingRateCurrent(GetLendingRateCurrentRequest) returns (LendingRatePointResponse)
+```
+
+**Request:**
+```protobuf
+message GetLendingRateCurrentRequest {
+  string protocol = 1;       // e.g. "aave_v3", "compound_v3", "morpho_blue"
+  string chain = 2;          // e.g. "ethereum", "arbitrum"
+  string asset_symbol = 3;   // e.g. "USDC", "WETH"
+  string side = 4;           // "supply" or "borrow"
+}
+```
+
+**Response:** `LendingRatePointResponse { protocol, chain, asset_symbol, side, point: LendingRatePoint, source, is_live_data, success, error }`.
+
+### GetLendingRateHistory
+
+Time-series of lending APY / utilisation over `[start_ts, end_ts)`.
+Migrated body of `framework/data/rates/history.py` (TheGraph crawl with
+DefiLlama fallback).
+
+```protobuf
+rpc GetLendingRateHistory(GetLendingRateHistoryRequest) returns (LendingRateHistoryResponse)
+```
+
+### GetFundingRateHistory
+
+Historical funding-rate series for a perp `(venue, market)`. Sibling of
+`FundingRateService.GetFundingRate` (which serves the live rate only).
+
+```protobuf
+rpc GetFundingRateHistory(GetFundingRateHistoryRequest) returns (FundingRateHistoryResponse)
+```
+
+### GetDexTwap
+
+Single TWAP observation for a Uniswap-V3-style pool (or a V3 fork with the
+same `observe(secondsAgos)` ABI). `secs_ago_start` is the older boundary,
+`secs_ago_end` is the newer boundary — matches the on-chain
+`observe(secondsAgos)` convention. Pass `as_of_block > 0` to pin the
+observation to an archive block; leave `as_of_block = 0` for current head.
+
+```protobuf
+rpc GetDexTwap(GetDexTwapRequest) returns (DexTwapPointResponse)
+```
+
+### GetDexTwapSeries
+
+TWAP series at `interval_secs` spacing over `[start_ts, end_ts)`.
+
+```protobuf
+rpc GetDexTwapSeries(GetDexTwapSeriesRequest) returns (DexTwapHistoryResponse)
+```
+
+### GetDexVolumeHistory
+
+Historical trading-volume series for a DEX pool (USD volume at the requested
+bucket spacing).
+
+```protobuf
+rpc GetDexVolumeHistory(GetDexVolumeHistoryRequest) returns (DexVolumeHistoryResponse)
+```
+
+**Wire conventions** — Decimal fields are encoded as strings (mirrors
+`PoolHistoryService` / `FundingRateService`). Empty string means
+"unmeasured by this provider for this row"; the framework boundary maps it
+to Python `None` — never `Decimal("0")`. Per-side selection on lending
+(e.g. `side="supply"`) returns the borrow field as the empty string, NOT
+zero.
 
 ## PolymarketService
 

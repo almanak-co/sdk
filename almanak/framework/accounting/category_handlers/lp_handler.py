@@ -555,6 +555,69 @@ def _resolve_lp_position_metadata(
     return tick_lower_v, tick_upper_v, liquidity_v, current_tick_v, in_range_v
 
 
+def _resolve_lp_open_discriminator(intent_type_str: str, extracted: Any) -> str | None:
+    """Return the per-position discriminator to stamp on an LP_OPEN payload (VIB-4275).
+
+    The minted NFT token id (``LPOpenData.position_id``) is the per-leg
+    discriminator that lets a later LP_CLOSE / LP_COLLECT_FEES on the SAME
+    pool-level ``position_key`` resolve THIS leg's open — instead of the
+    most-recent open by timestamp (the co-pool attribution bug). Only LP_OPEN
+    carries this: the token id is minted by the open, and the close-side
+    resolver reads it back off the open payload.
+
+    Returns the discriminator as a string (JSON-stable across the V3 integer
+    tokenId and any future address/handle form), or ``None`` when the connector
+    has no per-position id — e.g. fungible-LP venues (Curve / Aerodrome
+    classic) where one balance per pool means there is no co-leg to
+    disambiguate. ``None`` is faithful per Empty ≠ Zero: it means "no
+    discriminator", which the resolver treats as "single-open legacy only".
+    """
+    if intent_type_str != "LP_OPEN":
+        return None
+    lp_open = extracted.get("lp_open_data") if isinstance(extracted, dict) else None
+    if lp_open is None:
+        return None
+    raw = getattr(lp_open, "position_id", None)
+    # ``LPOpenData.position_id`` is typed ``int`` but defend against the empty /
+    # zero-id case: a real minted NFT id is a positive integer. An id of 0 or an
+    # empty string is "no usable discriminator" — stamp None so the resolver
+    # falls back to single-open legacy rather than matching on a degenerate id.
+    if raw is None or raw == "" or raw == 0:
+        return None
+    return str(raw)
+
+
+def _resolve_lp_close_discriminator(ledger_row: dict[str, Any]) -> str | None:
+    """Return the closing leg's per-position discriminator from the ledger row (VIB-4275).
+
+    The runner stamps the close intent's ``position_id`` onto
+    ``LPCloseData.position_id`` (carried in ``transaction_ledger.extracted_data_json``)
+    at ledger-build time. Read it back so the close-side resolver can attribute
+    a co-pool close to its OWN prior open.
+
+    Returns the discriminator as a stripped string, or ``None`` when absent
+    (fungible-LP venue, legacy row written before VIB-4275, or a connector that
+    never carries a per-position id). ``None`` is faithful per Empty ≠ Zero:
+    the resolver then resolves ONLY the unambiguous single-open case and never
+    guesses a sibling/latest open.
+    """
+    from almanak.framework.observability.ledger import deserialize_extracted_data
+
+    extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
+    lp_close = extracted.get("lp_close_data") if isinstance(extracted, dict) else None
+    if lp_close is None:
+        return None
+    raw = getattr(lp_close, "position_id", None)
+    # Mirror _resolve_lp_open_discriminator: a degenerate 0 / "0" is "no
+    # discriminator" (Empty != Zero) — a real minted NFT id is a positive
+    # integer. Filter it on BOTH sides so a close never tries to match against
+    # an open whose id-0 was already discarded (gemini review on PR #2459).
+    if raw is None or raw == "" or raw == 0 or str(raw).strip() == "0":
+        return None
+    disc = str(raw).strip()
+    return disc or None
+
+
 def _compute_lp_impermanent_loss(
     intent_type_str: str,
     price_oracle: dict[str, Decimal],
@@ -997,6 +1060,20 @@ def handle_lp(
         intent_type_str, extracted, prior_open_payload
     )
 
+    # VIB-4275 — stamp the per-position discriminator (the NFT token id) on EVERY
+    # LP event so the audit row is joinable to position_events by position_id:
+    #   • LP_OPEN: the minted token id read off LPOpenData — lets a later co-pool
+    #     close resolve THIS leg's open rather than the most-recent by timestamp.
+    #   • LP_CLOSE / LP_COLLECT_FEES: the closing intent's position_id (carried in
+    #     extracted_data_json) — the SAME id used to resolve the prior open, now
+    #     also persisted on the close row instead of being inferable only from the
+    #     resolved tick range. The intent always knows which NFT it is closing.
+    # None for fungible-LP venues (Curve / Aerodrome classic) with no per-leg id.
+    if intent_type_str == "LP_OPEN":
+        position_id_v = _resolve_lp_open_discriminator(intent_type_str, extracted)
+    else:
+        position_id_v = _resolve_lp_close_discriminator(ledger_row)
+
     realized_pnl_usd, fees_total_usd = _compute_lp_realized_pnl_and_fees(
         intent_type_str=intent_type_str,
         fees0=fees0,
@@ -1078,6 +1155,7 @@ def handle_lp(
         in_range=in_range_v,
         il_usd=il_usd,
         hodl_value_usd=hodl_value_usd,
+        position_id=position_id_v,
     )
 
 
@@ -1104,7 +1182,14 @@ def _dispatch_lp(ctx: HandlerContext) -> LPAccountingEvent | None:
     intent_type = (ctx.ledger_row.get("intent_type") or "").upper()
     prior_open: dict[str, Any] | None = None
     if intent_type in {"LP_CLOSE", "LP_COLLECT_FEES"}:
-        prior_open = ctx.prior_open_lookup(ctx.outbox_row.get("position_key") or "")
+        # VIB-4275 — extract the closing leg's per-position discriminator (the
+        # NFT token id the runner stamped onto ``lp_close_data`` from the close
+        # intent) and thread it into the resolver so a co-pool close attributes
+        # to its OWN prior open. None ⇒ fungible-LP venue / legacy row; the
+        # resolver then only resolves the unambiguous single-open case (it never
+        # guesses a sibling/latest open).
+        discriminator = _resolve_lp_close_discriminator(ctx.ledger_row)
+        prior_open = ctx.prior_open_lookup(ctx.outbox_row.get("position_key") or "", discriminator)
     return handle_lp(
         ctx.outbox_row,
         ctx.ledger_row,

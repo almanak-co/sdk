@@ -32,6 +32,7 @@ from almanak.connectors.uniswap_v4.gateway.pool_key_cache import (
     CachedPoolKey,
     V4PoolKeyCache,
     _decode_initialize_log,
+    _is_response_size_error,
     _normalize_pool_id,
 )
 from almanak.gateway.proto import gateway_pb2
@@ -968,3 +969,190 @@ class TestMakeSyncPoolKeyLookup:
             return lookup("0x" + _POOL_ID_HEX, "base")
 
         assert asyncio.run(_runner()) is None
+
+
+# ============================================================================
+# VIB-4536: bisection error-family distinction in _get_initialize_logs_chunked
+# ============================================================================
+
+
+_POOL_MANAGER = "0x498581fF718922c3f8e6A244956aF099B2652b2b"
+
+
+class TestIsResponseSizeError:
+    """VIB-4536 (Finding 1) — the predicate that decides bisect-vs-fail-fast."""
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Log response size exceeded. ... should work: [0x0, 0x100]",
+            "query returned more than 10000 results",
+            "block range is too large for this request",
+            "this block range should work but the response size is too big",
+            "query returned more than 10000 results; reduce the range",
+            "query timeout exceeded — narrow the block range",
+        ],
+    )
+    def test_size_shaped_messages_match(self, message: str) -> None:
+        assert _is_response_size_error(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "connection reset by peer",
+            "TLS handshake timeout",
+            "-32603 Fork Error: Transport(HttpError)",
+            "Expecting value: line 1 column 1 (char 0)",  # malformed JSON
+            "upstream-down",
+            # VIB-4536 review (gemini HIGH / CodeRabbit Major): rate / billing /
+            # quota / compute-limit pressure is ALWAYS transient and must NOT be
+            # treated as a response-size cap — bisecting into a rate-limited
+            # provider multiplies the breach. The old bare "limit exceeded"
+            # marker matched every one of these; the tightened list plus the
+            # _RATE_LIMIT_ERROR_MARKERS guard must classify them non-size.
+            "rate limit: 429 too many requests per second",
+            "rate limit exceeded",
+            "request limit exceeded for this api key",
+            "credit limit exceeded; upgrade your plan",
+            "compute units per second limit exceeded",
+            "monthly capacity limit exceeded",  # generic billing-quota "limit exceeded"
+        ],
+    )
+    def test_transport_messages_do_not_match(self, message: str) -> None:
+        assert _is_response_size_error(RuntimeError(message)) is False
+
+    def test_match_is_case_insensitive(self) -> None:
+        assert _is_response_size_error(RuntimeError("LOG RESPONSE SIZE EXCEEDED")) is True
+
+
+class TestBisectionErrorFamily:
+    """VIB-4536 (Finding 1) — ``_get_initialize_logs_chunked`` must bisect only
+    on response-size errors and fail fast on transient transport errors so a
+    real upstream outage does not trigger ~50-100 doomed RPC calls per miss.
+    """
+
+    @pytest.mark.asyncio
+    async def test_response_size_error_bisects(self) -> None:
+        """A response-size-shaped error halves the window and recovers the
+        target log from the surviving sub-range (current behaviour, preserved).
+        """
+        cache = V4PoolKeyCache()
+        call_log: list[tuple[int, int]] = []
+
+        async def fake_get_logs(params: dict) -> list[dict]:
+            lo, hi = params["fromBlock"], params["toBlock"]
+            call_log.append((lo, hi))
+            span = hi - lo + 1
+            if span > 25_000:
+                raise RuntimeError("Log response size exceeded; narrow the block range")
+            if lo >= 25_000:
+                return [_make_initialize_log()]
+            return []
+
+        w3 = MagicMock()
+        w3.eth.get_logs = AsyncMock(side_effect=fake_get_logs)
+        added = await cache.populate_from_logs(
+            chain="base",
+            w3=w3,
+            pool_manager=_POOL_MANAGER,
+            from_block=0,
+            to_block=49_999,
+        )
+        assert added == 1, f"expected bisection to recover the log; calls={call_log}"
+        # Full window first, then at least one strictly-smaller sub-range.
+        assert call_log[0] == (0, 49_999)
+        assert any(hi - lo + 1 <= 25_000 for lo, hi in call_log[1:]), call_log
+
+    @pytest.mark.asyncio
+    async def test_transient_transport_error_fails_fast_without_bisecting(self) -> None:
+        """A non-size error returns None IMMEDIATELY: exactly one get_logs call,
+        no bisection. Pre-fix this bisected to the min chunk (~50-100 doomed
+        calls) before surfacing the failure, burning the rate-limit budget.
+        """
+        cache = V4PoolKeyCache()
+        w3 = MagicMock()
+        # A wide window that WOULD bisect many times if the error were size-shaped.
+        w3.eth.get_logs = AsyncMock(
+            side_effect=RuntimeError("-32603 Fork Error: Transport(HttpError)")
+        )
+        added = await cache.populate_from_logs(
+            chain="base",
+            w3=w3,
+            pool_manager=_POOL_MANAGER,
+            from_block=0,
+            to_block=49_999,  # 50k blocks: ~6 levels of bisection if size-shaped
+        )
+        assert added is None
+        # The load-bearing assertion: a transient error short-circuits after the
+        # FIRST call rather than fanning out across the whole range.
+        assert w3.eth.get_logs.await_count == 1, (
+            f"transient error must not bisect; got {w3.eth.get_logs.await_count} calls"
+        )
+        assert cache.known_pool_count("base") == 0
+
+    @pytest.mark.asyncio
+    async def test_min_chunk_floor_exhaustion_returns_none(self) -> None:
+        """A response-size error that STILL trips at the min-chunk floor
+        surfaces None (the operator-facing cliff, Finding 2). The watermark is
+        preserved by the caller because populate_from_logs returns None ->
+        UNAVAILABLE is surfaced at the servicer boundary."""
+        cache = V4PoolKeyCache()
+        observed: list[tuple[int, int]] = []
+
+        async def always_too_big(params: dict) -> list[dict]:
+            lo, hi = params["fromBlock"], params["toBlock"]
+            observed.append((lo, hi))
+            # Even a 1-block window claims the response is too big.
+            raise RuntimeError("Log response size exceeded — block range too large")
+
+        w3 = MagicMock()
+        w3.eth.get_logs = AsyncMock(side_effect=always_too_big)
+        added = await cache.populate_from_logs(
+            chain="base",
+            w3=w3,
+            pool_manager=_POOL_MANAGER,
+            from_block=0,
+            to_block=4_999,  # 5k blocks: bisects down toward the 1k floor
+        )
+        assert added is None
+        # Bisection actually happened (more than one call) and terminated at
+        # the floor (no infinite recursion). The floor stops splitting once a
+        # window is no wider than min_chunk_blocks, so the smallest window the
+        # scanner is willing to *bisect* has span > 1_000; anything at or below
+        # the floor surfaces None instead of splitting further.
+        assert len(observed) > 1, observed
+        spans = [hi - lo + 1 for lo, hi in observed]
+        # Every window that the scanner chose to split must have been above the
+        # floor (otherwise it would have returned None instead of bisecting).
+        bisected_spans = [s for s in spans if s > min(spans)]
+        assert all(s > 1_000 for s in bisected_spans), spans
+        # And it walked down close to the floor rather than giving up early.
+        assert min(spans) <= 2_000, f"bisection did not approach the floor: {spans}"
+
+    @pytest.mark.asyncio
+    async def test_min_chunk_floor_surfaces_unavailable_at_servicer(self) -> None:
+        """End-to-end: a min-chunk-floor exhaustion propagates as
+        PoolKeyCacheError(code='unavailable') through _refresh_chain so the
+        servicer maps it to UNAVAILABLE rather than masking as NOT_FOUND."""
+        from almanak.connectors._base.gateway_capabilities import PoolKeyCacheError
+
+        cache = V4PoolKeyCache(backfill_blocks=4_999)
+
+        async def always_too_big(params: dict) -> list[dict]:
+            raise RuntimeError("Log response size exceeded — block range too large")
+
+        w3 = MagicMock()
+        w3.eth.block_number = _AwaitableInt(100_000)
+        w3.eth.get_logs = AsyncMock(side_effect=always_too_big)
+
+        with (
+            patch.object(cache, "_get_or_create_web3", return_value=w3),
+            patch(
+                "almanak.connectors.uniswap_v4.gateway.pool_key_cache.UNISWAP_V4",
+                {"base": {"pool_manager": _POOL_MANAGER}},
+            ),
+            pytest.raises(PoolKeyCacheError) as exc_info,
+        ):
+            await cache.lookup("base", _POOL_ID_BYTES)
+
+        assert exc_info.value.code == "unavailable"

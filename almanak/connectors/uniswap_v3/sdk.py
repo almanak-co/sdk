@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
-from almanak.core.contracts import UNISWAP_V3
+from .addresses import UNISWAP_V3
 
 logger = logging.getLogger(__name__)
 

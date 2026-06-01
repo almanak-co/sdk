@@ -1,15 +1,22 @@
-"""Tests for ``CoinGeckoPriceSource``'s bounded retry on 429.
+"""Tests for ``CoinGeckoPriceSource``'s 429 cooldown circuit breaker (VIB-4841).
 
 PriceAggregator fans sources out concurrently via ``asyncio.gather`` and
-waits for the slowest. Before this fix, CoinGecko's internal exponential
-backoff slept inside ``get_price`` for up to ~10s, blocking every other
-source's already-cached answer and pushing ``decide()`` past the
-framework's 30s ``decide_timeout_seconds`` ceiling.
+waits for the slowest (``_fetch_all_sources`` has no timeout, no early
+return). An earlier design retried a 429 once after a 1s ``asyncio.sleep``;
+on a CoinGecko free-tier key (~10 calls/min ≈ 1 call / 6s) that 1s landed
+back inside the same rate-limit window and re-throttled, *and* the sleep
+stalled the whole aggregate behind this one source on every fetch.
 
-Current contract: on a 429, retry **once** after a bounded 1s pause. If
-the retry also fails, raise ``DataSourceRateLimited`` so the aggregator
-falls over to the other sources. Behaviour mirrors Binance / DexScreener
-/ OnChain — all fail-fast peers in the aggregator.
+Current contract (T1 — source-level cooldown, fail-fast, no sleep):
+
+* On a 429, open an exponential-backoff cooldown window and raise
+  ``DataSourceRateLimited`` immediately — no in-call sleep / retry — so the
+  aggregator falls over to Binance / DexScreener / Chainlink instantly.
+* While the cooldown window is open, subsequent calls fast-fail WITHOUT a
+  network request.
+* A successful 200 resets the breaker.
+
+``asyncio.sleep`` must never be awaited on this path.
 """
 
 from __future__ import annotations
@@ -71,39 +78,14 @@ def _mock_session_with_responses(
 
 
 @pytest.mark.asyncio
-async def test_429_then_200_retries_once_and_succeeds():
-    """First call returns 429, second call returns 200 — source should retry
-    after a 1s pause and return the successful price. This is the path that
-    proves the fix actually recovers when CoinGecko's per-minute window
-    rolls over within the retry budget."""
+async def test_429_fails_fast_without_sleep():
+    """A single 429 must raise ``DataSourceRateLimited`` immediately — one HTTP
+    attempt, no ``asyncio.sleep``, no retry. The aggregator records the failed
+    source and proceeds with the other 3 (Chainlink + Binance + DexScreener)
+    without waiting on this rate-limited source."""
     source = CoinGeckoPriceSource(api_key="")  # free tier, no key
 
-    success_payload = {"ethereum": {"usd": 2350.0}}
-    responses = [(429, "Too Many Requests"), (200, success_payload)]
-    patch_session, session = _mock_session_with_responses(source, responses)
-
-    with (
-        patch_session,
-        patch("almanak.gateway.data.price.coingecko.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
-    ):
-        result = await source.get_price("ETH", "USD")
-
-    assert result.price == Decimal("2350.0")
-    assert result.source == "coingecko"
-    # Critical: exactly one 1s sleep between the two attempts.
-    mock_sleep.assert_awaited_once_with(1.0)
-    # And exactly two HTTP attempts (initial + one retry).
-    assert session.get.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_429_twice_raises_rate_limited():
-    """Both attempts return 429 — second 429 must surface as
-    ``DataSourceRateLimited`` so the aggregator records it as a failed
-    source and proceeds with the other 3 (Chainlink + Binance + DexScreener)."""
-    source = CoinGeckoPriceSource(api_key="")
-
-    responses = [(429, "Too Many Requests"), (429, "Too Many Requests")]
+    responses = [(429, "Too Many Requests")]
     patch_session, session = _mock_session_with_responses(source, responses)
 
     with (
@@ -113,11 +95,90 @@ async def test_429_twice_raises_rate_limited():
         with pytest.raises(DataSourceRateLimited) as exc_info:
             await source.get_price("ETH", "USD")
 
-    # One bounded retry, then give up — no compounding backoff.
-    mock_sleep.assert_awaited_once_with(1.0)
-    # Exactly two HTTP attempts before giving up — not three, not one.
-    assert session.get.call_count == 2
+    # Fail-fast: never sleeps, never retries.
+    mock_sleep.assert_not_awaited()
+    assert session.get.call_count == 1
     assert exc_info.value.source == "coingecko"
+    # retry_after surfaces the computed backoff as advisory metadata.
+    assert exc_info.value.retry_after == pytest.approx(1.0)
+    # The cooldown window is now open.
+    assert source._rate_limit_state.cooldown_remaining() > 0
+
+
+@pytest.mark.asyncio
+async def test_429_opens_cooldown_then_next_call_skips_network():
+    """After a 429 opens the cooldown window, the immediate next call must
+    fast-fail WITHOUT issuing a network request — and a call after the window
+    expires hits the network again. This is the core circuit-breaker contract:
+    no compounding 429s while cooling down, automatic recovery after expiry."""
+    source = CoinGeckoPriceSource(api_key="")
+
+    # First call: 429 opens the cooldown.
+    patch_session_1, session_1 = _mock_session_with_responses(source, [(429, "Too Many Requests")])
+    with (
+        patch_session_1,
+        patch("almanak.gateway.data.price.coingecko.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        with pytest.raises(DataSourceRateLimited):
+            await source.get_price("ETH", "USD")
+    assert session_1.get.call_count == 1
+
+    # Second call while still in cooldown: must NOT hit the network at all.
+    success_payload = {"ethereum": {"usd": 2350.0}}
+    patch_session_2, session_2 = _mock_session_with_responses(source, [(200, success_payload)])
+    with patch_session_2:
+        with pytest.raises(DataSourceRateLimited):
+            await source.get_price("ETH", "USD")
+    # Zero network requests — fast-failed on the open cooldown window.
+    assert session_2.get.call_count == 0
+    assert source._metrics.cooldown_skips == 1
+
+    # Force the window to expire, then the next call hits the network again.
+    source._rate_limit_state.next_allowed_at = None
+    patch_session_3, session_3 = _mock_session_with_responses(source, [(200, success_payload)])
+    with patch_session_3:
+        result = await source.get_price("ETH", "USD")
+    assert result.price == Decimal("2350.0")
+    assert session_3.get.call_count == 1
+    # Success closed the breaker.
+    assert source._rate_limit_state.cooldown_remaining() == 0
+    assert source._rate_limit_state.consecutive_429s == 0
+
+
+@pytest.mark.asyncio
+async def test_429_with_stale_cache_returns_stale_not_raise():
+    """A 429 with a stale cache entry returns the downgraded stale price rather
+    than raising — the source still surfaces a usable (if stale) signal to the
+    aggregator. The cooldown still opens so the *next* miss fast-fails."""
+    from datetime import UTC, datetime, timedelta
+
+    from almanak.framework.data.interfaces import PriceResult
+    from almanak.gateway.data.price.coingecko import CacheEntry
+
+    source = CoinGeckoPriceSource(api_key="")
+    source._cache["ETH/USD"] = CacheEntry(
+        result=PriceResult(
+            price=Decimal("2400"),
+            source="coingecko",
+            timestamp=datetime.now(UTC) - timedelta(minutes=5),
+            confidence=1.0,
+            stale=False,
+        ),
+        cached_at=datetime.now(UTC) - timedelta(seconds=60),  # expired TTL
+    )
+
+    patch_session, _ = _mock_session_with_responses(source, [(429, "Too Many Requests")])
+    with (
+        patch_session,
+        patch("almanak.gateway.data.price.coingecko.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        result = await source.get_price("ETH", "USD")
+
+    assert result.price == Decimal("2400")
+    assert result.stale is True
+    mock_sleep.assert_not_awaited()
+    # Cooldown still opened by the 429.
+    assert source._rate_limit_state.cooldown_remaining() > 0
 
 
 @pytest.mark.asyncio
@@ -143,19 +204,16 @@ async def test_200_on_first_attempt_does_not_sleep():
 
 
 @pytest.mark.asyncio
-async def test_429_then_200_does_not_proactively_sleep_on_first_attempt():
-    """Regression guard: the source used to sleep *before* the first request
-    if a prior call had been rate-limited. That proactive sleep blocked the
-    aggregator's concurrent gather on every subsequent call. Now the only
-    sleep happens *between* attempt 1 and attempt 2 of a single call —
-    nothing carries over to a fresh ``get_price`` invocation."""
+async def test_expired_cooldown_does_not_block_fresh_call():
+    """Regression guard: stale rate-limit state (consecutive_429s > 0) with an
+    already-elapsed cooldown window must NOT block or sleep on a fresh call.
+    The first attempt fires immediately and a 200 closes the breaker."""
     source = CoinGeckoPriceSource(api_key="")
 
-    # Simulate a previously rate-limited state (would have caused a proactive
-    # pre-request sleep in the old behaviour).
+    # Simulate prior 429s, but force the cooldown window to be already expired.
     source._rate_limit_state.record_rate_limit()
     source._rate_limit_state.record_rate_limit()
-    # backoff_seconds is now ~2s and get_wait_time() would have returned >0.
+    source._rate_limit_state.next_allowed_at = None  # window elapsed
 
     success_payload = {"ethereum": {"usd": 2350.0}}
     responses = [(200, success_payload)]
@@ -168,12 +226,11 @@ async def test_429_then_200_does_not_proactively_sleep_on_first_attempt():
         result = await source.get_price("ETH", "USD")
 
     assert result.price == Decimal("2350.0")
-    # No proactive sleep — first attempt fires immediately even with
-    # stale rate-limit state. Aggregator's gather is no longer stalled.
+    # No sleep — fail-fast design never sleeps on this path.
     mock_sleep.assert_not_awaited()
-    # Single HTTP attempt — the prior 429 state from earlier calls must
-    # not cause a redundant retry on a fresh successful first response.
+    # Single HTTP attempt; success resets the breaker.
     assert session.get.call_count == 1
+    assert source._rate_limit_state.consecutive_429s == 0
 
 
 # =============================================================================
@@ -186,37 +243,14 @@ async def test_429_then_200_does_not_proactively_sleep_on_first_attempt():
 
 
 @pytest.mark.asyncio
-async def test_address_endpoint_429_then_200_retries_once():
-    """Address endpoint: first attempt 429, second attempt 200 — must retry
-    once with a 1s pause and return the successful price. Mirrors the
-    ID-keyed path's 429→200 behaviour so the aggregator stays unblocked."""
+async def test_address_endpoint_429_fails_fast_without_sleep():
+    """Address endpoint: a 429 must surface as ``DataSourceRateLimited``
+    immediately — one HTTP attempt, no sleep — so the aggregator records the
+    failure and falls over to other sources rather than the raise getting
+    swallowed as "unknown token". Mirrors the ID-keyed path."""
     source = CoinGeckoPriceSource(api_key="")
 
-    success_payload = {_CBBTC_ADDRESS.lower(): {"usd": 65000.12}}
-    responses = [(429, "Too Many Requests"), (200, success_payload)]
-    patch_session, session = _mock_session_with_responses(source, responses)
-
-    with (
-        patch_session,
-        patch("almanak.gateway.data.price.coingecko.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
-    ):
-        result = await source.get_price(_CBBTC_ADDRESS, "USD", resolved_token=_resolved_cbbtc())
-
-    assert result.price == Decimal("65000.12")
-    assert result.source == "coingecko"
-    mock_sleep.assert_awaited_once_with(1.0)
-    assert session.get.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_address_endpoint_429_twice_raises_rate_limited():
-    """Address endpoint: both attempts 429 — must surface as
-    ``DataSourceRateLimited`` after one bounded retry so the aggregator
-    records the failure and falls over to other sources rather than the
-    raise getting swallowed as "unknown token"."""
-    source = CoinGeckoPriceSource(api_key="")
-
-    responses = [(429, "Too Many Requests"), (429, "Too Many Requests")]
+    responses = [(429, "Too Many Requests")]
     patch_session, session = _mock_session_with_responses(source, responses)
 
     with (
@@ -226,8 +260,33 @@ async def test_address_endpoint_429_twice_raises_rate_limited():
         with pytest.raises(DataSourceRateLimited):
             await source.get_price(_CBBTC_ADDRESS, "USD", resolved_token=_resolved_cbbtc())
 
-    mock_sleep.assert_awaited_once_with(1.0)
-    assert session.get.call_count == 2
+    mock_sleep.assert_not_awaited()
+    assert session.get.call_count == 1
+    assert source._rate_limit_state.cooldown_remaining() > 0
+
+
+@pytest.mark.asyncio
+async def test_address_endpoint_cooldown_skips_network():
+    """Address endpoint: after a 429 opens the cooldown, the next address-keyed
+    call must fast-fail without a network request."""
+    source = CoinGeckoPriceSource(api_key="")
+
+    patch_session_1, session_1 = _mock_session_with_responses(source, [(429, "Too Many Requests")])
+    with (
+        patch_session_1,
+        patch("almanak.gateway.data.price.coingecko.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        with pytest.raises(DataSourceRateLimited):
+            await source.get_price(_CBBTC_ADDRESS, "USD", resolved_token=_resolved_cbbtc())
+    assert session_1.get.call_count == 1
+
+    success_payload = {_CBBTC_ADDRESS.lower(): {"usd": 65000.12}}
+    patch_session_2, session_2 = _mock_session_with_responses(source, [(200, success_payload)])
+    with patch_session_2:
+        with pytest.raises(DataSourceRateLimited):
+            await source.get_price(_CBBTC_ADDRESS, "USD", resolved_token=_resolved_cbbtc())
+    # No network request while cooling down.
+    assert session_2.get.call_count == 0
 
 
 @pytest.mark.asyncio

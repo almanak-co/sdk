@@ -22,7 +22,6 @@ from almanak import IntentStrategy
 from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.data.ohlcv.dedup_provider import DedupingOHLCVProvider
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -145,20 +144,48 @@ class TestCreateMarketSnapshotClearsDeduper:
         assert deduper._cache == {}
 
     def test_clears_between_two_iterations(self) -> None:
-        """Two successive iterations: cache is reset before each."""
+        """Two successive iterations: cache is reset before each.
+
+        VIB-4843 FR-5001: create_market_snapshot() now memoizes per iteration,
+        so the deduper clears on the *fresh mint* (once per iteration), not on
+        every call. The runner stamps a new iteration token via
+        begin_market_snapshot_iteration(); we simulate that boundary here.
+        """
         strat, deduper = _make_strategy_with_deduper()
 
-        # iter 1: populate, then snapshot resets.
+        # iter 1: populate, then a fresh mint resets.
+        strat.begin_market_snapshot_iteration("cycle-1")
         deduper._cache[("cbBTC", "USD", "1h")] = _make_candles(85)
         strat.create_market_snapshot()
         assert deduper._cache == {}
 
-        # iter 2: populate again with different keys, then snapshot resets.
+        # iter 2: new iteration token forces a fresh mint, which resets again.
+        strat.begin_market_snapshot_iteration("cycle-2")
         deduper._cache[("WETH", "USD", "1h")] = _make_candles(50)
         deduper._cache[("WETH", "USD", "4h")] = _make_candles(50)
         assert len(deduper._cache) == 2
         strat.create_market_snapshot()
         assert deduper._cache == {}
+
+    def test_reuse_within_iteration_does_not_reclear(self) -> None:
+        """VIB-4843 FR-5001: within one iteration, a second
+        create_market_snapshot() returns the SAME instance and does NOT
+        re-clear the deduper (the per-iteration reset already happened on the
+        fresh mint).
+        """
+        strat, deduper = _make_strategy_with_deduper()
+
+        strat.begin_market_snapshot_iteration("cycle-1")
+        first = strat.create_market_snapshot()
+        assert deduper._cache == {}
+
+        # A within-iteration consumer (e.g. PortfolioValuer) populates the
+        # deduper after the mint; a second create_market_snapshot() must reuse
+        # the instance and leave that cache intact.
+        deduper._cache[("WETH", "USD", "1h")] = _make_candles(50)
+        second = strat.create_market_snapshot()
+        assert second is first
+        assert len(deduper._cache) == 1
 
     def test_no_deduper_wired_is_safe(self) -> None:
         """Strategies without indicators (no _wire_indicators call) leave the

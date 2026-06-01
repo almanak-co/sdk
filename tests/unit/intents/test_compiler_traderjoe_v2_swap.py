@@ -22,7 +22,7 @@ TJ_ADAPTER_MODULE = "almanak.connectors.traderjoe_v2"
 TJ_ADAPTER_CLS = f"{TJ_ADAPTER_MODULE}.TraderJoeV2Adapter"
 TJ_CONFIG_CLS = f"{TJ_ADAPTER_MODULE}.TraderJoeV2Config"
 TJ_SDK_MODULE = "almanak.connectors.traderjoe_v2.sdk"
-TJ_ADDRESSES_MODULE = "almanak.core.contracts"
+TJ_ADDRESSES_MODULE = "almanak.connectors.traderjoe_v2.addresses"
 
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 

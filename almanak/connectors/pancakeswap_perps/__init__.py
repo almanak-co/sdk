@@ -65,7 +65,7 @@ from almanak.connectors.aster_perps import (
 from almanak.connectors.aster_perps import (
     build_open_transaction as _aster_build_open_transaction,
 )
-from almanak.core.contracts import PANCAKESWAP_PERPS_BROKER_ID
+from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS_BROKER_ID
 
 _DEPRECATION_EMITTED = False
 
@@ -206,14 +206,40 @@ __all__ = [
 # Connector registration (VIB-4298). The registry powers the (connector,
 # intent, chain) coverage gate in scripts/ci/check_connector_registry.py
 # and will be consumed by PR 2's intent-test coverage check.
-from almanak.connectors._strategy_base.registry import register_connector  # noqa: E402
-from almanak.framework.intents.vocabulary import IntentType  # noqa: E402
+#
+# Lazy-fire pattern (VIB-4835 alignment): every sibling connector uses
+# ``_register_once`` so that ``ConnectorRegistry._clear()`` followed by
+# a fresh ``_import_all_connectors()`` re-registers everything cleanly.
+# Eager registration at module top-level skips that re-registration
+# (the module body only runs once per process) and leaves downstream
+# consumers — ``support_matrix._build_matrix`` and the CI coverage gate —
+# stuck with a missing manifest after the registry tests clear state
+# (VIB-4856 / W4).
 
-register_connector(
-    name="pancakeswap_perps",
-    intents=(
-        IntentType.PERP_OPEN,
-        IntentType.PERP_CLOSE,
-    ),
-    chains=("bnb",),
-)
+_registered = False
+
+
+def _register_once() -> None:
+    """Fire ``register_connector`` once on first strategy-side access."""
+    global _registered
+    if _registered:
+        return
+    _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            name="pancakeswap_perps",
+            intents=(
+                IntentType.PERP_OPEN,
+                IntentType.PERP_CLOSE,
+            ),
+            chains=("bnb",),
+        )
+    except Exception:
+        _registered = False
+        raise
+
+
+_register_once()

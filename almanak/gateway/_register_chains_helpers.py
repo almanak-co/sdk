@@ -90,7 +90,18 @@ def derive_default_wallet(settings: GatewaySettings, requested_wallet: str) -> s
 
 
 def _is_solana_resolved(resolved: Any) -> bool:
-    """Return True when a wallet-registry entry belongs to the Solana family."""
+    """Return True when a wallet-registry entry belongs to the Solana family.
+
+    The wallet registry plugin's ``ResolvedWallet.family`` is a ``StrEnum``
+    (``WalletFamily.SOLANA == "solana"``) we cannot import without taking
+    a hard dependency on the optional plugin. The string compare here
+    consults the *wallet's* stated family rather than the chain's family —
+    the two are equivalent for any well-formed wallet registry entry, but
+    the wallet-side check is the defensive one (skip a Solana-tagged
+    wallet even if the registry mis-routed it onto an EVM chain). This
+    is intentionally NOT the W3 ``ChainFamily.SOLANA`` migration target;
+    see the test ``test_registry_skips_solana_via_family_attribute``.
+    """
     return hasattr(resolved, "family") and str(resolved.family) == "solana"
 
 

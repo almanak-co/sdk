@@ -33,7 +33,7 @@ from web3.contract import Contract
 
 logger = logging.getLogger(__name__)
 
-from almanak.core.contracts import GMX_V2, GMX_V2_TOKENS
+from .addresses import GMX_V2, GMX_V2_TOKENS
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient

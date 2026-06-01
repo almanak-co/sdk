@@ -122,6 +122,29 @@ class TestGeckoTerminalGetOHLCV:
         ctx.set_code.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_include_empty_intervals_forwarded_to_provider(self, service):
+        """VIB-4875: the proto flag is threaded through to the provider call."""
+        ctx = _make_context()
+        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+            token="NVDAON", chain="ethereum", timeframe="1h", limit=2,
+            include_empty_intervals=True,
+        )
+
+        mock_provider = AsyncMock()
+        mock_provider.get_ohlcv.return_value = [_make_ohlcv_candle(0)]
+        mock_provider.__aenter__ = AsyncMock(return_value=mock_provider)
+        mock_provider.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            return_value=mock_provider,
+        ):
+            await service.GeckoTerminalGetOHLCV(request, ctx)
+
+        assert mock_provider.get_ohlcv.call_args.kwargs["include_empty_intervals"] is True
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_provider_error_returns_sanitized_internal(self, service):
         """Provider exceptions yield INTERNAL with sanitized message."""
         ctx = _make_context()

@@ -131,9 +131,7 @@ class TestChainValidation:
         assert exc_info.value.field == "chain"
         assert "unsupported" in exc_info.value.reason.lower()
 
-    @pytest.mark.parametrize(
-        "chain", [c for c in CHAIN_IDS if c != "solana"]
-    )
+    @pytest.mark.parametrize("chain", [c for c in CHAIN_IDS if c != "solana"])
     def test_all_supported_chains(self, chain: str):
         """Test that all EVM chains in CHAIN_IDS are valid.
 
@@ -344,6 +342,21 @@ class TestOptionalFieldValidation:
 class TestFromEnv:
     """Tests for from_env() class method."""
 
+    @pytest.fixture(autouse=True)
+    def _snapshot_vib_4879_dedupe_set(self):
+        """CodeRabbit (VIB-4879): snapshot + restore the module-level dedupe
+        set so individual tests that `.clear()` it don't bleed into siblings
+        or into other test modules when pytest-xdist shares a worker.
+        """
+        from almanak.config import runtime as _runtime
+
+        _original = set(_runtime._VIB_4879_DEPRECATED_GWEI_ENV_WARNED)
+        try:
+            yield
+        finally:
+            _runtime._VIB_4879_DEPRECATED_GWEI_ENV_WARNED.clear()
+            _runtime._VIB_4879_DEPRECATED_GWEI_ENV_WARNED.update(_original)
+
     def test_from_env_loads_required_fields(self):
         """Test that from_env loads required fields from environment."""
         env_vars = {
@@ -359,12 +372,16 @@ class TestFromEnv:
         assert config.wallet_address == TEST_WALLET_ADDRESS
 
     def test_from_env_loads_optional_fields(self):
-        """Test that from_env loads optional fields from environment."""
+        """Test that from_env loads optional fields from environment.
+
+        VIB-4879: ``ALMANAK_MAX_GAS_PRICE_GWEI`` was removed from this test —
+        it is now deprecated on mainnet and no longer loaded into the
+        runtime config. The chain descriptor default applies.
+        """
         env_vars = {
             "ALMANAK_CHAIN": "ethereum",
             "ALMANAK_RPC_URL": "https://mainnet.infura.io",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
-            "ALMANAK_MAX_GAS_PRICE_GWEI": "50",
             "ALMANAK_TX_TIMEOUT_SECONDS": "60",
             "ALMANAK_SIMULATION_ENABLED": "true",
             "ALMANAK_MAX_TX_VALUE_ETH": "5.0",
@@ -373,7 +390,7 @@ class TestFromEnv:
         with patch.dict(os.environ, env_vars, clear=False):
             config = _local_from_env()
 
-        assert config.max_gas_price_gwei == 50
+        assert config.max_gas_price_gwei == 300  # ethereum descriptor default
         assert config.tx_timeout_seconds == 60
         assert config.simulation_enabled is True
         assert config.max_tx_value_eth == 5.0
@@ -451,8 +468,13 @@ class TestFromEnv:
 
     # VIB-303: Chain-specific gas price cap defaults
     # Note: load_dotenv is patched to prevent the real .env file from polluting test defaults.
-    def test_from_env_polygon_uses_500_gwei_default(self):
-        """Polygon should use 500 gwei by default (not 100)."""
+    def test_from_env_polygon_uses_chain_default(self):
+        """Polygon should use its descriptor default (post VIB-4879 = 1000 gwei).
+
+        Live mainnet snapshot 2026-05-27 measured Polygon at ~284 gwei, so the
+        old 500-gwei default left only 1.76x spike headroom on a chain known
+        for 5-10x short spikes. VIB-4879 raised it to 1000.
+        """
         env_vars = {
             "ALMANAK_CHAIN": "polygon",
             "ALMANAK_RPC_URL": "https://polygon-rpc.com",
@@ -461,7 +483,7 @@ class TestFromEnv:
         with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
                 config = _local_from_env()
-        assert config.max_gas_price_gwei == 500
+        assert config.max_gas_price_gwei == 1000
 
     def test_from_env_arbitrum_uses_10_gwei_default(self):
         """Arbitrum should use 10 gwei by default (L2 is cheap)."""
@@ -499,18 +521,39 @@ class TestFromEnv:
                 config = _local_from_env()
         assert config.max_gas_price_gwei == 50  # berachain entry in CHAIN_GAS_PRICE_CAPS_GWEI
 
-    def test_from_env_explicit_override_respected_on_mainnet(self):
-        """Explicit ALMANAK_MAX_GAS_PRICE_GWEI should override chain-specific default on mainnet."""
+    def test_from_env_mainnet_global_gwei_env_is_deprecated_and_ignored(self):
+        """VIB-4879: ALMANAK_MAX_GAS_PRICE_GWEI is deprecated on mainnet.
+
+        Before VIB-4879 the global env clobbered every chain's descriptor
+        default — silently breaking multi-chain strategies because gwei is
+        a per-chain unit. After VIB-4879 the chain descriptor default
+        always wins on mainnet and a one-time WARNING is emitted.
+        """
+        # Force the module-level dedupe set to empty so the test's first
+        # call always emits. Tests using a fresh process see this set
+        # empty already; multi-test runs may have populated it.
+        from almanak.config import runtime as _runtime
+
+        _runtime._VIB_4879_DEPRECATED_GWEI_ENV_WARNED.clear()
+
         env_vars = {
             "ALMANAK_CHAIN": "polygon",
             "ALMANAK_RPC_URL": "https://polygon-rpc.com",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
-            "ALMANAK_MAX_GAS_PRICE_GWEI": "1000",
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "1000000",  # absurd value, should be ignored
         }
         with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = _local_from_env()
-        assert config.max_gas_price_gwei == 1000
+                with patch("almanak.config.runtime.logger") as mock_logger:
+                    config = _local_from_env()
+
+        # Chain default wins, NOT the absurd env value.
+        assert config.max_gas_price_gwei == 1000  # polygon descriptor (post VIB-4879)
+
+        warning_messages = [str(call) for call in mock_logger.warning.call_args_list]
+        assert any("deprecated" in msg and "MAX_GAS_PRICE_GWEI" in msg for msg in warning_messages), (
+            f"Expected deprecation warning, got: {warning_messages}"
+        )
 
     # VIB-304: Anvil mode disables effective gas cap
     def test_from_env_anvil_mode_uses_9999_gwei(self):
@@ -570,22 +613,37 @@ class TestFromEnv:
                 warning_messages = [str(call) for call in warning_calls]
                 assert any("MAX_GAS_PRICE_GWEI" in msg for msg in warning_messages)
 
-    def test_from_env_no_warning_when_prefixed_var_set(self):
-        """Should NOT warn when ALMANAK_MAX_GAS_PRICE_GWEI is correctly set."""
+    def test_from_env_warns_when_prefixed_var_set_on_mainnet(self):
+        """VIB-4879: even the prefixed ``ALMANAK_MAX_GAS_PRICE_GWEI`` is now
+        deprecated on mainnet because the gwei unit is per-chain.
+
+        Pre-VIB-4879 this test asserted NO warning when the prefixed form
+        was set (the unprefixed-warning was the only one). Post-VIB-4879
+        the prefixed form ALSO warns — the deprecation is unit-driven,
+        not prefix-driven.
+        """
+        from almanak.config import runtime as _runtime
+
+        _runtime._VIB_4879_DEPRECATED_GWEI_ENV_WARNED.clear()
+
         env_vars = {
             "ALMANAK_CHAIN": "arbitrum",
             "ALMANAK_RPC_URL": "https://arb1.arbitrum.io/rpc",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
-            "ALMANAK_MAX_GAS_PRICE_GWEI": "50",  # correctly prefixed
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "50",  # correctly prefixed, still deprecated
         }
         with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
                 with patch("almanak.config.runtime.logger") as mock_logger:
-                    _local_from_env()
-                # No warning about MAX_GAS_PRICE_GWEI should be emitted
-                warning_calls = mock_logger.warning.call_args_list
-                warning_messages = [str(call) for call in warning_calls]
-                assert not any("MAX_GAS_PRICE_GWEI" in msg and "ignored" in msg for msg in warning_messages)
+                    config = _local_from_env()
+
+        # Chain default wins, not the env value.
+        assert config.max_gas_price_gwei == 10  # arbitrum descriptor default
+
+        warning_messages = [str(call) for call in mock_logger.warning.call_args_list]
+        assert any("deprecated" in msg and "MAX_GAS_PRICE_GWEI" in msg for msg in warning_messages), (
+            f"Expected deprecation warning, got: {warning_messages}"
+        )
 
 
 class TestSecurityContract:

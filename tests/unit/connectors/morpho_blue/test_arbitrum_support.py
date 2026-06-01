@@ -18,7 +18,7 @@ import pytest
 from eth_abi import encode
 from web3 import Web3
 
-from almanak.core.contracts import MORPHO_BLUE, MORPHO_BLUE_ADDRESS, MORPHO_BLUE_TOKENS
+from almanak.connectors.morpho_blue.addresses import MORPHO_BLUE, MORPHO_BLUE_ADDRESS, MORPHO_BLUE_TOKENS
 from almanak.connectors.morpho_blue.adapter import (
     MORPHO_BLUE_ADDRESSES,
     MORPHO_BUNDLER_ADDRESSES,

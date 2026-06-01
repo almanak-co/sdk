@@ -1,0 +1,175 @@
+{
+  "meta": {
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3",
+    "resolution": "1d",
+    "start_ts": 1699920000,
+    "rows": 30,
+    "pool_id": "arbitrum-0xc6962004f452be9203591991d15f6b388e09e8d0",
+    "snapshot0_tvl": "1210000.0"
+  },
+  "catalog": {
+    "data": [
+      {
+        "pool": "arbitrum-0xc6962004f452be9203591991d15f6b388e09e8d0",
+        "chain": "Arbitrum",
+        "project": "uniswap-v3",
+        "symbol": "USDC-WETH"
+      }
+    ]
+  },
+  "chart": {
+    "data": [
+      {
+        "timestamp": 1699920000,
+        "tvlUsd": 1210000.0,
+        "volumeUsd1d": 90000.0
+      },
+      {
+        "timestamp": 1700006400,
+        "tvlUsd": 1210001.0,
+        "volumeUsd1d": 90001.0
+      },
+      {
+        "timestamp": 1700092800,
+        "tvlUsd": 1210002.0,
+        "volumeUsd1d": 90002.0
+      },
+      {
+        "timestamp": 1700179200,
+        "tvlUsd": 1210003.0,
+        "volumeUsd1d": 90003.0
+      },
+      {
+        "timestamp": 1700265600,
+        "tvlUsd": 1210004.0,
+        "volumeUsd1d": 90004.0
+      },
+      {
+        "timestamp": 1700352000,
+        "tvlUsd": 1210005.0,
+        "volumeUsd1d": 90005.0
+      },
+      {
+        "timestamp": 1700438400,
+        "tvlUsd": 1210006.0,
+        "volumeUsd1d": 90006.0
+      },
+      {
+        "timestamp": 1700524800,
+        "tvlUsd": 1210007.0,
+        "volumeUsd1d": 90007.0
+      },
+      {
+        "timestamp": 1700611200,
+        "tvlUsd": 1210008.0,
+        "volumeUsd1d": 90008.0
+      },
+      {
+        "timestamp": 1700697600,
+        "tvlUsd": 1210009.0,
+        "volumeUsd1d": 90009.0
+      },
+      {
+        "timestamp": 1700784000,
+        "tvlUsd": 1210010.0,
+        "volumeUsd1d": 90010.0
+      },
+      {
+        "timestamp": 1700870400,
+        "tvlUsd": 1210011.0,
+        "volumeUsd1d": 90011.0
+      },
+      {
+        "timestamp": 1700956800,
+        "tvlUsd": 1210012.0,
+        "volumeUsd1d": 90012.0
+      },
+      {
+        "timestamp": 1701043200,
+        "tvlUsd": 1210013.0,
+        "volumeUsd1d": 90013.0
+      },
+      {
+        "timestamp": 1701129600,
+        "tvlUsd": 1210014.0,
+        "volumeUsd1d": 90014.0
+      },
+      {
+        "timestamp": 1701216000,
+        "tvlUsd": 1210015.0,
+        "volumeUsd1d": 90015.0
+      },
+      {
+        "timestamp": 1701302400,
+        "tvlUsd": 1210016.0,
+        "volumeUsd1d": 90016.0
+      },
+      {
+        "timestamp": 1701388800,
+        "tvlUsd": 1210017.0,
+        "volumeUsd1d": 90017.0
+      },
+      {
+        "timestamp": 1701475200,
+        "tvlUsd": 1210018.0,
+        "volumeUsd1d": 90018.0
+      },
+      {
+        "timestamp": 1701561600,
+        "tvlUsd": 1210019.0,
+        "volumeUsd1d": 90019.0
+      },
+      {
+        "timestamp": 1701648000,
+        "tvlUsd": 1210020.0,
+        "volumeUsd1d": 90020.0
+      },
+      {
+        "timestamp": 1701734400,
+        "tvlUsd": 1210021.0,
+        "volumeUsd1d": 90021.0
+      },
+      {
+        "timestamp": 1701820800,
+        "tvlUsd": 1210022.0,
+        "volumeUsd1d": 90022.0
+      },
+      {
+        "timestamp": 1701907200,
+        "tvlUsd": 1210023.0,
+        "volumeUsd1d": 90023.0
+      },
+      {
+        "timestamp": 1701993600,
+        "tvlUsd": 1210024.0,
+        "volumeUsd1d": 90024.0
+      },
+      {
+        "timestamp": 1702080000,
+        "tvlUsd": 1210025.0,
+        "volumeUsd1d": 90025.0
+      },
+      {
+        "timestamp": 1702166400,
+        "tvlUsd": 1210026.0,
+        "volumeUsd1d": 90026.0
+      },
+      {
+        "timestamp": 1702252800,
+        "tvlUsd": 1210027.0,
+        "volumeUsd1d": 90027.0
+      },
+      {
+        "timestamp": 1702339200,
+        "tvlUsd": 1210028.0,
+        "volumeUsd1d": 90028.0
+      },
+      {
+        "timestamp": 1702425600,
+        "tvlUsd": 1210029.0,
+        "volumeUsd1d": 90029.0
+      }
+    ]
+  }
+}

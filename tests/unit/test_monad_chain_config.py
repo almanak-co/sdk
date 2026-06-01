@@ -65,7 +65,7 @@ class TestMonadContracts:
     """Monad contract addresses in the registry."""
 
     def test_uniswap_v3_addresses(self):
-        from almanak.core.contracts import UNISWAP_V3
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 
         assert "monad" in UNISWAP_V3
         monad = UNISWAP_V3["monad"]
@@ -75,7 +75,7 @@ class TestMonadContracts:
         assert "quoter_v2" in monad
 
     def test_uniswap_v3_tokens(self):
-        from almanak.core.contracts import UNISWAP_V3_TOKENS
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3_TOKENS
 
         assert "monad" in UNISWAP_V3_TOKENS
         tokens = UNISWAP_V3_TOKENS["monad"]

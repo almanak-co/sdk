@@ -107,10 +107,23 @@ def test_rsi_series_with_oscillation_stays_in_0_to_100():
 def test_ohlcv_to_price_history_normalises_to_time_price():
     payload = _ohlcv_payload([2300.0, 2305.0, 2310.0])
     df = _ohlcv_to_price_history(payload)
-    assert list(df.columns) == ["time", "price"]
+    # close → price, plus high/low carried through for the OHLC-range indicators.
+    assert list(df.columns) == ["time", "price", "high", "low"]
     assert len(df) == 3
     assert pd.api.types.is_datetime64_any_dtype(df["time"])
     assert df["price"].tolist() == [2300.0, 2305.0, 2310.0]
+    # _ohlcv_payload sets high = close + 2, low = close - 2.
+    assert df["high"].tolist() == [2302.0, 2307.0, 2312.0]
+    assert df["low"].tolist() == [2298.0, 2303.0, 2308.0]
+
+
+def test_ohlcv_to_price_history_close_only_payload_drops_high_low():
+    # A payload without high/low (e.g. a caller-supplied close series) keeps
+    # working — only time/price are produced.
+    payload = [{"timestamp": "2026-05-12T00:00:00Z", "close": "100"}]
+    df = _ohlcv_to_price_history(payload)
+    assert list(df.columns) == ["time", "price"]
+    assert df["price"].tolist() == [100.0]
 
 
 def test_ohlcv_to_price_history_handles_empty():

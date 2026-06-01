@@ -15,6 +15,8 @@ from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.gateway.integrations.base import BaseIntegration
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
@@ -88,7 +90,8 @@ class ZerionIntegration(BaseIntegration):
     @staticmethod
     def _cache_address(wallet_address: str, chain: str) -> str:
         """Normalize wallet address for cache keys. Preserves case for Solana (base58)."""
-        if chain.lower() == "solana":
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
             return wallet_address
         return wallet_address.lower()
 

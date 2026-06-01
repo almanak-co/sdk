@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
@@ -372,7 +374,9 @@ class DexScreenerPriceSource(BasePriceSource):
         """
         if resolved_token is not None and getattr(resolved_token, "address", None):
             address = resolved_token.address
-            identity = address if chain_name == "solana" else address.lower()
+            descriptor = ChainRegistry.try_resolve(chain_name)
+            is_solana = descriptor is not None and descriptor.family is ChainFamily.SOLANA
+            identity = address if is_solana else address.lower()
         else:
             identity = token.upper()
         return f"{chain_name}:{identity}/{quote}"
@@ -700,7 +704,9 @@ class DexScreenerPriceSource(BasePriceSource):
         hosted readiness checks.
         """
         if self._default_chain_name is not None:
-            health_token = "SOL" if self._default_chain_name == "solana" else "ETH"
+            descriptor = ChainRegistry.try_resolve(self._default_chain_name)
+            is_solana = descriptor is not None and descriptor.family is ChainFamily.SOLANA
+            health_token = "SOL" if is_solana else "ETH"
             try:
                 await self.get_price(health_token, "USD")
                 return True

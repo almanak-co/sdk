@@ -29,6 +29,18 @@ _LP_INTENT_TYPES = frozenset({"LP_OPEN", "LP_CLOSE"})
 class LPAccountingEvent:
     """Duck-typed LP accounting event consumed by AccountingWriter and both backends."""
 
+    # NOTE: this per-event attribute is a fallback only — the
+    # ``writer.augment_accounting_payload`` chokepoint UNCONDITIONALLY
+    # overwrites ``schema_version`` with the GLOBAL
+    # ``payload_schemas.SCHEMA_VERSION`` at write time, so the persisted value
+    # is always the global one. VIB-4275 adds an additive ``position_id``
+    # payload field; we deliberately do NOT bump the global ``SCHEMA_VERSION``
+    # because it is shared across every primitive and a bump would restamp
+    # Lending / Perp / Vault / etc. rows too — violating the per-primitive
+    # isolation the matching-policy-version map exists to provide. The additive
+    # field is tolerant (readers default a missing ``position_id`` to ``None``),
+    # and the behaviour change (co-pool close→open matching) is signalled by the
+    # per-primitive ``matching_policy_version`` bump for ``Primitive.LP`` instead.
     schema_version: int = 1
     # VIB-4166 (T6) — see ``almanak.framework.accounting.payload_schemas`` module
     # docstring for the bump policy. Class attribute so the augment chokepoint
@@ -90,6 +102,16 @@ class LPAccountingEvent:
         # V3 callers leave this None and lot-matching falls back to
         # ``position_token_id``; V4 receipt parser populates it (T05).
         position_hash: str | None = None,
+        # VIB-4275 — per-position discriminator for co-pool attribution.
+        # On LP_OPEN this is the minted NFT token id (``LPOpenData.position_id``)
+        # written into the open payload so a later LP_CLOSE / LP_COLLECT_FEES on
+        # the SAME pool-level ``position_key`` can resolve THIS leg's open rather
+        # than the most-recent open by timestamp. ``None`` for connectors that
+        # have no per-position id (fungible-LP venues — Curve / Aerodrome
+        # classic — where one fungible balance per pool means there is no
+        # co-leg to disambiguate). String form so it is JSON-stable across the
+        # V3 integer-tokenId and any future address/handle discriminators.
+        position_id: str | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -115,6 +137,7 @@ class LPAccountingEvent:
         self.il_usd = il_usd
         self.hodl_value_usd = hodl_value_usd
         self.position_hash = position_hash
+        self.position_id = position_id
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -184,6 +207,13 @@ class LPAccountingEvent:
                 # V3, populated for V4) so downstream JSON consumers see a
                 # stable key shape across protocols.
                 "position_hash": self.position_hash,
+                # VIB-4275 — per-position discriminator. On LP_OPEN this is the
+                # minted NFT token id; the close-side resolver
+                # (``AccountingProcessor._lookup_prior_lp_open``) filters the
+                # same-``position_key`` candidate opens by this field so a
+                # co-pool close attributes to its OWN open. Always emitted
+                # (None for fungible-LP venues) for a stable key shape.
+                "position_id": self.position_id,
                 "schema_version": self.schema_version,
                 "primitive_version": self.primitive_version,
             }

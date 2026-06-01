@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "chain": "ethereum",
+    "protocol": "uniswap_v3",
+    "resolution": "1d",
+    "start_ts": 1699920000,
+    "rows": 30,
+    "pool_id": "ethereum-0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+    "snapshot0_tvl": "215000000.0"
+  },
+  "catalog": {
+    "data": [
+      {
+        "pool": "ethereum-0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+        "chain": "Ethereum",
+        "project": "uniswap-v3",
+        "symbol": "USDC-WETH"
+      },
+      {
+        "pool": "ethereum-0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640deadbeef",
+        "chain": "Ethereum",
+        "project": "uniswap-v3",
+        "symbol": "DECOY"
+      },
+      {
+        "pool": "arbitrum-0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+        "chain": "Arbitrum",
+        "project": "uniswap-v3",
+        "symbol": "WRONGCHAIN"
+      }
+    ]
+  },
+  "chart": {
+    "data": [
+      {
+        "timestamp": 1699920000,
+        "tvlUsd": 215000000.0,
+        "volumeUsd1d": 1000000.0
+      },
+      {
+        "timestamp": 1700006400,
+        "tvlUsd": 215000001.0,
+        "volumeUsd1d": 1000001.0
+      },
+      {
+        "timestamp": 1700092800,
+        "tvlUsd": 215000002.0,
+        "volumeUsd1d": 1000002.0
+      },
+      {
+        "timestamp": 1700179200,
+        "tvlUsd": 215000003.0,
+        "volumeUsd1d": 1000003.0
+      },
+      {
+        "timestamp": 1700265600,
+        "tvlUsd": 215000004.0,
+        "volumeUsd1d": 1000004.0
+      },
+      {
+        "timestamp": 1700352000,
+        "tvlUsd": 215000005.0,
+        "volumeUsd1d": 1000005.0
+      },
+      {
+        "timestamp": 1700438400,
+        "tvlUsd": 215000006.0,
+        "volumeUsd1d": 1000006.0
+      },
+      {
+        "timestamp": 1700524800,
+        "tvlUsd": 215000007.0,
+        "volumeUsd1d": 1000007.0
+      },
+      {
+        "timestamp": 1700611200,
+        "tvlUsd": 215000008.0,
+        "volumeUsd1d": 1000008.0
+      },
+      {
+        "timestamp": 1700697600,
+        "tvlUsd": 215000009.0,
+        "volumeUsd1d": 1000009.0
+      },
+      {
+        "timestamp": 1700784000,
+        "tvlUsd": 215000010.0,
+        "volumeUsd1d": 1000010.0
+      },
+      {
+        "timestamp": 1700870400,
+        "tvlUsd": 215000011.0,
+        "volumeUsd1d": 1000011.0
+      },
+      {
+        "timestamp": 1700956800,
+        "tvlUsd": 215000012.0,
+        "volumeUsd1d": 1000012.0
+      },
+      {
+        "timestamp": 1701043200,
+        "tvlUsd": 215000013.0,
+        "volumeUsd1d": 1000013.0
+      },
+      {
+        "timestamp": 1701129600,
+        "tvlUsd": 215000014.0,
+        "volumeUsd1d": 1000014.0
+      },
+      {
+        "timestamp": 1701216000,
+        "tvlUsd": 215000015.0,
+        "volumeUsd1d": 1000015.0
+      },
+      {
+        "timestamp": 1701302400,
+        "tvlUsd": 215000016.0,
+        "volumeUsd1d": 1000016.0
+      },
+      {
+        "timestamp": 1701388800,
+        "tvlUsd": 215000017.0,
+        "volumeUsd1d": 1000017.0
+      },
+      {
+        "timestamp": 1701475200,
+        "tvlUsd": 215000018.0,
+        "volumeUsd1d": 1000018.0
+      },
+      {
+        "timestamp": 1701561600,
+        "tvlUsd": 215000019.0,
+        "volumeUsd1d": 1000019.0
+      },
+      {
+        "timestamp": 1701648000,
+        "tvlUsd": 215000020.0,
+        "volumeUsd1d": 1000020.0
+      },
+      {
+        "timestamp": 1701734400,
+        "tvlUsd": 215000021.0,
+        "volumeUsd1d": 1000021.0
+      },
+      {
+        "timestamp": 1701820800,
+        "tvlUsd": 215000022.0,
+        "volumeUsd1d": 1000022.0
+      },
+      {
+        "timestamp": 1701907200,
+        "tvlUsd": 215000023.0,
+        "volumeUsd1d": 1000023.0
+      },
+      {
+        "timestamp": 1701993600,
+        "tvlUsd": 215000024.0,
+        "volumeUsd1d": 1000024.0
+      },
+      {
+        "timestamp": 1702080000,
+        "tvlUsd": 215000025.0,
+        "volumeUsd1d": 1000025.0
+      },
+      {
+        "timestamp": 1702166400,
+        "tvlUsd": 215000026.0,
+        "volumeUsd1d": 1000026.0
+      },
+      {
+        "timestamp": 1702252800,
+        "tvlUsd": 215000027.0,
+        "volumeUsd1d": 1000027.0
+      },
+      {
+        "timestamp": 1702339200,
+        "tvlUsd": 215000028.0,
+        "volumeUsd1d": 1000028.0
+      },
+      {
+        "timestamp": 1702425600,
+        "tvlUsd": 215000029.0,
+        "volumeUsd1d": 1000029.0
+      }
+    ]
+  }
+}

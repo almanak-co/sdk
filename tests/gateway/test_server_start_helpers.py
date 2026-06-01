@@ -348,6 +348,8 @@ class TestBuildReflectionServiceNames:
             "almanak.gateway.proto.FundingRateService",
             "almanak.gateway.proto.SimulationService",
             "almanak.gateway.proto.PolymarketService",
+            "almanak.gateway.proto.PoolAnalyticsService",
+            "almanak.gateway.proto.PoolHistoryService",
             "almanak.gateway.proto.EnsoService",
             "almanak.gateway.proto.TokenService",
             "almanak.gateway.proto.LifecycleService",
@@ -359,6 +361,45 @@ class TestBuildReflectionServiceNames:
         names = build_reflection_service_names()
         assert "grpc.health.v1.Health" in names
         assert "grpc.reflection.v1alpha.ServerReflection" in names
+
+    def test_reflection_covers_all_proto_services_except_exemptions(self) -> None:
+        """Every gRPC service DEFINED in gateway.proto must be exposed via
+        reflection OR appear in the documented exemption set.
+
+        This is the *completeness* guard the older subset checks lacked. A
+        service that is registered on the server but missing from
+        ``build_reflection_service_names`` is invisible to operator tooling
+        (``grpcurl list``, dashboards) — exactly how PoolHistoryService
+        (VIB-4728 / POOL-2) shipped while its sibling PoolAnalyticsService was
+        reflected. Forcing each proto service to be reflected-or-exempted turns
+        that omission into a test failure instead of a runtime surprise.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        names = set(build_reflection_service_names())
+
+        # Services intentionally NOT advertised via reflection. Each entry is a
+        # deliberate, reviewable decision documented with a reason — NOT a place
+        # to silence the guard for a service that simply forgot to register.
+        reflection_exempt: dict[str, str] = {
+            # VIB-4210: internal reconciliation control-plane RPC, not part of
+            # the operator-facing surface.
+            "almanak.gateway.proto.PositionService": "reconciliation control-plane (VIB-4210)",
+            # The gateway's own Health service exists for the internal
+            # RegisterChains pre-warming RPC; the operator-facing health
+            # surface is the standard grpc.health.v1.Health (which IS reflected,
+            # via build_reflection_service_names). Check/Watch here are
+            # superseded by the standard health servicer.
+            "almanak.gateway.proto.Health": "internal RegisterChains pre-warming; grpc.health.v1.Health is the operator surface",
+        }
+
+        proto_service_names = {svc.full_name for svc in gateway_pb2.DESCRIPTOR.services_by_name.values()}
+        missing = proto_service_names - names - set(reflection_exempt)
+        assert not missing, (
+            "proto services missing from gRPC reflection — add to "
+            "build_reflection_service_names(), or add to reflection_exempt with "
+            f"a documented reason: {sorted(missing)}"
+        )
 
 
 # ---------------------------------------------------------------------------

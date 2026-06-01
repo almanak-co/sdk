@@ -6,8 +6,12 @@ with proper caching, rate limiting, and error handling.
 Key Features:
     - Response caching with configurable TTL
     - Graceful degradation on timeout (returns stale data with reduced confidence)
-    - Bounded retry (single 1s pause) on 429, then fail-fast so the aggregator
-      can fall over to other sources without stalling on compounding backoff
+    - Source-level cooldown circuit breaker on 429 (VIB-4841): a 429 opens an
+      exponential-backoff cooldown window and raises ``DataSourceRateLimited``
+      immediately — no in-call sleep. While the window is open, calls fast-fail
+      without a network request. This keeps the concurrent price aggregator
+      (which waits for every source with no timeout) from stalling behind a
+      single rate-limited source.
     - Comprehensive logging for observability
 
 Example:
@@ -19,7 +23,6 @@ Example:
 """
 
 import asyncio
-import enum
 import logging
 import time
 from dataclasses import dataclass
@@ -142,6 +145,12 @@ BSC_TOKEN_IDS: dict[str, str] = {
     "DAI": "dai",
     "WETH": "weth",  # Bridged ETH on BSC
     "BTCB": "bitcoin",
+    # Legacy WBTC.bsc callers resolve to the same BTCB contract via alias;
+    # bind them to the same CoinGecko feed ("bitcoin") so they don't fall
+    # back to the global `wrapped-bitcoin` ID — a separate feed that would
+    # drift on a WBTC depeg or a CoinGecko outage affecting one ID but not
+    # the other.
+    "WBTC": "bitcoin",
     "BUSD": "binance-usd",
 }
 
@@ -365,30 +374,72 @@ class CacheEntry:
 
 @dataclass
 class RateLimitState:
-    """Tracks rate limit state.
+    """Tracks rate limit state and drives a source-level cooldown circuit breaker.
 
-    Since the switch to fail-fast (bounded 1s retry on 429, then raise so
-    the aggregator falls over to other sources), the only consumer of this
-    state is ``DataSourceRateLimited.retry_after``, which surfaces
-    ``backoff_seconds`` to callers as advisory metadata. ``consecutive_429s``
-    is retained for observability/metrics.
+    VIB-4841 (T1): CoinGecko on the free tier allows ~10 calls/min (≈1 call /
+    6s), so the old "retry once after a 1s sleep" path was guaranteed to land
+    back inside the same rate-limit window and re-throttle — while *also*
+    stalling the aggregator's concurrent ``gather`` for that ~1s on every price
+    fetch (``aggregator.py`` waits for every source; there is no early return).
+
+    The fix is a fail-fast circuit breaker, not a sleep:
+
+    * On a 429, ``record_rate_limit()`` computes the exponential backoff
+      (1→2→4→8→10s) and opens a cooldown window ``next_allowed_at`` until which
+      the source MUST NOT issue another HTTP request. The caller raises
+      ``DataSourceRateLimited(retry_after=backoff_seconds)`` immediately so the
+      aggregator falls over to Binance / DexScreener / Chainlink without waiting.
+    * While ``cooldown_remaining(now) > 0`` the source fast-fails subsequent
+      calls *without a network request* — no compounding 429s.
+    * A successful 200 (``record_success()``) fully resets the breaker.
+
+    ``backoff_seconds`` still feeds ``DataSourceRateLimited.retry_after`` as
+    advisory metadata; ``consecutive_429s`` is retained for observability.
+    A monotonic clock is used for the cooldown so wall-clock adjustments
+    can't extend or collapse the window.
     """
 
     backoff_seconds: float = 1.0
     consecutive_429s: int = 0
     max_backoff_seconds: float = 10.0
+    # Monotonic deadline (``time.monotonic()`` seconds) before which the source
+    # is in cooldown and must not hit the network. ``None`` = breaker closed.
+    next_allowed_at: float | None = None
 
-    def record_rate_limit(self) -> None:
-        """Record a rate limit hit and increase backoff."""
+    def record_rate_limit(self, now: float | None = None) -> None:
+        """Record a 429, increase backoff, and open the cooldown window.
+
+        Args:
+            now: Monotonic timestamp (``time.monotonic()``). Injectable for
+                deterministic tests; defaults to the live monotonic clock.
+        """
         self.consecutive_429s += 1
-        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s. No longer drives
-        # sleeps; surfaced via DataSourceRateLimited.retry_after only.
+        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s.
         self.backoff_seconds = min(self.max_backoff_seconds, 2 ** (self.consecutive_429s - 1))
+        current = time.monotonic() if now is None else now
+        self.next_allowed_at = current + self.backoff_seconds
 
     def record_success(self) -> None:
-        """Record successful request, fully reset backoff state."""
+        """Record a successful request, fully resetting the circuit breaker."""
         self.consecutive_429s = 0
         self.backoff_seconds = 1.0
+        self.next_allowed_at = None
+
+    def cooldown_remaining(self, now: float | None = None) -> float:
+        """Seconds left in the cooldown window, or ``0.0`` if the breaker is closed.
+
+        Args:
+            now: Monotonic timestamp. Injectable for tests; defaults to live clock.
+        """
+        if self.next_allowed_at is None:
+            return 0.0
+        current = time.monotonic() if now is None else now
+        remaining = self.next_allowed_at - current
+        if remaining <= 0:
+            # Window elapsed — close the breaker so the next call hits the network.
+            self.next_allowed_at = None
+            return 0.0
+        return remaining
 
 
 @dataclass
@@ -400,6 +451,11 @@ class SourceHealthMetrics:
     cache_hits: int = 0
     timeouts: int = 0
     rate_limits: int = 0
+    # VIB-4841: number of times the source fast-failed because the 429 cooldown
+    # circuit breaker was open (no network request issued). Distinct from
+    # ``rate_limits`` (actual 429 responses) so dashboards can tell "we got
+    # throttled" apart from "we proactively skipped while cooling down".
+    cooldown_skips: int = 0
     errors: int = 0
     total_latency_ms: float = 0.0
     last_error: str | None = None
@@ -427,23 +483,13 @@ class SourceHealthMetrics:
             "cache_hits": self.cache_hits,
             "timeouts": self.timeouts,
             "rate_limits": self.rate_limits,
+            "cooldown_skips": self.cooldown_skips,
             "errors": self.errors,
             "success_rate": round(self.success_rate, 2),
             "average_latency_ms": round(self.average_latency_ms, 2),
             "last_error": self.last_error,
             "last_error_time": (self.last_error_time.isoformat() if self.last_error_time else None),
         }
-
-
-# Sentinel returned by _attempt_id_fetch / _attempt_address_fetch when the
-# response was 429 and the caller should retry. An Enum-singleton gives mypy a
-# narrowable type after `outcome is _RETRY`, so the orchestrator can `return
-# outcome` and have it land as the right narrowed type.
-class _RetrySentinel(enum.Enum):
-    RETRY = enum.auto()
-
-
-_RETRY = _RetrySentinel.RETRY
 
 
 class CoinGeckoPriceSource(BasePriceSource):
@@ -674,6 +720,39 @@ class CoinGeckoPriceSource(BasePriceSource):
         # Fall back to hardcoded symbol-based mappings.
         return GLOBAL_TOKEN_IDS.get(token)
 
+    def _raise_if_cooling_down(self, context: str) -> None:
+        """Fast-fail without a network request while the 429 cooldown is open.
+
+        VIB-4841 (T1): the price aggregator fans sources out concurrently and
+        waits for *every* one. A rate-limited CoinGecko must therefore return
+        instantly rather than retry/sleep, or it stalls the whole aggregate
+        behind the slowest source. ``RateLimitState`` opens a cooldown window
+        on a 429; while it is open we skip the request entirely and surface
+        ``DataSourceRateLimited`` so the aggregator falls over to Binance /
+        DexScreener / Chainlink.
+
+        Args:
+            context: Token/address label for the log line.
+
+        Raises:
+            DataSourceRateLimited: If the cooldown window is still open.
+        """
+        remaining = self._rate_limit_state.cooldown_remaining()
+        if remaining <= 0:
+            return
+        self._metrics.cooldown_skips += 1
+        logger.info(
+            "CoinGecko in 429 cooldown for %s — skipping request (%.1fs remaining, "
+            "consecutive_429s=%d). Aggregator will use other sources.",
+            context,
+            remaining,
+            self._rate_limit_state.consecutive_429s,
+        )
+        raise DataSourceRateLimited(
+            source=self.source_name,
+            retry_after=remaining,
+        )
+
     async def get_price(  # noqa: C901
         self,
         token: str,
@@ -728,11 +807,6 @@ class CoinGeckoPriceSource(BasePriceSource):
                 self._metrics.successful_requests += 1
                 return cached_addr.result
 
-        # No proactive sleep before the request. The aggregator fans out
-        # sources concurrently; sleeping here would stall every other source
-        # waiting on this single slow one. On 429 we give CoinGecko one
-        # bounded 1s retry inside the response handler below.
-
         # Resolve token ID (symbol/address -> CoinGecko ID via static registry)
         token_id = self._resolve_token_id(token_upper)
 
@@ -773,6 +847,13 @@ class CoinGeckoPriceSource(BasePriceSource):
                 reason=error_msg,
             )
 
+        # Fail-fast circuit breaker: if a recent 429 opened a cooldown window,
+        # skip the network call entirely. The price aggregator waits for every
+        # source with no timeout (aggregator.py _fetch_all_sources), so sleeping
+        # or retrying here would stall the whole aggregate behind this one
+        # rate-limited source. See _raise_if_cooling_down / RateLimitState.
+        self._raise_if_cooling_down(f"{token_upper}/{quote_upper}")
+
         # Build API URL
         url = f"{self._api_base}/simple/price"
         params: dict[str, str] = {
@@ -782,29 +863,20 @@ class CoinGeckoPriceSource(BasePriceSource):
         if self._api_key:
             params["x_cg_pro_api_key"] = self._api_key
 
-        # Bounded retry: at most one 1s pause after a 429 before giving up.
-        # 1s is enough for CoinGecko free's rate-limit window (~30/min) to
-        # roll over in most cases. Hardcoded; longer values compound across
-        # decide()'s ~5 price calls and risk the framework's 30s
-        # decide_timeout_seconds. Per-attempt logic is in _attempt_id_fetch.
+        # Single attempt, no in-call retry/sleep. On a 429 the attempt opens the
+        # cooldown window and raises DataSourceRateLimited (handled below as a
+        # stale-or-raise), so the aggregator fails over immediately.
         try:
-            for attempt in range(2):
-                if attempt > 0:
-                    await asyncio.sleep(1.0)
+            return await self._attempt_id_fetch(
+                url,
+                params,
+                token_id,
+                token_upper,
+                quote_upper,
+            )
 
-                outcome = await self._attempt_id_fetch(
-                    url,
-                    params,
-                    token_id,
-                    token_upper,
-                    quote_upper,
-                    attempt,
-                )
-                if outcome is _RETRY:
-                    continue
-                return outcome  # PriceResult on success or stale fallback
-
-            # Both attempts returned _RETRY (429 twice). Try stale, else raise.
+        except DataSourceRateLimited:
+            # 429: prefer a stale-cache signal over hard-failing this source.
             stale_result = self._stale_fallback_result(token_upper, quote_upper)
             if stale_result is not None:
                 logger.info(
@@ -813,10 +885,7 @@ class CoinGeckoPriceSource(BasePriceSource):
                     quote_upper,
                 )
                 return stale_result
-            raise DataSourceRateLimited(
-                source=self.source_name,
-                retry_after=self._rate_limit_state.backoff_seconds,
-            )
+            raise
 
         except TimeoutError as e:
             self._metrics.timeouts += 1
@@ -920,6 +989,10 @@ class CoinGeckoPriceSource(BasePriceSource):
             )
             return None
 
+        # Fail-fast circuit breaker (VIB-4841): skip the request while the 429
+        # cooldown window is open so the concurrent aggregator isn't stalled.
+        self._raise_if_cooling_down(address.lower())
+
         address_lower = address.lower()
         url = f"{self._api_base}/simple/token_price/{platform}"
         params: dict[str, str] = {
@@ -930,35 +1003,24 @@ class CoinGeckoPriceSource(BasePriceSource):
             params["x_cg_pro_api_key"] = self._api_key
 
         try:
-            # Bounded retry: at most one 1s pause after a 429, then give up.
-            # Each attempt's per-response logic lives in _attempt_address_fetch
-            # so this orchestration function stays trivial.
-            for attempt in range(2):
-                if attempt > 0:
-                    await asyncio.sleep(1.0)
+            # Single attempt, no in-call retry/sleep. A 429 opens the cooldown
+            # window and raises DataSourceRateLimited; we try stale cache first,
+            # else re-raise so the aggregator records the failure and fails over.
+            return await self._attempt_address_fetch(
+                url,
+                params,
+                address,
+                address_lower,
+                platform,
+                cache_token_key,
+                quote_upper,
+            )
 
-                outcome = await self._attempt_address_fetch(
-                    url,
-                    params,
-                    address,
-                    address_lower,
-                    platform,
-                    cache_token_key,
-                    quote_upper,
-                    attempt,
-                )
-                if outcome is _RETRY:
-                    continue
-                return outcome  # PriceResult on success/stale, None on miss
-
-            # Both attempts returned _RETRY (429 twice). Try stale, else raise.
+        except DataSourceRateLimited:
             stale_result = self._stale_fallback_result(cache_token_key, quote_upper)
             if stale_result is not None:
                 return stale_result
-            raise DataSourceRateLimited(
-                source=self.source_name,
-                retry_after=self._rate_limit_state.backoff_seconds,
-            )
+            raise
 
         except TimeoutError as e:
             self._metrics.timeouts += 1
@@ -993,18 +1055,17 @@ class CoinGeckoPriceSource(BasePriceSource):
         platform: str,
         cache_token_key: str,
         quote_upper: str,
-        attempt: int,
-    ) -> "PriceResult | None | _RetrySentinel":
+    ) -> "PriceResult | None":
         """Run one HTTP attempt of the address-endpoint fetch.
 
         Returns:
           - ``PriceResult``: success or stale-cache fallback (on non-200).
           - ``None``: CoinGecko has no listing for this address (normal miss).
-          - ``_RETRY`` sentinel: status 429, caller should retry.
 
-        Raises ``DataSourceUnavailable`` for non-200 with no stale cache.
-        ``DataSourceRateLimited`` is **not** raised here — the orchestrator in
-        ``_try_fetch_by_address`` decides whether to retry or exhaust.
+        Raises:
+          - ``DataSourceRateLimited``: status 429 — opens the cooldown window
+            so subsequent calls fast-fail without a network request.
+          - ``DataSourceUnavailable``: non-200 with no stale cache.
         """
         start_time = time.time()
         session = await self._get_session()
@@ -1013,16 +1074,22 @@ class CoinGeckoPriceSource(BasePriceSource):
 
             if response.status == 429:
                 # Rate limit is a transient outage, not "unknown token".
-                # Caller orchestrates retry vs. exhaust.
+                # Open the cooldown circuit breaker and fail fast — no retry,
+                # no sleep — so the aggregator's concurrent gather isn't stalled.
                 self._rate_limit_state.record_rate_limit()
                 self._metrics.rate_limits += 1
                 logger.warning(
-                    "Rate limited by CoinGecko on address endpoint for %s/%s (attempt %d)",
+                    "Rate limited by CoinGecko on address endpoint for %s/%s — "
+                    "opening %.1fs cooldown (consecutive_429s=%d)",
                     address_lower,
                     quote_upper,
-                    attempt + 1,
+                    self._rate_limit_state.backoff_seconds,
+                    self._rate_limit_state.consecutive_429s,
                 )
-                return _RETRY
+                raise DataSourceRateLimited(
+                    source=self.source_name,
+                    retry_after=self._rate_limit_state.backoff_seconds,
+                )
 
             if response.status != 200:
                 # Other HTTP errors — also transient. Try stale cache, then
@@ -1100,17 +1167,16 @@ class CoinGeckoPriceSource(BasePriceSource):
         token_id: str,
         token_upper: str,
         quote_upper: str,
-        attempt: int,
-    ) -> "PriceResult | _RetrySentinel":
+    ) -> "PriceResult":
         """Run one HTTP attempt of the `/simple/price` ID-keyed fetch.
 
         Returns:
           - ``PriceResult``: success or stale-cache fallback (on non-200).
-          - ``_RETRY`` sentinel: status 429, caller should retry.
 
-        Raises ``DataSourceUnavailable`` for non-200/null/missing-field with
-        no stale cache. ``DataSourceRateLimited`` is **not** raised here —
-        the orchestrator in ``get_price`` decides retry vs. exhaust.
+        Raises:
+          - ``DataSourceRateLimited``: status 429 — opens the cooldown window
+            so subsequent calls fast-fail without a network request.
+          - ``DataSourceUnavailable``: non-200/null/missing-field with no stale cache.
         """
         start_time = time.time()
         session = await self._get_session()
@@ -1118,20 +1184,26 @@ class CoinGeckoPriceSource(BasePriceSource):
             latency_ms = (time.time() - start_time) * 1000
 
             if response.status == 429:
+                # Open the cooldown circuit breaker and fail fast — no retry,
+                # no sleep — so the aggregator's concurrent gather isn't stalled.
                 self._rate_limit_state.record_rate_limit()
                 self._metrics.rate_limits += 1
                 logger.warning(
-                    "Rate limited by CoinGecko for %s/%s (attempt %d)",
+                    "Rate limited by CoinGecko for %s/%s — opening %.1fs cooldown",
                     token_upper,
                     quote_upper,
-                    attempt + 1,
+                    self._rate_limit_state.backoff_seconds,
                     extra={
                         "token": token_upper,
                         "quote": quote_upper,
                         "consecutive_429s": self._rate_limit_state.consecutive_429s,
+                        "cooldown_seconds": self._rate_limit_state.backoff_seconds,
                     },
                 )
-                return _RETRY
+                raise DataSourceRateLimited(
+                    source=self.source_name,
+                    retry_after=self._rate_limit_state.backoff_seconds,
+                )
 
             if response.status != 200:
                 error_msg = f"HTTP {response.status}: {await response.text()}"

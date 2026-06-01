@@ -384,7 +384,7 @@ def test_end_to_end_fake_bridge_produces_transfer_event() -> None:
         outbox_row=outbox,
         ledger_row=ledger,
         basis_store=FIFOBasisStore(),
-        prior_open_lookup=lambda _key: None,
+        prior_open_lookup=lambda _key, _disc=None: None,
     )
     event = handler(ctx)
 

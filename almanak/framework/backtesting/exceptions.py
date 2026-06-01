@@ -24,6 +24,76 @@ class BacktestError(Exception):
     pass
 
 
+class DataSourceUnavailableError(BacktestError):
+    """Raised when a required data source is unavailable and no safe fallback exists.
+
+    Unlike :class:`HistoricalDataUnavailableError` (which signals a missing
+    *historical* data point at a specific timestamp), this exception signals that
+    the adapter has *no acceptable way* to obtain a number it needs and refuses to
+    fabricate one. It is raised when:
+
+    - historical volume could not be fetched (no subgraph key / lookup failed /
+      ``use_historical_volume=False``), AND
+    - the caller did not provide explicit inputs (pool liquidity + volume), AND
+    - the caller did not explicitly opt in to the heuristic fallback.
+
+    The message must tell the user exactly what to provide to proceed. We fail loud
+    here rather than silently substitute a fabricated number, because a wrong
+    financial estimate is worse than a clear error.
+
+    Attributes:
+        data_type: Type of data that was unavailable (e.g., "volume").
+        identifier: Resource identifier (e.g., pool address, position id).
+        remediation: Concrete, actionable guidance on how to make the call succeed.
+
+    Example:
+        raise DataSourceUnavailableError(
+            data_type="volume",
+            identifier="WETH/USDC",
+            remediation=(
+                "Provide one of: use_historical_volume=True with a valid "
+                "subgraph_api_key; an explicit volume_provider; or set "
+                "allow_volume_fallback=True to accept the rough heuristic."
+            ),
+        )
+    """
+
+    def __init__(
+        self,
+        data_type: str,
+        identifier: str,
+        remediation: str,
+        message: str | None = None,
+    ) -> None:
+        """Initialize the exception.
+
+        Args:
+            data_type: Type of data that was unavailable.
+            identifier: Resource identifier (pool address, position id, token pair).
+            remediation: Concrete guidance on how to make the call succeed.
+            message: Optional override for the leading message. Defaults to a
+                standard "no acceptable data source" sentence.
+        """
+        self.data_type = data_type
+        self.identifier = identifier
+        self.remediation = remediation
+        lead = message or (
+            f"No acceptable {data_type} data source for '{identifier}' and refusing to fabricate a value"
+        )
+        self.message = lead
+        full_message = f"{lead}. To proceed: {remediation}"
+        super().__init__(full_message)
+
+    def __repr__(self) -> str:
+        """Return a detailed representation of the exception."""
+        return (
+            f"DataSourceUnavailableError("
+            f"data_type={self.data_type!r}, "
+            f"identifier={self.identifier!r}, "
+            f"remediation={self.remediation!r})"
+        )
+
+
 class HistoricalDataUnavailableError(BacktestError):
     """Raised when historical data is unavailable in strict mode.
 
@@ -103,5 +173,6 @@ class HistoricalDataUnavailableError(BacktestError):
 
 __all__ = [
     "BacktestError",
+    "DataSourceUnavailableError",
     "HistoricalDataUnavailableError",
 ]

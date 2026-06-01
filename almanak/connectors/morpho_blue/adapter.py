@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
 
-from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
+from .addresses import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 
 logger = logging.getLogger(__name__)
 

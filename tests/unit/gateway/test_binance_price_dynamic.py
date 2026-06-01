@@ -24,6 +24,21 @@ class TestBinanceDynamicResolution:
         assert "ETH" in _TOKEN_TO_BINANCE_SYMBOL
         assert "WETH" in _TOKEN_TO_BINANCE_SYMBOL
 
+    @pytest.mark.parametrize("token", ["POL", "MATIC", "WMATIC", "WPOL"])
+    def test_polygon_native_uses_pol_pair(self, token):
+        """Polygon native must price off the live POLUSDT pair, not the dead
+        MATICUSDT ghost listing (which returns ~4x the real price post-rebrand).
+        """
+        assert _TOKEN_TO_BINANCE_SYMBOL[token] == "POLUSDT"
+        assert _TOKEN_TO_BINANCE_SYMBOL[token] != "MATICUSDT"
+
+    @pytest.mark.parametrize("token", ["BTC", "WBTC", "BTCB"])
+    def test_btc_family_uses_btcusdt_pair(self, token):
+        """BSC's wrapper is BTCB (Binance-Peg BTC, 18 decimals — PR #2505).
+        It MUST share the BTCUSDT spot pair with WBTC; a different mapping
+        on BSC would silently fork BTC pricing per chain."""
+        assert _TOKEN_TO_BINANCE_SYMBOL[token] == "BTCUSDT"
+
     @pytest.mark.asyncio()
     async def test_dynamic_resolve_finds_usdt_pair(self, source):
         """Dynamic resolution should find {TOKEN}USDT pair."""

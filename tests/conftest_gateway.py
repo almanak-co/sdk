@@ -528,6 +528,7 @@ anvil_avalanche = _create_anvil_fixture("avalanche")
 anvil_bsc = _create_anvil_fixture("bsc")
 anvil_optimism = _create_anvil_fixture("optimism")
 anvil_polygon = _create_anvil_fixture("polygon")
+anvil_linea = _create_anvil_fixture("linea")
 anvil_mantle = _create_anvil_fixture("mantle")
 # Monad: Alchemy mainnet is gated per-app; default to public RPC which has been
 # verified (2026-04-18) to serve historical state sufficient for Anvil forking.

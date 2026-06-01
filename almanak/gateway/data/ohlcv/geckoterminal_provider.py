@@ -275,6 +275,7 @@ class GeckoTerminalOHLCVProvider:
         *,
         pool_address: str | None = None,
         chain: str = "ethereum",
+        include_empty_intervals: bool = False,
     ) -> list[OHLCVCandle]:
         """Fetch OHLCV candles from GeckoTerminal.
 
@@ -286,6 +287,11 @@ class GeckoTerminalOHLCVProvider:
             pool_address: Explicit pool contract address. If provided, fetched
                 directly. Otherwise a search is performed.
             chain: Chain name for network resolution (default "ethereum").
+            include_empty_intervals: When True, ask GeckoTerminal to backfill
+                no-trade intervals as continuous buckets. Fills *interior* gaps
+                up to the most recent trade; it does NOT advance the newest
+                candle past the last trade (that trailing-edge gap is handled
+                in the framework OHLCV router). Default False.
 
         Returns:
             List of OHLCVCandle sorted by timestamp ascending.
@@ -345,6 +351,8 @@ class GeckoTerminalOHLCVProvider:
             "limit": limit,
             "currency": "usd",
         }
+        if include_empty_intervals:
+            params["include_empty_intervals"] = "true"
 
         start_time = time.monotonic()
 

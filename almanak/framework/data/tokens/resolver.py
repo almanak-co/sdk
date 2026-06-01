@@ -57,7 +57,8 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import Chain, ChainFamily
 
 from .cache import TokenCacheManager
 from .defaults import DEFAULT_TOKENS, NATIVE_SENTINEL, SYMBOL_ALIASES, WRAPPED_NATIVE
@@ -99,13 +100,26 @@ ADDRESS_LIKE_PATTERN = re.compile(r"^0x[a-zA-Z0-9]{38,42}$")
 SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
+def _is_solana_chain(chain: str | None) -> bool:
+    """Return True when ``chain`` resolves to the SOLANA family.
+
+    ``ChainRegistry.try_resolve`` returns ``None`` for unknown names, so
+    a missing / unrecognized chain falls through to the EVM branch —
+    matches the legacy ``chain.lower() == "solana"`` contract.
+    """
+    if not chain:
+        return False
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor is not None and descriptor.family is ChainFamily.SOLANA
+
+
 def _is_address(token: str, chain: str | None = None) -> bool:
     """Check if a token string is a valid address.
 
     If chain is provided, checks format for that chain's family.
     If chain is None, checks if it matches ANY known address format.
     """
-    if chain and chain.lower() == "solana":
+    if chain and _is_solana_chain(chain):
         return bool(SOLANA_ADDRESS_PATTERN.match(token))
     if ADDRESS_PATTERN.match(token):
         return True
@@ -136,7 +150,7 @@ def _validate_address(address: str, chain: str) -> None:
     Raises:
         InvalidTokenAddressError: If address format is invalid
     """
-    if chain.lower() == "solana":
+    if _is_solana_chain(chain):
         if not SOLANA_ADDRESS_PATTERN.match(address):
             raise InvalidTokenAddressError(
                 token=address,
@@ -172,7 +186,7 @@ def _normalize_address_for_chain(address: str, chain: str) -> str:
     EVM addresses are case-insensitive -> lowercase.
     Solana base58 addresses are case-sensitive -> preserve case.
     """
-    if chain.lower() == "solana":
+    if _is_solana_chain(chain):
         return address
     return address.lower()
 

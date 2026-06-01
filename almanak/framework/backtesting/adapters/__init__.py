@@ -55,6 +55,8 @@ from almanak.framework.backtesting.adapters.lending_adapter import (
     LendingBacktestConfig,
 )
 from almanak.framework.backtesting.adapters.lp_adapter import (
+    HeuristicValidationResult,
+    HeuristicValidationSample,
     LPBacktestAdapter,
     LPBacktestConfig,
     RangeStatus,
@@ -103,6 +105,8 @@ __all__ = [
     "CumulativeSlippageModel",
     "ExecutionStep",
     # LP adapter
+    "HeuristicValidationResult",
+    "HeuristicValidationSample",
     "LPBacktestAdapter",
     "LPBacktestConfig",
     "RangeStatus",

@@ -702,6 +702,51 @@ def _build_extracted_data_json(result: Any) -> str:
         return extracted_data_json
 
 
+def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str) -> None:
+    """Stamp the close intent's ``position_id`` onto ``result.extracted_data["lp_close_data"]`` (VIB-4275).
+
+    The close RECEIPT does not re-emit the closing NFT's token id (a Burn /
+    DecreaseLiquidity event carries no NFT id), so receipt parsers leave
+    ``LPCloseData.position_id`` as ``None``. The close INTENT, however, names
+    exactly which position is being closed (``LPCloseIntent.position_id`` is a
+    required field). This is the single correct capture point: the runner holds
+    both the intent and the enriched result here, just before serialization into
+    the existing ``transaction_ledger.extracted_data_json`` JSON column (SDK-
+    owned; no new DB column, no Postgres DDL).
+
+    No-op unless this is an LP_CLOSE / LP_COLLECT_FEES with a usable
+    ``position_id`` on the intent and an ``LPCloseData`` already present on the
+    result. ``LPCloseData`` is frozen, so the stamped copy is written back via
+    :func:`dataclasses.replace`. Idempotent: a discriminator already present on
+    the close data (e.g. a future parser that learns to emit it) is preserved.
+    """
+    if intent_type not in ("LP_CLOSE", "LP_COLLECT_FEES"):
+        return
+    raw = getattr(intent, "position_id", None)
+    # Uniformly ignore the degenerate 0 / "0" id across stamp + both resolvers:
+    # never stamp a discriminator the resolver will discard (gemini review on #2459).
+    if raw is None or raw == "" or raw == 0 or str(raw).strip() == "0":
+        return
+    extracted = getattr(result, "extracted_data", None) if result else None
+    if not isinstance(extracted, dict):
+        return
+    close_data = extracted.get("lp_close_data")
+    if close_data is None or not hasattr(close_data, "position_id"):
+        return
+    # Preserve an already-stamped discriminator (Empty ≠ Zero — do not clobber
+    # a real parser-emitted value with the intent's).
+    if getattr(close_data, "position_id", None):
+        return
+    import dataclasses
+
+    try:
+        extracted["lp_close_data"] = dataclasses.replace(close_data, position_id=str(raw))
+    except (TypeError, ValueError):
+        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave
+        # it untouched rather than raise on the ledger-write path.
+        return
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -790,6 +835,13 @@ def build_ledger_entry(
                 cycle_id,
             )
     final_error = _coalesce_error(success, error, result)
+    # VIB-4275 — stamp the close intent's per-position discriminator onto
+    # ``lp_close_data`` BEFORE serialization. The close RECEIPT cannot carry the
+    # token id (a Burn emits no NFT id), but the close INTENT
+    # (``LPCloseIntent.position_id``) knows exactly which NFT is being closed.
+    # The close-side accounting resolver reads this back off ``extracted_data_json``
+    # to attribute a co-pool close to its OWN prior open.
+    _stamp_lp_close_discriminator(intent, result, intent_type)
     extracted_data_json = _build_extracted_data_json(result)
     protocol = getattr(intent, "protocol", "") or ""
 
@@ -861,12 +913,49 @@ def build_ledger_entry(
     # W1-5 decimal-unit soft-fail guard (VIB-4780).  Runs after the entry is
     # fully constructed so amount_in/amount_out are resolved.  Soft-fail only:
     # logs a WARNING, never raises, never mutates the entry.
-    from almanak.framework.accounting.decimal_guards import _check_decimal_unit_soft_fail
+    #
+    # Token decimals are resolved LAZILY — only when at least one of the
+    # guarded fields is integer-shaped (the raw-wei tell).  This keeps the
+    # happy path (legitimate Decimal strings like ``"0.001130"``) free of
+    # any resolver init cost or noise.
+    from almanak.framework.accounting.decimal_guards import (
+        _check_decimal_unit_soft_fail,
+        _is_integer_shaped,
+    )
+
+    chain_lc = (chain or "").lower()
+    token_symbols_map: dict[str, str] = {}
+    token_decimals_map: dict[str, int] = {}
+
+    needs_decimals_lookup = any(_is_integer_shaped(v) for v in (entry.amount_in, entry.amount_out))
+
+    if needs_decimals_lookup:
+        try:
+            from almanak.framework.data.tokens.resolver import get_token_resolver
+
+            resolver = get_token_resolver()
+            for side, sym in (("in", token_in), ("out", token_out)):
+                if not sym:
+                    continue
+                token_symbols_map[side] = sym
+                try:
+                    info = resolver.resolve(sym, chain=chain_lc)
+                except Exception:
+                    info = None
+                if info is not None and info.decimals is not None:
+                    token_decimals_map[side] = info.decimals
+        except Exception:  # pragma: no cover - resolver path is best-effort
+            # Resolver unavailable — fall through; the magnitude rule will
+            # still run inside the guard without decimals plumbed.
+            pass
 
     _check_decimal_unit_soft_fail(
         {"amount_in": entry.amount_in, "amount_out": entry.amount_out},
         event_id=entry.id,
         event_type=entry.intent_type,
+        chain=chain_lc or None,
+        token_decimals_map=token_decimals_map or None,
+        token_symbols_map=token_symbols_map or None,
     )
 
     return entry

@@ -131,8 +131,10 @@ def _register_once() -> None:
         return
     _registered = True
     try:
-        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
         from almanak.framework.intents.vocabulary import IntentType
+
+        from .client import CHAIN_MAPPING
 
         register_connector(
             name="enso",
@@ -145,6 +147,20 @@ def _register_once() -> None:
                 "base",
                 "avalanche",
                 "bnb",
+            ),
+            # Matrix output is owned by the connector (VIB-4856 / W4).
+            # Enso surfaces under ``aggregator`` (not ``swap``) because it
+            # aggregates routes across multiple DEXes / lending venues; Edge
+            # / agent classifiers should not treat it as a primary swap
+            # venue. Chain coverage is the full Enso API set (~13 chains,
+            # ahead of the strategy ``chains`` field's 7) so the matrix
+            # advertises every chain Enso can route on.
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="enso",
+                    category="aggregator",
+                    chains=frozenset(CHAIN_MAPPING.keys()),
+                ),
             ),
         )
     except Exception:

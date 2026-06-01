@@ -462,7 +462,9 @@ class SwapAccountingEvent:
     # conflate.
     effective_price: Decimal | None
     slippage_bps: int | None
-    realized_pnl_usd: Decimal | None  # amount_in_usd - cost_basis_consumed; None if no prior lot
+    realized_pnl_usd: (
+        Decimal | None
+    )  # amount_in_usd - cost_basis_consumed; None if no prior lot OR partial match (legacy contract)
     cost_basis_recorded: bool  # True if acquisition lot was recorded for token_out
     gas_usd: Decimal | None
     confidence: AccountingConfidence
@@ -470,9 +472,25 @@ class SwapAccountingEvent:
     # Position key used for FIFO lot lookup (swap:<chain>:<wallet>).
     # Stored in payload for reconstruct_from_events reconstruction.
     swap_position_key: str = ""
+    # VIB-4905 (F1): matched-portion realized PnL.  Populated on partial
+    # matches too — ``realized_pnl_usd`` above keeps the legacy "full-match
+    # only" semantics for backward compat; consumers wanting the matched
+    # portion under partial matches read this field instead.  ``None`` when
+    # no prior basis was matched at all.
+    realized_pnl_usd_matched: Decimal | None = None
+    # VIB-4905 (F1): unmatched portion of ``amount_in`` after FIFO
+    # consumption.  ``None`` when matching was not attempted (no basis
+    # store, unmeasured amounts).  ``Decimal("0")`` is a full match.
+    unmatched_amount_in: Decimal | None = None
+    # VIB-4905 (F1): pro-rated USD proceeds attributable to the unmatched
+    # portion.  ``None`` when ``amount_in_usd`` was unavailable.
+    unmatched_proceeds_usd: Decimal | None = None
     schema_version: int = 1
     # VIB-4166 (T6) — see module docstring for bump policy.
-    primitive_version: int = 1
+    # VIB-4905 (F1) bumped to 2: payload contract gained the three
+    # partial-match fields above.  Replay path tolerates v1 payloads via
+    # ``.get(..., None)``.
+    primitive_version: int = 2
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -494,6 +512,13 @@ class SwapAccountingEvent:
             "effective_price": _enc(self.effective_price),
             "slippage_bps": self.slippage_bps,
             "realized_pnl_usd": _enc(self.realized_pnl_usd),
+            # VIB-4905 (F1): additive partial-match fields.  Consumers
+            # reading the legacy ``realized_pnl_usd`` keep getting the
+            # same value (None on partial matches); consumers wanting the
+            # matched portion read ``realized_pnl_usd_matched``.
+            "realized_pnl_usd_matched": _enc(self.realized_pnl_usd_matched),
+            "unmatched_amount_in": _enc(self.unmatched_amount_in),
+            "unmatched_proceeds_usd": _enc(self.unmatched_proceeds_usd),
             "cost_basis_recorded": self.cost_basis_recorded,
             "gas_usd": _enc(self.gas_usd),
             "confidence": self.confidence.value,
@@ -523,6 +548,12 @@ class SwapAccountingEvent:
             effective_price=Decimal(d["effective_price"]) if d.get("effective_price") is not None else None,
             slippage_bps=d.get("slippage_bps"),
             realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
+            # VIB-4905 (F1): additive — ``.get(..., None)`` keeps v1 payloads
+            # round-tripping without crashing.  Pre-v2 rows simply emit
+            # ``None`` for the matched / unmatched bundle.
+            realized_pnl_usd_matched=_dec(d.get("realized_pnl_usd_matched")),
+            unmatched_amount_in=_dec(d.get("unmatched_amount_in")),
+            unmatched_proceeds_usd=_dec(d.get("unmatched_proceeds_usd")),
             cost_basis_recorded=bool(d.get("cost_basis_recorded", False)),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),

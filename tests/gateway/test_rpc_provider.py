@@ -168,18 +168,18 @@ class TestGetRpcUrl:
         assert "xlayer-mainnet.g.alchemy.com" in url
         assert "test-alchemy-key" in url
 
-    def test_builtin_chains_register_xlayer_alchemy_prefix(self):
-        """xlayer's alchemy_prefix is wired both via config/rpc_defaults.json and the
-        in-process _BUILTIN_CHAINS fallback, so deployments without the JSON config still
-        route through Alchemy. Mantle has the same wiring; included for parity."""
-        from almanak.gateway.utils.rpc_provider import _BUILTIN_CHAINS, ALCHEMY_CHAIN_KEYS
+    def test_chain_descriptors_register_xlayer_alchemy_prefix(self):
+        """xlayer / mantle Alchemy routing is wired on the chain descriptor, so any
+        deployment that imports ``almanak.core.chains`` (i.e. all of them) routes
+        through Alchemy. Previously this lived in ``config/rpc_defaults.json`` with
+        a duplicated in-process ``_BUILTIN_CHAINS`` fallback; both are gone."""
+        from almanak.core.chains import ChainRegistry
+        from almanak.gateway.utils.rpc_provider import ALCHEMY_CHAIN_KEYS
 
-        # _BUILTIN_CHAINS is the in-process fallback used when config/rpc_defaults.json
-        # isn't on disk (e.g. wheel-installed package without the repo root checkout).
-        assert _BUILTIN_CHAINS["xlayer"]["alchemy_prefix"] == "xlayer"
-        assert _BUILTIN_CHAINS["mantle"]["alchemy_prefix"] == "mantle"
-        # ALCHEMY_CHAIN_KEYS is built from the loaded chains dict (config file when
-        # present, _BUILTIN_CHAINS otherwise) — it must contain both either way.
+        # ChainDescriptor.rpc is the single source of truth.
+        assert ChainRegistry.resolve("xlayer").rpc.alchemy_prefix == "xlayer"
+        assert ChainRegistry.resolve("mantle").rpc.alchemy_prefix == "mantle"
+        # ALCHEMY_CHAIN_KEYS is derived from ChainRegistry at module import.
         assert ALCHEMY_CHAIN_KEYS.get("xlayer") == "xlayer"
         assert ALCHEMY_CHAIN_KEYS.get("mantle") == "mantle"
 

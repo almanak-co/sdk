@@ -263,6 +263,8 @@ class TestUniswapV4LPOpenIntent:
             range_upper=LP_RANGE_UPPER,
             protocol="uniswap_v4",
             chain=CHAIN_NAME,
+            # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork -> estimated price; opt in.
+            protocol_params={"allow_estimated_price": True},
         )
 
         print(f"\nCreated LPOpenIntent: pool={intent.pool}, protocol={intent.protocol}")

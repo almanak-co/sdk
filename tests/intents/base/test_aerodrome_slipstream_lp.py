@@ -29,7 +29,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.core.contracts import AERODROME
+from almanak.connectors.aerodrome.addresses import AERODROME
 from almanak.connectors.aerodrome.receipt_parser import (
     AerodromeSlipstreamReceiptParser,
 )

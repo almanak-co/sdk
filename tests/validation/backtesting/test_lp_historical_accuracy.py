@@ -310,13 +310,22 @@ def il_calculator():
 
 @pytest.fixture
 def lp_adapter():
-    """Create LP backtest adapter with default config."""
+    """Create LP backtest adapter exercising the volume_multiplier heuristic.
+
+    These integration tests deliberately validate the heuristic fee-accrual / IL
+    path WITHOUT a live subgraph (no API key in CI). Post-VIB-4849 the adapter
+    refuses to silently fabricate volume by default and raises
+    ``DataSourceUnavailableError`` instead. We therefore opt into the heuristic
+    explicitly via ``allow_volume_fallback=True`` so the path under test runs;
+    production callers keep the safe fail-loud default.
+    """
     config = LPBacktestConfig(
         strategy_type="lp",
         il_calculation_method="standard",
         fee_tracking_enabled=True,
         volume_multiplier=Decimal("10"),
         base_liquidity=Decimal("1000000"),
+        allow_volume_fallback=True,
     )
     return LPBacktestAdapter(config)
 

@@ -471,13 +471,26 @@ def test_handler_killswitch_off_does_NOT_run_validator():
     assert "VIB-4728" in response.error
 
 
-def test_handler_valid_request_still_returns_unimplemented_in_pool3_window():
-    """Validator passing does NOT mean providers are wired — POOL-3 is
-    the validator ticket; POOL-5 (VIB-4753) wires providers. A
-    syntactically-valid request still returns UNIMPLEMENTED until then."""
+def test_handler_valid_request_dispatches_after_pool5():
+    """POOL-5 (VIB-4753) closed the UNIMPLEMENTED window: a validated request
+    now dispatches through the provider fallback chain. With all providers
+    forced to fail (deterministic — no network egress), the handler returns
+    UNAVAILABLE with the D3.F6 failure-envelope shape — NOT the old
+    UNIMPLEMENTED stub. (The happy path with mocked providers is exercised in
+    ``test_pool_history_service.py``.)"""
+    from unittest.mock import AsyncMock, patch
+
+    from almanak.gateway.data.pool_history.dispatcher import _DispatchOutcome
+
     servicer = _enabled_servicer()
     ctx = _CodeContext()
-    response = asyncio.run(servicer.GetPoolHistory(_make_request(), ctx))  # type: ignore[arg-type]
-    assert ctx.code == grpc.StatusCode.UNIMPLEMENTED
+    failure = _DispatchOutcome(success=False, source="", snapshots=[], error="all providers exhausted")
+    with patch.object(servicer._dispatcher, "dispatch", new=AsyncMock(return_value=failure)):
+        response = asyncio.run(servicer.GetPoolHistory(_make_request(), ctx))  # type: ignore[arg-type]
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
     assert response.success is False
-    assert "POOL-5" in ctx.details or "VIB-4753" in ctx.details
+    assert response.error  # non-empty: caller must be able to find out why
+    assert response.truncation_reason == gateway_pb2.TruncationReason.TRUNCATION_REASON_UNSPECIFIED
+    assert response.next_start_ts == 0
+    assert response.source == ""
+    assert len(response.snapshots) == 0

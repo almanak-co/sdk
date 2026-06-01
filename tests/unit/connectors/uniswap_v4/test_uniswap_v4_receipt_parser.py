@@ -136,7 +136,7 @@ class TestParserInit:
         assert parser.chain == "ethereum"
 
     def test_init_with_chain(self):
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         assert parser.chain == "arbitrum"
         assert parser.pool_manager == UNISWAP_V4["arbitrum"]["pool_manager"].lower()
@@ -475,7 +475,7 @@ class TestExtractPositionId:
 
     def test_extract_from_position_manager_mint(self):
         """Standard case: ERC-721 Transfer from PositionManager with from=zero (mint)."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -494,7 +494,7 @@ class TestExtractPositionId:
 
     def test_extract_ignores_non_mint_transfers(self):
         """Regular transfers (from != zero) should NOT be extracted."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -517,7 +517,7 @@ class TestExtractPositionId:
 
     def test_extract_with_mixed_logs(self):
         """Position ID extracted from ERC-721 mint among ERC-20 transfers and swaps."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -550,7 +550,7 @@ class TestExtractPositionId:
         """When ERC-721 mint comes from a known V4 PositionManager address
         (but not the one configured for this chain), the fallback should
         still extract the position ID."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         # Use ethereum's PM address (known V4 PM, but not arbitrum's)
@@ -586,7 +586,7 @@ class TestExtractPositionId:
     def test_extract_prefers_position_manager_over_fallback(self):
         """When both the chain's PositionManager and another known V4 PM emit
         ERC-721 mints, prefer the chain's own PositionManager."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -615,7 +615,7 @@ class TestExtractPositionId:
 
     def test_extract_large_token_id(self):
         """Large tokenId values should be handled correctly."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -635,7 +635,7 @@ class TestExtractPositionId:
 
     def test_extract_all_supported_chains(self):
         """Position ID extraction works for all chains with V4 deployments."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         for chain_name, addrs in UNISWAP_V4.items():
             parser = UniswapV4ReceiptParser(chain=chain_name)
@@ -655,7 +655,7 @@ class TestExtractPositionId:
 
     def test_extract_case_insensitive_address(self):
         """Address comparison should be case-insensitive (checksum vs lowercase)."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
@@ -676,7 +676,7 @@ class TestExtractPositionId:
     def test_extract_fails_closed_on_multiple_known_pm_mints(self):
         """When multiple ERC-721 mints from known V4 PMs exist (no exact chain match),
         return None to fail closed rather than guessing."""
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         eth_pm = UNISWAP_V4["ethereum"]["position_manager"]

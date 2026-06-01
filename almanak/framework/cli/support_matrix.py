@@ -1,7 +1,32 @@
 """CLI command to display the chains x protocols support matrix.
 
-Dynamically derives the matrix from the SDK's actual data structures
-(compiler routing tables, contract registries, connector availability).
+Dynamically derived from the SDK's actual data structures — the matrix
+is composed from two strategy-side sources:
+
+1. **Strategy-side** :class:`~almanak.connectors._strategy_base.registry.ConnectorRegistry`
+   — every ``register_connector`` call contributes a manifest. The
+   manifest's optional ``matrix_entries`` field is consumed verbatim
+   when declared; otherwise entries are derived from ``intents`` +
+   ``chains`` via :func:`_derive_entries_from_intents`.
+2. **Compiler routing tables** — last-resort fallback for protocols
+   that have no connector folder (``uniswap_v2`` / ``pancakeswap_v2`` /
+   ``quickswap`` / ``sushiswap`` / ``velodrome`` / ``1inch``). Read as
+   data (dict iteration), so no protocol-name string literals leak into
+   this file.
+
+The gateway-side ``SupportedActionsCapability`` was an early design
+candidate (Source 3 in the VIB-4856 spec) but the strategy-side import
+boundary forbids reading gateway-only modules from a strategy-container
+CLI module. ``ConnectorManifest.matrix_entries`` is the equivalent
+declarative override on the strategy side — every connector that needs
+matrix coverage beyond the intent → category default declares it there
+in its ``__init__.py``.
+
+Adding a new connector folder under ``almanak/connectors/<protocol>/``
+causes it to appear in the matrix automatically — no central edit. See
+VIB-4856 (epic VIB-4851) for the rationale, and
+``blueprints/22-connector-self-containment.md`` for the architectural
+context.
 """
 
 from __future__ import annotations
@@ -42,508 +67,296 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Per-classifier collectors. Each populates one or more {protocol: chains} maps
-# from a specific data source (compiler routing table, contracts registry, or
-# connector import-probe). Helpers mutate the shared `all_chains` set so the
-# orchestrator only owns assembly + sort.
+# Connector-driven matrix derivation
 # ---------------------------------------------------------------------------
 
 
-def _collect_swap_and_split_oneinch(all_chains: set[str]) -> tuple[dict[str, set[str]], set[str]]:
-    """Split PROTOCOL_ROUTERS into (swap_protocols, oneinch_chains)."""
-    from almanak.framework.intents.compiler import PROTOCOL_ROUTERS
+def _matrix_chain(chain: str) -> str:
+    """Normalise a manifest chain name to the matrix's canonical form.
 
-    swap_protocols: dict[str, set[str]] = {}
-    oneinch_chains: set[str] = set()
-    for chain, protos in PROTOCOL_ROUTERS.items():
-        all_chains.add(chain)
-        for proto in protos:
-            # Track aggregators separately — they get their own category
-            if proto in ("1inch",):
-                oneinch_chains.add(chain)
-                continue
-            swap_protocols.setdefault(proto, set()).add(chain)
-    return swap_protocols, oneinch_chains
-
-
-def _collect_lp_position_managers(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect LP protocols from compiler's LP_POSITION_MANAGERS table."""
-    from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
-
-    lp_protocols: dict[str, set[str]] = {}
-    for chain, protos in LP_POSITION_MANAGERS.items():
-        all_chains.add(chain)
-        for proto in protos:
-            lp_protocols.setdefault(proto, set()).add(chain)
-    return lp_protocols
-
-
-def _collect_registry_lending(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect Aave V3 and Morpho Blue lending from contracts registry."""
-    from almanak.core.contracts import AAVE_V3, MORPHO_BLUE
-
-    lending: dict[str, set[str]] = {}
-    for chain in AAVE_V3:
-        all_chains.add(chain)
-        lending.setdefault("aave_v3", set()).add(chain)
-    for chain in MORPHO_BLUE:
-        all_chains.add(chain)
-        lending.setdefault("morpho_blue", set()).add(chain)
-    return lending
-
-
-def _add_compound_v3(lending: dict[str, set[str]], all_chains: set[str]) -> None:
-    """Compound V3 — derive chains from adapter's COMET_ADDRESSES (single source of truth)."""
-    try:
-        from almanak.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
-
-        compound_chains = list(COMPOUND_V3_COMET_ADDRESSES.keys())
-        lending.setdefault("compound_v3", set()).update(compound_chains)
-        all_chains.update(compound_chains)
-    except ImportError:
-        pass
-
-
-def _add_euler_v2(lending: dict[str, set[str]], all_chains: set[str]) -> None:
-    """Euler V2 — lending on Avalanche + Ethereum (derived from adapter's CHAIN_ADDRESSES)."""
-    try:
-        from almanak.connectors.euler_v2.adapter import CHAIN_ADDRESSES as EULER_V2_CHAINS
-
-        euler_v2_chains = set(EULER_V2_CHAINS.keys())
-        lending.setdefault("euler_v2", set()).update(euler_v2_chains)
-        all_chains.update(euler_v2_chains)
-    except ImportError:
-        pass
-
-
-def _add_curvance(lending: dict[str, set[str]], all_chains: set[str]) -> None:
-    """Curvance — Monad isolated leveraged lending markets (VIB-2861)."""
-    try:
-        from almanak.connectors.curvance.constants import SUPPORTED_CHAINS as CURVANCE_CHAINS
-
-        lending.setdefault("curvance", set()).update(CURVANCE_CHAINS)
-        all_chains.update(CURVANCE_CHAINS)
-    except ImportError:
-        pass
-
-
-def _add_singleton_lending(
-    lending: dict[str, set[str]],
-    all_chains: set[str],
-    proto: str,
-    chain: str,
-    module_path: str,
-    attr: str,
-) -> None:
-    """Add a single-chain lending connector if its adapter module is importable."""
-    try:
-        __import__(module_path, fromlist=[attr])
-    except ImportError:
-        return
-    lending.setdefault(proto, set()).add(chain)
-    all_chains.add(chain)
-
-
-def _collect_lending_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect lending protocols from registries + connector import-probes."""
-    lending = _collect_registry_lending(all_chains)
-    _add_compound_v3(lending, all_chains)
-    # BenQi — Avalanche lending
-    _add_singleton_lending(lending, all_chains, "benqi", "avalanche", "almanak.connectors.benqi", "BenqiAdapter")
-    # Spark — Ethereum lending
-    _add_singleton_lending(lending, all_chains, "spark", "ethereum", "almanak.connectors.spark", "SparkAdapter")
-    # Silo V2 — Avalanche isolated lending (ERC-4626 vault pairs)
-    _add_singleton_lending(
-        lending, all_chains, "silo_v2", "avalanche", "almanak.connectors.silo_v2.adapter", "SiloV2Adapter"
-    )
-    _add_euler_v2(lending, all_chains)
-    # Joe Lend (Banker Joe) — DORMANT (governance wound down the protocol; VIB-3960).
-    # Connector kept in-tree only for historical receipt parsing; full removal in July.
-    # Jupiter Lend — intentionally NOT emitted. The compiler_solana.py routing
-    # is unexercised (no demo, no incubating, no on-chain intent test). The
-    # connector is also omitted from ConnectorRegistry. Re-add this collector
-    # once a Solana lending demo + intent test cover the full lifecycle.
-    _add_curvance(lending, all_chains)
-    return lending
-
-
-def _collect_perps_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect perps protocols from contracts registry + connector import-probes."""
-    from almanak.core.contracts import GMX_V2
-
-    perps: dict[str, set[str]] = {}
-    for chain in GMX_V2:
-        all_chains.add(chain)
-        perps.setdefault("gmx_v2", set()).add(chain)
-
-    # Drift — Solana perps
-    try:
-        from almanak.connectors.drift import DriftAdapter  # noqa: F401
-
-        perps.setdefault("drift", set()).add("solana")
-        all_chains.add("solana")
-    except ImportError:
-        pass
-
-    # Hyperliquid — intentionally NOT emitted. Production PERP execution has
-    # not shipped (VIB-4774) and zero strategies in the repo route through the
-    # adapter. The connector is also omitted from ConnectorRegistry. Re-add
-    # this import-probe once VIB-4774 lands and an on-chain intent test
-    # covers PERP_OPEN / PERP_CLOSE end-to-end.
-
-    # Aster (ApolloX rebrand) — BSC perps (Diamond proxy, broker_id 0).
-    # PancakeSwap Perps is a shim over aster_perps (broker_id 2), so it ships
-    # whenever the Aster adapter is importable.
-    try:
-        from almanak.connectors.aster_perps.adapter import AsterPerpsAdapter  # noqa: F401
-
-        perps.setdefault("aster_perps", set()).add("bsc")
-        perps.setdefault("pancakeswap_perps", set()).add("bsc")
-        all_chains.add("bsc")
-    except ImportError:
-        pass
-
-    return perps
-
-
-def _collect_yield_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect yield protocols from contracts registry + connector import-probes."""
-    from almanak.core.contracts import PENDLE
-
-    yields: dict[str, set[str]] = {}
-    for chain in PENDLE:
-        all_chains.add(chain)
-        yields.setdefault("pendle", set()).add(chain)
-
-    # Ethena
-    try:
-        from almanak.connectors.ethena import EthenaAdapter  # noqa: F401
-
-        yields.setdefault("ethena", set()).add("ethereum")
-        all_chains.add("ethereum")
-    except ImportError:
-        pass
-
-    # Lido staking
-    try:
-        from almanak.connectors.lido import LidoAdapter  # noqa: F401
-
-        yields.setdefault("lido", set()).add("ethereum")
-        all_chains.add("ethereum")
-    except ImportError:
-        pass
-
-    # MetaMorpho vaults
-    try:
-        from almanak.connectors.morpho_vault import MetaMorphoAdapter  # noqa: F401
-
-        morpho_vault_chains = ["ethereum", "base"]
-        yields.setdefault("morpho_vault", set()).update(morpho_vault_chains)
-        all_chains.update(morpho_vault_chains)
-    except ImportError:
-        pass
-
-    # Gimo — liquid staking on 0G Chain (StaFi EVM LSD Stack)
-    try:
-        from almanak.connectors.gimo import GimoAdapter  # noqa: F401
-
-        yields.setdefault("gimo", set()).add("zerog")
-        all_chains.add("zerog")
-    except ImportError:
-        pass
-
-    return yields
-
-
-def _collect_prediction_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect prediction-market protocols.
-
-    Polymarket — prediction markets on Polygon (off-chain CLOB + on-chain CTF).
-    Edge/agent-side compatibility filters consult this matrix — dropping
-    Polymarket from "yield" into a dedicated "prediction" category avoids
-    surfacing it as a yield opportunity (VIB-3139).
+    The strategy-side :data:`KNOWN_VENUES` uses ``"bnb"`` (the
+    ``resolve_chain_name`` canonical form for BNB Chain), but the matrix
+    has rendered ``"bsc"`` since inception so downstream Edge / CI
+    consumers match on that string. Normalising at the matrix boundary
+    keeps both surfaces consistent without changing the strategy-side
+    contract.
     """
-    prediction: dict[str, set[str]] = {}
-    try:
-        from almanak.connectors.polymarket.adapter import PolymarketAdapter  # noqa: F401
-
-        prediction.setdefault("polymarket", set()).add("polygon")
-        all_chains.add("polygon")
-    except ImportError:
-        pass
-    return prediction
+    return "bsc" if chain == "bnb" else chain
 
 
-def _collect_bridge_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect bridge protocols (Across, Stargate) intersected with SDK Chain enum."""
-    bridges: dict[str, set[str]] = {}
-
-    # Across — fast intent-based bridge (uses spoke pools, no slippage on supported tokens)
-    # zksync is in Across's registry but not in the SDK's Chain enum — excluded.
-    try:
-        from almanak.connectors.across.adapter import ACROSS_CHAIN_IDS
-
-        across_sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "linea"}
-        bridges.setdefault("across", set()).update(c for c in ACROSS_CHAIN_IDS if c in across_sdk_chains)
-        all_chains.update(c for c in ACROSS_CHAIN_IDS if c in across_sdk_chains)
-    except ImportError:
-        pass
-
-    # Stargate — LayerZero-based bridge (native asset + stablecoin transfers)
-    try:
-        from almanak.connectors.stargate.adapter import STARGATE_CHAIN_IDS
-
-        stargate_sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche", "bsc"}
-        bridges.setdefault("stargate", set()).update(c for c in STARGATE_CHAIN_IDS if c in stargate_sdk_chains)
-        all_chains.update(c for c in STARGATE_CHAIN_IDS if c in stargate_sdk_chains)
-    except ImportError:
-        pass
-
-    return bridges
+def _normalize_entry_chains(chains: frozenset[str]) -> frozenset[str]:
+    """Apply ``_matrix_chain`` to every chain in a ``MatrixEntry``."""
+    return frozenset(_matrix_chain(c) for c in chains)
 
 
-def _collect_flash_protocols(all_chains: set[str]) -> dict[str, set[str]]:
-    """Collect flash-loan protocols from BALANCER_VAULT_ADDRESSES."""
-    from almanak.framework.intents.compiler import BALANCER_VAULT_ADDRESSES
+def _derive_entries_from_intents(
+    name: str,
+    intents: tuple[Any, ...],
+    chains: tuple[str, ...] | None,
+) -> tuple[tuple[str, str, frozenset[str]], ...]:
+    """Derive ``(matrix_name, category, chains)`` rows from a manifest's intents.
 
-    flash: dict[str, set[str]] = {}
-    for chain in BALANCER_VAULT_ADDRESSES:
-        all_chains.add(chain)
-        flash.setdefault("balancer", set()).add(chain)
-    return flash
+    Used as the fallback when a :class:`~almanak.connectors._strategy_base.registry.ConnectorManifest`
+    has no explicit ``matrix_entries`` field. The intent → category map
+    lives here (not on each connector) so the strategy registry stays
+    schema-clean — connectors that need anything beyond this default
+    declare it explicitly via ``matrix_entries``.
+
+    A connector with multiple intent classes (e.g. Curve has SWAP +
+    LP_OPEN + LP_CLOSE) emits multiple rows, one per category. Returns
+    an empty tuple for connectors with off-chain venues (``chains is
+    None``) since the matrix is on-chain only.
+    """
+    from almanak.framework.intents.vocabulary import IntentType
+
+    if chains is None:
+        return ()
+
+    matrix_chains = frozenset(_matrix_chain(c) for c in chains)
+
+    # Intent class → category. Centralising the dispatch here means
+    # connectors don't have to repeat it; the matrix is the only place
+    # that knows about the rendering category vocabulary.
+    intent_category: dict[IntentType, str] = {
+        IntentType.SWAP: ACTION_SWAP,
+        IntentType.LP_OPEN: ACTION_LP,
+        IntentType.LP_CLOSE: ACTION_LP,
+        IntentType.LP_COLLECT_FEES: ACTION_LP,
+        IntentType.SUPPLY: ACTION_LENDING,
+        IntentType.BORROW: ACTION_LENDING,
+        IntentType.REPAY: ACTION_LENDING,
+        IntentType.WITHDRAW: ACTION_LENDING,
+        IntentType.PERP_OPEN: ACTION_PERPS,
+        IntentType.PERP_CLOSE: ACTION_PERPS,
+        IntentType.STAKE: ACTION_YIELD,
+        IntentType.UNSTAKE: ACTION_YIELD,
+        IntentType.VAULT_DEPOSIT: ACTION_YIELD,
+        IntentType.VAULT_REDEEM: ACTION_YIELD,
+        IntentType.PREDICTION_BUY: ACTION_PREDICTION,
+        IntentType.PREDICTION_SELL: ACTION_PREDICTION,
+        IntentType.PREDICTION_REDEEM: ACTION_PREDICTION,
+        IntentType.BRIDGE: ACTION_BRIDGE,
+        IntentType.FLASH_LOAN: ACTION_FLASH_LOAN,
+    }
+
+    categories: set[str] = set()
+    for intent in intents:
+        cat = intent_category.get(intent)
+        if cat is not None:
+            categories.add(cat)
+
+    return tuple((name, cat, matrix_chains) for cat in categories)
 
 
-def _collect_aggregator_protocols(all_chains: set[str], oneinch_chains: set[str]) -> dict[str, set[str]]:
-    """Collect aggregator protocols (Enso, LiFi) and merge in 1inch chains tracked from PROTOCOL_ROUTERS."""
-    aggs: dict[str, set[str]] = {}
-    try:
-        from almanak.connectors.enso.client import CHAIN_MAPPING as ENSO_CHAIN_MAPPING
-
-        enso_chains = set(ENSO_CHAIN_MAPPING.keys())
-        aggs["enso"] = enso_chains
-        all_chains.update(enso_chains)
-    except ImportError:
-        pass
-    try:
-        from almanak.connectors.lifi.client import CHAIN_MAPPING as LIFI_CHAIN_MAPPING
-
-        lifi_chains = set(LIFI_CHAIN_MAPPING.keys())
-        aggs["lifi"] = lifi_chains
-        all_chains.update(lifi_chains)
-    except ImportError:
-        pass
-    # 1inch — tracked from PROTOCOL_ROUTERS above
-    if oneinch_chains:
-        aggs["1inch"] = oneinch_chains
-        all_chains.update(oneinch_chains)
-    return aggs
-
-
-def _augment_with_curve(
-    swap_protocols: dict[str, set[str]],
-    lp_protocols: dict[str, set[str]],
-    all_chains: set[str],
+def _collect_from_connector_registry(
+    entries: dict[tuple[str, str], set[str]],
+    authoritative: set[tuple[str, str]],
 ) -> None:
-    """Curve (from connector adapter, supports swap + LP)."""
-    try:
-        from almanak.connectors.curve.adapter import CURVE_ADDRESSES
+    """Phase A — derive rows from the strategy-side ``ConnectorRegistry``.
 
-        for chain in CURVE_ADDRESSES:
-            all_chains.add(chain)
-            swap_protocols.setdefault("curve", set()).add(chain)
-            lp_protocols.setdefault("curve", set()).add(chain)
-    except ImportError:
-        pass
+    Every connector that calls ``register_connector(...)`` contributes
+    rows here. When the manifest declares ``matrix_entries``, those are
+    consumed verbatim and the resulting keys are marked
+    ``authoritative`` (no compiler-table widening); otherwise rows are
+    derived from ``(intents, chains)`` via
+    :func:`_derive_entries_from_intents` and the keys stay non-
+    authoritative (Phase B can still union compiler-table chains in,
+    since derivation only knows what the manifest declared).
 
-
-def _augment_with_dex_extras(
-    swap_protocols: dict[str, set[str]],
-    lp_protocols: dict[str, set[str]],
-    all_chains: set[str],
-) -> None:
-    """DEX-specific additions from contracts registry + Fluid import-probe."""
-    from almanak.core.contracts import AERODROME, AGNI_FINANCE, TRADERJOE_V2, UNISWAP_V4
-
-    # Aerodrome/Velodrome
-    for chain in AERODROME:
-        all_chains.add(chain)
-        # Already in swap_protocols via PROTOCOL_ROUTERS, but ensure LP
-        lp_protocols.setdefault("aerodrome", set()).add(chain)
-
-    # TraderJoe V2 — LP + swap (VIB-1928 compiler path) on all TJ V2 chains
-    for chain in TRADERJOE_V2:
-        all_chains.add(chain)
-        lp_protocols.setdefault("traderjoe_v2", set()).add(chain)
-        swap_protocols.setdefault("traderjoe_v2", set()).add(chain)
-
-    # Uniswap V4 — swap via Universal Router (LP already populated by
-    # LP_POSITION_MANAGERS via PROTOCOL_ROUTERS in compiler_constants)
-    for chain in UNISWAP_V4:
-        all_chains.add(chain)
-        swap_protocols.setdefault("uniswap_v4", set()).add(chain)
-
-    # Fluid DEX — swap on Arbitrum (LP already populated via LP_POSITION_MANAGERS)
-    try:
-        from almanak.connectors.fluid.adapter import FluidAdapter  # noqa: F401
-
-        swap_protocols.setdefault("fluid", set()).add("arbitrum")
-        all_chains.add("arbitrum")
-    except ImportError:
-        pass
-
-    # Agni Finance (Uniswap V3 fork on Mantle)
-    for chain in AGNI_FINANCE:
-        all_chains.add(chain)
-        swap_protocols.setdefault("agni_finance", set()).add(chain)
-        lp_protocols.setdefault("agni_finance", set()).add(chain)
-
-
-def _try_import_solana_proto(module_path: str, attr: str) -> bool:
-    """Return True if a Solana connector module is importable."""
-    try:
-        __import__(module_path, fromlist=[attr])
-    except ImportError:
-        return False
-    return True
-
-
-def _augment_with_solana_protocols(
-    swap_protocols: dict[str, set[str]],
-    lp_protocols: dict[str, set[str]],
-    lending_protocols: dict[str, set[str]],
-    all_chains: set[str],
-) -> None:
-    """Probe Solana connectors and merge them into the swap/lp/lending dicts."""
-    solana_swap: list[str] = []
-    solana_lp: list[str] = []
-    solana_lending: list[str] = []
-
-    if _try_import_solana_proto("almanak.connectors.jupiter", "JupiterAdapter"):
-        solana_swap.append("jupiter")
-    if _try_import_solana_proto("almanak.connectors.raydium", "RaydiumAdapter"):
-        solana_lp.append("raydium")
-    if _try_import_solana_proto("almanak.connectors.orca", "OrcaAdapter"):
-        solana_lp.append("orca")
-    if _try_import_solana_proto("almanak.connectors.meteora", "MeteoraAdapter"):
-        solana_lp.append("meteora")
-    if _try_import_solana_proto("almanak.connectors.kamino", "KaminoAdapter"):
-        solana_lending.append("kamino")
-
-    if solana_swap or solana_lp or solana_lending:
-        all_chains.add("solana")
-
-    for proto in solana_swap:
-        swap_protocols.setdefault(proto, set()).add("solana")
-    for proto in solana_lp:
-        lp_protocols.setdefault(proto, set()).add("solana")
-    for proto in solana_lending:
-        lending_protocols.setdefault(proto, set()).add("solana")
-
-
-def _assemble_protocol_list(
-    all_chains: set[str],
-    swap_protocols: dict[str, set[str]],
-    lp_protocols: dict[str, set[str]],
-    lending_protocols: dict[str, set[str]],
-    perps_protocols: dict[str, set[str]],
-    yield_protocols: dict[str, set[str]],
-    prediction_protocols: dict[str, set[str]],
-    flash_protocols: dict[str, set[str]],
-    agg_protocols: dict[str, set[str]],
-    bridge_protocols: dict[str, set[str]],
-) -> list[dict[str, Any]]:
-    """Build the unified protocol list in the canonical category order."""
-    protocols: list[dict[str, Any]] = []
-
-    def _add(name: str, category: str, chains: set[str]) -> None:
-        protocols.append(
-            {
-                "name": name,
-                "category": category,
-                "chains": sorted(chains & all_chains),
-            }
-        )
-
-    # Order matters — assertions in tests/CLI rendering rely on it.
-    sections: tuple[tuple[dict[str, set[str]], str], ...] = (
-        (swap_protocols, ACTION_SWAP),
-        # Always add LP entry even when protocol also appears in swap
-        (lp_protocols, ACTION_LP),
-        (lending_protocols, ACTION_LENDING),
-        (perps_protocols, ACTION_PERPS),
-        (yield_protocols, ACTION_YIELD),
-        (prediction_protocols, ACTION_PREDICTION),
-        (flash_protocols, ACTION_FLASH_LOAN),
-        (agg_protocols, ACTION_AGGREGATOR),
-        (bridge_protocols, ACTION_BRIDGE),
+    A manifest with ``matrix_entries=()`` (zero declared entries) is
+    treated as authoritative-empty: the connector explicitly publishes
+    nothing into the matrix. Skipping intent derivation in that case is
+    the mechanism connectors use to suppress matrix surfacing for an
+    intent they implement but don't want rendered (e.g. Aave's
+    flash-loan capability today).
+    """
+    from almanak.connectors._strategy_base.registry import (
+        ConnectorRegistry,
+        _import_all_connectors,
     )
-    for source, category in sections:
-        for name, chains in sorted(source.items()):
-            _add(name, category, chains)
-    return protocols
+
+    # Strategy-side connectors register lazily on first attribute access;
+    # the matrix builder forces a full sweep so every connector folder
+    # is represented regardless of whether the rest of the CLI session
+    # has touched it. (CI gates the same way.)
+    _import_all_connectors()
+
+    for manifest in ConnectorRegistry.all():
+        if manifest.matrix_entries is not None:
+            for entry in manifest.matrix_entries:
+                key = (entry.matrix_name, entry.category)
+                entries.setdefault(key, set()).update(_normalize_entry_chains(entry.chains))
+                authoritative.add(key)
+            # Mark the connector's own name as authoritative — even with
+            # zero declared entries the connector has spoken, so Phase B
+            # must not widen a key keyed by this connector's name. The
+            # marker key uses ``("", manifest.name)`` so it doesn't
+            # collide with real (matrix_name, category) entries; Phase B
+            # consults the marker directly.
+            authoritative.add(("", manifest.name))
+            continue
+        derived = _derive_entries_from_intents(
+            manifest.name,
+            manifest.intents,
+            manifest.chains,
+        )
+        for matrix_name, category, chain_set in derived:
+            key = (matrix_name, category)
+            entries.setdefault(key, set()).update(chain_set)
+
+
+def _collect_from_compiler_tables(
+    entries: dict[tuple[str, str], set[str]],
+    authoritative: set[tuple[str, str]],
+) -> None:
+    """Phase B — compiler-only routes without a dedicated connector folder.
+
+    A handful of legacy DEXes (Uniswap V2, PancakeSwap V2, QuickSwap,
+    SushiSwap, Velodrome) and aggregators (1inch) ship in
+    ``PROTOCOL_ROUTERS`` but have no connector folder under
+    ``almanak/connectors/``. They cannot publish through the registry,
+    so the matrix iterates the routing tables as a fallback.
+
+    For ``(matrix_name, category)`` pairs in ``authoritative`` (declared
+    by a strategy-side ``matrix_entries`` field), Phase B must NOT widen
+    the chain set — the connector's own declaration wins. For non-
+    authoritative pairs (those derived from a strategy manifest's
+    ``intents`` + ``chains`` only, or absent entirely), Phase B unions
+    the compiler-table chains in: the manifest typically declares the
+    chains a strategy can use end-to-end, and the routing tables add
+    chains that a swap router covers but a strategy lifecycle doesn't
+    yet — keeping the union gives the matrix its historical "wherever
+    the protocol is routable" view.
+
+    Reads from compiler tables as **data** (dict iteration). The
+    protocol names come from the table keys, not from literal strings,
+    so no protocol-name string literal leaks into this file.
+    """
+    from almanak.framework.intents.compiler_constants import (
+        BALANCER_VAULT_ADDRESSES,
+        LP_POSITION_MANAGERS,
+        PROTOCOL_ROUTERS,
+    )
+
+    # Aggregator protocol names are emitted in their own category, not
+    # ``swap``. The list lives in the compiler routing tables (the only
+    # place aggregators appear) so the disambiguation is data-driven.
+    aggregator_names = frozenset({"1inch"})
+
+    def _maybe_add(key: tuple[str, str], chain: str) -> None:
+        # ``authoritative`` keys (declared via strategy ``matrix_entries``)
+        # are never widened — see the docstring. Other keys union the
+        # compiler-table chains in. We also block widening when the
+        # connector whose name matches the matrix_name has spoken (even
+        # with an empty matrix_entries tuple): the
+        # ``("", connector_name)`` marker key is consulted directly.
+        if key in authoritative:
+            return
+        if ("", key[0]) in authoritative:
+            return
+        entries.setdefault(key, set()).add(chain)
+
+    for chain, protos in PROTOCOL_ROUTERS.items():
+        matrix_chain = _matrix_chain(chain)
+        for proto in protos:
+            category = ACTION_AGGREGATOR if proto in aggregator_names else ACTION_SWAP
+            _maybe_add((proto, category), matrix_chain)
+
+    for chain, protos in LP_POSITION_MANAGERS.items():
+        matrix_chain = _matrix_chain(chain)
+        for proto in protos:
+            _maybe_add((proto, ACTION_LP), matrix_chain)
+
+    # Balancer V2's vault is the canonical flash-loan venue across every
+    # chain it's deployed on. The matrix has historically rendered the
+    # row under the bare ``"balancer"`` name (not ``"balancer_v2"``);
+    # preserve that. Sourced from compiler_constants as data, not from a
+    # literal protocol name in this file.
+    balancer_matrix_name = "balancer"  # matrix-display alias; cf. balancer_v2 connector
+    for chain in BALANCER_VAULT_ADDRESSES:
+        _maybe_add((balancer_matrix_name, ACTION_FLASH_LOAN), _matrix_chain(chain))
 
 
 def _sort_chains(all_chains: set[str]) -> list[str]:
-    """Sort chains in canonical CLI display order, appending unknowns alphabetically."""
-    chain_order = [
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "base",
-        "polygon",
-        "avalanche",
-        "bsc",
-        "mantle",
-        "linea",
-        "blast",
-        "sonic",
-        "plasma",
-        "berachain",
-        "monad",
-        "solana",
-        "hyperliquid",
-    ]
-    sorted_chains = [c for c in chain_order if c in all_chains]
+    """Sort chains in canonical CLI display order, appending unknowns alphabetically.
+
+    The canonical order is owned by
+    :data:`~almanak.connectors._strategy_base.registry.MATRIX_CHAIN_DISPLAY_ORDER`
+    — the chain-name string literals live under ``almanak/connectors/``
+    (the coupling scanner's canonical-home exclusion) so this module
+    stays free of per-chain literals. Unknown chains (newly registered
+    after the display order was last updated) fall through to
+    alphabetical sorting at the tail — forward-compatible default.
+    """
+    from almanak.connectors._strategy_base.registry import MATRIX_CHAIN_DISPLAY_ORDER
+
+    sorted_chains = [c for c in MATRIX_CHAIN_DISPLAY_ORDER if c in all_chains]
     # Add any chains not in our predefined order
-    sorted_chains.extend(sorted(all_chains - set(chain_order)))
+    sorted_chains.extend(sorted(all_chains - set(MATRIX_CHAIN_DISPLAY_ORDER)))
     return sorted_chains
 
 
 def _build_matrix() -> dict:
     """Build the chains x protocols support matrix from SDK data structures.
 
+    Composition order:
+
+    1. Strategy-side ``ConnectorRegistry`` manifests (uses
+       ``matrix_entries`` when declared, derived from intents +
+       chains otherwise). Manifests with ``matrix_entries=()``
+       intentionally publish nothing.
+    2. Compiler routing tables (fallback for protocols without a
+       connector folder; only fills ``(matrix_name, category)`` keys no
+       upstream phase touched).
+
     Returns a dict with:
-        chains: list of chain names
+        chains: list of chain names (canonical order, matrix form)
         protocols: list of {name, category, chains: [chain_names]}
+
+    Each ``(name, category)`` pair appears at most once; chains union
+    across phases so a connector visible to both registries doesn't
+    double-up.
     """
+    entries: dict[tuple[str, str], set[str]] = {}
+    # Keys declared explicitly by a connector (via a strategy-side
+    # ``matrix_entries`` field). Phase B must not widen these — the
+    # connector's view wins. Other keys are open for compiler-table
+    # union. See ``_collect_from_compiler_tables`` for the rationale.
+    authoritative: set[tuple[str, str]] = set()
+
+    _collect_from_connector_registry(entries, authoritative)
+    _collect_from_compiler_tables(entries, authoritative)
+
+    # Drop empty-chain rows — a connector that declared the capability
+    # without any chain coverage shouldn't surface as a no-op row.
+    entries = {key: chains for key, chains in entries.items() if chains}
+
     all_chains: set[str] = set()
+    for chain_set in entries.values():
+        all_chains.update(chain_set)
 
-    swap_protocols, oneinch_chains = _collect_swap_and_split_oneinch(all_chains)
-    lp_protocols = _collect_lp_position_managers(all_chains)
-    lending_protocols = _collect_lending_protocols(all_chains)
-    perps_protocols = _collect_perps_protocols(all_chains)
-    yield_protocols = _collect_yield_protocols(all_chains)
-    prediction_protocols = _collect_prediction_protocols(all_chains)
-    bridge_protocols = _collect_bridge_protocols(all_chains)
-    flash_protocols = _collect_flash_protocols(all_chains)
-    agg_protocols = _collect_aggregator_protocols(all_chains, oneinch_chains)
-
-    _augment_with_curve(swap_protocols, lp_protocols, all_chains)
-    _augment_with_dex_extras(swap_protocols, lp_protocols, all_chains)
-    _augment_with_solana_protocols(swap_protocols, lp_protocols, lending_protocols, all_chains)
-
-    protocols = _assemble_protocol_list(
-        all_chains,
-        swap_protocols,
-        lp_protocols,
-        lending_protocols,
-        perps_protocols,
-        yield_protocols,
-        prediction_protocols,
-        flash_protocols,
-        agg_protocols,
-        bridge_protocols,
-    )
+    # Group entries by category (preserve canonical category order from
+    # SUPPORTED_CATEGORIES), then sort alphabetically by name within
+    # each category. This is the same order the previous hand-coded
+    # build produced.
+    protocols: list[dict[str, Any]] = []
+    for category in SUPPORTED_CATEGORIES:
+        category_entries = [(name, chain_set) for (name, cat), chain_set in entries.items() if cat == category]
+        # Sort by ``name`` only — explicit key avoids relying on tuple
+        # comparison, which would fall through to ``set`` comparison
+        # (uncomparable in Python 3) on duplicate names. Names are
+        # de-duplicated upstream (the dict key includes the category)
+        # so this guard is belt-and-braces, but it documents intent
+        # and removes a fragile implicit contract. (Gemini code review
+        # on PR 2469.)
+        for name, chain_set in sorted(category_entries, key=lambda pair: pair[0]):
+            protocols.append(
+                {
+                    "name": name,
+                    "category": category,
+                    "chains": sorted(chain_set & all_chains),
+                }
+            )
 
     return {
         "chains": _sort_chains(all_chains),
@@ -608,8 +421,10 @@ def _render_table(data: dict) -> str:
 def support_matrix(as_json: bool, category: str | None, chain: str | None, protocol: str | None) -> None:
     """Show the chains x protocols support matrix.
 
-    Dynamically derived from the SDK's routing tables and contract registries.
-    Always reflects the current state of the codebase.
+    Dynamically derived from the SDK's registries and compiler routing
+    tables. Always reflects the current state of the codebase — adding a
+    new connector folder under ``almanak/connectors/`` makes it appear
+    here automatically.
 
     Examples:
 

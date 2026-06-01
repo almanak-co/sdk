@@ -11,7 +11,7 @@ covering:
 
 from datetime import date
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,6 +24,7 @@ from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
     MultiDEXVolumeProvider,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, VolumeResult
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 
 class TestMultiDEXVolumeProviderInitialization:
@@ -308,26 +309,29 @@ class TestFallbackBehavior:
             assert vol.source_info.confidence == DataConfidence.LOW
 
     @pytest.mark.asyncio
-    async def test_provider_error_returns_fallback(self):
-        """Test that provider errors return fallback."""
+    async def test_provider_unavailable_propagates_no_silent_zero(self):
+        """A gateway-backed provider's DataSourceUnavailable propagates.
+
+        VIB-4870: empty/errored subgraph -> the per-DEX provider raises
+        ``DataSourceUnavailable``; the aggregator no longer swallows it
+        into a silent ``Decimal("0")`` LOW-confidence fallback row.
+        """
         provider = MultiDEXVolumeProvider(fallback_volume=Decimal("200"))
 
-        # Mock the inner provider to raise an error
         mock_inner = MagicMock()
-        mock_inner.get_volume = AsyncMock(side_effect=Exception("Subgraph error"))
+        mock_inner.get_volume = AsyncMock(
+            side_effect=DataSourceUnavailable(source="uniswap_v3", reason="subgraph returned no poolDayDatas")
+        )
         provider._providers["uniswap_v3"] = mock_inner
 
-        volumes = await provider.get_volume(
-            pool_address="0x123",
-            chain=Chain.ARBITRUM,
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-            protocol=Protocol.UNISWAP_V3,
-        )
-
-        assert len(volumes) == 1
-        assert volumes[0].value == Decimal("200")
-        assert volumes[0].source_info.confidence == DataConfidence.LOW
+        with pytest.raises(DataSourceUnavailable):
+            await provider.get_volume(
+                pool_address="0x123",
+                chain=Chain.ARBITRUM,
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 15),
+                protocol=Protocol.UNISWAP_V3,
+            )
 
 
 class TestContextManager:
@@ -335,7 +339,7 @@ class TestContextManager:
 
     @pytest.mark.asyncio
     async def test_context_manager_closes_providers(self):
-        """Test that context manager closes all providers."""
+        """Test that context manager closes all routed providers."""
         provider = MultiDEXVolumeProvider()
 
         # Add mock providers
@@ -347,15 +351,11 @@ class TestContextManager:
         provider._providers["proto1"] = mock_provider1
         provider._providers["proto2"] = mock_provider2
 
-        # Mock the shared client
-        provider._shared_client.close = AsyncMock()
-
         async with provider:
             pass
 
         mock_provider1.close.assert_called_once()
         mock_provider2.close.assert_called_once()
-        provider._shared_client.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_context_manager_handles_close_errors(self):
@@ -366,7 +366,6 @@ class TestContextManager:
         mock_provider = MagicMock()
         mock_provider.close = AsyncMock(side_effect=Exception("Close failed"))
         provider._providers["proto"] = mock_provider
-        provider._shared_client.close = AsyncMock()
 
         # Should not raise
         async with provider:

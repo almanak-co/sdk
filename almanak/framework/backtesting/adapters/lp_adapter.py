@@ -56,7 +56,10 @@ from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestConfig,
     register_adapter,
 )
-from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+from almanak.framework.backtesting.exceptions import (
+    DataSourceUnavailableError,
+    HistoricalDataUnavailableError,
+)
 from almanak.framework.backtesting.models import FeeAccrualResult
 from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
     ImpermanentLossCalculator,
@@ -182,11 +185,22 @@ class LPBacktestConfig(StrategyBacktestConfig):
         rebalance_on_out_of_range: Whether to signal rebalance when price
             moves outside the position's tick range. When True, should_rebalance()
             returns True if current price is outside [tick_lower, tick_upper].
-        volume_multiplier: Multiplier for estimating trading volume in fee
-            calculations. Higher values simulate more active pools. Default 10.
-        base_liquidity: Base pool liquidity for calculating liquidity share.
+        volume_multiplier: Multiplier for the OPT-IN volume heuristic
+            (``position_value_usd * volume_multiplier``). Only applied when
+            ``allow_volume_fallback=True``. Higher values simulate more active
+            pools. Default 10.
+        base_liquidity: Placeholder pool liquidity for the liquidity-share
+            denominator when ``explicit_pool_liquidity_usd`` is not set.
             Position's share = min(1, position.liquidity / base_liquidity).
             Default 1_000_000.
+        explicit_pool_volume_usd_daily: Caller-provided daily pool volume (USD).
+            When set, used directly with HIGH confidence (no subgraph, no fabrication).
+        explicit_pool_liquidity_usd: Caller-provided pool TVL (USD) used as the
+            liquidity-share denominator instead of ``base_liquidity``.
+        allow_volume_fallback: Opt-in to the ``volume_multiplier`` heuristic when no
+            real volume is available. Defaults to False -> the adapter raises
+            ``DataSourceUnavailableError`` rather than silently fabricating a number
+            (VIB-4849).
 
     Example:
         config = LPBacktestConfig(
@@ -221,7 +235,29 @@ class LPBacktestConfig(StrategyBacktestConfig):
     use_historical_volume: bool = True
     """Whether to attempt fetching historical volume from subgraph.
     If True, will try to use actual pool volume for fee calculation.
-    Falls back to volume_multiplier heuristic if data unavailable."""
+    When the subgraph lookup fails (no key / network / no data) the adapter does
+    NOT silently fabricate a number: it either uses explicit inputs, the opt-in
+    heuristic (``allow_volume_fallback``), or raises ``DataSourceUnavailableError``."""
+
+    explicit_pool_volume_usd_daily: Decimal | None = None
+    """Caller-provided daily pool volume in USD. When set, fee accrual uses this
+    value directly instead of fetching historical volume or fabricating one.
+    Use this when you know the pool's volume and do not want a subgraph dependency."""
+
+    explicit_pool_liquidity_usd: Decimal | None = None
+    """Caller-provided pool TVL/liquidity in USD for the liquidity-share
+    calculation. When set, overrides ``base_liquidity`` as the denominator so the
+    position's share is grounded in a real number rather than the 1,000,000
+    placeholder. Pair with ``explicit_pool_volume_usd_daily`` for a fully
+    user-specified (no-subgraph, non-fabricated) fee estimate."""
+
+    allow_volume_fallback: bool = False
+    """Explicit opt-in to the ``volume_multiplier`` heuristic when no real volume
+    data is available. Defaults to False: the adapter fails loud
+    (``DataSourceUnavailableError``) rather than silently fabricating
+    ``position_value_usd * volume_multiplier``. Set True only when you knowingly
+    accept a rough, order-of-magnitude-uncertain fee estimate (e.g. quick
+    parameter sweeps), and understand the result is LOW confidence."""
 
     chain: str = "arbitrum"
     """Chain for subgraph queries. Options: ethereum, arbitrum, base, optimism, polygon."""
@@ -267,6 +303,15 @@ class LPBacktestConfig(StrategyBacktestConfig):
                 "volume_multiplier": str(self.volume_multiplier),
                 "base_liquidity": str(self.base_liquidity),
                 "use_historical_volume": self.use_historical_volume,
+                "explicit_pool_volume_usd_daily": (
+                    str(self.explicit_pool_volume_usd_daily)
+                    if self.explicit_pool_volume_usd_daily is not None
+                    else None
+                ),
+                "explicit_pool_liquidity_usd": (
+                    str(self.explicit_pool_liquidity_usd) if self.explicit_pool_liquidity_usd is not None else None
+                ),
+                "allow_volume_fallback": self.allow_volume_fallback,
                 "chain": self.chain,
                 "subgraph_api_key": self.subgraph_api_key,
             }
@@ -297,9 +342,79 @@ class LPBacktestConfig(StrategyBacktestConfig):
             volume_multiplier=Decimal(str(data.get("volume_multiplier", "10"))),
             base_liquidity=Decimal(str(data.get("base_liquidity", "1000000"))),
             use_historical_volume=data.get("use_historical_volume", True),
+            explicit_pool_volume_usd_daily=(
+                Decimal(str(data["explicit_pool_volume_usd_daily"]))
+                if data.get("explicit_pool_volume_usd_daily") is not None
+                else None
+            ),
+            explicit_pool_liquidity_usd=(
+                Decimal(str(data["explicit_pool_liquidity_usd"]))
+                if data.get("explicit_pool_liquidity_usd") is not None
+                else None
+            ),
+            allow_volume_fallback=data.get("allow_volume_fallback", False),
             chain=data.get("chain", "arbitrum"),
             subgraph_api_key=data.get("subgraph_api_key"),
         )
+
+
+@dataclass
+class _VolumeResolution:
+    """Outcome of resolving the daily pool volume used for LP fee accrual.
+
+    Attributes:
+        volume_usd: The daily pool volume in USD selected for the fee calc.
+        source: One of "explicit", "historical", or "fallback".
+        confidence: Data confidence for the selected source.
+    """
+
+    volume_usd: Decimal
+    source: Literal["explicit", "historical", "fallback"]
+    confidence: DataConfidence
+
+
+@dataclass
+class HeuristicValidationSample:
+    """A single ground-truth observation for validating the fee heuristic.
+
+    The caller supplies real on-chain (or trusted) data so ``validate_heuristics``
+    can compare the adapter's heuristic output against it WITHOUT performing any
+    network egress from the strategy container.
+
+    Attributes:
+        position_value_usd: Position value in USD over the sample window.
+        liquidity: Position liquidity (same units the adapter uses for share).
+        fee_tier: Pool fee tier as a fraction (e.g. Decimal("0.0005") for 0.05%).
+        elapsed_seconds: Duration of the sample window in seconds.
+        observed_fees_usd: The real fees earned over the window (ground truth).
+        label: Optional human-readable label for diagnostics (e.g. pool name + date).
+    """
+
+    position_value_usd: Decimal
+    liquidity: Decimal
+    fee_tier: Decimal
+    elapsed_seconds: float
+    observed_fees_usd: Decimal
+    label: str = ""
+
+
+@dataclass
+class HeuristicValidationResult:
+    """Per-sample result of comparing heuristic fees to observed fees.
+
+    Attributes:
+        label: Sample label (echoed from the input).
+        estimated_fees_usd: Fees the heuristic produced for the sample.
+        observed_fees_usd: Real fees supplied by the caller.
+        error_pct: Relative error as a fraction (e.g. 0.5 == 50% off).
+        exceeds_threshold: True if ``error_pct`` exceeds the warn threshold.
+    """
+
+    label: str
+    estimated_fees_usd: Decimal
+    observed_fees_usd: Decimal
+    error_pct: Decimal
+    exceeds_threshold: bool
 
 
 @register_adapter(
@@ -1693,6 +1808,113 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Update position timestamp
         position.last_updated = update_time
 
+    def _resolve_pool_volume(
+        self,
+        position: "SimulatedPosition",
+        position_value_usd: Decimal,
+        timestamp: datetime | None,
+        pool_address: str | None,
+        protocol: str | None,
+    ) -> _VolumeResolution:
+        """Resolve the daily pool volume used for fee accrual, or fail loud.
+
+        Source precedence (highest-trust first):
+
+        1. **Explicit** -- ``config.explicit_pool_volume_usd_daily`` provided by the
+           caller. Used directly; HIGH confidence.
+        2. **Historical** -- fetched from the DEX subgraph via
+           ``_get_historical_volume`` when ``use_historical_volume`` is enabled and a
+           pool address + timestamp are available. Uses the provider's confidence.
+        3. **Fallback heuristic** -- ``position_value_usd * volume_multiplier`` --
+           ONLY when the caller explicitly opted in via
+           ``config.allow_volume_fallback=True``. LOW confidence.
+
+        When none of the above yields a usable number, this raises
+        :class:`DataSourceUnavailableError` rather than silently fabricating a value
+        (VIB-4849). The error message tells the caller exactly what to provide.
+
+        Args:
+            position: The LP position (used for diagnostics in the error).
+            position_value_usd: Current position value in USD (heuristic basis).
+            timestamp: Simulation timestamp for the historical lookup.
+            pool_address: Pool contract address for the subgraph query.
+            protocol: Protocol identifier for subgraph routing.
+
+        Returns:
+            A :class:`_VolumeResolution` describing the chosen volume and its source.
+
+        Raises:
+            DataSourceUnavailableError: If no acceptable, non-fabricated volume
+                source is available and the heuristic fallback is not opted into.
+        """
+        # 1. Explicit caller-provided volume wins outright.
+        # Empty != Zero: ``None`` means the caller supplied no volume (absent);
+        # ``Decimal("0")`` is a measured/intended zero-volume day and is a valid,
+        # trusted value -- use it directly (it simply yields zero fees). A negative
+        # value is nonsensical and is rejected as a configuration error.
+        explicit_volume = self._config.explicit_pool_volume_usd_daily
+        if explicit_volume is not None:
+            if explicit_volume < 0:
+                msg = (
+                    "explicit_pool_volume_usd_daily must be >= 0 (a measured zero is "
+                    f"valid, a negative value is not), got {explicit_volume}"
+                )
+                raise ValueError(msg)
+            return _VolumeResolution(
+                volume_usd=explicit_volume,
+                source="explicit",
+                confidence=DataConfidence.HIGH,
+            )
+
+        # 2. Historical volume from the subgraph (only when actually usable).
+        if timestamp is not None and pool_address and self._use_historical_volume():
+            actual_volume, volume_confidence = self._get_historical_volume(
+                pool_address=pool_address,
+                timestamp=timestamp,
+                protocol=protocol,
+            )
+            # Empty != Zero: a non-LOW-confidence ``Decimal("0")`` is a *measured*
+            # zero-volume day (real subgraph observation) and is a valid value to
+            # use -- it yields zero fees for the tick. ``None`` means the lookup
+            # produced nothing (unmeasured) and must fall through.
+            if actual_volume is not None and actual_volume >= 0 and volume_confidence != DataConfidence.LOW:
+                return _VolumeResolution(
+                    volume_usd=actual_volume,
+                    source="historical",
+                    confidence=volume_confidence,
+                )
+
+        # 3. Heuristic fallback -- only if the caller explicitly opted in.
+        if self._config.allow_volume_fallback:
+            multiplier = self._get_volume_fallback_multiplier()
+            estimated_daily_volume = position_value_usd * multiplier
+            logger.warning(
+                "LP fee accrual using OPT-IN fallback volume multiplier (LOW confidence): "
+                "position=%s, multiplier=%.1fx, estimated_volume=$%.2f. "
+                "This is a rough estimate that can be off by an order of magnitude.",
+                position.position_id,
+                float(multiplier),
+                float(estimated_daily_volume),
+            )
+            return _VolumeResolution(
+                volume_usd=estimated_daily_volume,
+                source="fallback",
+                confidence=DataConfidence.LOW,
+            )
+
+        # 4. No acceptable source -- fail loud rather than fabricate.
+        raise DataSourceUnavailableError(
+            data_type="volume",
+            identifier=pool_address or f"position:{position.position_id}",
+            remediation=(
+                "set use_historical_volume=True with a valid subgraph_api_key AND a "
+                "pool address on the position; OR provide "
+                "explicit_pool_volume_usd_daily (and ideally explicit_pool_liquidity_usd); "
+                "OR set allow_volume_fallback=True to accept the LOW-confidence "
+                "volume_multiplier heuristic."
+            ),
+        )
+
     def _calculate_fee_accrual(
         self,
         position: "SimulatedPosition",
@@ -1747,10 +1969,16 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         days_elapsed = Decimal(str(elapsed_seconds)) / Decimal("86400")
 
         # Calculate liquidity share factor
-        # liquidity_share = min(1, liquidity / base_liquidity)
-        base_liquidity = self._config.base_liquidity
-        if position.liquidity > 0 and base_liquidity > 0:
-            liquidity_share = min(Decimal("1"), position.liquidity / base_liquidity)
+        # liquidity_share = min(1, liquidity / pool_liquidity)
+        # Prefer caller-provided real pool TVL; fall back to the base_liquidity
+        # placeholder only when no explicit value is supplied.
+        pool_liquidity = (
+            self._config.explicit_pool_liquidity_usd
+            if self._config.explicit_pool_liquidity_usd is not None
+            else self._config.base_liquidity
+        )
+        if position.liquidity > 0 and pool_liquidity > 0:
+            liquidity_share = min(Decimal("1"), position.liquidity / pool_liquidity)
         else:
             liquidity_share = Decimal("0.5")
         # Ensure minimum share of 10% for small positions
@@ -1772,70 +2000,45 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             # Exotic pairs: low volume
             base_apr = Decimal("0.10")  # 10% APR
 
-        # Try to get actual historical volume from MultiDEXVolumeProvider
-        actual_volume: Decimal | None = None
-        volume_confidence = DataConfidence.LOW
-        volume_source = "estimated"
+        # Resolve the daily pool volume from the highest-trust source available.
+        # Raises DataSourceUnavailableError (rather than fabricating) when there is
+        # no acceptable source and the heuristic fallback was not opted into.
+        resolution = self._resolve_pool_volume(
+            position=position,
+            position_value_usd=position_value_usd,
+            timestamp=timestamp,
+            pool_address=pool_address,
+            protocol=protocol,
+        )
 
-        if timestamp is not None and pool_address and self._use_historical_volume():
-            actual_volume, volume_confidence = self._get_historical_volume(
-                pool_address=pool_address,
-                timestamp=timestamp,
-                protocol=protocol,
-            )
-
-        # Get the volume fallback multiplier from config
-        volume_fallback_multiplier = self._get_volume_fallback_multiplier()
-
-        if actual_volume is not None and actual_volume > 0 and volume_confidence != DataConfidence.LOW:
-            # Use actual historical volume from subgraph
-            # Fee calculation: volume * fee_tier * liquidity_share (prorated for elapsed time)
-            volume_based_fees = actual_volume * position.fee_tier * liquidity_share * days_elapsed
-            volume_source = "historical"
-            logger.info(
-                "LP fee accrual using historical volume: pool=%s..., date=%s, "
-                "volume_usd=$%.2f, fees_usd=%.4f, confidence=%s (source: %s)",
-                pool_address[:10] if pool_address else "unknown",
-                timestamp.date() if timestamp else "unknown",
-                float(actual_volume),
-                float(volume_based_fees),
-                volume_confidence.value,
-                volume_source,
-            )
-        else:
-            # Fallback to estimated volume using multiplier
-            estimated_daily_volume = position_value_usd * volume_fallback_multiplier
-            volume_based_fees = estimated_daily_volume * position.fee_tier * liquidity_share * days_elapsed
-            volume_source = "fallback"
-            volume_confidence = DataConfidence.LOW
-            logger.warning(
-                "LP fee accrual using fallback volume multiplier: position=%s, "
-                "multiplier=%.1fx, estimated_volume=$%.2f, fees_usd=%.4f (historical volume unavailable)",
-                position.position_id,
-                float(volume_fallback_multiplier),
-                float(estimated_daily_volume),
-                float(volume_based_fees),
-            )
+        # Fee calculation: volume * fee_tier * liquidity_share (prorated for elapsed time)
+        volume_based_fees = resolution.volume_usd * position.fee_tier * liquidity_share * days_elapsed
 
         # APR-based fee calculation (fallback/comparison)
         daily_fee_rate = base_apr / Decimal("365")
         apr_based_fees = position_value_usd * daily_fee_rate * days_elapsed
 
         # Determine fee confidence and data source based on how fees were calculated
-        if volume_source == "historical":
-            # Historical volume from subgraph - use the confidence from the provider
-            fees_usd = volume_based_fees
-            # Map DataConfidence enum to string for FeeAccrualResult
-            fee_confidence: Literal["high", "medium", "low"] = volume_confidence.value
-            data_source = f"multi_dex:{self._config.chain}"
-            volume_for_result = actual_volume
-        else:
-            # Use average of both approaches for balanced estimate
+        if resolution.source == "fallback":
+            # Heuristic estimate -- average volume + APR approaches; lowest confidence.
             fees_usd = (volume_based_fees + apr_based_fees) / Decimal("2")
-            # Multiplier heuristic - lowest confidence
-            fee_confidence = "low"
-            data_source = f"fallback_multiplier:{volume_fallback_multiplier}x"
-            volume_for_result = position_value_usd * volume_fallback_multiplier
+            fee_confidence: Literal["high", "medium", "low"] = "low"
+            data_source = f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x"
+        else:
+            # Real (explicit or historical) volume -- trust it directly.
+            fees_usd = volume_based_fees
+            fee_confidence = resolution.confidence.value
+            data_source = "explicit_volume" if resolution.source == "explicit" else f"multi_dex:{self._config.chain}"
+            logger.info(
+                "LP fee accrual using %s volume: pool=%s..., date=%s, volume_usd=$%.2f, fees_usd=%.4f, confidence=%s",
+                resolution.source,
+                pool_address[:10] if pool_address else "unknown",
+                timestamp.date() if timestamp else "unknown",
+                float(resolution.volume_usd),
+                float(volume_based_fees),
+                resolution.confidence.value,
+            )
+        volume_for_result = resolution.volume_usd
 
         # Update detailed fee tracking fields on position
         position.accumulated_fees_usd += fees_usd
@@ -1917,6 +2120,130 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             slippage_pct=slippage_pct,
             liquidity_usd=liquidity_usd,
         )
+
+    def _base_apr_for_fee_tier(self, fee_tier: Decimal) -> Decimal:
+        """Return the heuristic base APR for a given fee tier.
+
+        Mirrors the tier->APR mapping used in ``_calculate_fee_accrual`` so the
+        validation path estimates fees with the same model the backtest uses.
+        """
+        fee_tier_pct = fee_tier * Decimal("100")
+        if fee_tier_pct <= Decimal("0.01"):
+            return Decimal("0.10")  # Stablecoin pools
+        if fee_tier_pct <= Decimal("0.05"):
+            return Decimal("0.20")  # Blue chip pairs
+        if fee_tier_pct <= Decimal("0.30"):
+            return Decimal("0.25")  # Volatile pairs
+        return Decimal("0.10")  # Exotic pairs
+
+    def _estimate_heuristic_fees(self, sample: "HeuristicValidationSample") -> Decimal:
+        """Compute heuristic fees for a sample using the fallback-multiplier model.
+
+        This reproduces the ``allow_volume_fallback`` arm of ``_calculate_fee_accrual``
+        (average of volume-multiplier-based and APR-based fees) so the result can be
+        compared against an observed ground-truth value. No position state is mutated
+        and no network egress occurs.
+        """
+        if sample.position_value_usd <= 0 or sample.elapsed_seconds <= 0:
+            return Decimal("0")
+
+        days_elapsed = Decimal(str(sample.elapsed_seconds)) / Decimal("86400")
+
+        # Liquidity share, mirroring _calculate_fee_accrual.
+        pool_liquidity = (
+            self._config.explicit_pool_liquidity_usd
+            if self._config.explicit_pool_liquidity_usd is not None
+            else self._config.base_liquidity
+        )
+        if sample.liquidity > 0 and pool_liquidity > 0:
+            liquidity_share = min(Decimal("1"), sample.liquidity / pool_liquidity)
+        else:
+            liquidity_share = Decimal("0.5")
+        liquidity_share = max(Decimal("0.1"), liquidity_share)
+
+        multiplier = self._get_volume_fallback_multiplier()
+        estimated_daily_volume = sample.position_value_usd * multiplier
+        volume_based_fees = estimated_daily_volume * sample.fee_tier * liquidity_share * days_elapsed
+
+        base_apr = self._base_apr_for_fee_tier(sample.fee_tier)
+        apr_based_fees = sample.position_value_usd * (base_apr / Decimal("365")) * days_elapsed
+
+        return (volume_based_fees + apr_based_fees) / Decimal("2")
+
+    def validate_heuristics(
+        self,
+        samples: "list[HeuristicValidationSample]",
+        warn_threshold_pct: Decimal = Decimal("0.5"),
+    ) -> "list[HeuristicValidationResult]":
+        """Compare the fee heuristic against caller-provided ground-truth samples.
+
+        For each sample, computes the heuristic fee estimate and the relative error
+        versus the observed (real, on-chain) fees, then logs a WARNING for any sample
+        whose error exceeds ``warn_threshold_pct`` (default 50%). This surfaces when
+        the order-of-magnitude-uncertain ``volume_multiplier`` heuristic is materially
+        wrong for the pools being backtested.
+
+        This method does NOT fetch on-chain data itself -- doing so from the strategy
+        container would violate the gateway boundary. The caller is responsible for
+        supplying observed fees (e.g. derived from Swap events via the gateway's
+        MarketService, or from a prior historical-volume run).
+
+        Args:
+            samples: Ground-truth observations to validate against. Empty list returns
+                an empty result and logs nothing.
+            warn_threshold_pct: Relative-error threshold (as a fraction) above which a
+                WARNING is logged. Default Decimal("0.5") == 50%.
+
+        Returns:
+            One HeuristicValidationResult per input sample, in input order.
+        """
+        results: list[HeuristicValidationResult] = []
+        for sample in samples:
+            estimated = self._estimate_heuristic_fees(sample)
+            observed = sample.observed_fees_usd
+
+            if observed != 0:
+                error_pct = abs(estimated - observed) / abs(observed)
+            elif estimated == 0:
+                error_pct = Decimal("0")
+            else:
+                # Observed zero but heuristic non-zero -- treat as fully off.
+                error_pct = Decimal("1")
+
+            exceeds = error_pct > warn_threshold_pct
+            label = sample.label or "<unlabeled sample>"
+            if exceeds:
+                logger.warning(
+                    "LP fee heuristic validation FAILED for %s: estimated=$%.4f, "
+                    "observed=$%.4f, error=%.1f%% (threshold=%.1f%%). The "
+                    "volume_multiplier heuristic is unreliable for this pool; prefer "
+                    "historical or explicit volume.",
+                    label,
+                    float(estimated),
+                    float(observed),
+                    float(error_pct * 100),
+                    float(warn_threshold_pct * 100),
+                )
+            else:
+                logger.debug(
+                    "LP fee heuristic validation OK for %s: estimated=$%.4f, observed=$%.4f, error=%.1f%%",
+                    label,
+                    float(estimated),
+                    float(observed),
+                    float(error_pct * 100),
+                )
+
+            results.append(
+                HeuristicValidationResult(
+                    label=label,
+                    estimated_fees_usd=estimated,
+                    observed_fees_usd=observed,
+                    error_pct=error_pct,
+                    exceeds_threshold=exceeds,
+                )
+            )
+
+        return results
 
     def value_position(
         self,

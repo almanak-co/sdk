@@ -11,12 +11,12 @@ import json
 import logging
 from dataclasses import dataclass
 
-from almanak.core.contracts import AAVE_V3
+from almanak.connectors.aave_v3.addresses import AAVE_V3
 
 logger = logging.getLogger(__name__)
 
-# Aave V3 Pool Data Provider addresses — derived from the centralized registry
-# in almanak/core/contracts.py (single source of truth for all Aave V3 addresses).
+# Aave V3 Pool Data Provider addresses — derived from the connector-owned
+# address table in almanak/connectors/aave_v3/addresses.py (W1 / VIB-4853).
 AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {chain: addrs["pool_data_provider"] for chain, addrs in AAVE_V3.items()}
 
 # Function selector for getUserReserveData(address asset, address user)

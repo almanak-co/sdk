@@ -239,17 +239,43 @@ class AccountingProcessor:
         )
         return handler(ctx)
 
-    def _lookup_prior_lp_open(self, position_key: str) -> dict[str, Any] | None:
-        """Return the most recent LP_OPEN payload for ``position_key``.
+    def _lookup_prior_lp_open(self, position_key: str, discriminator: str | None = None) -> dict[str, Any] | None:
+        """Resolve the prior LP_OPEN payload for a closing LP position (VIB-4275).
 
-        Used to compute ``realized_pnl_usd`` and backfill tick metadata on
-        LP_CLOSE / LP_COLLECT_FEES events. Returns the parsed
-        ``payload_json`` dict, or None if no prior open exists or the
-        state manager doesn't expose ``get_accounting_events_sync``.
+        Used to compute ``realized_pnl_usd``, ``hodl_value_usd`` / ``il_usd``,
+        and backfill tick metadata on LP_CLOSE / LP_COLLECT_FEES events.
 
-        Read-side fail-quiet: a state-manager error returns None and the
-        handler emits a CLOSE payload without ``realized_pnl_usd``. We
-        prefer "no PnL number" over "fabricated PnL number".
+        Resolution policy
+        -----------------
+        ``position_key`` is POOL-LEVEL — identical for every concurrent position
+        in one pool. When a wallet holds N>1 positions in the same pool (the
+        confirmed co-pool bug, deployment ``4d0fd01e``), the pool key alone
+        cannot identify WHICH open belongs to the closing leg.
+
+        * **Discriminator provided** (the closing leg's NFT token id): filter the
+          same-``position_key`` candidate opens to those whose open payload
+          carries a matching ``position_id``. Return the unique match.
+          - exactly one match → that open.
+          - zero matches, or more than one match → **None** (fail closed). The
+            close cannot be attributed with certainty, so the handler emits
+            ``None`` for the attribution-dependent money fields rather than
+            guessing.
+        * **No discriminator** (None / "") — non-CL / fungible-LP venues or a
+          legacy row: resolve ONLY the single-open case. Exactly one prior open
+          for this key → return it (the legacy 1:1 behaviour is preserved).
+          Two or more opens with no discriminator to choose between them →
+          **None** (fail closed).
+
+        **NEVER falls back to "most-recent open by timestamp."** That is the
+        VIB-4275 bug this method exists to remove — substituting a sibling /
+        latest open under ambiguity cross-contaminated co-pool legs'
+        hodl/IL/realized_pnl. When the closing position's own open cannot be
+        identified with certainty, the answer is ``None`` (unmeasured, per
+        Empty ≠ Zero) — never another leg's open.
+
+        Returns the parsed ``payload_json`` dict, or ``None`` (no prior open,
+        ambiguous, state manager lacks ``get_accounting_events_sync``, or a
+        read-side error — fail-quiet: "no PnL number" beats "fabricated PnL").
         """
         if not position_key or not self._deployment_id:
             return None
@@ -260,19 +286,124 @@ class AccountingProcessor:
         except Exception as exc:  # noqa: BLE001
             logger.debug("prior LP_OPEN lookup failed for %s: %s", position_key, exc)
             return None
-        # Sorted ascending by timestamp; pick the most recent OPEN.
-        for row in reversed(events or []):
-            if (row.get("event_type") or "").upper() == "LP_OPEN":
-                payload = row.get("payload_json")
-                if isinstance(payload, str):
-                    import json as _json
 
-                    try:
-                        return _json.loads(payload)
-                    except Exception:  # noqa: BLE001
-                        return None
-                if isinstance(payload, dict):
-                    return payload
+        # Single pass over the pool key's events (timestamp-ASC) to derive both
+        # the full open set (for discriminator matching) and the ACTIVE open set
+        # (for the legacy/no-id fallback). active is a stack: an LP_CLOSE retires
+        # the lone live open when exactly one is active; a close while >=2 opens
+        # are live is AMBIGUOUS without a per-position id (we cannot tell which
+        # leg it closed) so we refuse the fallback rather than guess. A naive
+        # FIFO drop would mis-assign OPEN A -> OPEN B -> CLOSE B and recreate
+        # sibling attribution (Codex Finding 2 + CodeRabbit on #2459).
+        # LP_COLLECT_FEES does not retire a position.
+        opens: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        ambiguous_close = False
+        for row in events or []:
+            if self._is_lp_open(row):
+                parsed = self._parse_open_payload(row)
+                if parsed is not None:
+                    opens.append(parsed)
+                    active.append(parsed)
+            elif self._is_lp_close(row):
+                if len(active) == 1:
+                    active.pop()
+                elif len(active) >= 2:
+                    ambiguous_close = True
+                # len(active) == 0: a close with no live open we can see — ignore.
+        if not opens:
+            return None
+
+        # Do ANY candidate opens carry a usable per-position id? If none do, the
+        # data predates discriminator stamping (pre-fix migration window — Codex
+        # Finding 1) or the venue is fungible: a close discriminator cannot match
+        # it, so degrade to active-open resolution. If id-bearing opens DO exist
+        # we trust the id match and fail closed on a miss (never guess a sibling).
+        # 0 / "0" is normalized to "no discriminator" on BOTH sides (gemini +
+        # CodeRabbit on #2459) — a real minted NFT id is a positive integer.
+        disc = self._normalize_position_id(discriminator)
+        opens_carry_id = any(self._normalize_position_id(p.get("position_id")) for p in opens)
+
+        if disc and opens_carry_id:
+            # NFT ids are unique, so match across ALL opens — a historical
+            # (already-closed) open never aliases a live one.
+            matches = [p for p in opens if self._normalize_position_id(p.get("position_id")) == disc]
+            if len(matches) == 1:
+                return matches[0]
+            # Id-bearing data exists but the close's id matches 0 (genuine miss /
+            # closing position's open absent) or >1 (duplicate ids — should not
+            # happen) ⇒ fail closed.
+            logger.error(
+                "VIB-4275: LP close prior-open resolution found %d opens matching "
+                "discriminator=%r for position_key=%s (need exactly 1); attributing "
+                "to None rather than guessing a sibling/latest open",
+                len(matches),
+                disc,
+                position_key,
+            )
+            return None
+
+        # No usable discriminator (None/0, or every candidate open is legacy/no-id):
+        # resolve ONLY the provably-unique single-active-open case. A close that
+        # fired while >=2 opens were live makes the active set ambiguous ⇒ fail
+        # closed; NEVER guess a sibling/latest.
+        if not ambiguous_close and len(active) == 1:
+            return active[0]
+        logger.error(
+            "VIB-4275: LP close prior-open resolution could not isolate a single active "
+            "open for position_key=%s (%d historical opens, %d active, ambiguous_close=%s) "
+            "and no usable discriminator; attributing to None rather than guessing a sibling/latest",
+            position_key,
+            len(opens),
+            len(active),
+            ambiguous_close,
+        )
+        return None
+
+    @staticmethod
+    def _is_lp_open(row: dict[str, Any]) -> bool:
+        return (row.get("event_type") or "").upper() == "LP_OPEN"
+
+    @staticmethod
+    def _is_lp_close(row: dict[str, Any]) -> bool:
+        return (row.get("event_type") or "").upper() == "LP_CLOSE"
+
+    @staticmethod
+    def _normalize_position_id(value: Any) -> str:
+        """Canonicalize a per-position id to its discriminator string, or ``""``
+        for "no discriminator".
+
+        A real minted NFT id is a positive integer; ``None`` / ``""`` / ``0`` /
+        ``"0"`` are degenerate and normalize to ``""`` so they never match — applied
+        uniformly to the close-side discriminator AND the open-side ids (gemini +
+        CodeRabbit on #2459), mirroring the open/close discriminator resolvers.
+        """
+        if value is None:
+            return ""
+        normalized = str(value).strip()
+        return "" if normalized in ("", "0") else normalized
+
+    @staticmethod
+    def _parse_open_payload(row: dict[str, Any]) -> dict[str, Any] | None:
+        payload = row.get("payload_json")
+        if isinstance(payload, str):
+            import json as _json
+
+            try:
+                parsed = _json.loads(payload)
+            except (ValueError, TypeError):
+                # Malformed stored payload_json is a data-integrity anomaly — we
+                # serialized it. Skip this candidate open (fail-closed per
+                # VIB-4275) but surface it: a silent swallow here would hide
+                # ledger corruption on a money path.
+                logger.warning(
+                    "LP-open candidate has unparseable payload_json; skipping it (fail-closed)",
+                    exc_info=True,
+                )
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        if isinstance(payload, dict):
+            return payload
         return None
 
     # ──────────────────────────────────────────────────────────────────────────

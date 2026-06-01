@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.contracts import AAVE_V3_TOKENS
+from almanak.connectors.aave_v3.addresses import AAVE_V3_TOKENS
 from tests.intents._permission_onchain_harness import (
     _BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN,
     _BORROW_SEED_FALLBACK_COLLATERAL,

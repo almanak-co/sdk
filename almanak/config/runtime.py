@@ -582,6 +582,18 @@ def _gas_cap_for_chain(
     ``chain`` is ``None`` for the multi-chain lane (no per-chain cap is
     expressible there); the multi-chain mainnet default is the global
     ``DEFAULT_GAS_PRICE_CAP_GWEI``.
+
+    VIB-4879: the **mainnet** path no longer honours the global
+    ``ALMANAK_MAX_GAS_PRICE_GWEI`` env var — gwei is per-chain by
+    construction and a single global number cannot represent operator
+    intent across chains with 22,000x native-price spread. The mainnet
+    path now always returns the chain descriptor default; if the legacy
+    env is set, a one-time deprecation warning is emitted recommending
+    ``ALMANAK_MAX_GAS_COST_USD`` or the chain-scoped
+    ``ALMANAK_MAX_GAS_PRICE_GWEI_<CHAIN>`` form. The **Anvil** path is
+    unchanged — anvil is a developer convenience surface where the
+    env-read drives only the "you set it too low for Anvil" warning,
+    never the actual cap.
     """
     # Imported lazily so this module's startup cost stays low.
     from almanak.core.chains import ChainRegistry
@@ -613,7 +625,54 @@ def _gas_cap_for_chain(
         )
     else:
         default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
-    return get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
+
+    # VIB-4879: mainnet path — chain default wins. We still INVOKE the
+    # int-parser on the legacy env (then discard the result) so a
+    # malformed ALMANAK_MAX_GAS_PRICE_GWEI=not-an-int still fails loudly
+    # with the runtime config's ConfigurationError — operators catching
+    # typo'd .env entries is a useful property even though the parsed
+    # value itself is unused. The deprecation warning fires alongside.
+    get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
+    _warn_if_global_gwei_env_set_on_mainnet(prefix=prefix, chain=chain)
+    return default_gas_cap
+
+
+# VIB-4879: deduplicate the deprecation warning to one log line per
+# (process, chain) pair. Module-level state is appropriate — the warning
+# IS a process-wide condition. Tests reset state via monkeypatch on the
+# environment + by reimporting / clearing the set if needed.
+_VIB_4879_DEPRECATED_GWEI_ENV_WARNED: set[str] = set()
+
+
+def _warn_if_global_gwei_env_set_on_mainnet(*, prefix: str, chain: str | None) -> None:
+    """Emit a one-time deprecation WARNING for the legacy global gwei env.
+
+    The (prefix, chain) tuple keys the dedupe set so a multi-chain boot
+    that hits ``_gas_cap_for_chain`` once per chain still gets a single
+    warning per chain (matching how operators reason about config).
+    """
+    import os as _os
+
+    raw = _os.environ.get(f"{prefix}MAX_GAS_PRICE_GWEI") or _os.environ.get("MAX_GAS_PRICE_GWEI")
+    if not raw:
+        return
+
+    key = f"{prefix}|{chain or '<multi>'}"
+    if key in _VIB_4879_DEPRECATED_GWEI_ENV_WARNED:
+        return
+    _VIB_4879_DEPRECATED_GWEI_ENV_WARNED.add(key)
+    chain_label = chain if chain is not None else "multi-chain lane"
+    logger.warning(
+        "%sMAX_GAS_PRICE_GWEI is deprecated and ignored on mainnet (VIB-4879). "
+        "The global form cannot represent operator intent across chains with "
+        "22,000x native-price spread. The chain default for %s is used instead. "
+        "Migrate to ALMANAK_MAX_GAS_COST_USD=<dollars> (chain-agnostic, primary "
+        "recommendation) or ALMANAK_MAX_GAS_PRICE_GWEI_<CHAIN>=<gwei> "
+        "(chain-scoped escape hatch). Raw value seen: %s.",
+        prefix,
+        chain_label,
+        raw,
+    )
 
 
 def _resolve_single_chain_rpc_url(
@@ -729,15 +788,15 @@ def _default_receipt_timeout(chain: str) -> int:
 
     Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks. Users
     can still override per-strategy with ``ALMANAK_TX_TIMEOUT_SECONDS``.
-    """
-    # Imported lazily so this module's startup cost stays low; chain_executor
-    # pulls in execution machinery we don't otherwise need at config-load time.
-    from almanak.framework.execution.chain_executor import (
-        CHAIN_RECEIPT_TIMEOUTS,
-        DEFAULT_RECEIPT_TIMEOUT,
-    )
 
-    return CHAIN_RECEIPT_TIMEOUTS.get(chain.lower(), DEFAULT_RECEIPT_TIMEOUT)
+    VIB-4857 (W5): backed by ``ChainDescriptor.timeouts.receipt_polling``
+    via :func:`almanak.core.chains._helpers.receipt_timeout_for`. The
+    helper lives below this layer so ``almanak.config`` does not import
+    from ``almanak.framework.execution``.
+    """
+    from almanak.core.chains._helpers import receipt_timeout_for
+
+    return receipt_timeout_for(chain.lower())
 
 
 # =============================================================================

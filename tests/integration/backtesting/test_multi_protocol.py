@@ -103,6 +103,12 @@ def lp_adapter_config() -> LPBacktestConfig:
         fee_tracking_enabled=True,
         use_historical_volume=True,
         chain="ethereum",
+        # VIB-4849: strict by default — a regression in the historical/subgraph
+        # path must FAIL this suite, not silently pass via the heuristic. Offline
+        # CI is already covered by the per-test THEGRAPH_API_KEY skip, so no
+        # fallback is needed here (the heuristic is exercised in dedicated adapter
+        # unit tests).
+        allow_volume_fallback=False,
     )
 
 

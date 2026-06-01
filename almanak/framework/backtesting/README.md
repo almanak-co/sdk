@@ -240,6 +240,50 @@ config = PnLBacktestConfig(
 - **Fee APY**: Annualized fee return
 - **IL-to-Fees Ratio**: Risk vs reward
 
+### LP Fee-Accrual Model and Heuristic Assumptions
+
+LP fee accrual (`LPBacktestAdapter`) estimates fees per tick as:
+
+```text
+fees = pool_volume_usd * fee_tier * liquidity_share * days_elapsed
+liquidity_share = clamp(position.liquidity / pool_liquidity, 0.10, 1.0)
+```
+
+`pool_volume_usd` is resolved from the highest-trust source available, in order:
+
+| Source | How to enable | Confidence |
+|--------|---------------|------------|
+| **Explicit** | `LPBacktestConfig.explicit_pool_volume_usd_daily` (+ `explicit_pool_liquidity_usd` for the share denominator) | HIGH |
+| **Historical** | `use_historical_volume=True` with a valid `subgraph_api_key` and a pool **address** on the position | per-subgraph |
+| **Heuristic fallback** | `allow_volume_fallback=True` (opt-in) | LOW |
+
+> **VIB-4849 — no silent fabrication.** When none of the above is available, the
+> adapter raises `DataSourceUnavailableError` instead of fabricating
+> `pool_volume = position_value * volume_multiplier`. A wrong fee number is worse
+> than a clear error. The error message states exactly what to provide.
+
+**The heuristic fallback** (`allow_volume_fallback=True`) is a deliberately rough,
+order-of-magnitude-uncertain estimate intended for quick parameter sweeps, **not**
+for PnL claims. Its assumptions:
+
+- Daily volume ≈ `position_value_usd * volume_multiplier` (default `10x`). Real
+  pools vary by orders of magnitude, so this can be wildly wrong.
+- A pool-TVL placeholder of `base_liquidity = 1,000,000` is used for liquidity
+  share unless `explicit_pool_liquidity_usd` is set.
+- A `liquidity_share` floor of 10% is applied to avoid degenerate zero-fee
+  positions for tiny stakes.
+- The reported fee blends the volume-based estimate with a fee-tier→APR proxy
+  (stable 10% / blue-chip 20% / volatile 25% / exotic 10%), and is stamped
+  `fee_confidence="low"`.
+
+**Validating the heuristic.** `LPBacktestAdapter.validate_heuristics(samples)`
+compares the heuristic output against caller-supplied ground-truth samples
+(`HeuristicValidationSample`) and logs a WARNING for any sample whose relative
+error exceeds 50% (configurable). It performs **no** network egress — the caller
+supplies observed fees (e.g. derived from on-chain `Swap` events via the gateway,
+or from a prior historical-volume run) — and returns a
+`HeuristicValidationResult` per sample.
+
 ### Lending-Specific Metrics
 
 - **Health Factor**: Collateral safety margin

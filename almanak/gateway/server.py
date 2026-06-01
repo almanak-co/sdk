@@ -47,6 +47,7 @@ from almanak.gateway.services import (
     PoolAnalyticsServiceServicer,
     PoolHistoryServiceServicer,
     PositionServiceServicer,
+    RateHistoryServiceServicer,
     RpcServiceServicer,
     SimulationServiceServicer,
     StateServiceServicer,
@@ -235,6 +236,11 @@ class GatewayServer:
         # the servicer is always registered so auth + telemetry surfaces work
         # from day 1. POOL-5 (VIB-4753) wires actual providers.
         self._pool_history_servicer: PoolHistoryServiceServicer | None = None
+        # VIB-4859 / W7: rate history (lending APY / perp funding / DEX TWAP /
+        # DEX volume). Dispatcher walks
+        # ``GatewayLendingRateHistoryCapability`` / ``GatewayFundingHistoryCapability``
+        # / ``GatewayDexTwapCapability`` / ``GatewayDexVolumeCapability`` providers.
+        self._rate_history_servicer: RateHistoryServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
         self._teardown_servicer: TeardownServiceServicer | None = None
@@ -510,6 +516,15 @@ class GatewayServer:
         self._pool_history_servicer = PoolHistoryServiceServicer(self.settings)
         gateway_pb2_grpc.add_PoolHistoryServiceServicer_to_server(self._pool_history_servicer, self.server)
 
+        # VIB-4859 / W7: rate history (lending APY / perp funding /
+        # DEX TWAP / DEX volume). Dispatcher walks the four sibling
+        # capabilities declared by registered connectors. With no
+        # implementers wired yet the servicer returns INVALID_ARGUMENT
+        # for every request — Step 2 of the migration lights up the
+        # Aave V3 + Uniswap V3 prototype.
+        self._rate_history_servicer = RateHistoryServiceServicer(self.settings)
+        gateway_pb2_grpc.add_RateHistoryServiceServicer_to_server(self._rate_history_servicer, self.server)
+
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
         # Wire TokenService into MarketService so balance providers can fall
@@ -629,28 +644,49 @@ class GatewayServer:
         # Registry-aware branch: iterate wallet_registry chains
         if self._wallet_registry is not None:
             for chain in self._wallet_registry.all_chains():
-                # Skip non-configured chains in Anvil mode to avoid connecting to
-                # Anvil ports that aren't running
-                if is_anvil_mode and configured_chains and chain not in configured_chains:
-                    logger.debug(f"Skipping non-configured chain {chain} in Anvil mode")
+                if self._skip_chain_in_anvil_mode(chain, configured_chains, is_anvil_mode):
                     continue
-                try:
-                    resolved = self._wallet_registry.resolve(chain)
-                    # Skip Solana chains
-                    if hasattr(resolved, "family") and str(resolved.family) == "solana":
-                        logger.info(f"Skipping Solana chain {chain} during pre-warm")
-                        continue
-                    wallet_address = resolved.account_address
-                    await self._execution_servicer._get_orchestrator(chain, wallet_address)
-                    self._execution_servicer._get_compiler(chain, wallet_address)
-                    logger.info(f"Pre-warmed orchestrator for chain={chain} (wallet={wallet_address[:10]}...)")
-                except Exception as e:
-                    logger.warning(f"Failed to pre-warm chain {chain}: {e}")
+                await self._prewarm_registry_chain(chain)
             return
 
         # Legacy path: derive wallet from private key / Safe address
         for chain in self.settings.chains:
             await self._prewarm_chain_legacy(chain)
+
+    @staticmethod
+    def _skip_chain_in_anvil_mode(chain: str, configured_chains: set[str], is_anvil_mode: bool) -> bool:
+        """Return True when ``chain`` should be skipped because Anvil mode is
+        configured for a different chain (VIB-2580). Centralized so the
+        pre-warm loop body stays a straight-line sequence of helper calls."""
+        if is_anvil_mode and configured_chains and chain not in configured_chains:
+            logger.debug(f"Skipping non-configured chain {chain} in Anvil mode")
+            return True
+        return False
+
+    async def _prewarm_registry_chain(self, chain: str) -> None:
+        """Pre-warm orchestrator + compiler for a single wallet-registry chain.
+
+        Solana-family wallets are skipped via the shared
+        ``_is_solana_resolved`` predicate in ``_register_chains_helpers``
+        (see that helper's docstring for why we compare on the wallet's
+        *stated* family rather than ``ChainFamily.SOLANA`` — intentionally
+        NOT the W3 migration target).
+        """
+        from almanak.gateway._register_chains_helpers import _is_solana_resolved
+
+        assert self._wallet_registry is not None
+        assert self._execution_servicer is not None
+        try:
+            resolved = self._wallet_registry.resolve(chain)
+            if _is_solana_resolved(resolved):
+                logger.info(f"Skipping Solana chain {chain} during pre-warm")
+                return
+            wallet_address = resolved.account_address
+            await self._execution_servicer._get_orchestrator(chain, wallet_address)
+            self._execution_servicer._get_compiler(chain, wallet_address)
+            logger.info(f"Pre-warmed orchestrator for chain={chain} (wallet={wallet_address[:10]}...)")
+        except Exception as e:
+            logger.warning(f"Failed to pre-warm chain {chain}: {e}")
 
     async def _prewarm_chain_legacy(self, chain: str) -> None:
         """Pre-warm a single chain using the legacy private-key path."""
@@ -712,6 +748,8 @@ class GatewayServer:
             self._funding_rate_servicer,
             self._simulation_servicer,
             self._pool_analytics_servicer,
+            self._pool_history_servicer,
+            self._rate_history_servicer,
             self._token_servicer,
         )
         # VIB-4812: connector-owned servicers (Polymarket, Enso, …) are

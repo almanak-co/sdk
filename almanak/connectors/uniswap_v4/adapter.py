@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3_TOKENS
 from almanak.connectors.uniswap_v4.hooks import HookFlags
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
@@ -41,8 +42,9 @@ from almanak.connectors.uniswap_v4.sdk import (
     SwapTransaction,
     UniswapV4SDK,
 )
-from almanak.core.contracts import UNISWAP_V4
 from almanak.framework.data.tokens import TokenNotFoundError
+
+from .addresses import UNISWAP_V4
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
@@ -58,7 +60,18 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-class UniswapV4UnsupportedPoolError(ValueError):
+class UniswapV4FailLoudError(ValueError):
+    """Base for V4 compile errors that must surface to the strategy author as a
+    raised exception rather than a soft-error empty ActionBundle.
+
+    Subclasses are re-raised (not swallowed) by ``compile_lp_open_intent``'s
+    trailing ``except`` block so a money-safety guard never silently degrades
+    into an empty bundle. Subclasses ``ValueError`` so existing
+    ``isinstance(..., ValueError)`` callers keep working (VIB-2180).
+    """
+
+
+class UniswapV4UnsupportedPoolError(UniswapV4FailLoudError):
     """Pool shape is outside the V0 supported surface (hookless ERC20-ERC20).
 
     Raised at compile time by the adapter before any transaction is built, so
@@ -75,6 +88,31 @@ class UniswapV4UnsupportedPoolError(ValueError):
     """
 
     pass
+
+
+class UniswapV4EstimatedPriceWithoutOptInError(UniswapV4FailLoudError):
+    """LP_OPEN compiled with an estimated (non-on-chain) sqrtPrice while the user's
+    max_slippage is too tight to absorb estimate divergence, and the strategy did
+    not opt in via protocol_params['allow_estimated_price'].
+
+    The adapter refuses to silently widen the user's slippage tolerance by more
+    than 2x to make an estimated-price LP open succeed (VIB-2180). The strategy
+    author must either widen max_slippage or opt in explicitly.
+    """
+
+
+# =============================================================================
+# Module constants
+# =============================================================================
+
+# Slippage floor when sqrtPrice came from an on-chain StateView query — accurate,
+# so 5% covers normal price movement (pre-existing behaviour, VIB-2180).
+ON_CHAIN_MIN_SLIPPAGE = Decimal("0.05")
+# Slippage floor when sqrtPrice is estimated (oracle / range midpoint). An estimate
+# can diverge from real pool state, so a wider buffer avoids PoolManager
+# MaximumAmountExceeded reverts. Was a silent 30% override; now a 10% floor gated
+# by an explicit opt-in for tight-slippage users (VIB-2180).
+ESTIMATED_PRICE_MIN_SLIPPAGE = Decimal("0.10")
 
 
 # =============================================================================
@@ -483,6 +521,10 @@ class UniswapV4Adapter:
             # Get sqrtPriceX96: prefer on-chain query, fall back to estimate
             sqrt_price_x96 = None
             used_onchain_price = False
+            # VIB-2180: surface which source produced the sqrtPrice so strategy
+            # authors can tell an LP opened on an estimate vs real pool state.
+            # Exactly three labels: on_chain, oracle_estimate, range_midpoint_estimate.
+            price_source = "on_chain"
 
             # Parse hook address early (needed for pool key in StateView query)
             hooks = NATIVE_CURRENCY  # default: no hooks
@@ -525,40 +567,60 @@ class UniswapV4Adapter:
                 price1 = price_oracle.get(token1_symbol.upper())
                 if price0 and price1 and price1 > 0:
                     mid_price = Decimal(str(price0)) / Decimal(str(price1))
+                    price_source = "oracle_estimate"
                 elif range_lower is not None and range_upper is not None:
                     mid_price = (range_lower + range_upper) / 2
+                    price_source = "range_midpoint_estimate"
 
                 if mid_price and mid_price > 0:
                     sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, token0_dec, token1_dec)
                     logger.info("V4 LP_OPEN: using estimated sqrtPriceX96=%d from oracle prices", sqrt_price_x96)
                 else:
-                    # Last resort: arithmetic mean of range sqrt ratios
+                    # Last resort: arithmetic mean of range sqrt ratios — a range
+                    # midpoint in tick space, so labelled range_midpoint_estimate.
                     from almanak.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
 
                     sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
+                    price_source = "range_midpoint_estimate"
                     logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
 
             # Preserve the intent's requested amount as the hard spend cap.
             # When price estimates are uncertain, reduce liquidity instead of
             # raising amount*_max above what the user asked to spend.
             #
-            # On-chain sqrtPrice is accurate so 5% covers normal price movement.
-            # Estimated sqrtPrice (oracle-based) can diverge significantly from
-            # actual V4 pool state, so use 30% to avoid MaximumAmountExceeded
-            # reverts from the PoolManager without exceeding the request.
+            # VIB-2180: an on-chain sqrtPrice keeps the pre-existing 5% floor. An
+            # estimated sqrtPrice needs a wider buffer, but rather than silently
+            # bumping the user to a fixed 30% we refuse to widen their tolerance by
+            # more than 2x unless they explicitly opt in.
+            user_slippage = getattr(intent, "max_slippage", None)
+            if user_slippage is None:
+                user_slippage = Decimal("0.005")
+
             if used_onchain_price:
-                lp_default_slippage = Decimal("0.05")  # 5% for on-chain price
+                # On-chain sqrtPrice is accurate; keep the pre-existing 5% floor.
+                effective_slippage = max(user_slippage, ON_CHAIN_MIN_SLIPPAGE)
             else:
-                lp_default_slippage = Decimal("0.30")  # 30% for estimated price
-            intent_slippage = getattr(intent, "max_slippage", None)
-            if intent_slippage is None:
-                intent_slippage = Decimal("0.005")
-            effective_slippage = max(lp_default_slippage, intent_slippage)
-            if effective_slippage > intent_slippage:
+                # Estimated sqrtPrice needs a wider buffer to avoid PoolManager
+                # MaximumAmountExceeded reverts. Refuse to silently widen the user's
+                # tolerance by more than 2x unless they explicitly opt in.
+                allow_estimated = (intent.protocol_params or {}).get("allow_estimated_price") is True
+                if not allow_estimated and user_slippage * 2 < ESTIMATED_PRICE_MIN_SLIPPAGE:
+                    raise UniswapV4EstimatedPriceWithoutOptInError(
+                        f"V4 LP_OPEN: on-chain sqrtPrice unavailable (pool may be uninitialised "
+                        f"or StateView reverted), so the price is estimated ({price_source}). "
+                        f"Estimated-price fallback requires max_slippage >= "
+                        f"{ESTIMATED_PRICE_MIN_SLIPPAGE * 100:.0f}% to avoid PoolManager reverts; "
+                        f"your max_slippage={user_slippage * 100:.2f}% is too tight. To proceed, set "
+                        f"intent.protocol_params['allow_estimated_price'] = True. (VIB-2180)"
+                    )
+                effective_slippage = max(user_slippage, ESTIMATED_PRICE_MIN_SLIPPAGE)
+
+            if effective_slippage > user_slippage:
                 logger.warning(
-                    "V4 LP_OPEN: overriding user slippage %s%% with LP minimum %s%%",
-                    intent_slippage * 100,
-                    lp_default_slippage * 100,
+                    "V4 LP_OPEN: widening user slippage %s%% to %s%% (price_source=%s)",
+                    user_slippage * 100,
+                    effective_slippage * 100,
+                    price_source,
                 )
             slippage_bps = int(effective_slippage * 10000)
             slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
@@ -627,6 +689,9 @@ class UniswapV4Adapter:
                 "gas_estimate": sum(tx.gas_estimate for tx in transactions),
                 "protocol_version": "v4",
                 "effective_slippage_bps": slippage_bps,
+                # VIB-2180: surface the sqrtPrice provenance to the strategy author.
+                "price_source": price_source,
+                "estimated_sqrt_price_x96": (str(sqrt_price_x96) if price_source != "on_chain" else None),
             }
             if warnings:
                 metadata["warnings"] = warnings
@@ -637,9 +702,10 @@ class UniswapV4Adapter:
                 metadata=metadata,
             )
 
-        except UniswapV4UnsupportedPoolError:
-            # VIB-4475: V0 scope violations are fail-loud, not soft-error bundles.
-            # The strategy author needs to see an exception, not a silent empty bundle.
+        except UniswapV4FailLoudError:
+            # VIB-4475: V0 scope violations and VIB-2180: estimated-price-without-opt-in
+            # are fail-loud money-safety guards, not soft-error bundles. The strategy
+            # author needs to see an exception, not a silent empty bundle.
             raise
         except Exception as e:
             logger.error("V4 LP_OPEN compilation failed: %s", e)
@@ -875,8 +941,6 @@ class UniswapV4Adapter:
             return resolved.address, resolved.decimals
 
         # Fallback: use UNISWAP_V3_TOKENS registry for address
-        from almanak.core.contracts import UNISWAP_V3_TOKENS
-
         chain_tokens = UNISWAP_V3_TOKENS.get(self.chain, {})
         address = chain_tokens.get(token.upper())
         if address:
@@ -950,5 +1014,7 @@ __all__ = [
     "SwapResult",
     "UniswapV4Adapter",
     "UniswapV4Config",
+    "UniswapV4EstimatedPriceWithoutOptInError",
+    "UniswapV4FailLoudError",
     "UniswapV4UnsupportedPoolError",
 ]

@@ -192,6 +192,10 @@ async def test_execute_empty_dict_oracle_not_coerced_to_none():
     Regression test for VIB-1408: `x or None` converts {} to None, which
     triggers $1 placeholder prices on mainnet teardowns. The fix uses
     `is not None` checks to preserve the semantic distinction.
+
+    VIB-4842: the warm+validate seam preserves this distinction — when the
+    plan has no warmable tokens (token-less intent, no declared chain), the
+    fetched ``{}`` is returned verbatim, not coerced to None.
     """
     market = MagicMock()
     market.get_price_oracle_dict.return_value = {}  # empty but not None
@@ -211,11 +215,17 @@ async def test_execute_empty_dict_oracle_not_coerced_to_none():
     manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
     manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
 
-    # Give it an intent so it reaches _execute_intents
+    # Token-less intent with no declared chain → no warmable tokens, so the
+    # warm seam returns the fetched oracle verbatim (tests the {} passthrough,
+    # not the warming behaviour, which has dedicated coverage).
     intent = MagicMock()
     intent.intent_type = "SWAP"
-    intent.chain = "arbitrum"
+    intent.chain = None
     intent.to_dict.return_value = {"type": "swap"}
+    del intent.from_token
+    del intent.to_token
+    del intent.token
+    del intent.pool
     strategy.generate_teardown_intents.return_value = [intent]
 
     await manager.execute(strategy=strategy, mode="graceful", market=market)
@@ -245,10 +255,16 @@ async def test_execute_none_oracle_stays_none():
     manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
     manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
 
+    # Token-less intent with no declared chain → warm seam returns fetched
+    # value (None) verbatim.
     intent = MagicMock()
     intent.intent_type = "SWAP"
-    intent.chain = "arbitrum"
+    intent.chain = None
     intent.to_dict.return_value = {"type": "swap"}
+    del intent.from_token
+    del intent.to_token
+    del intent.token
+    del intent.pool
     strategy.generate_teardown_intents.return_value = [intent]
 
     await manager.execute(strategy=strategy, mode="graceful", market=market)

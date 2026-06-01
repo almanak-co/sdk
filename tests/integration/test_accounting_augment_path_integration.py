@@ -35,8 +35,10 @@ from almanak.framework.accounting.models import (
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
     MATCHING_POLICY_VERSION,
+    MATCHING_POLICY_VERSIONS,
     SCHEMA_VERSION,
 )
+from almanak.framework.primitives.types import Primitive
 from almanak.framework.accounting.writer import (
     AccountingWriter,
     augment_accounting_payload,
@@ -130,10 +132,15 @@ async def test_full_chain_swap_event_lands_versioned():
     assert len(rows) == 1
     payload = json.loads(rows[0][0])
 
-    # G13: every version stamped.
+    # G13: every version stamped.  Per-primitive matching_policy_version
+    # (VIB-4162 T2) — SWAP has its own slot, independently versioned from
+    # the global ``MATCHING_POLICY_VERSION`` legacy constant.  VIB-4905
+    # bumped Primitive.SWAP 3→4 for the partial-match payload contract;
+    # this assertion follows the per-primitive map so future bumps are
+    # automatically picked up.
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["formula_version"] == FORMULA_VERSION
-    assert payload["matching_policy_version"] == MATCHING_POLICY_VERSION
+    assert payload["matching_policy_version"] == MATCHING_POLICY_VERSIONS[Primitive.SWAP]
 
     # Original fields preserved.
     assert payload["event_type"] == "SWAP"

@@ -188,8 +188,10 @@ def _register_once() -> None:
         return
     _registered = True
     try:
-        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
         from almanak.framework.intents.vocabulary import IntentType
+
+        from .addresses import AAVE_V3
 
         register_connector(
             name="aave_v3",
@@ -201,6 +203,19 @@ def _register_once() -> None:
                 IntentType.FLASH_LOAN,
             ),
             chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
+            # Matrix output is owned by the connector (VIB-4856 / W4). The
+            # ``AAVE_V3`` address dict is the broader chain coverage (12
+            # chains, ahead of the strategy ``chains`` field's 9). Flash-loan
+            # is implemented on-chain but the matrix has historically scoped
+            # ``flash_loan`` to Balancer V2 (the cross-protocol venue);
+            # re-add an Aave flash-loan row once an Aave-flash strategy ships.
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="aave_v3",
+                    category="lending",
+                    chains=frozenset(AAVE_V3.keys()),
+                ),
+            ),
         )
     except Exception:
         _registered = False

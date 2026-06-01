@@ -27,12 +27,13 @@ LP compile paths for both surfaces query on-chain state:
   each scoped to the single intent type that emits it.
 """
 
-from almanak.core.contracts import AERODROME
 from almanak.framework.intents.compiler_constants import (
     NFT_POSITION_COLLECT_SELECTOR,
     NFT_POSITION_DECREASE_SELECTOR,
 )
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
+
+from .addresses import AERODROME
 
 # =========================================================================
 # Classic (V1/V2 Solidly-fork) — unchanged surface

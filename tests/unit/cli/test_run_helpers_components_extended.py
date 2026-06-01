@@ -662,8 +662,8 @@ class TestBuildOrchestratorExtras:
         rm_calls: list[Any] = []
 
         class _FakeRateMonitor:
-            def __init__(self, chain: str, rpc_url: Any) -> None:
-                rm_calls.append((chain, rpc_url))
+            def __init__(self, chain: str, rpc_url: Any, *, _internal: bool = False) -> None:
+                rm_calls.append((chain, rpc_url, _internal))
 
         monkeypatch.setattr(rates_mod, "RateMonitor", _FakeRateMonitor)
 
@@ -688,6 +688,7 @@ class TestBuildOrchestratorExtras:
                 config_chain=None,
             )
         assert rm_calls and rm_calls[0][0] == "arbitrum"
+        assert rm_calls[0][2] is True  # _internal flag passed by _build_components()
         assert isinstance(strategy_instance._rate_monitor, _FakeRateMonitor)
 
     def test_multi_chain_rate_monitor_init_failure_is_logged(
@@ -848,8 +849,8 @@ class TestBuildOrchestratorExtras:
         rm_calls: list[Any] = []
 
         class _FakeRateMonitor:
-            def __init__(self, chain: str, rpc_url: Any) -> None:
-                rm_calls.append((chain, rpc_url))
+            def __init__(self, chain: str, rpc_url: Any, *, _internal: bool = False) -> None:
+                rm_calls.append((chain, rpc_url, _internal))
 
         monkeypatch.setattr(rates_mod, "RateMonitor", _FakeRateMonitor)
 
@@ -874,6 +875,7 @@ class TestBuildOrchestratorExtras:
                 config_chain="arbitrum",
             )
         assert rm_calls and rm_calls[0][0] == "arbitrum"
+        assert rm_calls[0][2] is True  # _internal flag passed by _build_components()
 
     def test_single_chain_funding_provider_wired(
         self, monkeypatch: pytest.MonkeyPatch

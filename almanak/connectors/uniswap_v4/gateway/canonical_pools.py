@@ -65,12 +65,13 @@ from almanak.connectors.uniswap_v4.sdk import (
 from almanak.connectors.uniswap_v4.sdk import (
     PoolKey as FrameworkPoolKey,
 )
-from almanak.core.contracts import UNISWAP_V4
 from almanak.framework.data.tokens import (
     TokenNotFoundError,
     TokenResolutionError,
     get_token_resolver,
 )
+
+from ..addresses import UNISWAP_V4
 
 if TYPE_CHECKING:
     from almanak.connectors.uniswap_v4.gateway.pool_key_cache import V4PoolKeyCache

@@ -56,6 +56,15 @@ class AccountingData:
 
     strategy_classes: frozenset[StrategyClass] = field(default_factory=frozenset)
 
+    # VIB-4907 / F4: recent portfolio snapshots ordered oldest-first within
+    # the loaded window.  ``snapshot`` (above) is always the latest of these
+    # when populated, kept as a separate field for backward compat with
+    # consumers that only need the head.  The window is consumed by
+    # :func:`detect_stale_post_teardown_snapshot` to suppress misleading
+    # headline PnL on the SWAP-class fallback pattern.  Empty list when no
+    # snapshots exist.
+    recent_snapshots: list[Any] = field(default_factory=list)
+
     @property
     def has_lending(self) -> bool:
         return StrategyClass.LENDING in self.strategy_classes
@@ -157,9 +166,21 @@ async def load_accounting_data(
     ledger_limit: int = 10000,
     position_limit: int = 10000,
     accounting_limit: int = 5000,
+    snapshot_window: int = 2,
 ) -> AccountingData:
-    """Load all persisted accounting rows and return a unified AccountingData."""
+    """Load all persisted accounting rows and return a unified AccountingData.
+
+    ``snapshot_window`` controls how many of the most-recent
+    ``portfolio_snapshots`` rows to materialise into
+    ``AccountingData.recent_snapshots`` (oldest-first).  Defaults to ``2``
+    so the F4 / VIB-4907 SWAP-class fallback detector has the pre / post
+    pair it needs.  The latest is also returned via ``snapshot`` for
+    backward compatibility.
+    """
     from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+    if snapshot_window < 1:
+        snapshot_window = 1
 
     store = SQLiteStore(SQLiteConfig(db_path=db_path))
     await store.initialize()
@@ -167,10 +188,15 @@ async def load_accounting_data(
         metrics = await store.get_portfolio_metrics(deployment_id)
         ledger_entries = await store.get_ledger_entries(deployment_id, limit=ledger_limit)
         position_events = await store.get_position_events(deployment_id, limit=position_limit)
-        snapshot = await store.get_latest_snapshot(deployment_id)
+        recent_snapshots = await store.get_recent_snapshots(deployment_id, limit=snapshot_window)
         raw_accounting = await store.get_accounting_events(deployment_id, limit=accounting_limit)
     finally:
         await store.close()
+
+    # The latest snapshot is the tail of the oldest-first window.  Preserves
+    # the original ``snapshot`` contract while making the prior snapshot
+    # available alongside.
+    snapshot = recent_snapshots[-1] if recent_snapshots else None
 
     lending_events, pendle_events, unavailable, parse_errors = _deserialize_events(raw_accounting or [])
 
@@ -189,4 +215,5 @@ async def load_accounting_data(
         unavailable_records=unavailable,
         parse_errors=parse_errors,
         strategy_classes=strategy_classes,
+        recent_snapshots=recent_snapshots or [],
     )

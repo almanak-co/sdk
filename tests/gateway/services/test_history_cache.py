@@ -279,6 +279,7 @@ def test_lru_eviction_uses_access_order():
 # ============================================================================
 
 
+@pytest.mark.acceptance_pack
 def test_lru_eviction_by_bytes_uses_dedicated_counter():
     """When ONLY the bytes bound trips, eviction is classed as ``by_bytes``
     not ``by_entries``. A buggy implementation that bumps the wrong
@@ -355,6 +356,7 @@ def test_negative_size_estimator_raises():
 
 
 @pytest.mark.asyncio
+@pytest.mark.acceptance_pack
 async def test_inflight_dedup_shared_fetch():
     """Two concurrent ``get_or_fetch`` callers for the same key result
     in ONE fetcher invocation; both receive the same value."""

@@ -84,8 +84,10 @@ def _register_once() -> None:
         return
     _registered = True
     try:
-        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
         from almanak.framework.intents.vocabulary import IntentType
+
+        from .adapter import BALANCER_VAULT_ADDRESSES
 
         register_connector(
             # Renamed during VIB-4835 Phase 2 — see the rename commit message.
@@ -95,6 +97,19 @@ def _register_once() -> None:
             name="balancer_v2",
             intents=(IntentType.FLASH_LOAN,),
             chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+            # Matrix output is owned by the connector (VIB-4856 / W4).
+            # The Vault is the canonical flash-loan venue; the matrix has
+            # historically rendered the row under the bare ``"balancer"``
+            # name (not ``"balancer_v2"``) because that's the only Balancer
+            # surface advertised. Chains come from ``BALANCER_VAULT_ADDRESSES``,
+            # the connector-owned source of truth.
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="balancer",
+                    category="flash_loan",
+                    chains=frozenset(BALANCER_VAULT_ADDRESSES.keys()),
+                ),
+            ),
         )
     except Exception:
         _registered = False

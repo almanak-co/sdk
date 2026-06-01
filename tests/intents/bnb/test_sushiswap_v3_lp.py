@@ -25,7 +25,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.core.contracts import SUSHISWAP_V3, get_address
+from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
 from almanak.connectors.sushiswap_v3.receipt_parser import SushiSwapV3ReceiptParser
 from almanak.framework.execution.extracted_data import LPCloseData
 from almanak.framework.execution.orchestrator import (
@@ -58,7 +58,7 @@ from tests.intents.conftest import (
 # =============================================================================
 
 CHAIN_NAME = "bsc"
-POSITION_MANAGER = get_address(SUSHISWAP_V3, "bsc", "position_manager")
+POSITION_MANAGER = SUSHISWAP_V3["bsc"]["position_manager"]
 MAX_UINT128 = 2**128 - 1
 
 # Pool: USDT/WBNB 0.3% fee tier

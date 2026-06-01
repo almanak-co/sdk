@@ -147,6 +147,64 @@ def _collect_open_positions(
     return by_position
 
 
+def _hydration_position_types() -> frozenset[str]:
+    """Full position-event ``position_type`` vocabulary for bulk hydration.
+
+    Derived directly from the canonical ``observability`` enum (NOT the
+    teardown enum) so a future ``PositionType`` addition is picked up
+    automatically rather than silently dropped from the hosted bulk
+    pre-warm. Passed to ``get_position_events_filtered`` on the
+    ``GatewayStateManager`` fallback so LP + perp + both lending legs all
+    hydrate — not just LP. Imported lazily to keep the observability
+    module out of ``_run_loop_helpers`` import-time.
+    """
+    from ..observability.position_events import PositionType
+
+    return frozenset(pt.value for pt in PositionType)
+
+
+async def _read_position_events_for_hydration(
+    state_manager: Any,
+    deployment_id: str,
+) -> list[dict] | None:
+    """Read the deployment's full ``position_events`` history for cache hydration.
+
+    VIB-4894 — pick the available async read surface so the hosted
+    ``GatewayStateManager`` (which deliberately does NOT expose the
+    local-SQLite ``get_position_events_sync`` wedge — that sync bridge is
+    SQLite-specific per blueprint 06) gets the SAME bulk pre-warm as the
+    local backend:
+
+    1. ``get_position_events_for_dashboard`` — StateManager warm-tier getter
+       (state_manager.py:3405), present on the local SQLite-backed manager.
+       With no filters it returns the full timestamp-ASC history and
+       internally dispatches to the sync getter via ``run_in_executor``.
+    2. ``get_position_events_filtered`` — present on the hosted
+       ``GatewayStateManager`` (gateway_state_manager.py:1229). Filters by
+       ``position_type``; we pass the full position-event vocabulary so LP +
+       perp + lending OPENs all hydrate.
+
+    Returns the raw event-row list (possibly empty) on success, or ``None``
+    when the backend exposes neither surface — the caller treats ``None`` as
+    "no usable read path" and logs a WARN rather than silently succeeding.
+    Both surfaces return rows in timestamp-ASC order, which
+    ``_collect_open_positions`` relies on for last-write-wins.
+    """
+    # Prefer the warm-tier dashboard getter first (present on the local
+    # SQLite-backed StateManager). It is unfiltered, so it cannot miss a
+    # position whose type is absent from the hydration vocabulary.
+    if hasattr(state_manager, "get_position_events_for_dashboard"):
+        return await state_manager.get_position_events_for_dashboard(deployment_id)
+    # Hosted GatewayStateManager direct: filtered async read over the full
+    # position-type vocabulary.
+    if hasattr(state_manager, "get_position_events_filtered"):
+        return await state_manager.get_position_events_filtered(
+            deployment_id=deployment_id,
+            position_types=_hydration_position_types(),
+        )
+    return None
+
+
 async def hydrate_recent_open_events_cache(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -173,20 +231,45 @@ async def hydrate_recent_open_events_cache(
     in-process flows still work, only cross-process continuity degrades.
     """
     state_manager = getattr(runner, "state_manager", None)
-    if state_manager is None or not hasattr(state_manager, "get_position_events_sync"):
-        # GatewayStateManager (hosted) doesn't expose the sync getter.
-        # Hosted mode runs without restart-mid-position semantics today
-        # (VIB-3866 truth correction §15a.3), so this is acceptable.
+    if state_manager is None:
+        # Persistence disabled or ``initialize()`` failed — nothing to hydrate.
         return 0
 
     deployment_id = strategy.deployment_id
     if not deployment_id:
         return 0
 
+    # VIB-4894 — branch on the available async read surface so the hosted
+    # ``GatewayStateManager`` gets the SAME bulk pre-warm as the local
+    # backend. The prior code early-returned 0 on any backend lacking the
+    # SQLite-specific ``get_position_events_sync`` wedge, which silently
+    # disabled restart-mid-position continuity on every hosted runner.
+    # VIB-4839's lp_triple production evidence (4-day OPEN→teardown gap, 3
+    # positions, hosted strategy) disproved the "hosted runs without
+    # restart-mid-position semantics" assumption that justified the no-op.
+    # Without this bulk pre-warm, the per-CLOSE durable fallback (VIB-4839,
+    # ``_emit_position_event_for_intent``) still keeps the books correct but
+    # pays N separate ``get_position_history`` gRPC round-trips during the
+    # teardown loop instead of one bulk read at boot.
     try:
-        all_events = state_manager.get_position_events_sync(deployment_id)
+        all_events = await _read_position_events_for_hydration(state_manager, deployment_id)
     except Exception as e:  # noqa: BLE001 — best-effort startup hydration
         logger.warning("Failed to hydrate recent_open_events cache: %s", e)
+        return 0
+
+    if all_events is None:
+        # No usable async read surface (neither the warm-tier dashboard
+        # getter nor the filtered getter). We do NOT expand the SQLite sync
+        # wedge onto the GatewayStateManager (blueprint 06 keeps that bridge
+        # SQLite-specific) — surface the gap loudly instead of silently
+        # succeeding with an empty cache.
+        logger.warning(
+            "recent_open_events hydration: state_manager %s exposes no "
+            "get_position_events_for_dashboard / get_position_events_filtered "
+            "surface; skipping bulk pre-warm for %s",
+            type(state_manager).__name__,
+            deployment_id,
+        )
         return 0
 
     if not all_events:
@@ -977,6 +1060,43 @@ async def capture_teardown_snapshot_with_accounting(
                 error,
             )
 
+    # VIB-4906 / F2: invalidate the strategy's per-iteration MarketSnapshot
+    # memo before the bracket so its ``_balance_cache`` is rebuilt against
+    # the current on-chain state.
+    #
+    # Why it matters — without this, the post-teardown bracket reuses the
+    # MarketSnapshot instance that was warmed during the preceding iteration
+    # (or pre-teardown bracket).  ``capture_portfolio_snapshot`` reads
+    # balances through that cache (via Track C / ``create_market_snapshot``),
+    # so the post-teardown ``portfolio_snapshots`` row carries the
+    # PRE-teardown wallet balances — byte-identical to the pre-bracket row
+    # even though the teardown SWAPs landed on chain in between.  That
+    # cache-staleness fingerprint is exactly what VIB-4907 / F4 suppresses;
+    # this fix is the structural complement.
+    #
+    # Token shape ``{teardown_cycle_id}:{phase}`` is unique against both
+    # the iteration's cycle id (no colon-suffix) and the sibling bracket,
+    # so each bracket builds a fresh snapshot.
+    #
+    # Defensive try/except: the runner's helper already wraps to
+    # never-raise (strategy_runner.py:6549-6552), but we wrap again at the
+    # call site so the teardown bracket's never-raise contract holds even
+    # if a future refactor loses that wrapping.  Failures degrade to "memo
+    # not invalidated" — the bracket still runs, the post-snapshot may be
+    # stale, F4 suppression then re-fires downstream.  Strictly safer than
+    # propagating.
+    try:
+        runner._begin_market_snapshot_iteration(strategy, f"{teardown_cycle_id}:{phase}")
+    except Exception:  # noqa: BLE001 — never propagate from teardown bracket
+        logger.warning(
+            "capture_teardown_snapshot_with_accounting[%s]: market snapshot "
+            "cache invalidation failed for %s — post-bracket may carry stale "
+            "balances, F4 suppression will catch it downstream",
+            phase,
+            deployment_id,
+            exc_info=True,
+        )
+
     try:
         try:
             snapshot = await capture_portfolio_snapshot(
@@ -1410,8 +1530,20 @@ async def _install_registry_lookup_for_lp_tracker(
             # ``_lp_registry_id_cache`` (populated at boot via
             # ``_refresh_lp_registry_id_cache`` and refreshed on every
             # registry-mode write).
-            cache: dict[tuple[str, str, str], str] = getattr(runner_ref, "_lp_registry_id_cache", {})
-            return cache.get((protocol.lower(), chain.lower(), pool.lower()))
+            #
+            # VIB-4301: the cache value is the SET of open token_ids for this
+            # (protocol, chain, pool). Auto-injection is only safe when there is
+            # exactly ONE open NFT in the pool — return it. When there are zero
+            # or N>1 (a legitimate co-pool / delta-neutral position), return None
+            # WITHOUT warning: the strategy must (and does) supply ``position_id``
+            # on the close intent itself, and the tracker only injects when the
+            # caller did not. This eliminates the pre-fix cache-thrash + spurious
+            # multi-NFT warning that fired on every legitimate co-pool close.
+            cache: dict[tuple[str, str, str], set[str]] = getattr(runner_ref, "_lp_registry_id_cache", {})
+            token_ids = cache.get((protocol.lower(), chain.lower(), pool.lower()))
+            if token_ids and len(token_ids) == 1:
+                return next(iter(token_ids))
+            return None
         except Exception:  # noqa: BLE001 — defensive
             return None
 
@@ -1453,26 +1585,26 @@ _UNIV3_FAMILY_PROTOCOL_SLUGS: tuple[str, ...] = (
 def _index_lp_registry_row_into_cache(
     *,
     row: dict[str, Any],
-    cache: dict[tuple[str, str, str], str],
-    ambiguous: set[tuple[str, str, str]],
+    cache: dict[tuple[str, str, str], set[str]],
+    ambiguous: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """Index one OPEN ``position_registry`` row into the runner's
     registry-id cache (in place).
 
-    Audit P2 (CodeRabbit): the cache key
-    ``(protocol, chain, pool_address)`` is the same shape
-    :class:`LPPositionTracker._PositionKey` uses, so multiple open
-    NFTs in the same pool collide on it. Using last-write-wins would
-    let teardown target an arbitrary token_id when a delta-neutral
-    hedge or any other multi-NFT-per-pool strategy is active. We
-    detect ambiguity here and DROP the cache entry so the sync lookup
-    returns ``None`` and the in-memory tracker fallback fires (legacy
-    behavior preserved). The registry's authoritative read is still
-    ``get_position_registry_open_rows`` keyed on
-    ``physical_identity_hash``; this cache is the legacy projection
-    for the tracker-injection compatibility shim. A complete fix
-    plumbs a per-position discriminator (registry_handle) through the
-    LPPositionTracker contract — out of scope for T12 cutover.
+    VIB-4301: the cache value is the SET of open token_ids for the
+    ``(protocol, chain, pool_address)`` key. Co-pool legs (a delta-neutral
+    hedge or any other multi-NFT-per-pool strategy) accumulate into the same
+    set rather than colliding — there is no last-write-wins, no cache thrash,
+    and no spurious "multi-NFT" warning. The reader (``_sync_lookup``) only
+    auto-injects when the set has exactly one element; with N>1 the strategy
+    supplies ``position_id`` on the close intent itself and the tracker injects
+    nothing. The registry's authoritative read is still
+    ``get_position_registry_open_rows`` keyed on ``physical_identity_hash``;
+    this cache is the legacy projection for the tracker-injection shim
+    (removed by T29 / VIB-4215).
+
+    ``ambiguous`` is accepted for back-compat with existing callers but is no
+    longer needed — set accumulation handles multiplicity directly.
 
     No-op when:
     - ``row.payload`` is not a dict (corrupt payload).
@@ -1490,26 +1622,7 @@ def _index_lp_registry_row_into_cache(
     token_str = str(token_id)
     for protocol_slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
         key = (protocol_slug, chain, pool_lower)
-        if key in ambiguous:
-            continue
-        existing = cache.get(key)
-        if existing is not None and existing != token_str:
-            # Multi-NFT-per-pool collision detected — mark ambiguous
-            # so subsequent rows don't last-write-wins. Drop the entry
-            # so the lookup returns None (tracker fallback).
-            ambiguous.add(key)
-            cache.pop(key, None)
-            logger.warning(
-                "LP registry-id cache: multiple OPEN NFTs in same pool "
-                "(protocol=%s chain=%s pool=%s); cache entry dropped, "
-                "tracker fallback active. Multi-NFT-per-pool injection "
-                "needs a per-position discriminator (follow-up).",
-                protocol_slug,
-                chain,
-                pool,
-            )
-        else:
-            cache[key] = token_str
+        cache.setdefault(key, set()).add(token_str)
 
 
 async def _refresh_lp_registry_id_cache(runner: StrategyRunner, deployment_id: str) -> None:
@@ -1555,8 +1668,7 @@ async def _refresh_lp_registry_id_cache(runner: StrategyRunner, deployment_id: s
             exc,
         )
         return
-    cache: dict[tuple[str, str, str], str] = {}
-    ambiguous: set[tuple[str, str, str]] = set()
+    cache: dict[tuple[str, str, str], set[str]] = {}
     for row in rows:
-        _index_lp_registry_row_into_cache(row=row, cache=cache, ambiguous=ambiguous)
+        _index_lp_registry_row_into_cache(row=row, cache=cache)
     runner._lp_registry_id_cache = cache

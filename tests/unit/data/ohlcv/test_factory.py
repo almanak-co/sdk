@@ -59,9 +59,11 @@ def test_factory_pool_address_none_default(fake_gateway_client: MagicMock) -> No
 # =============================================================================
 
 
-def test_factory_registers_two_providers(fake_gateway_client: MagicMock) -> None:
+def test_factory_registers_three_providers(fake_gateway_client: MagicMock) -> None:
+    """VIB-4847: CoinGecko is now wired as the second CEX provider, so the
+    factory registers three providers (gecko, binance, coingecko)."""
     stack = create_ohlcv_stack(gateway_client=fake_gateway_client, chain="arbitrum")
-    assert set(stack.router._providers.keys()) == {"geckoterminal", "binance"}
+    assert set(stack.router._providers.keys()) == {"geckoterminal", "binance", "coingecko"}
 
 
 def test_provider_chain_geckoterminal_first(fake_gateway_client: MagicMock) -> None:

@@ -2802,6 +2802,23 @@ class ExecutionOrchestrator:
         # Single point of gas buffer application -- simulators return raw gas_used
         buffered_gas = int(gas_estimate * self.gas_buffer_multiplier)
 
+        # Never go below the compiler-provided gas limit. The compiler seeds a
+        # worst-case static estimate per intent; a simulator / eth_estimateGas can
+        # underestimate when a tx is estimated against pre-execution state (e.g. a
+        # multi-step LP close where collect is estimated before decrease releases
+        # tokens, or a single withdraw simulated before the position changes). The
+        # estimate may only RAISE the limit, never lower it below the compiler floor.
+        # This mirrors the clamp in _maybe_estimate_gas_limits so BOTH the
+        # simulation-enabled (this is the default path) and simulation-disabled
+        # submission paths are protected against undersizing. (VIB-4915)
+        compiler_limit = tx.gas_limit or 0
+        if buffered_gas < compiler_limit:
+            logger.warning(
+                f"Gas estimate buffered={buffered_gas:,} (x{self.gas_buffer_multiplier}) "
+                f"< compiler={compiler_limit:,}, using compiler limit"
+            )
+            return tx
+
         return UnsignedTransaction(
             to=tx.to,
             value=tx.value,

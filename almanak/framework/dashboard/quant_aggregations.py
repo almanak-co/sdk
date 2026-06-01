@@ -429,7 +429,12 @@ def compute_cost_stack(
         if event_type == "SWAP":
             slip = _payload_decimal(payload, "slippage_usd")
             stack.slippage_usd += slip
-            stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd")
+            # VIB-4905 (F1): prefer ``realized_pnl_usd_matched`` (matched-
+            # portion PnL, populated on partial matches too) and fall back
+            # to legacy ``realized_pnl_usd`` (null on partial matches under
+            # the v1 contract).  Pre-v2 payloads on disk only carry the
+            # legacy key — the precedence walk handles both.
+            stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd_matched", "realized_pnl_usd")
             stack.protocol_fees_usd += _payload_decimal(payload, "protocol_fee_usd", "fee_usd")
             continue
 
@@ -507,7 +512,10 @@ def compute_reconciliation(
         if not event_type:
             continue
         if event_type == "SWAP":
-            sum_swap += _payload_decimal(payload, "realized_pnl_usd")
+            # VIB-4905 (F1): same matched-priority precedence as
+            # compute_cost_stack — keep both sites in lockstep so the
+            # reconciliation buckets agree on the SWAP signal.
+            sum_swap += _payload_decimal(payload, "realized_pnl_usd_matched", "realized_pnl_usd")
         elif event_type == "LP_CLOSE":
             sum_lp += _payload_decimal(payload, "realized_pnl_usd")
             sum_fees += _payload_decimal(payload, "fees_total_usd")

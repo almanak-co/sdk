@@ -76,6 +76,7 @@ from .exceptions import (
     TokenResolutionError,
     TokenResolutionTimeoutError,
 )
+from .identity import canonicalize_token_identity
 from .models import BridgeType, ChainToken, ChainTokenConfig, ResolvedToken, Token
 from .resolver import TokenResolver, create_token_resolver, get_token_resolver
 from .utils import denormalize, normalize
@@ -88,6 +89,8 @@ __all__ = [
     "get_token_resolver",
     "create_token_resolver",
     "TokenResolver",
+    # Read-side canonical identity helper (W1-4 / VIB-TA-8)
+    "canonicalize_token_identity",
     # Resolved token model
     "ResolvedToken",
     "BridgeType",

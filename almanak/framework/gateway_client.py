@@ -276,6 +276,15 @@ class GatewayClient:
         self._funding_rate_stub: gateway_pb2_grpc.FundingRateServiceStub | None = None
         # VIB-4727: PoolAnalyticsService stub for market.pool_analytics(...).
         self._pool_analytics_stub: gateway_pb2_grpc.PoolAnalyticsServiceStub | None = None
+        # VIB-4728 / POOL-7 (VIB-4755): PoolHistoryService stub. Backs
+        # ``PoolHistoryReader`` / ``MarketSnapshot.pool_history(...)``.
+        # All HTTP / GraphQL egress to The Graph / DefiLlama /
+        # GeckoTerminal happens on the gateway side.
+        self._pool_history_stub: gateway_pb2_grpc.PoolHistoryServiceStub | None = None
+        # VIB-4859 / W7: RateHistoryService — lending APY / perp funding
+        # / DEX TWAP / DEX volume. Backs ``RateMonitor`` /
+        # ``RateHistoryReader`` / backtesting rate providers after W7.
+        self._rate_history_stub: gateway_pb2_grpc.RateHistoryServiceStub | None = None
         self._simulation_stub: gateway_pb2_grpc.SimulationServiceStub | None = None
         self._polymarket_stub: polymarket_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
@@ -371,6 +380,33 @@ class GatewayClient:
         return self._pool_analytics_stub
 
     @property
+    def pool_history(self) -> gateway_pb2_grpc.PoolHistoryServiceStub:
+        """Get PoolHistoryService stub (VIB-4728 / POOL-7 VIB-4755). Raises if not connected.
+
+        The strategy-container ``PoolHistoryReader`` calls this stub to fetch
+        historical pool snapshots (TVL / volume / fee revenue / reserves over
+        time). All HTTP / GraphQL egress to The Graph / DefiLlama /
+        GeckoTerminal happens on the gateway side. The framework reader is a
+        thin gRPC client per `docs/internal/uat-cards/VIB-4755.md`.
+        """
+        if self._pool_history_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._pool_history_stub
+
+    @property
+    def rate_history(self) -> gateway_pb2_grpc.RateHistoryServiceStub:
+        """Get RateHistoryService stub (VIB-4859 / W7). Raises if not connected.
+
+        The strategy-container ``RateMonitor`` / ``RateHistoryReader`` /
+        backtesting rate providers call this stub. All HTTP / GraphQL /
+        Web3 egress for lending APY / perp funding / DEX TWAP / DEX volume
+        happens on the gateway side.
+        """
+        if self._rate_history_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._rate_history_stub
+
+    @property
     def simulation(self) -> gateway_pb2_grpc.SimulationServiceStub:
         """Get SimulationService stub. Raises if not connected."""
         if self._simulation_stub is None:
@@ -461,6 +497,12 @@ class GatewayClient:
         # Initialize PoolAnalytics service stub (VIB-4727)
         self._pool_analytics_stub = gateway_pb2_grpc.PoolAnalyticsServiceStub(self._channel)
 
+        # Initialize PoolHistory service stub (VIB-4728 / POOL-7 VIB-4755)
+        self._pool_history_stub = gateway_pb2_grpc.PoolHistoryServiceStub(self._channel)
+
+        # Initialize RateHistory service stub (VIB-4859 / W7)
+        self._rate_history_stub = gateway_pb2_grpc.RateHistoryServiceStub(self._channel)
+
         # Initialize Simulation service stub
         self._simulation_stub = gateway_pb2_grpc.SimulationServiceStub(self._channel)
 
@@ -503,6 +545,8 @@ class GatewayClient:
             self._dashboard_stub = None
             self._funding_rate_stub = None
             self._pool_analytics_stub = None
+            self._pool_history_stub = None
+            self._rate_history_stub = None
             self._simulation_stub = None
             self._polymarket_stub = None
             self._enso_stub = None

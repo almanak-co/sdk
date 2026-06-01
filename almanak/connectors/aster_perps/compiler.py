@@ -8,12 +8,12 @@ from decimal import Decimal
 from typing import ClassVar
 
 from almanak.connectors._strategy_base.base.compiler import BasePerpCompiler, PerpCompilerContext
-from almanak.core.contracts import ASTER_PERPS_TOKENS
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 from .adapter import AsterPerpsAdapter, AsterPerpsConfig
+from .addresses import ASTER_PERPS_TOKENS
 from .sdk import ASTER_BROKER_RAW, NATIVE_BNB_ADDRESS, PCS_BROKER_ID
 
 logger = logging.getLogger(__name__)
@@ -241,13 +241,31 @@ class AsterPerpsCompiler(BasePerpCompiler):
             ),
         )
 
+    # BSC base symbols → registered wrapper symbol for price lookup.
+    # BTC -> BTCB (Binance-Peg BTC, the actual ERC-20 at 0x7130d2A1…);
+    # WBTC.bsc kept as a legacy alias resolving to the same record. Kept
+    # chain-scoped so a future expansion to non-BSC venues doesn't bleed
+    # these BSC-specific aliases onto a chain where, e.g., BTC should map
+    # to WBTC rather than BTCB.
+    _PERP_PRICE_ALIAS_BY_CHAIN: dict[str, dict[str, str]] = {
+        "bsc": {"BTC": "BTCB", "ETH": "WETH", "BNB": "WBNB"},
+    }
+
     def _resolve_mark_price(self, ctx: PerpCompilerContext, market: str) -> Decimal:
         base_symbol = market.split("/")[0] if "/" in market else market
-        bsc_perp_price_alias = {"BTC": "WBTC", "ETH": "WETH", "BNB": "WBNB"}
+        # Try the perp market's base symbol first, then fall back to the
+        # chain-scoped alias. We deliberately do NOT map to the alias up
+        # front (Gemini #2505 suggestion): strategies still in the process
+        # of migrating to the canonical wrapper (BTC → BTCB on BSC) may
+        # pre-warm the oracle with the bare market symbol. The try/then-
+        # alias shape keeps both pre- and post-migration strategies green.
+        # The caught ValueError is the established failure mode of
+        # ``require_token_price`` and is well-trodden — no surprise here.
         try:
             return ctx.services.require_token_price(base_symbol)
         except ValueError:
-            wrapped = bsc_perp_price_alias.get(base_symbol.upper())
+            chain_aliases = self._PERP_PRICE_ALIAS_BY_CHAIN.get(ctx.chain.lower(), {})
+            wrapped = chain_aliases.get(base_symbol.upper())
             if not wrapped:
                 raise
             return ctx.services.require_token_price(wrapped)

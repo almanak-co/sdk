@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 
 from ..types import DataConfidence
 
@@ -863,66 +865,95 @@ class GasPriceProvider(Protocol):
 # Etherscan Gas Price Provider
 # =============================================================================
 
-# Etherscan API endpoints by chain
-ETHERSCAN_API_URLS: dict[str, str] = {
-    "ethereum": "https://api.etherscan.io/api",
-    "arbitrum": "https://api.arbiscan.io/api",
-    "optimism": "https://api-optimistic.etherscan.io/api",
-    "base": "https://api.basescan.org/api",
-    "polygon": "https://api.polygonscan.com/api",
-    "bsc": "https://api.bscscan.com/api",
-    "avalanche": "https://api.snowtrace.io/api",
-}
 
-# API key environment variable names by chain
-ETHERSCAN_API_KEY_ENV_VARS: dict[str, str] = {
-    "ethereum": "ETHERSCAN_API_KEY",
-    "arbitrum": "ARBISCAN_API_KEY",
-    "optimism": "OPTIMISTIC_ETHERSCAN_API_KEY",
-    "base": "BASESCAN_API_KEY",
-    "polygon": "POLYGONSCAN_API_KEY",
-    "bsc": "BSCSCAN_API_KEY",
-    "avalanche": "SNOWTRACE_API_KEY",
-}
+# Etherscan API endpoints by chain.
+#
+# VIB-4857 (W5): derived view over ``ChainRegistry``. Chains expose
+# their explorer config via ``ChainDescriptor.explorer``; this dict is
+# kept solely as a back-compat surface for tests and downstream callers
+# that snapshot the historical shape. Mutating it has no production
+# effect — to change a chain's URL, edit the corresponding descriptor
+# under ``almanak/core/chains/``.
+def _build_etherscan_api_urls() -> dict[str, str]:
+    return {
+        d.name: d.explorer.api_url
+        for d in ChainRegistry.all()
+        if d.family is ChainFamily.EVM and d.explorer.api_url is not None
+    }
 
-# Typical gas prices by chain (gwei) for fallback estimation
-DEFAULT_GAS_PRICES: dict[str, dict[str, Decimal]] = {
-    "ethereum": {
-        "base_fee": Decimal("20"),
-        "priority_fee": Decimal("2"),
-    },
-    "arbitrum": {
-        "base_fee": Decimal("0.1"),
-        "priority_fee": Decimal("0"),
-    },
-    "optimism": {
-        "base_fee": Decimal("0.001"),
-        "priority_fee": Decimal("0.001"),
-    },
-    "base": {
-        "base_fee": Decimal("0.001"),
-        "priority_fee": Decimal("0.001"),
-    },
-    "polygon": {
-        "base_fee": Decimal("30"),
-        "priority_fee": Decimal("30"),
-    },
-    "bsc": {
-        "base_fee": Decimal("3"),
-        "priority_fee": Decimal("0"),
-    },
-    "avalanche": {
-        "base_fee": Decimal("25"),
-        "priority_fee": Decimal("1"),
-    },
-}
+
+ETHERSCAN_API_URLS: dict[str, str] = _build_etherscan_api_urls()
+
+
+# API key environment variable names by chain.
+# VIB-4857 (W5): derived view; see :func:`_build_etherscan_api_urls`.
+def _build_etherscan_api_key_env_vars() -> dict[str, str]:
+    return {
+        d.name: d.explorer.api_key_env
+        for d in ChainRegistry.all()
+        if d.family is ChainFamily.EVM and d.explorer.api_key_env is not None
+    }
+
+
+ETHERSCAN_API_KEY_ENV_VARS: dict[str, str] = _build_etherscan_api_key_env_vars()
+
+
+# Typical gas prices by chain (gwei) for fallback estimation.
+#
+# VIB-4857 (W5): derived view over ``ChainRegistry``. Chains expose the
+# fallback gas fees via ``ChainDescriptor.gas.fallback_base_fee_gwei`` /
+# ``.fallback_priority_fee_gwei``. ``None`` means "no fallback registered
+# for this chain"; the consumer falls back to the ethereum entry,
+# mirroring the legacy ``DEFAULT_GAS_PRICES.get(chain, DEFAULT_GAS_PRICES["ethereum"])``
+# shape.
+def _build_default_gas_prices() -> dict[str, dict[str, Decimal]]:
+    return {
+        d.name: {
+            "base_fee": Decimal(str(d.gas.fallback_base_fee_gwei)),
+            "priority_fee": Decimal(str(d.gas.fallback_priority_fee_gwei)),
+        }
+        for d in ChainRegistry.all()
+        if d.gas.fallback_base_fee_gwei is not None and d.gas.fallback_priority_fee_gwei is not None
+    }
+
+
+DEFAULT_GAS_PRICES: dict[str, dict[str, Decimal]] = _build_default_gas_prices()
+
+
+# Default block time used when a chain has no
+# ``ChainDescriptor.rpc.block_time_seconds`` entry — matches the legacy
+# ``block_times.get(chain, 12.0)`` fallback in
+# :meth:`EtherscanGasPriceProvider._get_historical_gas_price_from_archive`.
+_DEFAULT_BLOCK_TIME_SECONDS: float = 12.0
+
+
+def _block_time_for(chain: str) -> float:
+    """Return the per-chain block time in seconds.
+
+    VIB-4857 (W5): looks up ``ChainDescriptor.rpc.block_time_seconds``
+    and falls back to :data:`_DEFAULT_BLOCK_TIME_SECONDS` (12.0, Ethereum
+    L1) for chains without an entry — mirrors the legacy
+    ``block_times.get(chain, 12.0)`` shape byte-for-byte.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.rpc.block_time_seconds is None:
+        return _DEFAULT_BLOCK_TIME_SECONDS
+    return descriptor.rpc.block_time_seconds
 
 
 # Archive RPC URL environment variable pattern (same as ChainlinkDataProvider)
 ARCHIVE_RPC_URL_ENV_PATTERN = "ARCHIVE_RPC_URL_{chain}"
 
-# Chains that support archive RPC queries
-ARCHIVE_RPC_CHAINS = ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"]
+# Chains that support archive RPC queries.
+#
+# VIB-4857 (W5): derived view over ``ChainRegistry``. A chain "supports
+# archive RPC" iff it has both a ``block_time_seconds`` (needed to map
+# timestamps to historical block numbers) and an ``explorer.api_url``
+# (the alternate price source). This mirrors the legacy hard-coded list
+# byte-for-byte.
+ARCHIVE_RPC_CHAINS: list[str] = [
+    d.name for d in ChainRegistry.all() if d.rpc.block_time_seconds is not None and d.explorer.api_url is not None
+]
 
 
 class EtherscanGasPriceProvider:
@@ -1210,6 +1241,120 @@ class EtherscanGasPriceProvider:
             confidence=DataConfidence.HIGH,  # Real API data
         )
 
+    async def _fetch_archive_current_block(
+        self,
+        session: aiohttp.ClientSession,
+        rpc_url: str,
+    ) -> int | None:
+        """Query the archive RPC for ``eth_blockNumber`` and return the int.
+
+        Returns ``None`` on any HTTP / JSON-RPC error; logs at WARNING. The
+        outer caller decides whether to short-circuit. Extracted from
+        :meth:`_get_historical_gas_price_from_archive` to keep that
+        function below the CRAP threshold after VIB-4857 added a
+        block-time lookup branch.
+
+        Defensive against non-dict JSON-RPC responses: a misbehaving RPC
+        endpoint (or a stray load balancer) can return ``null``, a list,
+        or a string instead of the expected envelope; we ``None`` out
+        rather than letting ``TypeError`` propagate past the caller's
+        ``except (TimeoutError, aiohttp.ClientError, KeyError, ValueError)``.
+        Gemini review of PR #2472.
+        """
+        payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
+        async with session.post(rpc_url, json=payload) as response:
+            if response.status != 200:
+                logger.warning(f"Archive RPC error: HTTP {response.status}")
+                return None
+            result = await response.json()
+            if not isinstance(result, dict):
+                logger.warning(f"Archive RPC returned non-dict payload: {type(result).__name__}")
+                return None
+            if "error" in result:
+                logger.warning(f"Archive RPC error: {result['error']}")
+                return None
+            block_hex = result.get("result")
+            if not isinstance(block_hex, str):
+                logger.warning(f"Archive RPC eth_blockNumber returned non-string result: {block_hex!r}")
+                return None
+            return int(block_hex, 16)
+
+    async def _fetch_archive_block_by_number(
+        self,
+        session: aiohttp.ClientSession,
+        rpc_url: str,
+        block_number: int,
+    ) -> dict | None:
+        """Query archive RPC for the given block; return the block data dict.
+
+        Returns ``None`` on any error or when the RPC has no record of the
+        block. Extracted from :meth:`_get_historical_gas_price_from_archive`
+        to reduce that function's cyclomatic complexity. Defensive against
+        non-dict JSON-RPC responses for the same reason
+        :meth:`_fetch_archive_current_block` is — see its docstring.
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_getBlockByNumber",
+            "params": [hex(block_number), False],
+            "id": 2,
+        }
+        async with session.post(rpc_url, json=payload) as response:
+            if response.status != 200:
+                return None
+            result = await response.json()
+            if not isinstance(result, dict):
+                logger.warning(f"Archive RPC returned non-dict payload: {type(result).__name__}")
+                return None
+            if "error" in result:
+                return None
+            block_data = result.get("result")
+            if not isinstance(block_data, dict):
+                return None
+            return block_data
+
+    def _gas_price_from_block_data(
+        self,
+        block_data: dict,
+        chain_lower: str,
+        timestamp: datetime,
+        target_block: int,
+    ) -> GasPrice | None:
+        """Build a :class:`GasPrice` from a block payload.
+
+        Returns ``None`` for pre-EIP-1559 blocks (no ``baseFeePerGas``).
+        Extracted from :meth:`_get_historical_gas_price_from_archive`
+        to keep that function's cyclomatic complexity below the gate
+        threshold after VIB-4857 added a block-time lookup branch.
+        """
+        base_fee_hex = block_data.get("baseFeePerGas")
+        if not base_fee_hex:
+            # Pre-EIP-1559 block, use gasPrice heuristic
+            logger.debug(f"Block {target_block} has no baseFeePerGas (pre-EIP-1559)")
+            return None
+
+        # Convert from wei to gwei
+        base_fee_wei = int(base_fee_hex, 16)
+        base_fee_gwei = Decimal(base_fee_wei) / Decimal("1000000000")
+
+        # Default priority fee based on chain
+        defaults = DEFAULT_GAS_PRICES.get(chain_lower, DEFAULT_GAS_PRICES["ethereum"])
+        priority_fee = defaults["priority_fee"]
+
+        gas_price_gwei = base_fee_gwei + priority_fee
+
+        logger.debug(f"Archive RPC: {chain_lower} block {target_block} base_fee={base_fee_gwei} gwei")
+
+        return GasPrice(
+            timestamp=timestamp,
+            chain=chain_lower,
+            base_fee_gwei=base_fee_gwei,
+            priority_fee_gwei=priority_fee,
+            gas_price_gwei=gas_price_gwei,
+            source="archive_rpc",
+            confidence=DataConfidence.HIGH,  # Real on-chain data
+        )
+
     async def _get_historical_gas_price_from_archive(
         self,
         timestamp: datetime,
@@ -1237,92 +1382,26 @@ class EtherscanGasPriceProvider:
         try:
             session = await self._get_session()
 
-            # First, get the block number for the timestamp
-            # eth_getBlockByNumber with "finalized" doesn't work for historical queries
-            # We need to find the block closest to our target timestamp
-            # For simplicity, we'll query the block at a specific number
-
-            # Get current block number to estimate historical block
-            current_block_payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_blockNumber",
-                "params": [],
-                "id": 1,
-            }
-
-            async with session.post(rpc_url, json=current_block_payload) as response:
-                if response.status != 200:
-                    logger.warning(f"Archive RPC error: HTTP {response.status}")
-                    return None
-                result = await response.json()
-                if "error" in result:
-                    logger.warning(f"Archive RPC error: {result['error']}")
-                    return None
-                current_block = int(result["result"], 16)
-
-            # Estimate historical block number
-            # Approximate: 12 seconds per block on Ethereum, ~0.25s on L2s
-            now = datetime.now(UTC)
-            seconds_ago = (now - timestamp).total_seconds()
-
-            # Chain-specific block times (seconds)
-            block_times = {
-                "ethereum": 12.0,
-                "arbitrum": 0.25,
-                "optimism": 2.0,
-                "base": 2.0,
-                "polygon": 2.0,
-                "avalanche": 2.0,
-            }
-            block_time = block_times.get(chain_lower, 12.0)
-            blocks_ago = int(seconds_ago / block_time)
-            target_block = max(1, current_block - blocks_ago)
-
-            # Get the block data
-            block_payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_getBlockByNumber",
-                "params": [hex(target_block), False],
-                "id": 2,
-            }
-
-            async with session.post(rpc_url, json=block_payload) as response:
-                if response.status != 200:
-                    return None
-                result = await response.json()
-                if "error" in result or result.get("result") is None:
-                    return None
-
-                block_data = result["result"]
-
-            # Extract base fee (EIP-1559)
-            base_fee_hex = block_data.get("baseFeePerGas")
-            if not base_fee_hex:
-                # Pre-EIP-1559 block, use gasPrice heuristic
-                logger.debug(f"Block {target_block} has no baseFeePerGas (pre-EIP-1559)")
+            # First, get the block number for the timestamp.
+            # eth_getBlockByNumber with "finalized" doesn't work for
+            # historical queries — we estimate the historical block from
+            # the target timestamp and the per-chain block time.
+            current_block = await self._fetch_archive_current_block(session, rpc_url)
+            if current_block is None:
                 return None
 
-            # Convert from wei to gwei
-            base_fee_wei = int(base_fee_hex, 16)
-            base_fee_gwei = Decimal(base_fee_wei) / Decimal("1000000000")
+            # Estimate historical block number. VIB-4857 (W5): block time
+            # comes from the descriptor via :func:`_block_time_for`.
+            now = datetime.now(UTC)
+            seconds_ago = (now - timestamp).total_seconds()
+            blocks_ago = int(seconds_ago / _block_time_for(chain_lower))
+            target_block = max(1, current_block - blocks_ago)
 
-            # Default priority fee based on chain
-            defaults = DEFAULT_GAS_PRICES.get(chain_lower, DEFAULT_GAS_PRICES["ethereum"])
-            priority_fee = defaults["priority_fee"]
+            block_data = await self._fetch_archive_block_by_number(session, rpc_url, target_block)
+            if block_data is None:
+                return None
 
-            gas_price_gwei = base_fee_gwei + priority_fee
-
-            logger.debug(f"Archive RPC: {chain} block {target_block} base_fee={base_fee_gwei} gwei")
-
-            return GasPrice(
-                timestamp=timestamp,
-                chain=chain_lower,
-                base_fee_gwei=base_fee_gwei,
-                priority_fee_gwei=priority_fee,
-                gas_price_gwei=gas_price_gwei,
-                source="archive_rpc",
-                confidence=DataConfidence.HIGH,  # Real on-chain data
-            )
+            return self._gas_price_from_block_data(block_data, chain_lower, timestamp, target_block)
 
         except (TimeoutError, aiohttp.ClientError, KeyError, ValueError) as e:
             logger.warning(f"Archive RPC query failed for {chain}: {e}")

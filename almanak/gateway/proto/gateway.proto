@@ -1349,6 +1349,9 @@ service IntegrationService {
   rpc CoinGeckoGetMarkets(CoinGeckoGetMarketsRequest) returns (CoinGeckoGetMarketsResponse);
   rpc CoinGeckoGetHistoricalPrice(CoinGeckoHistoricalPriceRequest) returns (CoinGeckoHistoricalPriceResponse);
   rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse);
+  // CoinGecko CEX-reference OHLCV (second CEX provider for the cex_primary
+  // failover chain — VIB-4847). Price-only candles (no volume).
+  rpc CoinGeckoGetOHLCV(CoinGeckoOHLCVRequest) returns (CoinGeckoOHLCVResponse);
 
   // TheGraph subgraph query endpoint
   rpc TheGraphQuery(TheGraphQueryRequest) returns (TheGraphQueryResponse);
@@ -1509,6 +1512,28 @@ message CoinGeckoMarketChartRangeResponse {
   repeated CoinGeckoMarketChartDataPoint total_volumes = 3;
   bool success = 4;
   string error = 5;
+}
+
+// CoinGecko CEX-reference OHLCV (VIB-4847). Second CEX-capable provider in the
+// router's cex_primary failover chain. Candles are price-only (no volume).
+message CoinGeckoOHLCVRequest {
+  string token = 1;             // Token symbol (e.g., "WETH", "ARB")
+  string timeframe = 2;         // Candle timeframe (1h, 4h, 1d — sub-hour is below CoinGecko's 30m native floor)
+  int32 limit = 3;              // Number of candles (most-recent N)
+  string quote = 4;             // Quote currency (default "USD"; CoinGecko OHLC is fiat-quoted)
+}
+
+message CoinGeckoOHLCVCandle {
+  int64 timestamp = 1;          // Unix timestamp in seconds (candle start)
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  // No volume field: CoinGecko OHLC carries price-only candles.
+}
+
+message CoinGeckoOHLCVResponse {
+  repeated CoinGeckoOHLCVCandle candles = 1;
 }
 
 // =============================================================================
@@ -1912,6 +1937,335 @@ message PoolHistoryResponse {
   // metadata fields above MUST be in their non-stale form:
   // truncation_reason=UNSPECIFIED, next_start_ts=0, finalized_only=false,
   // source in ("","none"), snapshots empty, error non-empty.
+  bool success = 6;
+  string error = 7;
+}
+
+// =============================================================================
+// RateHistoryService - lending APY / perp funding / DEX TWAP / DEX volume
+// =============================================================================
+//
+// VIB-4859 (W7 of epic VIB-4851). Replaces the in-framework rate-data fetch
+// scattered across ``almanak/framework/data/rates/{monitor,history}.py`` and
+// ``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}``
+// which used direct ``httpx`` / ``aiohttp`` / ``Web3(HTTPProvider(...))``
+// egress from inside the strategy container, violating the gateway boundary
+// (``AGENTS.md`` §"Gateway boundary"). All HTTP / GraphQL / Web3 egress moves
+// server-side; framework consumers become thin gRPC clients.
+//
+// Four RPCs map to the four sibling capabilities declared in
+// ``almanak.connectors._base.gateway_capabilities``:
+//
+//   - GetLendingRateCurrent + GetLendingRateHistory
+//        → ``GatewayLendingRateHistoryCapability``
+//   - GetFundingRateHistory
+//        → ``GatewayFundingHistoryCapability``
+//        (sibling of the existing live-only ``GetFundingRate`` on
+//        ``FundingRateService``)
+//   - GetDexTwap + GetDexTwapSeries
+//        → ``GatewayDexTwapCapability``
+//   - GetDexVolumeHistory
+//        → ``GatewayDexVolumeCapability``
+//
+// Wire conventions (Decimal as string, Empty != Zero, dual-channel
+// envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
+//
+// Error semantics — dual-channel wire shape, v1 behavior:
+//   - status OK + success=true   -> fresh data, returned as envelope.
+//   - status OK + success=false  -> framework raises DataSourceUnavailable
+//                                   (no silent zero-fill / no default-rate
+//                                    fallback).
+//   - non-OK status (UNAVAILABLE / INVALID_ARGUMENT / DEADLINE_EXCEEDED /
+//     PERMISSION_DENIED / UNAUTHENTICATED) -> framework raises
+//     DataSourceUnavailable; __cause__ preserves the grpc.RpcError.
+
+service RateHistoryService {
+  // Single-point live lending rate (supply or borrow APY + utilisation)
+  // for ``(chain, protocol, asset_symbol)``. Replaces
+  // ``RateMonitor._fetch_<protocol>_rate_onchain`` ``eth_call`` paths.
+  rpc GetLendingRateCurrent(GetLendingRateCurrentRequest)
+      returns (LendingRatePointResponse);
+
+  // Time-series lending APY / borrow / utilisation. Replaces the
+  // TheGraph / DefiLlama subgraph crawls in
+  // ``framework/data/rates/history.py`` and the duplicates under
+  // ``backtesting/pnl/providers/lending/``.
+  rpc GetLendingRateHistory(GetLendingRateHistoryRequest)
+      returns (LendingRateHistoryResponse);
+
+  // Historical funding-rate series for a perp ``(venue, market)``.
+  // Sibling of ``FundingRateService.GetFundingRate`` (live-only).
+  rpc GetFundingRateHistory(GetFundingRateHistoryRequest)
+      returns (FundingRateHistoryResponse);
+
+  // Single TWAP price observation for ``(chain, pool_address)`` over
+  // ``[as_of - secs_ago_start, as_of - secs_ago_end]`` (matches the
+  // Uniswap V3 ``observe(secondsAgos)`` semantics — secs_ago is
+  // measured backwards from current head, or ``as_of_block`` head when
+  // pinned). Replaces ``twap.py:_query_observe`` /
+  // ``_query_observe_at_block``.
+  rpc GetDexTwap(GetDexTwapRequest) returns (DexTwapPointResponse);
+
+  // TWAP series for ``(chain, pool_address)`` at ``interval_secs``
+  // spacing over ``[start_ts, end_ts)``.
+  rpc GetDexTwapSeries(GetDexTwapSeriesRequest)
+      returns (DexTwapHistoryResponse);
+
+  // Historical DEX trading-volume series for a single pool.
+  // Replaces the per-DEX duplicate egress under
+  // ``backtesting/pnl/providers/dex/``.
+  rpc GetDexVolumeHistory(GetDexVolumeHistoryRequest)
+      returns (DexVolumeHistoryResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Common point messages (the four data shapes)
+// -----------------------------------------------------------------------------
+//
+// All Decimal fields are encoded as strings — same convention as
+// PoolHistoryResponse / FundingRateResponse / PriceResponse. Empty string
+// means "unmeasured by this provider for this row"; NEVER substitute "0".
+
+message LendingRatePoint {
+  // Unix seconds, UTC.
+  int64 timestamp = 1;
+
+  // Supply APY as a percentage (e.g. "5.25" = 5.25%). Empty when the
+  // upstream / connector didn't measure this side. Decimal-as-string.
+  string supply_apy_pct = 2;
+
+  // Borrow APY as a percentage. Empty when not measured. Decimal-as-string.
+  string borrow_apy_pct = 3;
+
+  // Pool utilisation as a percentage (0.0 - 100.0). Empty when the
+  // upstream doesn't expose utilisation (some subgraphs). Decimal-as-string.
+  string utilization_pct = 4;
+}
+
+message FundingRatePoint {
+  // Unix seconds, UTC.
+  int64 timestamp = 1;
+
+  // Hourly funding rate as a decimal (e.g. "0.00001" = 0.001%/h).
+  // Decimal-as-string. Empty when the upstream didn't report this point.
+  string rate_hourly = 2;
+
+  // Annualised funding rate (rate_hourly * 8760). Convenience field —
+  // connectors MAY leave it empty if the connector body doesn't
+  // pre-compute it; the framework reader can derive it client-side.
+  string rate_annualized = 3;
+}
+
+message DexTwapPoint {
+  // Unix seconds, UTC. For a single fetch this is the gateway-side
+  // observation timestamp; for a series it's the bucket boundary.
+  int64 timestamp = 1;
+
+  // TWAP price (quote / base, in human-readable units). Decimal-as-string.
+  string price = 2;
+
+  // Uniswap-V3-style sanity-check field — number of observations the
+  // pool's ring-buffer had over the requested window. 0 when the
+  // connector doesn't expose an analogous counter.
+  int64 tick_observation_count = 3;
+}
+
+message DexVolumePoint {
+  // Unix seconds, UTC, aligned to the requested ``interval_secs``.
+  int64 timestamp = 1;
+
+  // Trading volume over the bucket, in USD. Decimal-as-string.
+  // Empty when the upstream subgraph didn't measure this row.
+  string volume_usd = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Request / response envelopes
+// -----------------------------------------------------------------------------
+
+message GetLendingRateCurrentRequest {
+  // Required. Lending protocol identifier — one per registered
+  // ``GatewayLendingRateHistoryCapability`` connector
+  // (``"aave_v3"``, ``"compound_v3"``, ``"morpho_blue"``, …).
+  // Empty / unknown values -> INVALID_ARGUMENT.
+  string protocol = 1;
+
+  // Required. Chain name. Validator + dispatcher consult the
+  // ``lending_supported_chains()`` declaration on the matching
+  // connector; unsupported pairs -> INVALID_ARGUMENT.
+  string chain = 2;
+
+  // Required. Asset symbol (e.g. ``"USDC"``, ``"WETH"``). The framework
+  // already keys lending rate queries by symbol — the connector resolves
+  // address-of-asset using its own ``GatewayAddressCapability`` mapping.
+  string asset_symbol = 3;
+
+  // Required. ``"supply"`` or ``"borrow"`` — matches
+  // ``RateMonitor.get_lending_rate(side=...)``.
+  string side = 4;
+}
+
+message GetLendingRateHistoryRequest {
+  // Required. See GetLendingRateCurrentRequest.
+  string protocol = 1;
+  string chain = 2;
+  string asset_symbol = 3;
+  string side = 4;
+
+  // Required. Unix seconds, UTC. Validator rejects start_ts <= 0,
+  // end_ts <= 0, start_ts >= end_ts with INVALID_ARGUMENT.
+  int64 start_ts = 5;
+  int64 end_ts = 6;
+}
+
+message LendingRatePointResponse {
+  // Echoed identity (normalised).
+  string protocol = 1;
+  string chain = 2;
+  string asset_symbol = 3;
+  string side = 4;
+
+  // The single point. Always populated on success=true.
+  LendingRatePoint point = 5;
+
+  // Provider that served the response: ``"on_chain"`` | ``"the_graph"`` |
+  // ``"defillama"`` | … On failure: ``""`` or ``"none"``.
+  string source = 6;
+
+  bool is_live_data = 7;
+
+  // Dual-channel envelope — see header comment for RateHistoryService.
+  bool success = 8;
+  string error = 9;
+}
+
+message LendingRateHistoryResponse {
+  string protocol = 1;
+  string chain = 2;
+  string asset_symbol = 3;
+  string side = 4;
+
+  // Time-series, strictly ordered by ``timestamp`` ascending. Empty
+  // ONLY when success=false (no silent zero-fill).
+  repeated LendingRatePoint points = 5;
+
+  string source = 6;
+  bool success = 7;
+  string error = 8;
+}
+
+message GetFundingRateHistoryRequest {
+  // Required. Venue identifier matching
+  // ``GatewayFundingHistoryCapability.funding_venue()``
+  // (``"hyperliquid"``, ``"gmx_v2"``).
+  string venue = 1;
+
+  // Required. Market symbol (e.g. ``"ETH-USD"``).
+  string market = 2;
+
+  // Chain (for on-chain venues; may be empty for off-chain like
+  // Hyperliquid). Validator accepts empty but rejects unknown values
+  // for on-chain venues that declared a chain set.
+  string chain = 3;
+
+  // Required. Unix seconds, UTC.
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+}
+
+message FundingRateHistoryResponse {
+  string venue = 1;
+  string market = 2;
+  string chain = 3;
+
+  repeated FundingRatePoint points = 4;
+
+  string source = 5;
+  bool success = 6;
+  string error = 7;
+}
+
+message GetDexTwapRequest {
+  // Required. DEX identifier matching
+  // ``GatewayDexTwapCapability.dex_name()`` on the connector
+  // (``"uniswap_v3"``, ``"pancakeswap_v3"``, ``"sushiswap_v3"``,
+  // ``"aerodrome"``). Empty / unknown -> INVALID_ARGUMENT.
+  string dex = 1;
+
+  // Required. Chain name.
+  string chain = 2;
+
+  // Required. Pool contract address (case-insensitive for EVM).
+  string pool_address = 3;
+
+  // Required. Window endpoints in seconds-ago (matches Uniswap V3
+  // ``observe(secondsAgos)`` semantics). ``secs_ago_start`` is the
+  // older boundary, ``secs_ago_end`` is the newer boundary. Validator
+  // rejects secs_ago_start <= secs_ago_end and any negative values.
+  int64 secs_ago_start = 4;
+  int64 secs_ago_end = 5;
+
+  // Optional. When > 0, pins the observation to this archive block.
+  // When 0, uses the current chain head.
+  int64 as_of_block = 6;
+}
+
+message DexTwapPointResponse {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+
+  DexTwapPoint point = 4;
+
+  string source = 5;
+  bool success = 6;
+  string error = 7;
+}
+
+message GetDexTwapSeriesRequest {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+
+  // Required. Unix seconds, UTC.
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+
+  // Required. Spacing between consecutive TWAP samples in seconds.
+  // Validator rejects <= 0.
+  int64 interval_secs = 6;
+}
+
+message DexTwapHistoryResponse {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+
+  repeated DexTwapPoint points = 4;
+
+  string source = 5;
+  bool success = 6;
+  string error = 7;
+}
+
+message GetDexVolumeHistoryRequest {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+  int64 interval_secs = 6;
+}
+
+message DexVolumeHistoryResponse {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+
+  repeated DexVolumePoint points = 4;
+
+  string source = 5;
   bool success = 6;
   string error = 7;
 }
@@ -3376,6 +3730,7 @@ message GeckoTerminalOHLCVRequest {
   int32 limit = 4;              // Number of candles (max 1000)
   string pool_address = 5;      // Explicit pool address (optional)
   string quote = 6;             // Quote currency (default "USD")
+  bool include_empty_intervals = 7;  // Backfill no-trade intervals as continuous buckets (default false)
 }
 
 message GeckoTerminalOHLCVCandle {

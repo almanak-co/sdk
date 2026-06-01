@@ -172,7 +172,7 @@ class TestTokenResolution:
 
         fake_tokens = {"arbitrum": {"FAKECOIN": "0x1234567890123456789012345678901234567890"}}
         adapter = UniswapV4Adapter(chain="arbitrum")
-        with patch("almanak.core.contracts.UNISWAP_V3_TOKENS", fake_tokens):
+        with patch("almanak.connectors.uniswap_v4.adapter.UNISWAP_V3_TOKENS", fake_tokens):
             with pytest.raises(TokenNotFoundError):
                 adapter._resolve_token("FAKECOIN")
 
@@ -286,5 +286,5 @@ class TestIntentCompilerV4Routing:
         assert result.status.value == "SUCCESS"
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         assert result.action_bundle.metadata["router"] == UNISWAP_V4["arbitrum"]["universal_router"]

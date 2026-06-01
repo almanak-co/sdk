@@ -51,6 +51,16 @@ class ExecutionAttempt:
     compilation errors, missing prices, unknown tokens) so the slippage
     manager skips further escalation.  The default ``True`` is correct for
     transient errors (RPC timeout, nonce conflict, gas estimation).
+
+    ``disposition`` (VIB-4532 / VIB-4664 / VIB-4258) refines that decision for
+    execution/simulation reverts. It is set by the teardown manager from
+    :func:`almanak.framework.teardown.error_taxonomy.classify_teardown_failure`:
+
+    * ``"escalate"`` (default) — walk the slippage ladder, as before.
+    * ``"non_retryable"`` — deterministic revert no slippage level can fix;
+      short-circuit (equivalent to ``retryable=False``).
+    * ``"retry_same_level"`` — transient transport/RPC error; retry at the SAME
+      slippage level then abort, never escalating to an operator-approval gate.
     """
 
     success: bool
@@ -60,6 +70,7 @@ class ExecutionAttempt:
     retry_count: int = 0
     retryable: bool = True
     retry_after_seconds: float | None = None
+    disposition: str = "escalate"
 
 
 @dataclass
@@ -68,7 +79,8 @@ class ExecutionResult:
 
     success: bool
     final_slippage: Decimal
-    status: str  # "completed", "paused_awaiting_approval", "failed_manual_intervention"
+    status: str  # "completed", "paused_awaiting_approval", "failed_manual_intervention_required",
+    # "failed_non_retryable" (deterministic revert), "failed_rpc_unreachable" (transport/RPC)
     attempts: list[ExecutionAttempt]
     current_level: EscalationLevel | None = None
     message: str | None = None
@@ -350,8 +362,15 @@ class EscalatingSlippageManager:
                 # Failed - log and potentially retry
                 logger.warning(f"Execution failed at {slippage:.1%}: {attempt.error}")
 
-                # Don't retry deterministic failures (missing price, unknown token, etc.)
-                if not attempt.retryable:
+                # Classify how to react to this failure (VIB-4532 / VIB-4664 /
+                # VIB-4258). ``non_retryable`` short-circuits, ``retry_same_level``
+                # retries without escalating, ``escalate`` (default) keeps the
+                # historical ladder. ``retryable=False`` is the legacy spelling of
+                # ``non_retryable`` — permanent compile failures still set it.
+                disposition = getattr(attempt, "disposition", "escalate")
+
+                # Deterministic failure no slippage level can fix — surface now.
+                if not attempt.retryable or disposition == "non_retryable":
                     logger.info(
                         f"Non-retryable failure at {slippage:.1%}: {attempt.error}. Skipping further escalation."
                     )
@@ -362,6 +381,38 @@ class EscalatingSlippageManager:
                         attempts=attempts,
                         current_level=level_config.level,
                         message=f"Non-retryable error: {attempt.error}",
+                    )
+
+                # Transient transport/RPC failure (VIB-4258): retry at the SAME
+                # slippage level, never escalate — bumping slippage cannot fix a
+                # DNS/Fork transport error and an operator must never approve loss
+                # for a network blip. After this level's retries are exhausted we
+                # abort with a distinct status instead of advancing the ladder.
+                if disposition == "retry_same_level":
+                    if retry < level_config.retries - 1:
+                        transport_delay = float(self.config.retry_delay_seconds)
+                        if attempt.retry_after_seconds is not None:
+                            transport_delay = max(transport_delay, attempt.retry_after_seconds)
+                        logger.info(
+                            "Transient transport failure at %.1f%%: %s. Retrying at the same level (%.2fs backoff).",
+                            slippage * 100,
+                            attempt.error,
+                            transport_delay,
+                        )
+                        await asyncio.sleep(transport_delay)
+                        continue
+                    logger.warning(
+                        "Transport/RPC failure persisted after %d same-level retries; aborting without escalation: %s",
+                        level_config.retries,
+                        attempt.error,
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        final_slippage=slippage,
+                        status="failed_rpc_unreachable",
+                        attempts=attempts,
+                        current_level=level_config.level,
+                        message=f"Transport/RPC unreachable: {attempt.error}",
                     )
 
                 if retry < level_config.retries - 1:

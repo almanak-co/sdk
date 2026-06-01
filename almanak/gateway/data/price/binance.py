@@ -31,12 +31,19 @@ _TOKEN_TO_BINANCE_SYMBOL: dict[str, str] = {
     "WETH": "ETHUSDT",
     "BTC": "BTCUSDT",
     "WBTC": "BTCUSDT",
+    "BTCB": "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
     "SOL": "SOLUSDT",
     "ARB": "ARBUSDT",
     "AVAX": "AVAXUSDT",
     "WAVAX": "AVAXUSDT",
-    "MATIC": "MATICUSDT",
-    "WMATIC": "MATICUSDT",
+    # Polygon rebranded MATIC -> POL (Sept 2024). Binance delisted MATICUSDT;
+    # the live spot pair is POLUSDT. The stale MATICUSDT ghost quote returns
+    # ~4x the real price, so it must NOT be used. POL is the registry-canonical
+    # native symbol; MATIC/WMATIC are kept as aliases.
+    "POL": "POLUSDT",
+    "MATIC": "POLUSDT",
+    "WMATIC": "POLUSDT",
+    "WPOL": "POLUSDT",
     "BNB": "BNBUSDT",
     "WBNB": "BNBUSDT",
     "LINK": "LINKUSDT",

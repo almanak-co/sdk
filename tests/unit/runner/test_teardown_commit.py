@@ -46,7 +46,6 @@ from almanak.framework.state.exceptions import (
     AccountingWriteKind,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -99,14 +98,39 @@ def _make_execution_result(
     )
 
 
-def _make_runner(*, live_mode: bool = True) -> MagicMock:
+def _make_runner(*, live_mode: bool = True, execution_mode: str | None = None) -> MagicMock:
     """Construct a fake runner satisfying the helper's protocol surface."""
     runner = MagicMock(name="StrategyRunner")
     runner._is_live_mode.return_value = live_mode
+    # Lane B stamps the centralised tri-state mode (dry_run / live / paper) via
+    # _derive_execution_mode (mirrors Lane C). Default it consistently with
+    # live_mode; tests exercising dry_run pass execution_mode explicitly.
+    runner._derive_execution_mode.return_value = execution_mode or ("live" if live_mode else "paper")
     runner._write_ledger_entry = AsyncMock(return_value="ledger-1")
     runner._write_outbox_and_fire_processor = AsyncMock(return_value=None)
     runner.config = SimpleNamespace(chain="arbitrum")
+    # VIB-4895 — Lane B now emits position_events. Wire the position-event
+    # surface honestly: a real dict cache, an async save that succeeds, an
+    # async durable-hydration fallback, and the two best-effort side-effect
+    # hooks. Tests that need failure inject their own AsyncMock on
+    # ``save_position_event``.
+    runner.state_manager = MagicMock(name="StateManager")
+    runner.state_manager.save_position_event = AsyncMock(return_value=True)
+    runner._recent_open_events = {}
+    runner._hydrate_lp_close_from_durable_store = AsyncMock(return_value=None)
+    runner._update_recent_open_events_cache = MagicMock(return_value=None)
+    runner._run_position_event_attribution = AsyncMock(return_value=None)
+    runner._runtime_config = SimpleNamespace(wallet_address="0xWALLET")
     return runner
+
+
+def _read_deferred_log(log_dir: Path) -> list[dict]:
+    """Parse the on-disk deferred-write JSONL pinned to ``log_dir`` (empty if
+    no degraded write ever landed)."""
+    log_file = log_dir / DEFERRED_LOG_FILENAME
+    if not log_file.exists():
+        return []
+    return [json.loads(ln) for ln in log_file.read_text().splitlines() if ln.strip()]
 
 
 @pytest.fixture
@@ -150,21 +174,15 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
             sidecar_calls.append(
                 {
                     "deployment_id": deployment_id,
-                    "intent_type": getattr(
-                        intent.intent_type, "value", str(intent.intent_type)
-                    ),
+                    "intent_type": getattr(intent.intent_type, "value", str(intent.intent_type)),
                     "chain": chain,
                     "result_enriched": getattr(result, "enriched", False),
                     "price_oracle_passed": price_oracle is not None,
                 }
             )
 
-    monkeypatch.setattr(
-        "almanak.framework.execution.result_enricher.ResultEnricher", _SpyEnricher
-    )
-    monkeypatch.setattr(
-        "almanak.framework.accounting.sidecar.AccountingSidecarWriter", _SpySidecar
-    )
+    monkeypatch.setattr("almanak.framework.execution.result_enricher.ResultEnricher", _SpyEnricher)
+    monkeypatch.setattr("almanak.framework.accounting.sidecar.AccountingSidecarWriter", _SpySidecar)
 
     return enricher_calls, sidecar_calls
 
@@ -175,9 +193,7 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_t1_lp_close_full_pipeline(
-    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
-):
+async def test_t1_lp_close_full_pipeline(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
     enricher_calls, sidecar_calls = patch_enricher_and_sidecar
     runner = _make_runner(live_mode=True)
     intent = _make_intent("LP_CLOSE")
@@ -205,9 +221,7 @@ async def test_t1_lp_close_full_pipeline(
     assert enricher_calls[0]["intent_type"] == "LP_CLOSE"
     assert enricher_calls[0]["bundle_metadata"] == {"expected_output_human": "1.0"}
     runner._write_ledger_entry.assert_awaited_once()
-    runner._write_outbox_and_fire_processor.assert_awaited_once_with(
-        fake_strategy, intent, "ledger-1"
-    )
+    runner._write_outbox_and_fire_processor.assert_awaited_once_with(fake_strategy, intent, "ledger-1")
     assert len(sidecar_calls) == 1
     assert sidecar_calls[0]["intent_type"] == "LP_CLOSE"
     assert sidecar_calls[0]["chain"] == "arbitrum"
@@ -225,9 +239,7 @@ async def test_t1_lp_close_full_pipeline(
 
 
 @pytest.mark.asyncio
-async def test_t2_swap_full_pipeline(
-    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
-):
+async def test_t2_swap_full_pipeline(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
     enricher_calls, sidecar_calls = patch_enricher_and_sidecar
     runner = _make_runner(live_mode=True)
     intent = _make_intent("SWAP")
@@ -249,6 +261,65 @@ async def test_t2_swap_full_pipeline(
     runner._write_outbox_and_fire_processor.assert_awaited_once()
     assert sidecar_calls[0]["intent_type"] == "SWAP"
     assert enricher_calls[0]["intent_type"] == "SWAP"
+
+
+# ---------------------------------------------------------------------------
+# VIB-4790 — TOKEN/swap teardown writes ledger + accounting but NO position_event
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_t2b_swap_teardown_no_position_event_by_design_vib4790(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """A TOKEN/swap teardown close writes the ledger + accounting surfaces but
+    emits ZERO ``position_events`` rows — and that asymmetry is BY DESIGN, not
+    the VIB-4790 bug.
+
+    ``position_events`` models *protocol* positions only — its
+    ``PositionType`` is ``{LP, PERP, LENDING_COLLATERAL, LENDING_DEBT}`` and
+    ``build_position_event_from_intent`` returns ``None`` for SWAP (see
+    ``test_position_events.test_swap_produces_no_event``). A raw token holding
+    is tracked via ``transaction_ledger`` + lot-matched cost basis +
+    ``portfolio_snapshots``, never ``position_events``. The iteration lane is
+    identical — an RSI BUY swap emits no TOKEN OPEN event either.
+
+    VIB-4790's original "Expected: a position_events CLOSE row for the TOKEN
+    position" therefore describes a *new TOKEN position primitive*, not a
+    teardown-wiring gap. This guard pins the current, correct boundary: the
+    teardown commit for a SWAP runs ``_write_ledger_entry`` (success side,
+    with ``emit_position_event=False`` because Lane B owns the emit) yet the
+    Step 2b emit is a no-op (builder → None → no ``save_position_event``). A
+    future regression that wires a half-baked TOKEN emit without the full
+    primitive (taxonomy + SWAP direction inference + cost basis + dashboard)
+    trips this test before it ships.
+    """
+    runner = _make_runner(live_mode=True)
+    intent = _make_intent("SWAP")
+    result = _make_execution_result(tx_hash="0xswap-token-close")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-token-close",
+    )
+
+    # Ledger surface IS written for the SWAP close (the real VIB-4790 fix,
+    # delivered by VIB-4895/4904) — not degraded.
+    assert outcome.accounting_degraded is False
+    assert outcome.ledger_entry_id == "ledger-1"
+    runner._write_ledger_entry.assert_awaited_once()
+    # The teardown lane owns the position-event emit explicitly (Step 2b), so
+    # it suppresses the ledger writer's transitive emit.
+    assert runner._write_ledger_entry.await_args.kwargs["emit_position_event"] is False
+    # ...and for a SWAP the explicit Step 2b emit is a no-op: zero
+    # position_events writes (the builder returns None for non-position
+    # intents). This is the by-design boundary, not a missing write.
+    runner.state_manager.save_position_event.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -392,9 +463,7 @@ async def test_t5_paper_mode_failure_degrades_does_not_raise(
 
 
 @pytest.mark.asyncio
-async def test_cycle_id_set_during_helper_and_restored(
-    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
-):
+async def test_cycle_id_set_during_helper_and_restored(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
     runner = _make_runner(live_mode=True)
 
     # Capture cycle_id seen by ledger/outbox writers.
@@ -433,9 +502,7 @@ async def test_cycle_id_set_during_helper_and_restored(
 
 
 @pytest.mark.asyncio
-async def test_cycle_id_restored_to_none_when_no_outer(
-    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
-):
+async def test_cycle_id_restored_to_none_when_no_outer(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
     """When no outer cycle id is set, the helper must restore to None,
     not leave its teardown value lingering on the contextvar.
     """
@@ -476,12 +543,8 @@ async def test_enrich_failure_does_not_block_ledger_outbox_sidecar(
         def append(self, *, deployment_id, intent, result, chain, price_oracle=None):
             sidecar_seen.append(True)
 
-    monkeypatch.setattr(
-        "almanak.framework.execution.result_enricher.ResultEnricher", _BoomEnricher
-    )
-    monkeypatch.setattr(
-        "almanak.framework.accounting.sidecar.AccountingSidecarWriter", _SpySidecar
-    )
+    monkeypatch.setattr("almanak.framework.execution.result_enricher.ResultEnricher", _BoomEnricher)
+    monkeypatch.setattr("almanak.framework.accounting.sidecar.AccountingSidecarWriter", _SpySidecar)
 
     outcome = await commit_teardown_intent(
         runner,
@@ -507,9 +570,7 @@ async def test_enrich_failure_does_not_block_ledger_outbox_sidecar(
 
 
 @pytest.mark.asyncio
-async def test_sidecar_failure_captured_not_raised(
-    fake_strategy, monkeypatch: pytest.MonkeyPatch, local_db_dir: Path
-):
+async def test_sidecar_failure_captured_not_raised(fake_strategy, monkeypatch: pytest.MonkeyPatch, local_db_dir: Path):
     runner = _make_runner(live_mode=True)
 
     class _SpyEnricher:
@@ -521,12 +582,8 @@ async def test_sidecar_failure_captured_not_raised(
         def append(self, **kwargs):
             raise OSError("disk full")
 
-    monkeypatch.setattr(
-        "almanak.framework.execution.result_enricher.ResultEnricher", _SpyEnricher
-    )
-    monkeypatch.setattr(
-        "almanak.framework.accounting.sidecar.AccountingSidecarWriter", _BoomSidecar
-    )
+    monkeypatch.setattr("almanak.framework.execution.result_enricher.ResultEnricher", _SpyEnricher)
+    monkeypatch.setattr("almanak.framework.accounting.sidecar.AccountingSidecarWriter", _BoomSidecar)
 
     outcome = await commit_teardown_intent(
         runner,
@@ -853,9 +910,7 @@ async def test_vib4318_pre_teardown_quote_wins_on_collision(
     # If our helper queried USDC, the gateway would return a wrong / stale
     # quote. The assertion is that the helper does NOT overwrite the
     # pre-teardown entry on collision.
-    runner.price_oracle = _make_price_oracle(
-        {"USDC": "0.99"}, source="gateway", confidence="STALE"
-    )
+    runner.price_oracle = _make_price_oracle({"USDC": "0.99"}, source="gateway", confidence="STALE")
 
     intent = _make_swap_intent(from_token="USDC", to_token="USDT")
     result = _make_execution_result(tx_hash="0xusdc_usdt")
@@ -1176,12 +1231,10 @@ async def test_vib4807_log_context_set_to_teardown_cycle_id(
         assert len(seen_log_ctx) == 1, "Expected exactly one ledger-writer capture"
         ctx = seen_log_ctx[0]
         assert ctx.get("cycle_id") == "teardown-vib4807-1", (
-            f"Log context cycle_id must equal teardown_cycle_id during commit. "
-            f"Got: {ctx}"
+            f"Log context cycle_id must equal teardown_cycle_id during commit. Got: {ctx}"
         )
         assert ctx.get("correlation_id") == "teardown-vib4807-1", (
-            f"Log context correlation_id must equal teardown_cycle_id during commit. "
-            f"Got: {ctx}"
+            f"Log context correlation_id must equal teardown_cycle_id during commit. Got: {ctx}"
         )
     finally:
         structlog.contextvars.clear_contextvars()
@@ -1220,17 +1273,269 @@ async def test_vib4807_log_context_restored_after_teardown(
 
         ctx_after = structlog.contextvars.get_contextvars()
         assert ctx_after.get("cycle_id") == "iter-cycle-abc", (
-            f"cycle_id must be restored to the pre-teardown value after commit exits. "
-            f"Got: {ctx_after}"
+            f"cycle_id must be restored to the pre-teardown value after commit exits. Got: {ctx_after}"
         )
         assert ctx_after.get("correlation_id") == "iter-corr-abc", (
-            f"correlation_id must be restored to the pre-teardown value. "
-            f"Got: {ctx_after}"
+            f"correlation_id must be restored to the pre-teardown value. Got: {ctx_after}"
         )
         # deployment_id (not bound by with_context) must be preserved untouched.
         assert ctx_after.get("deployment_id") == "dep-1", (
-            f"Unrelated context keys must not be cleared by the teardown commit. "
-            f"Got: {ctx_after}"
+            f"Unrelated context keys must not be cleared by the teardown commit. Got: {ctx_after}"
         )
     finally:
         structlog.contextvars.clear_contextvars()
+
+
+# ---------------------------------------------------------------------------
+# VIB-4895 — Lane B emits position_events
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vib4895_lp_close_emits_position_event_with_close_shape(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """An LP_CLOSE teardown intent (Lane B) must persist a real CLOSE
+    ``position_events`` row — not just enrich → ledger → outbox → sidecar.
+
+    Asserts the REAL emitted PositionEvent shape (event_type/position_type/
+    position_id/chain/cycle_id), built by the production
+    ``build_position_event_from_intent`` — NOT a monkeypatched no-op. This is
+    the honest-assertion guard the VIB-4839 cycle's vacuous-test anti-pattern
+    warns against.
+    """
+    runner = _make_runner(live_mode=True)
+    intent = _make_intent("LP_CLOSE")
+    intent.position_id = "98765"
+    result = _make_execution_result(tx_hash="0xc1ose")
+    context = SimpleNamespace(protocol="uniswap_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-pe-1",
+    )
+
+    assert outcome.accounting_degraded is False
+    # VIB-4895 — the ledger write MUST suppress its transitive emit so only this
+    # lane's explicit Step 2b emit fires. Without emit_position_event=False the
+    # real ``_write_ledger_entry`` would emit a SECOND (duplicate) CLOSE row
+    # (``PositionEvent.id`` is a random uuid → INSERT OR IGNORE does not dedupe).
+    runner._write_ledger_entry.assert_awaited_once()
+    assert runner._write_ledger_entry.await_args.kwargs.get("emit_position_event") is False
+    runner.state_manager.save_position_event.assert_awaited_once()
+    pos_event = runner.state_manager.save_position_event.await_args.args[0]
+    assert pos_event.event_type == "CLOSE"
+    assert pos_event.position_type == "LP"
+    assert pos_event.position_id == "98765"
+    assert pos_event.chain == "arbitrum"
+    # Cycle-id must be the teardown cycle so dashboards correlate.
+    assert pos_event.cycle_id == "teardown-pe-1"
+    assert pos_event.execution_mode == "live"
+    # Save success → cache update + attribution side-effects ran.
+    runner._update_recent_open_events_cache.assert_called_once_with(pos_event)
+    runner._run_position_event_attribution.assert_awaited_once_with(pos_event)
+
+
+@pytest.mark.asyncio
+async def test_vib4895_dry_run_mode_stamps_dry_run_not_paper(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """The emitted event must carry the centralised tri-state mode. A dry_run
+    teardown must stamp ``execution_mode="dry_run"`` — not be flattened to
+    ``"paper"`` by a live/paper binary (mirrors Lane C `_derive_execution_mode`).
+    """
+    runner = _make_runner(execution_mode="dry_run")
+    intent = _make_intent("LP_CLOSE")
+    intent.position_id = "31337"
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=_make_execution_result(tx_hash="0xdry"),
+        execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-dry",
+    )
+
+    assert outcome.accounting_degraded is False
+    pos_event = runner.state_manager.save_position_event.await_args.args[0]
+    assert pos_event.execution_mode == "dry_run"
+
+
+@pytest.mark.asyncio
+async def test_vib4895_perp_close_emits_position_event(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
+    """PERP_CLOSE also emits a CLOSE position event on Lane B."""
+    runner = _make_runner(live_mode=True)
+    intent = _make_intent("PERP_CLOSE")
+    intent.protocol = "gmx_v2"
+    intent.position_id = "perp-77"
+    result = _make_execution_result(tx_hash="0xperp")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=SimpleNamespace(protocol="gmx_v2", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-perp",
+    )
+
+    assert outcome.accounting_degraded is False
+    # Exactly one emit — a duplicate-emit regression must fail here, not pass
+    # silently on a shape-only check.
+    runner.state_manager.save_position_event.assert_awaited_once()
+    pos_event = runner.state_manager.save_position_event.await_args.args[0]
+    assert pos_event.event_type == "CLOSE"
+    assert pos_event.position_type == "PERP"
+
+
+@pytest.mark.asyncio
+async def test_vib4895_swap_emits_no_position_event_not_degraded(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """SWAP produces no position event (builder returns None). The lane must
+    NOT mark itself degraded for a legitimately-absent event."""
+    runner = _make_runner(live_mode=True)
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        _make_intent("SWAP"),
+        execution_result=_make_execution_result(),
+        execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-swap",
+    )
+
+    assert outcome.accounting_degraded is False
+    runner.state_manager.save_position_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_vib4895_position_event_save_failure_degraded_never_raises(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """Inverted failure semantics (blueprint 27 §14.1): a position-event save
+    failure must NOT propagate. It is recorded into the deferred-write log,
+    flags ``accounting_degraded``, and the helper returns normally so the next
+    risk-reducing intent can run.
+    """
+    runner = _make_runner(live_mode=True)
+    # Live-mode raise from the writer — must be caught + recorded, not re-raised.
+    runner.state_manager.save_position_event = AsyncMock(
+        side_effect=AccountingPersistenceError(
+            write_kind=AccountingWriteKind.ACCOUNTING,
+            deployment_id="dep-1",
+            message="forced position-event save failure",
+        )
+    )
+    intent = _make_intent("LP_CLOSE")
+    intent.position_id = "55555"
+
+    # Must NOT raise.
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=_make_execution_result(tx_hash="0xfail"),
+        execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-fail",
+    )
+
+    assert outcome.accounting_degraded is True
+    assert outcome.degraded_reason is not None
+    # A position_event deferred-write row landed.
+    kinds = {w.kind for w in outcome.degraded_writes}
+    assert "position_event" in kinds
+    # Ledger still succeeded (failure was isolated to the emit step) and the
+    # subsequent steps still ran — teardown kept reducing risk.
+    assert outcome.ledger_entry_id == "ledger-1"
+    runner._write_outbox_and_fire_processor.assert_awaited_once()
+    # Attribution side-effects must NOT run when the save failed.
+    runner._run_position_event_attribution.assert_not_awaited()
+    # Durability: the deferred row must reach the on-disk JSONL log, not just
+    # the in-memory outcome tuple — that is what survives a process restart.
+    log_rows = _read_deferred_log(local_db_dir)
+    assert any(r.get("kind") == "position_event" for r in log_rows), (
+        f"position_event deferred row must be durably logged; got {log_rows}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib4895_falsy_save_degraded_never_raises(fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path):
+    """A falsy (non-raising) save return is also degraded-but-continue: it
+    becomes a deferred-log row and the lane proceeds. Mirrors the iteration
+    lane's ``save returned False`` branch but without the live-mode halt."""
+    runner = _make_runner(live_mode=True)
+    runner.state_manager.save_position_event = AsyncMock(return_value=False)
+    intent = _make_intent("LP_CLOSE")
+    intent.position_id = "44444"
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=_make_execution_result(tx_hash="0xfalsy"),
+        execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-falsy",
+    )
+
+    assert outcome.accounting_degraded is True
+    assert "position_event" in {w.kind for w in outcome.degraded_writes}
+    runner._run_position_event_attribution.assert_not_awaited()
+    # Durability: falsy-save degradation must also reach the on-disk log.
+    log_rows = _read_deferred_log(local_db_dir)
+    assert any(r.get("kind") == "position_event" for r in log_rows), (
+        f"position_event deferred row must be durably logged; got {log_rows}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib4895_lp_close_hydrates_durable_store_on_cache_miss(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """VIB-4839 carry-forward mirrored on Lane B: a real-enum LP_CLOSE with a
+    cold ``_recent_open_events`` cache pulls the OPEN bracket from durable
+    storage and seeds the cache so close-time column carry-forward works on
+    the hosted / restart shape Lane B fires on.
+    """
+    from almanak.framework.intents.vocabulary import IntentType
+
+    runner = _make_runner(live_mode=True)
+    runner._recent_open_events = {}
+    durable_payload = {
+        "value_usd": "4.03",
+        "ledger_entry_id": "open-ledger-1",
+        "timestamp": "2026-05-01T00:00:00Z",
+        "tick_lower": -100,
+        "tick_upper": 100,
+        "liquidity": "123456",
+        "token0": "WETH",
+        "token1": "USDC",
+    }
+    runner._hydrate_lp_close_from_durable_store = AsyncMock(return_value=durable_payload)
+
+    # Real enum so the hydration branch (which gates on IntentType.LP_CLOSE)
+    # fires — duck-typed SimpleNamespace would not equal the enum.
+    intent = SimpleNamespace(
+        intent_type=IntentType.LP_CLOSE,
+        protocol="uniswap_v3",
+        chain="arbitrum",
+        position_id="33333",
+    )
+
+    await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=_make_execution_result(tx_hash="0xhydrate"),
+        execution_context=SimpleNamespace(protocol="uniswap_v3", chain="arbitrum"),
+        teardown_cycle_id="teardown-pe-hydrate",
+    )
+
+    runner._hydrate_lp_close_from_durable_store.assert_awaited_once_with(deployment_id="dep-1", position_id="33333")
+    # Cache seeded under the (position_id, "LP") key the carry-forward reads.
+    assert runner._recent_open_events[("33333", "LP")] == durable_payload

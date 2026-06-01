@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
 
-from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+from .addresses import AERODROME as AERODROME_ADDRESSES
 
 logger = logging.getLogger(__name__)
 

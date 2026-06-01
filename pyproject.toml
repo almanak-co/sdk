@@ -74,7 +74,7 @@ dev = [
     "twine (>=6.1.0,<7.0.0)",
     "ruff (>=0.9.10,<0.15.0)",
     "mypy>=1.19.1,<2.0.0",
-    "mypy-protobuf>=3.6.0",
+    "mypy-protobuf>=5.0.0",
     "types-requests>=2.32.0",
     "types-PyYAML>=6.0.0",
     "types-pytz>=2024.1.0",
@@ -142,6 +142,7 @@ dev = [
     "radon>=6.0.1",
     "xenon>=0.9.1",
     "diff-cover>=10.2.0",
+    "mypy-protobuf>=5.0.0",
 ]
 
 [tool.ruff.lint]
@@ -245,11 +246,18 @@ omit = [
 #                (#2158) + accounting events (#2161) merged. Local measurement on df261b66
 #                (post-#2156): 76.37% on the full unit-scope (151 307 stmts).
 #                Bumped to 75 → 1.37 pt buffer.
+#   2026-05-29 — CI measured 77.73% on main HEAD ec259bf (Main run 26622506766,
+#                test_suite job: 167 984 stmts, 130 577 covered, 37 407 missing,
+#                35 248 tests passing, 10m41s with COVERAGE_CORE=sysmon). Bumped
+#                to 77 → 0.73 pt buffer — deliberately tighter than the prior
+#                1.37-1.69 pt band (per explicit direction); a legitimate PR that
+#                lands coverage in [77.00, 77.73) or normal run-to-run noise can
+#                trip the gate. Revisit if it flakes.
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 75
+fail_under = 77
 show_missing = true
 skip_empty = true
 

@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 from eth_hash.auto import keccak as keccak256
 
-from almanak.core.contracts import SUSHISWAP_V3
+from .addresses import SUSHISWAP_V3
 
 logger = logging.getLogger(__name__)
 

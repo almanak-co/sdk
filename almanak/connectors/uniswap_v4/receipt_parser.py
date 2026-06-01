@@ -45,6 +45,8 @@ from almanak.framework.observability.metrics import (
     record_v4_lp_parser_drop,
 )
 
+from .addresses import UNISWAP_V4
+
 if TYPE_CHECKING:
     from almanak.connectors.uniswap_v4.sdk import PoolKey
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
@@ -211,8 +213,6 @@ class UniswapV4ReceiptParser:
         self.chain = chain.lower()
         self._token_resolver = token_resolver
         self._pool_key_lookup = pool_key_lookup
-
-        from almanak.core.contracts import UNISWAP_V4
 
         chain_addrs = UNISWAP_V4.get(self.chain, {})
         if pool_manager_address:
@@ -415,8 +415,6 @@ class UniswapV4ReceiptParser:
         tx_hash = receipt.get("transactionHash", "unknown")
 
         # Build set of known V4 PositionManager addresses for fallback constraint
-        from almanak.core.contracts import UNISWAP_V4
-
         known_pm_addresses = {
             addrs["position_manager"].lower() for addrs in UNISWAP_V4.values() if addrs.get("position_manager")
         }

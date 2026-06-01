@@ -15,14 +15,12 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.contracts import (
-    AAVE_V3,
-    AERODROME,
-    PANCAKESWAP_V3,
-    SUSHISWAP_V3,
-    TRADERJOE_V2,
-    UNISWAP_V3,
-)
+from almanak.connectors.aave_v3.addresses import AAVE_V3
+from almanak.connectors.aerodrome.addresses import AERODROME
+from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
+from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.framework.intents.compiler import (
     LENDING_POOL_ADDRESSES,
     LP_POSITION_MANAGERS,

@@ -12,7 +12,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.contracts import AAVE_V3
+from almanak.connectors.aave_v3.addresses import AAVE_V3
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType

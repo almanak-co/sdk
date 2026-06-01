@@ -78,8 +78,8 @@ chains = server.resources_read("almanak://chains")
 
 ### Claude Desktop Configuration
 
-The planned entry point is the `almanak mcp serve` CLI command. Once it ships,
-the Claude Desktop config will look roughly like:
+The entry point is the `almanak mcp serve` CLI command. Point your Claude
+Desktop config at it:
 
 ```json
 {
@@ -97,17 +97,18 @@ the Claude Desktop config will look roughly like:
 }
 ```
 
-!!! warning "Not yet shipped"
-    The `almanak mcp serve` CLI is not yet available, and
-    `almanak.framework.agent_tools.adapters.mcp_adapter` does not currently
-    expose a `__main__` runner — invoking it directly with `python -m ...`
-    will not start an MCP server. Use the `AlmanakMCPServer` Python API
-    (above) from a wrapper script in the meantime; the CLI entry point is
-    tracked as a separate code change.
+`almanak mcp serve` accepts `--schema-only` (serve tool schemas without a
+gateway connection), `--max-single-trade-usd` / `--allowed-chains` (policy
+overrides), and `--gateway-host` / `--gateway-port`.
 
-    **TODO (doc):** `mcp_adapter.py:15` docstring still references
-    `server.run_stdio()`, which the adapter doesn't implement. Adapter wiring
-    is tracked as a code change separate from this docs PR.
+!!! note "Programmatic embedding"
+    The CLI serves over stdio via
+    `almanak.framework.agent_tools.adapters.mcp_server.AlmanakMCPStdioServer`
+    (an awaitable `.run()` loop). The `AlmanakMCPServer` class shown above is a
+    lower-level request/response helper (`tools_list` / `tools_call` /
+    `resources_*`) for embedding in a custom transport — it does not own the
+    stdio loop itself. Prefer `almanak mcp serve` (or `AlmanakMCPStdioServer`)
+    for a ready-to-run stdio server.
 
 ## LangChain / LangGraph
 

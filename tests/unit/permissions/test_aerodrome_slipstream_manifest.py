@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.contracts import AERODROME
+from almanak.connectors.aerodrome.addresses import AERODROME
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.hints import (
     PermissionHints,

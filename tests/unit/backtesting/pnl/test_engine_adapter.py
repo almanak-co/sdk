@@ -706,3 +706,160 @@ async def test_execute_intent_no_adapter(backtester):
     # Verify generic execution worked
     assert trade_record is not None
     assert trade_record.amount_usd > Decimal("0")
+
+
+# =============================================================================
+# Tests: VIB-4849 -- missing-data error must PROPAGATE, never be swallowed
+# =============================================================================
+
+
+class _RaisingAdapter(StrategyBacktestAdapter):
+    """Adapter whose update_position always fails loud with a missing-data signal."""
+
+    @property
+    def adapter_name(self) -> str:
+        return "lp"
+
+    def execute_intent(self, intent: Any, portfolio: Any, market_state: Any) -> Any:
+        return None
+
+    def update_position(
+        self,
+        position: Any,
+        market_state: Any,
+        elapsed_seconds: float,
+        timestamp: Any = None,
+    ) -> None:
+        from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+        raise DataSourceUnavailableError(
+            data_type="volume",
+            identifier="0xdeadbeef",
+            remediation="provide explicit_pool_volume_usd_daily or opt into the fallback",
+        )
+
+    def value_position(self, position: Any, market_state: Any) -> Decimal:
+        return Decimal("0")
+
+    def should_rebalance(self, position: Any, market_state: Any) -> bool:
+        return False
+
+
+def _lp_position():
+    """Build a minimal LP position for adapter-update tests."""
+    from almanak.framework.backtesting.pnl.portfolio import PositionType, SimulatedPosition
+
+    return SimulatedPosition(
+        position_type=PositionType.LP,
+        protocol="uniswap_v3",
+        tokens=["WETH", "USDC"],
+        amounts={"WETH": Decimal("1"), "USDC": Decimal("2000")},
+        entry_price=Decimal("2000"),
+        entry_time=datetime.now(UTC),
+        liquidity=Decimal("1000000"),
+        fee_tier=Decimal("0.003"),
+        metadata={},
+    )
+
+
+def _portfolio_with_position():
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    portfolio.positions.append(_lp_position())
+    return portfolio
+
+
+def test_missing_volume_error_propagates_when_no_handler(backtester):
+    """VIB-4849 (P1): DataSourceUnavailableError must NOT be swallowed to DEBUG.
+
+    With no error handler configured, the engine must re-raise so the backtest
+    fails loudly rather than silently accruing zero fees for the tick.
+    """
+    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = None
+    portfolio = _portfolio_with_position()
+    market_state = MockMarketState()
+
+    with pytest.raises(DataSourceUnavailableError):
+        backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+
+
+def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
+    """VIB-4849 (P1): the missing-data signal is surfaced at ERROR, not hidden at DEBUG."""
+    import logging
+
+    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = None
+    portfolio = _portfolio_with_position()
+    market_state = MockMarketState()
+
+    with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.pnl.engine"):
+        with pytest.raises(DataSourceUnavailableError):
+            backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+
+    # Must be surfaced loudly (ERROR), never quietly logged at DEBUG.
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("Missing data source" in r.message for r in error_records), (
+        "missing-data error must be logged at ERROR, not swallowed"
+    )
+
+
+def test_missing_volume_error_routes_to_handler_stop(backtester):
+    """VIB-4849 (P1): with a stop-policy handler, the error still surfaces (raises)."""
+    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+    class _StopResult:
+        should_stop = True
+
+    class _StopHandler:
+        def handle_error(self, error, context=""):
+            return _StopResult()
+
+        def record_success(self):
+            pass
+
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = _StopHandler()
+    portfolio = _portfolio_with_position()
+    market_state = MockMarketState()
+
+    with pytest.raises(DataSourceUnavailableError):
+        backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+
+
+def test_missing_volume_error_handler_continue_does_not_swallow_silently(backtester, caplog):
+    """VIB-4849 (P1): a continue-policy handler still gets a loud ERROR (no silent zero)."""
+    import logging
+
+    class _ContinueResult:
+        should_stop = False
+
+    class _ContinueHandler:
+        def __init__(self):
+            self.handled = []
+
+        def handle_error(self, error, context=""):
+            self.handled.append(error)
+            return _ContinueResult()
+
+        def record_success(self):
+            pass
+
+    handler = _ContinueHandler()
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = handler
+    portfolio = _portfolio_with_position()
+    market_state = MockMarketState()
+
+    with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.pnl.engine"):
+        # Handler explicitly chose to continue -> no raise, but routed + logged loud.
+        backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+
+    assert len(handler.handled) == 1
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("Missing data source" in r.message for r in error_records)

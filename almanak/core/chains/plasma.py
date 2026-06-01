@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, Timeouts
+from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -26,6 +26,12 @@ DESCRIPTOR = register_chain(
         timeouts=Timeouts(
             tx_confirmation=120,
             grpc_execute=300,
+        ),
+        rpc=RpcProfile(
+            public_rpc="https://rpc.plasma.to",
+            alchemy_prefix="plasma",
+            tenderly_subdomain="plasma",
+            anvil_port=8554,
         ),
         aliases=(),
     )

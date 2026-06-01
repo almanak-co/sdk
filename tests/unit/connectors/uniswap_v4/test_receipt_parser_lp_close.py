@@ -35,7 +35,11 @@ from almanak.connectors.uniswap_v4.sdk import PoolKey, _pad_int24, _pad_uint
 
 CHAIN = "arbitrum"
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
-POSITION_MANAGER = "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24"
+# Real Ethereum V4 PositionManager (VIB-4874: was a garbled non-contract
+# 0xBd2165...e83b24). Paired with Ethereum's POOL_MANAGER above so the
+# fixture mocks a real V4 deployment; the parser matches the configured
+# address exactly, independent of CHAIN.
+POSITION_MANAGER = "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
 # Arbitrum USDC / WETH — USDC > WETH numerically so PoolKey sorts WETH first.
 USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"

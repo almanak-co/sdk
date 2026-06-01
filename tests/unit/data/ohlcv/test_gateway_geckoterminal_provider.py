@@ -85,6 +85,17 @@ class TestGatewayGeckoTerminalOHLCVProvider:
         assert request.chain == "ethereum"
 
     @pytest.mark.asyncio
+    async def test_request_sets_include_empty_intervals(self, provider, mock_client):
+        """VIB-4875: GeckoTerminal is DEX-native, so the SDK always asks for
+        continuous buckets (include_empty_intervals=True)."""
+        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+
+        await provider.get_ohlcv(token="NVDAON", chain="ethereum")
+
+        request = mock_client.integration.GeckoTerminalGetOHLCV.call_args[0][0]
+        assert request.include_empty_intervals is True
+
+    @pytest.mark.asyncio
     async def test_empty_response_raises(self, provider, mock_client):
         """Empty candle list raises DataSourceUnavailable."""
         mock_client.integration.GeckoTerminalGetOHLCV.return_value = (

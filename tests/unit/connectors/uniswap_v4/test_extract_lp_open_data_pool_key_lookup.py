@@ -33,7 +33,7 @@ import logging
 
 import pytest
 
-from almanak.core.contracts import UNISWAP_V4
+from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
     UniswapV4ReceiptParser,

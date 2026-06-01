@@ -1,0 +1,4332 @@
+{
+  "meta": {
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3",
+    "resolution": "4h",
+    "start_ts": 1699992000,
+    "hourly_rows": 720,
+    "expected_4h_rows": 180
+  },
+  "poolHourDatas": [
+    {
+      "periodStartUnix": 1699992000,
+      "tvlUSD": "3000000.0",
+      "volumeUSD": "1000.0",
+      "feesUSD": "10.0"
+    },
+    {
+      "periodStartUnix": 1699995600,
+      "tvlUSD": "3000001.0",
+      "volumeUSD": "1001.0",
+      "feesUSD": "11.0"
+    },
+    {
+      "periodStartUnix": 1699999200,
+      "tvlUSD": "3000002.0",
+      "volumeUSD": "1002.0",
+      "feesUSD": "12.0"
+    },
+    {
+      "periodStartUnix": 1700002800,
+      "tvlUSD": "3000003.0",
+      "volumeUSD": "1003.0",
+      "feesUSD": "13.0"
+    },
+    {
+      "periodStartUnix": 1700006400,
+      "tvlUSD": "3000004.0",
+      "volumeUSD": "1004.0",
+      "feesUSD": "14.0"
+    },
+    {
+      "periodStartUnix": 1700010000,
+      "tvlUSD": "3000005.0",
+      "volumeUSD": "1005.0",
+      "feesUSD": "15.0"
+    },
+    {
+      "periodStartUnix": 1700013600,
+      "tvlUSD": "3000006.0",
+      "volumeUSD": "1006.0",
+      "feesUSD": "16.0"
+    },
+    {
+      "periodStartUnix": 1700017200,
+      "tvlUSD": "3000007.0",
+      "volumeUSD": "1007.0",
+      "feesUSD": "17.0"
+    },
+    {
+      "periodStartUnix": 1700020800,
+      "tvlUSD": "3000008.0",
+      "volumeUSD": "1008.0",
+      "feesUSD": "18.0"
+    },
+    {
+      "periodStartUnix": 1700024400,
+      "tvlUSD": "3000009.0",
+      "volumeUSD": "1009.0",
+      "feesUSD": "19.0"
+    },
+    {
+      "periodStartUnix": 1700028000,
+      "tvlUSD": "3000010.0",
+      "volumeUSD": "1010.0",
+      "feesUSD": "20.0"
+    },
+    {
+      "periodStartUnix": 1700031600,
+      "tvlUSD": "3000011.0",
+      "volumeUSD": "1011.0",
+      "feesUSD": "21.0"
+    },
+    {
+      "periodStartUnix": 1700035200,
+      "tvlUSD": "3000012.0",
+      "volumeUSD": "1012.0",
+      "feesUSD": "22.0"
+    },
+    {
+      "periodStartUnix": 1700038800,
+      "tvlUSD": "3000013.0",
+      "volumeUSD": "1013.0",
+      "feesUSD": "23.0"
+    },
+    {
+      "periodStartUnix": 1700042400,
+      "tvlUSD": "3000014.0",
+      "volumeUSD": "1014.0",
+      "feesUSD": "24.0"
+    },
+    {
+      "periodStartUnix": 1700046000,
+      "tvlUSD": "3000015.0",
+      "volumeUSD": "1015.0",
+      "feesUSD": "25.0"
+    },
+    {
+      "periodStartUnix": 1700049600,
+      "tvlUSD": "3000016.0",
+      "volumeUSD": "1016.0",
+      "feesUSD": "26.0"
+    },
+    {
+      "periodStartUnix": 1700053200,
+      "tvlUSD": "3000017.0",
+      "volumeUSD": "1017.0",
+      "feesUSD": "27.0"
+    },
+    {
+      "periodStartUnix": 1700056800,
+      "tvlUSD": "3000018.0",
+      "volumeUSD": "1018.0",
+      "feesUSD": "28.0"
+    },
+    {
+      "periodStartUnix": 1700060400,
+      "tvlUSD": "3000019.0",
+      "volumeUSD": "1019.0",
+      "feesUSD": "29.0"
+    },
+    {
+      "periodStartUnix": 1700064000,
+      "tvlUSD": "3000020.0",
+      "volumeUSD": "1020.0",
+      "feesUSD": "30.0"
+    },
+    {
+      "periodStartUnix": 1700067600,
+      "tvlUSD": "3000021.0",
+      "volumeUSD": "1021.0",
+      "feesUSD": "31.0"
+    },
+    {
+      "periodStartUnix": 1700071200,
+      "tvlUSD": "3000022.0",
+      "volumeUSD": "1022.0",
+      "feesUSD": "32.0"
+    },
+    {
+      "periodStartUnix": 1700074800,
+      "tvlUSD": "3000023.0",
+      "volumeUSD": "1023.0",
+      "feesUSD": "33.0"
+    },
+    {
+      "periodStartUnix": 1700078400,
+      "tvlUSD": "3000024.0",
+      "volumeUSD": "1024.0",
+      "feesUSD": "34.0"
+    },
+    {
+      "periodStartUnix": 1700082000,
+      "tvlUSD": "3000025.0",
+      "volumeUSD": "1025.0",
+      "feesUSD": "35.0"
+    },
+    {
+      "periodStartUnix": 1700085600,
+      "tvlUSD": "3000026.0",
+      "volumeUSD": "1026.0",
+      "feesUSD": "36.0"
+    },
+    {
+      "periodStartUnix": 1700089200,
+      "tvlUSD": "3000027.0",
+      "volumeUSD": "1027.0",
+      "feesUSD": "37.0"
+    },
+    {
+      "periodStartUnix": 1700092800,
+      "tvlUSD": "3000028.0",
+      "volumeUSD": "1028.0",
+      "feesUSD": "38.0"
+    },
+    {
+      "periodStartUnix": 1700096400,
+      "tvlUSD": "3000029.0",
+      "volumeUSD": "1029.0",
+      "feesUSD": "39.0"
+    },
+    {
+      "periodStartUnix": 1700100000,
+      "tvlUSD": "3000030.0",
+      "volumeUSD": "1030.0",
+      "feesUSD": "40.0"
+    },
+    {
+      "periodStartUnix": 1700103600,
+      "tvlUSD": "3000031.0",
+      "volumeUSD": "1031.0",
+      "feesUSD": "41.0"
+    },
+    {
+      "periodStartUnix": 1700107200,
+      "tvlUSD": "3000032.0",
+      "volumeUSD": "1032.0",
+      "feesUSD": "42.0"
+    },
+    {
+      "periodStartUnix": 1700110800,
+      "tvlUSD": "3000033.0",
+      "volumeUSD": "1033.0",
+      "feesUSD": "43.0"
+    },
+    {
+      "periodStartUnix": 1700114400,
+      "tvlUSD": "3000034.0",
+      "volumeUSD": "1034.0",
+      "feesUSD": "44.0"
+    },
+    {
+      "periodStartUnix": 1700118000,
+      "tvlUSD": "3000035.0",
+      "volumeUSD": "1035.0",
+      "feesUSD": "45.0"
+    },
+    {
+      "periodStartUnix": 1700121600,
+      "tvlUSD": "3000036.0",
+      "volumeUSD": "1036.0",
+      "feesUSD": "46.0"
+    },
+    {
+      "periodStartUnix": 1700125200,
+      "tvlUSD": "3000037.0",
+      "volumeUSD": "1037.0",
+      "feesUSD": "47.0"
+    },
+    {
+      "periodStartUnix": 1700128800,
+      "tvlUSD": "3000038.0",
+      "volumeUSD": "1038.0",
+      "feesUSD": "48.0"
+    },
+    {
+      "periodStartUnix": 1700132400,
+      "tvlUSD": "3000039.0",
+      "volumeUSD": "1039.0",
+      "feesUSD": "49.0"
+    },
+    {
+      "periodStartUnix": 1700136000,
+      "tvlUSD": "3000040.0",
+      "volumeUSD": "1040.0",
+      "feesUSD": "50.0"
+    },
+    {
+      "periodStartUnix": 1700139600,
+      "tvlUSD": "3000041.0",
+      "volumeUSD": "1041.0",
+      "feesUSD": "51.0"
+    },
+    {
+      "periodStartUnix": 1700143200,
+      "tvlUSD": "3000042.0",
+      "volumeUSD": "1042.0",
+      "feesUSD": "52.0"
+    },
+    {
+      "periodStartUnix": 1700146800,
+      "tvlUSD": "3000043.0",
+      "volumeUSD": "1043.0",
+      "feesUSD": "53.0"
+    },
+    {
+      "periodStartUnix": 1700150400,
+      "tvlUSD": "3000044.0",
+      "volumeUSD": "1044.0",
+      "feesUSD": "54.0"
+    },
+    {
+      "periodStartUnix": 1700154000,
+      "tvlUSD": "3000045.0",
+      "volumeUSD": "1045.0",
+      "feesUSD": "55.0"
+    },
+    {
+      "periodStartUnix": 1700157600,
+      "tvlUSD": "3000046.0",
+      "volumeUSD": "1046.0",
+      "feesUSD": "56.0"
+    },
+    {
+      "periodStartUnix": 1700161200,
+      "tvlUSD": "3000047.0",
+      "volumeUSD": "1047.0",
+      "feesUSD": "57.0"
+    },
+    {
+      "periodStartUnix": 1700164800,
+      "tvlUSD": "3000048.0",
+      "volumeUSD": "1048.0",
+      "feesUSD": "58.0"
+    },
+    {
+      "periodStartUnix": 1700168400,
+      "tvlUSD": "3000049.0",
+      "volumeUSD": "1049.0",
+      "feesUSD": "59.0"
+    },
+    {
+      "periodStartUnix": 1700172000,
+      "tvlUSD": "3000050.0",
+      "volumeUSD": "1050.0",
+      "feesUSD": "60.0"
+    },
+    {
+      "periodStartUnix": 1700175600,
+      "tvlUSD": "3000051.0",
+      "volumeUSD": "1051.0",
+      "feesUSD": "61.0"
+    },
+    {
+      "periodStartUnix": 1700179200,
+      "tvlUSD": "3000052.0",
+      "volumeUSD": "1052.0",
+      "feesUSD": "62.0"
+    },
+    {
+      "periodStartUnix": 1700182800,
+      "tvlUSD": "3000053.0",
+      "volumeUSD": "1053.0",
+      "feesUSD": "63.0"
+    },
+    {
+      "periodStartUnix": 1700186400,
+      "tvlUSD": "3000054.0",
+      "volumeUSD": "1054.0",
+      "feesUSD": "64.0"
+    },
+    {
+      "periodStartUnix": 1700190000,
+      "tvlUSD": "3000055.0",
+      "volumeUSD": "1055.0",
+      "feesUSD": "65.0"
+    },
+    {
+      "periodStartUnix": 1700193600,
+      "tvlUSD": "3000056.0",
+      "volumeUSD": "1056.0",
+      "feesUSD": "66.0"
+    },
+    {
+      "periodStartUnix": 1700197200,
+      "tvlUSD": "3000057.0",
+      "volumeUSD": "1057.0",
+      "feesUSD": "67.0"
+    },
+    {
+      "periodStartUnix": 1700200800,
+      "tvlUSD": "3000058.0",
+      "volumeUSD": "1058.0",
+      "feesUSD": "68.0"
+    },
+    {
+      "periodStartUnix": 1700204400,
+      "tvlUSD": "3000059.0",
+      "volumeUSD": "1059.0",
+      "feesUSD": "69.0"
+    },
+    {
+      "periodStartUnix": 1700208000,
+      "tvlUSD": "3000060.0",
+      "volumeUSD": "1060.0",
+      "feesUSD": "70.0"
+    },
+    {
+      "periodStartUnix": 1700211600,
+      "tvlUSD": "3000061.0",
+      "volumeUSD": "1061.0",
+      "feesUSD": "71.0"
+    },
+    {
+      "periodStartUnix": 1700215200,
+      "tvlUSD": "3000062.0",
+      "volumeUSD": "1062.0",
+      "feesUSD": "72.0"
+    },
+    {
+      "periodStartUnix": 1700218800,
+      "tvlUSD": "3000063.0",
+      "volumeUSD": "1063.0",
+      "feesUSD": "73.0"
+    },
+    {
+      "periodStartUnix": 1700222400,
+      "tvlUSD": "3000064.0",
+      "volumeUSD": "1064.0",
+      "feesUSD": "74.0"
+    },
+    {
+      "periodStartUnix": 1700226000,
+      "tvlUSD": "3000065.0",
+      "volumeUSD": "1065.0",
+      "feesUSD": "75.0"
+    },
+    {
+      "periodStartUnix": 1700229600,
+      "tvlUSD": "3000066.0",
+      "volumeUSD": "1066.0",
+      "feesUSD": "76.0"
+    },
+    {
+      "periodStartUnix": 1700233200,
+      "tvlUSD": "3000067.0",
+      "volumeUSD": "1067.0",
+      "feesUSD": "77.0"
+    },
+    {
+      "periodStartUnix": 1700236800,
+      "tvlUSD": "3000068.0",
+      "volumeUSD": "1068.0",
+      "feesUSD": "78.0"
+    },
+    {
+      "periodStartUnix": 1700240400,
+      "tvlUSD": "3000069.0",
+      "volumeUSD": "1069.0",
+      "feesUSD": "79.0"
+    },
+    {
+      "periodStartUnix": 1700244000,
+      "tvlUSD": "3000070.0",
+      "volumeUSD": "1070.0",
+      "feesUSD": "80.0"
+    },
+    {
+      "periodStartUnix": 1700247600,
+      "tvlUSD": "3000071.0",
+      "volumeUSD": "1071.0",
+      "feesUSD": "81.0"
+    },
+    {
+      "periodStartUnix": 1700251200,
+      "tvlUSD": "3000072.0",
+      "volumeUSD": "1072.0",
+      "feesUSD": "82.0"
+    },
+    {
+      "periodStartUnix": 1700254800,
+      "tvlUSD": "3000073.0",
+      "volumeUSD": "1073.0",
+      "feesUSD": "83.0"
+    },
+    {
+      "periodStartUnix": 1700258400,
+      "tvlUSD": "3000074.0",
+      "volumeUSD": "1074.0",
+      "feesUSD": "84.0"
+    },
+    {
+      "periodStartUnix": 1700262000,
+      "tvlUSD": "3000075.0",
+      "volumeUSD": "1075.0",
+      "feesUSD": "85.0"
+    },
+    {
+      "periodStartUnix": 1700265600,
+      "tvlUSD": "3000076.0",
+      "volumeUSD": "1076.0",
+      "feesUSD": "86.0"
+    },
+    {
+      "periodStartUnix": 1700269200,
+      "tvlUSD": "3000077.0",
+      "volumeUSD": "1077.0",
+      "feesUSD": "87.0"
+    },
+    {
+      "periodStartUnix": 1700272800,
+      "tvlUSD": "3000078.0",
+      "volumeUSD": "1078.0",
+      "feesUSD": "88.0"
+    },
+    {
+      "periodStartUnix": 1700276400,
+      "tvlUSD": "3000079.0",
+      "volumeUSD": "1079.0",
+      "feesUSD": "89.0"
+    },
+    {
+      "periodStartUnix": 1700280000,
+      "tvlUSD": "3000080.0",
+      "volumeUSD": "1080.0",
+      "feesUSD": "90.0"
+    },
+    {
+      "periodStartUnix": 1700283600,
+      "tvlUSD": "3000081.0",
+      "volumeUSD": "1081.0",
+      "feesUSD": "91.0"
+    },
+    {
+      "periodStartUnix": 1700287200,
+      "tvlUSD": "3000082.0",
+      "volumeUSD": "1082.0",
+      "feesUSD": "92.0"
+    },
+    {
+      "periodStartUnix": 1700290800,
+      "tvlUSD": "3000083.0",
+      "volumeUSD": "1083.0",
+      "feesUSD": "93.0"
+    },
+    {
+      "periodStartUnix": 1700294400,
+      "tvlUSD": "3000084.0",
+      "volumeUSD": "1084.0",
+      "feesUSD": "94.0"
+    },
+    {
+      "periodStartUnix": 1700298000,
+      "tvlUSD": "3000085.0",
+      "volumeUSD": "1085.0",
+      "feesUSD": "95.0"
+    },
+    {
+      "periodStartUnix": 1700301600,
+      "tvlUSD": "3000086.0",
+      "volumeUSD": "1086.0",
+      "feesUSD": "96.0"
+    },
+    {
+      "periodStartUnix": 1700305200,
+      "tvlUSD": "3000087.0",
+      "volumeUSD": "1087.0",
+      "feesUSD": "97.0"
+    },
+    {
+      "periodStartUnix": 1700308800,
+      "tvlUSD": "3000088.0",
+      "volumeUSD": "1088.0",
+      "feesUSD": "98.0"
+    },
+    {
+      "periodStartUnix": 1700312400,
+      "tvlUSD": "3000089.0",
+      "volumeUSD": "1089.0",
+      "feesUSD": "99.0"
+    },
+    {
+      "periodStartUnix": 1700316000,
+      "tvlUSD": "3000090.0",
+      "volumeUSD": "1090.0",
+      "feesUSD": "100.0"
+    },
+    {
+      "periodStartUnix": 1700319600,
+      "tvlUSD": "3000091.0",
+      "volumeUSD": "1091.0",
+      "feesUSD": "101.0"
+    },
+    {
+      "periodStartUnix": 1700323200,
+      "tvlUSD": "3000092.0",
+      "volumeUSD": "1092.0",
+      "feesUSD": "102.0"
+    },
+    {
+      "periodStartUnix": 1700326800,
+      "tvlUSD": "3000093.0",
+      "volumeUSD": "1093.0",
+      "feesUSD": "103.0"
+    },
+    {
+      "periodStartUnix": 1700330400,
+      "tvlUSD": "3000094.0",
+      "volumeUSD": "1094.0",
+      "feesUSD": "104.0"
+    },
+    {
+      "periodStartUnix": 1700334000,
+      "tvlUSD": "3000095.0",
+      "volumeUSD": "1095.0",
+      "feesUSD": "105.0"
+    },
+    {
+      "periodStartUnix": 1700337600,
+      "tvlUSD": "3000096.0",
+      "volumeUSD": "1096.0",
+      "feesUSD": "106.0"
+    },
+    {
+      "periodStartUnix": 1700341200,
+      "tvlUSD": "3000097.0",
+      "volumeUSD": "1097.0",
+      "feesUSD": "107.0"
+    },
+    {
+      "periodStartUnix": 1700344800,
+      "tvlUSD": "3000098.0",
+      "volumeUSD": "1098.0",
+      "feesUSD": "108.0"
+    },
+    {
+      "periodStartUnix": 1700348400,
+      "tvlUSD": "3000099.0",
+      "volumeUSD": "1099.0",
+      "feesUSD": "109.0"
+    },
+    {
+      "periodStartUnix": 1700352000,
+      "tvlUSD": "3000100.0",
+      "volumeUSD": "1100.0",
+      "feesUSD": "110.0"
+    },
+    {
+      "periodStartUnix": 1700355600,
+      "tvlUSD": "3000101.0",
+      "volumeUSD": "1101.0",
+      "feesUSD": "111.0"
+    },
+    {
+      "periodStartUnix": 1700359200,
+      "tvlUSD": "3000102.0",
+      "volumeUSD": "1102.0",
+      "feesUSD": "112.0"
+    },
+    {
+      "periodStartUnix": 1700362800,
+      "tvlUSD": "3000103.0",
+      "volumeUSD": "1103.0",
+      "feesUSD": "113.0"
+    },
+    {
+      "periodStartUnix": 1700366400,
+      "tvlUSD": "3000104.0",
+      "volumeUSD": "1104.0",
+      "feesUSD": "114.0"
+    },
+    {
+      "periodStartUnix": 1700370000,
+      "tvlUSD": "3000105.0",
+      "volumeUSD": "1105.0",
+      "feesUSD": "115.0"
+    },
+    {
+      "periodStartUnix": 1700373600,
+      "tvlUSD": "3000106.0",
+      "volumeUSD": "1106.0",
+      "feesUSD": "116.0"
+    },
+    {
+      "periodStartUnix": 1700377200,
+      "tvlUSD": "3000107.0",
+      "volumeUSD": "1107.0",
+      "feesUSD": "117.0"
+    },
+    {
+      "periodStartUnix": 1700380800,
+      "tvlUSD": "3000108.0",
+      "volumeUSD": "1108.0",
+      "feesUSD": "118.0"
+    },
+    {
+      "periodStartUnix": 1700384400,
+      "tvlUSD": "3000109.0",
+      "volumeUSD": "1109.0",
+      "feesUSD": "119.0"
+    },
+    {
+      "periodStartUnix": 1700388000,
+      "tvlUSD": "3000110.0",
+      "volumeUSD": "1110.0",
+      "feesUSD": "120.0"
+    },
+    {
+      "periodStartUnix": 1700391600,
+      "tvlUSD": "3000111.0",
+      "volumeUSD": "1111.0",
+      "feesUSD": "121.0"
+    },
+    {
+      "periodStartUnix": 1700395200,
+      "tvlUSD": "3000112.0",
+      "volumeUSD": "1112.0",
+      "feesUSD": "122.0"
+    },
+    {
+      "periodStartUnix": 1700398800,
+      "tvlUSD": "3000113.0",
+      "volumeUSD": "1113.0",
+      "feesUSD": "123.0"
+    },
+    {
+      "periodStartUnix": 1700402400,
+      "tvlUSD": "3000114.0",
+      "volumeUSD": "1114.0",
+      "feesUSD": "124.0"
+    },
+    {
+      "periodStartUnix": 1700406000,
+      "tvlUSD": "3000115.0",
+      "volumeUSD": "1115.0",
+      "feesUSD": "125.0"
+    },
+    {
+      "periodStartUnix": 1700409600,
+      "tvlUSD": "3000116.0",
+      "volumeUSD": "1116.0",
+      "feesUSD": "126.0"
+    },
+    {
+      "periodStartUnix": 1700413200,
+      "tvlUSD": "3000117.0",
+      "volumeUSD": "1117.0",
+      "feesUSD": "127.0"
+    },
+    {
+      "periodStartUnix": 1700416800,
+      "tvlUSD": "3000118.0",
+      "volumeUSD": "1118.0",
+      "feesUSD": "128.0"
+    },
+    {
+      "periodStartUnix": 1700420400,
+      "tvlUSD": "3000119.0",
+      "volumeUSD": "1119.0",
+      "feesUSD": "129.0"
+    },
+    {
+      "periodStartUnix": 1700424000,
+      "tvlUSD": "3000120.0",
+      "volumeUSD": "1120.0",
+      "feesUSD": "130.0"
+    },
+    {
+      "periodStartUnix": 1700427600,
+      "tvlUSD": "3000121.0",
+      "volumeUSD": "1121.0",
+      "feesUSD": "131.0"
+    },
+    {
+      "periodStartUnix": 1700431200,
+      "tvlUSD": "3000122.0",
+      "volumeUSD": "1122.0",
+      "feesUSD": "132.0"
+    },
+    {
+      "periodStartUnix": 1700434800,
+      "tvlUSD": "3000123.0",
+      "volumeUSD": "1123.0",
+      "feesUSD": "133.0"
+    },
+    {
+      "periodStartUnix": 1700438400,
+      "tvlUSD": "3000124.0",
+      "volumeUSD": "1124.0",
+      "feesUSD": "134.0"
+    },
+    {
+      "periodStartUnix": 1700442000,
+      "tvlUSD": "3000125.0",
+      "volumeUSD": "1125.0",
+      "feesUSD": "135.0"
+    },
+    {
+      "periodStartUnix": 1700445600,
+      "tvlUSD": "3000126.0",
+      "volumeUSD": "1126.0",
+      "feesUSD": "136.0"
+    },
+    {
+      "periodStartUnix": 1700449200,
+      "tvlUSD": "3000127.0",
+      "volumeUSD": "1127.0",
+      "feesUSD": "137.0"
+    },
+    {
+      "periodStartUnix": 1700452800,
+      "tvlUSD": "3000128.0",
+      "volumeUSD": "1128.0",
+      "feesUSD": "138.0"
+    },
+    {
+      "periodStartUnix": 1700456400,
+      "tvlUSD": "3000129.0",
+      "volumeUSD": "1129.0",
+      "feesUSD": "139.0"
+    },
+    {
+      "periodStartUnix": 1700460000,
+      "tvlUSD": "3000130.0",
+      "volumeUSD": "1130.0",
+      "feesUSD": "140.0"
+    },
+    {
+      "periodStartUnix": 1700463600,
+      "tvlUSD": "3000131.0",
+      "volumeUSD": "1131.0",
+      "feesUSD": "141.0"
+    },
+    {
+      "periodStartUnix": 1700467200,
+      "tvlUSD": "3000132.0",
+      "volumeUSD": "1132.0",
+      "feesUSD": "142.0"
+    },
+    {
+      "periodStartUnix": 1700470800,
+      "tvlUSD": "3000133.0",
+      "volumeUSD": "1133.0",
+      "feesUSD": "143.0"
+    },
+    {
+      "periodStartUnix": 1700474400,
+      "tvlUSD": "3000134.0",
+      "volumeUSD": "1134.0",
+      "feesUSD": "144.0"
+    },
+    {
+      "periodStartUnix": 1700478000,
+      "tvlUSD": "3000135.0",
+      "volumeUSD": "1135.0",
+      "feesUSD": "145.0"
+    },
+    {
+      "periodStartUnix": 1700481600,
+      "tvlUSD": "3000136.0",
+      "volumeUSD": "1136.0",
+      "feesUSD": "146.0"
+    },
+    {
+      "periodStartUnix": 1700485200,
+      "tvlUSD": "3000137.0",
+      "volumeUSD": "1137.0",
+      "feesUSD": "147.0"
+    },
+    {
+      "periodStartUnix": 1700488800,
+      "tvlUSD": "3000138.0",
+      "volumeUSD": "1138.0",
+      "feesUSD": "148.0"
+    },
+    {
+      "periodStartUnix": 1700492400,
+      "tvlUSD": "3000139.0",
+      "volumeUSD": "1139.0",
+      "feesUSD": "149.0"
+    },
+    {
+      "periodStartUnix": 1700496000,
+      "tvlUSD": "3000140.0",
+      "volumeUSD": "1140.0",
+      "feesUSD": "150.0"
+    },
+    {
+      "periodStartUnix": 1700499600,
+      "tvlUSD": "3000141.0",
+      "volumeUSD": "1141.0",
+      "feesUSD": "151.0"
+    },
+    {
+      "periodStartUnix": 1700503200,
+      "tvlUSD": "3000142.0",
+      "volumeUSD": "1142.0",
+      "feesUSD": "152.0"
+    },
+    {
+      "periodStartUnix": 1700506800,
+      "tvlUSD": "3000143.0",
+      "volumeUSD": "1143.0",
+      "feesUSD": "153.0"
+    },
+    {
+      "periodStartUnix": 1700510400,
+      "tvlUSD": "3000144.0",
+      "volumeUSD": "1144.0",
+      "feesUSD": "154.0"
+    },
+    {
+      "periodStartUnix": 1700514000,
+      "tvlUSD": "3000145.0",
+      "volumeUSD": "1145.0",
+      "feesUSD": "155.0"
+    },
+    {
+      "periodStartUnix": 1700517600,
+      "tvlUSD": "3000146.0",
+      "volumeUSD": "1146.0",
+      "feesUSD": "156.0"
+    },
+    {
+      "periodStartUnix": 1700521200,
+      "tvlUSD": "3000147.0",
+      "volumeUSD": "1147.0",
+      "feesUSD": "157.0"
+    },
+    {
+      "periodStartUnix": 1700524800,
+      "tvlUSD": "3000148.0",
+      "volumeUSD": "1148.0",
+      "feesUSD": "158.0"
+    },
+    {
+      "periodStartUnix": 1700528400,
+      "tvlUSD": "3000149.0",
+      "volumeUSD": "1149.0",
+      "feesUSD": "159.0"
+    },
+    {
+      "periodStartUnix": 1700532000,
+      "tvlUSD": "3000150.0",
+      "volumeUSD": "1150.0",
+      "feesUSD": "160.0"
+    },
+    {
+      "periodStartUnix": 1700535600,
+      "tvlUSD": "3000151.0",
+      "volumeUSD": "1151.0",
+      "feesUSD": "161.0"
+    },
+    {
+      "periodStartUnix": 1700539200,
+      "tvlUSD": "3000152.0",
+      "volumeUSD": "1152.0",
+      "feesUSD": "162.0"
+    },
+    {
+      "periodStartUnix": 1700542800,
+      "tvlUSD": "3000153.0",
+      "volumeUSD": "1153.0",
+      "feesUSD": "163.0"
+    },
+    {
+      "periodStartUnix": 1700546400,
+      "tvlUSD": "3000154.0",
+      "volumeUSD": "1154.0",
+      "feesUSD": "164.0"
+    },
+    {
+      "periodStartUnix": 1700550000,
+      "tvlUSD": "3000155.0",
+      "volumeUSD": "1155.0",
+      "feesUSD": "165.0"
+    },
+    {
+      "periodStartUnix": 1700553600,
+      "tvlUSD": "3000156.0",
+      "volumeUSD": "1156.0",
+      "feesUSD": "166.0"
+    },
+    {
+      "periodStartUnix": 1700557200,
+      "tvlUSD": "3000157.0",
+      "volumeUSD": "1157.0",
+      "feesUSD": "167.0"
+    },
+    {
+      "periodStartUnix": 1700560800,
+      "tvlUSD": "3000158.0",
+      "volumeUSD": "1158.0",
+      "feesUSD": "168.0"
+    },
+    {
+      "periodStartUnix": 1700564400,
+      "tvlUSD": "3000159.0",
+      "volumeUSD": "1159.0",
+      "feesUSD": "169.0"
+    },
+    {
+      "periodStartUnix": 1700568000,
+      "tvlUSD": "3000160.0",
+      "volumeUSD": "1160.0",
+      "feesUSD": "170.0"
+    },
+    {
+      "periodStartUnix": 1700571600,
+      "tvlUSD": "3000161.0",
+      "volumeUSD": "1161.0",
+      "feesUSD": "171.0"
+    },
+    {
+      "periodStartUnix": 1700575200,
+      "tvlUSD": "3000162.0",
+      "volumeUSD": "1162.0",
+      "feesUSD": "172.0"
+    },
+    {
+      "periodStartUnix": 1700578800,
+      "tvlUSD": "3000163.0",
+      "volumeUSD": "1163.0",
+      "feesUSD": "173.0"
+    },
+    {
+      "periodStartUnix": 1700582400,
+      "tvlUSD": "3000164.0",
+      "volumeUSD": "1164.0",
+      "feesUSD": "174.0"
+    },
+    {
+      "periodStartUnix": 1700586000,
+      "tvlUSD": "3000165.0",
+      "volumeUSD": "1165.0",
+      "feesUSD": "175.0"
+    },
+    {
+      "periodStartUnix": 1700589600,
+      "tvlUSD": "3000166.0",
+      "volumeUSD": "1166.0",
+      "feesUSD": "176.0"
+    },
+    {
+      "periodStartUnix": 1700593200,
+      "tvlUSD": "3000167.0",
+      "volumeUSD": "1167.0",
+      "feesUSD": "177.0"
+    },
+    {
+      "periodStartUnix": 1700596800,
+      "tvlUSD": "3000168.0",
+      "volumeUSD": "1168.0",
+      "feesUSD": "178.0"
+    },
+    {
+      "periodStartUnix": 1700600400,
+      "tvlUSD": "3000169.0",
+      "volumeUSD": "1169.0",
+      "feesUSD": "179.0"
+    },
+    {
+      "periodStartUnix": 1700604000,
+      "tvlUSD": "3000170.0",
+      "volumeUSD": "1170.0",
+      "feesUSD": "180.0"
+    },
+    {
+      "periodStartUnix": 1700607600,
+      "tvlUSD": "3000171.0",
+      "volumeUSD": "1171.0",
+      "feesUSD": "181.0"
+    },
+    {
+      "periodStartUnix": 1700611200,
+      "tvlUSD": "3000172.0",
+      "volumeUSD": "1172.0",
+      "feesUSD": "182.0"
+    },
+    {
+      "periodStartUnix": 1700614800,
+      "tvlUSD": "3000173.0",
+      "volumeUSD": "1173.0",
+      "feesUSD": "183.0"
+    },
+    {
+      "periodStartUnix": 1700618400,
+      "tvlUSD": "3000174.0",
+      "volumeUSD": "1174.0",
+      "feesUSD": "184.0"
+    },
+    {
+      "periodStartUnix": 1700622000,
+      "tvlUSD": "3000175.0",
+      "volumeUSD": "1175.0",
+      "feesUSD": "185.0"
+    },
+    {
+      "periodStartUnix": 1700625600,
+      "tvlUSD": "3000176.0",
+      "volumeUSD": "1176.0",
+      "feesUSD": "186.0"
+    },
+    {
+      "periodStartUnix": 1700629200,
+      "tvlUSD": "3000177.0",
+      "volumeUSD": "1177.0",
+      "feesUSD": "187.0"
+    },
+    {
+      "periodStartUnix": 1700632800,
+      "tvlUSD": "3000178.0",
+      "volumeUSD": "1178.0",
+      "feesUSD": "188.0"
+    },
+    {
+      "periodStartUnix": 1700636400,
+      "tvlUSD": "3000179.0",
+      "volumeUSD": "1179.0",
+      "feesUSD": "189.0"
+    },
+    {
+      "periodStartUnix": 1700640000,
+      "tvlUSD": "3000180.0",
+      "volumeUSD": "1180.0",
+      "feesUSD": "190.0"
+    },
+    {
+      "periodStartUnix": 1700643600,
+      "tvlUSD": "3000181.0",
+      "volumeUSD": "1181.0",
+      "feesUSD": "191.0"
+    },
+    {
+      "periodStartUnix": 1700647200,
+      "tvlUSD": "3000182.0",
+      "volumeUSD": "1182.0",
+      "feesUSD": "192.0"
+    },
+    {
+      "periodStartUnix": 1700650800,
+      "tvlUSD": "3000183.0",
+      "volumeUSD": "1183.0",
+      "feesUSD": "193.0"
+    },
+    {
+      "periodStartUnix": 1700654400,
+      "tvlUSD": "3000184.0",
+      "volumeUSD": "1184.0",
+      "feesUSD": "194.0"
+    },
+    {
+      "periodStartUnix": 1700658000,
+      "tvlUSD": "3000185.0",
+      "volumeUSD": "1185.0",
+      "feesUSD": "195.0"
+    },
+    {
+      "periodStartUnix": 1700661600,
+      "tvlUSD": "3000186.0",
+      "volumeUSD": "1186.0",
+      "feesUSD": "196.0"
+    },
+    {
+      "periodStartUnix": 1700665200,
+      "tvlUSD": "3000187.0",
+      "volumeUSD": "1187.0",
+      "feesUSD": "197.0"
+    },
+    {
+      "periodStartUnix": 1700668800,
+      "tvlUSD": "3000188.0",
+      "volumeUSD": "1188.0",
+      "feesUSD": "198.0"
+    },
+    {
+      "periodStartUnix": 1700672400,
+      "tvlUSD": "3000189.0",
+      "volumeUSD": "1189.0",
+      "feesUSD": "199.0"
+    },
+    {
+      "periodStartUnix": 1700676000,
+      "tvlUSD": "3000190.0",
+      "volumeUSD": "1190.0",
+      "feesUSD": "200.0"
+    },
+    {
+      "periodStartUnix": 1700679600,
+      "tvlUSD": "3000191.0",
+      "volumeUSD": "1191.0",
+      "feesUSD": "201.0"
+    },
+    {
+      "periodStartUnix": 1700683200,
+      "tvlUSD": "3000192.0",
+      "volumeUSD": "1192.0",
+      "feesUSD": "202.0"
+    },
+    {
+      "periodStartUnix": 1700686800,
+      "tvlUSD": "3000193.0",
+      "volumeUSD": "1193.0",
+      "feesUSD": "203.0"
+    },
+    {
+      "periodStartUnix": 1700690400,
+      "tvlUSD": "3000194.0",
+      "volumeUSD": "1194.0",
+      "feesUSD": "204.0"
+    },
+    {
+      "periodStartUnix": 1700694000,
+      "tvlUSD": "3000195.0",
+      "volumeUSD": "1195.0",
+      "feesUSD": "205.0"
+    },
+    {
+      "periodStartUnix": 1700697600,
+      "tvlUSD": "3000196.0",
+      "volumeUSD": "1196.0",
+      "feesUSD": "206.0"
+    },
+    {
+      "periodStartUnix": 1700701200,
+      "tvlUSD": "3000197.0",
+      "volumeUSD": "1197.0",
+      "feesUSD": "207.0"
+    },
+    {
+      "periodStartUnix": 1700704800,
+      "tvlUSD": "3000198.0",
+      "volumeUSD": "1198.0",
+      "feesUSD": "208.0"
+    },
+    {
+      "periodStartUnix": 1700708400,
+      "tvlUSD": "3000199.0",
+      "volumeUSD": "1199.0",
+      "feesUSD": "209.0"
+    },
+    {
+      "periodStartUnix": 1700712000,
+      "tvlUSD": "3000200.0",
+      "volumeUSD": "1200.0",
+      "feesUSD": "210.0"
+    },
+    {
+      "periodStartUnix": 1700715600,
+      "tvlUSD": "3000201.0",
+      "volumeUSD": "1201.0",
+      "feesUSD": "211.0"
+    },
+    {
+      "periodStartUnix": 1700719200,
+      "tvlUSD": "3000202.0",
+      "volumeUSD": "1202.0",
+      "feesUSD": "212.0"
+    },
+    {
+      "periodStartUnix": 1700722800,
+      "tvlUSD": "3000203.0",
+      "volumeUSD": "1203.0",
+      "feesUSD": "213.0"
+    },
+    {
+      "periodStartUnix": 1700726400,
+      "tvlUSD": "3000204.0",
+      "volumeUSD": "1204.0",
+      "feesUSD": "214.0"
+    },
+    {
+      "periodStartUnix": 1700730000,
+      "tvlUSD": "3000205.0",
+      "volumeUSD": "1205.0",
+      "feesUSD": "215.0"
+    },
+    {
+      "periodStartUnix": 1700733600,
+      "tvlUSD": "3000206.0",
+      "volumeUSD": "1206.0",
+      "feesUSD": "216.0"
+    },
+    {
+      "periodStartUnix": 1700737200,
+      "tvlUSD": "3000207.0",
+      "volumeUSD": "1207.0",
+      "feesUSD": "217.0"
+    },
+    {
+      "periodStartUnix": 1700740800,
+      "tvlUSD": "3000208.0",
+      "volumeUSD": "1208.0",
+      "feesUSD": "218.0"
+    },
+    {
+      "periodStartUnix": 1700744400,
+      "tvlUSD": "3000209.0",
+      "volumeUSD": "1209.0",
+      "feesUSD": "219.0"
+    },
+    {
+      "periodStartUnix": 1700748000,
+      "tvlUSD": "3000210.0",
+      "volumeUSD": "1210.0",
+      "feesUSD": "220.0"
+    },
+    {
+      "periodStartUnix": 1700751600,
+      "tvlUSD": "3000211.0",
+      "volumeUSD": "1211.0",
+      "feesUSD": "221.0"
+    },
+    {
+      "periodStartUnix": 1700755200,
+      "tvlUSD": "3000212.0",
+      "volumeUSD": "1212.0",
+      "feesUSD": "222.0"
+    },
+    {
+      "periodStartUnix": 1700758800,
+      "tvlUSD": "3000213.0",
+      "volumeUSD": "1213.0",
+      "feesUSD": "223.0"
+    },
+    {
+      "periodStartUnix": 1700762400,
+      "tvlUSD": "3000214.0",
+      "volumeUSD": "1214.0",
+      "feesUSD": "224.0"
+    },
+    {
+      "periodStartUnix": 1700766000,
+      "tvlUSD": "3000215.0",
+      "volumeUSD": "1215.0",
+      "feesUSD": "225.0"
+    },
+    {
+      "periodStartUnix": 1700769600,
+      "tvlUSD": "3000216.0",
+      "volumeUSD": "1216.0",
+      "feesUSD": "226.0"
+    },
+    {
+      "periodStartUnix": 1700773200,
+      "tvlUSD": "3000217.0",
+      "volumeUSD": "1217.0",
+      "feesUSD": "227.0"
+    },
+    {
+      "periodStartUnix": 1700776800,
+      "tvlUSD": "3000218.0",
+      "volumeUSD": "1218.0",
+      "feesUSD": "228.0"
+    },
+    {
+      "periodStartUnix": 1700780400,
+      "tvlUSD": "3000219.0",
+      "volumeUSD": "1219.0",
+      "feesUSD": "229.0"
+    },
+    {
+      "periodStartUnix": 1700784000,
+      "tvlUSD": "3000220.0",
+      "volumeUSD": "1220.0",
+      "feesUSD": "230.0"
+    },
+    {
+      "periodStartUnix": 1700787600,
+      "tvlUSD": "3000221.0",
+      "volumeUSD": "1221.0",
+      "feesUSD": "231.0"
+    },
+    {
+      "periodStartUnix": 1700791200,
+      "tvlUSD": "3000222.0",
+      "volumeUSD": "1222.0",
+      "feesUSD": "232.0"
+    },
+    {
+      "periodStartUnix": 1700794800,
+      "tvlUSD": "3000223.0",
+      "volumeUSD": "1223.0",
+      "feesUSD": "233.0"
+    },
+    {
+      "periodStartUnix": 1700798400,
+      "tvlUSD": "3000224.0",
+      "volumeUSD": "1224.0",
+      "feesUSD": "234.0"
+    },
+    {
+      "periodStartUnix": 1700802000,
+      "tvlUSD": "3000225.0",
+      "volumeUSD": "1225.0",
+      "feesUSD": "235.0"
+    },
+    {
+      "periodStartUnix": 1700805600,
+      "tvlUSD": "3000226.0",
+      "volumeUSD": "1226.0",
+      "feesUSD": "236.0"
+    },
+    {
+      "periodStartUnix": 1700809200,
+      "tvlUSD": "3000227.0",
+      "volumeUSD": "1227.0",
+      "feesUSD": "237.0"
+    },
+    {
+      "periodStartUnix": 1700812800,
+      "tvlUSD": "3000228.0",
+      "volumeUSD": "1228.0",
+      "feesUSD": "238.0"
+    },
+    {
+      "periodStartUnix": 1700816400,
+      "tvlUSD": "3000229.0",
+      "volumeUSD": "1229.0",
+      "feesUSD": "239.0"
+    },
+    {
+      "periodStartUnix": 1700820000,
+      "tvlUSD": "3000230.0",
+      "volumeUSD": "1230.0",
+      "feesUSD": "240.0"
+    },
+    {
+      "periodStartUnix": 1700823600,
+      "tvlUSD": "3000231.0",
+      "volumeUSD": "1231.0",
+      "feesUSD": "241.0"
+    },
+    {
+      "periodStartUnix": 1700827200,
+      "tvlUSD": "3000232.0",
+      "volumeUSD": "1232.0",
+      "feesUSD": "242.0"
+    },
+    {
+      "periodStartUnix": 1700830800,
+      "tvlUSD": "3000233.0",
+      "volumeUSD": "1233.0",
+      "feesUSD": "243.0"
+    },
+    {
+      "periodStartUnix": 1700834400,
+      "tvlUSD": "3000234.0",
+      "volumeUSD": "1234.0",
+      "feesUSD": "244.0"
+    },
+    {
+      "periodStartUnix": 1700838000,
+      "tvlUSD": "3000235.0",
+      "volumeUSD": "1235.0",
+      "feesUSD": "245.0"
+    },
+    {
+      "periodStartUnix": 1700841600,
+      "tvlUSD": "3000236.0",
+      "volumeUSD": "1236.0",
+      "feesUSD": "246.0"
+    },
+    {
+      "periodStartUnix": 1700845200,
+      "tvlUSD": "3000237.0",
+      "volumeUSD": "1237.0",
+      "feesUSD": "247.0"
+    },
+    {
+      "periodStartUnix": 1700848800,
+      "tvlUSD": "3000238.0",
+      "volumeUSD": "1238.0",
+      "feesUSD": "248.0"
+    },
+    {
+      "periodStartUnix": 1700852400,
+      "tvlUSD": "3000239.0",
+      "volumeUSD": "1239.0",
+      "feesUSD": "249.0"
+    },
+    {
+      "periodStartUnix": 1700856000,
+      "tvlUSD": "3000240.0",
+      "volumeUSD": "1240.0",
+      "feesUSD": "250.0"
+    },
+    {
+      "periodStartUnix": 1700859600,
+      "tvlUSD": "3000241.0",
+      "volumeUSD": "1241.0",
+      "feesUSD": "251.0"
+    },
+    {
+      "periodStartUnix": 1700863200,
+      "tvlUSD": "3000242.0",
+      "volumeUSD": "1242.0",
+      "feesUSD": "252.0"
+    },
+    {
+      "periodStartUnix": 1700866800,
+      "tvlUSD": "3000243.0",
+      "volumeUSD": "1243.0",
+      "feesUSD": "253.0"
+    },
+    {
+      "periodStartUnix": 1700870400,
+      "tvlUSD": "3000244.0",
+      "volumeUSD": "1244.0",
+      "feesUSD": "254.0"
+    },
+    {
+      "periodStartUnix": 1700874000,
+      "tvlUSD": "3000245.0",
+      "volumeUSD": "1245.0",
+      "feesUSD": "255.0"
+    },
+    {
+      "periodStartUnix": 1700877600,
+      "tvlUSD": "3000246.0",
+      "volumeUSD": "1246.0",
+      "feesUSD": "256.0"
+    },
+    {
+      "periodStartUnix": 1700881200,
+      "tvlUSD": "3000247.0",
+      "volumeUSD": "1247.0",
+      "feesUSD": "257.0"
+    },
+    {
+      "periodStartUnix": 1700884800,
+      "tvlUSD": "3000248.0",
+      "volumeUSD": "1248.0",
+      "feesUSD": "258.0"
+    },
+    {
+      "periodStartUnix": 1700888400,
+      "tvlUSD": "3000249.0",
+      "volumeUSD": "1249.0",
+      "feesUSD": "259.0"
+    },
+    {
+      "periodStartUnix": 1700892000,
+      "tvlUSD": "3000250.0",
+      "volumeUSD": "1250.0",
+      "feesUSD": "260.0"
+    },
+    {
+      "periodStartUnix": 1700895600,
+      "tvlUSD": "3000251.0",
+      "volumeUSD": "1251.0",
+      "feesUSD": "261.0"
+    },
+    {
+      "periodStartUnix": 1700899200,
+      "tvlUSD": "3000252.0",
+      "volumeUSD": "1252.0",
+      "feesUSD": "262.0"
+    },
+    {
+      "periodStartUnix": 1700902800,
+      "tvlUSD": "3000253.0",
+      "volumeUSD": "1253.0",
+      "feesUSD": "263.0"
+    },
+    {
+      "periodStartUnix": 1700906400,
+      "tvlUSD": "3000254.0",
+      "volumeUSD": "1254.0",
+      "feesUSD": "264.0"
+    },
+    {
+      "periodStartUnix": 1700910000,
+      "tvlUSD": "3000255.0",
+      "volumeUSD": "1255.0",
+      "feesUSD": "265.0"
+    },
+    {
+      "periodStartUnix": 1700913600,
+      "tvlUSD": "3000256.0",
+      "volumeUSD": "1256.0",
+      "feesUSD": "266.0"
+    },
+    {
+      "periodStartUnix": 1700917200,
+      "tvlUSD": "3000257.0",
+      "volumeUSD": "1257.0",
+      "feesUSD": "267.0"
+    },
+    {
+      "periodStartUnix": 1700920800,
+      "tvlUSD": "3000258.0",
+      "volumeUSD": "1258.0",
+      "feesUSD": "268.0"
+    },
+    {
+      "periodStartUnix": 1700924400,
+      "tvlUSD": "3000259.0",
+      "volumeUSD": "1259.0",
+      "feesUSD": "269.0"
+    },
+    {
+      "periodStartUnix": 1700928000,
+      "tvlUSD": "3000260.0",
+      "volumeUSD": "1260.0",
+      "feesUSD": "270.0"
+    },
+    {
+      "periodStartUnix": 1700931600,
+      "tvlUSD": "3000261.0",
+      "volumeUSD": "1261.0",
+      "feesUSD": "271.0"
+    },
+    {
+      "periodStartUnix": 1700935200,
+      "tvlUSD": "3000262.0",
+      "volumeUSD": "1262.0",
+      "feesUSD": "272.0"
+    },
+    {
+      "periodStartUnix": 1700938800,
+      "tvlUSD": "3000263.0",
+      "volumeUSD": "1263.0",
+      "feesUSD": "273.0"
+    },
+    {
+      "periodStartUnix": 1700942400,
+      "tvlUSD": "3000264.0",
+      "volumeUSD": "1264.0",
+      "feesUSD": "274.0"
+    },
+    {
+      "periodStartUnix": 1700946000,
+      "tvlUSD": "3000265.0",
+      "volumeUSD": "1265.0",
+      "feesUSD": "275.0"
+    },
+    {
+      "periodStartUnix": 1700949600,
+      "tvlUSD": "3000266.0",
+      "volumeUSD": "1266.0",
+      "feesUSD": "276.0"
+    },
+    {
+      "periodStartUnix": 1700953200,
+      "tvlUSD": "3000267.0",
+      "volumeUSD": "1267.0",
+      "feesUSD": "277.0"
+    },
+    {
+      "periodStartUnix": 1700956800,
+      "tvlUSD": "3000268.0",
+      "volumeUSD": "1268.0",
+      "feesUSD": "278.0"
+    },
+    {
+      "periodStartUnix": 1700960400,
+      "tvlUSD": "3000269.0",
+      "volumeUSD": "1269.0",
+      "feesUSD": "279.0"
+    },
+    {
+      "periodStartUnix": 1700964000,
+      "tvlUSD": "3000270.0",
+      "volumeUSD": "1270.0",
+      "feesUSD": "280.0"
+    },
+    {
+      "periodStartUnix": 1700967600,
+      "tvlUSD": "3000271.0",
+      "volumeUSD": "1271.0",
+      "feesUSD": "281.0"
+    },
+    {
+      "periodStartUnix": 1700971200,
+      "tvlUSD": "3000272.0",
+      "volumeUSD": "1272.0",
+      "feesUSD": "282.0"
+    },
+    {
+      "periodStartUnix": 1700974800,
+      "tvlUSD": "3000273.0",
+      "volumeUSD": "1273.0",
+      "feesUSD": "283.0"
+    },
+    {
+      "periodStartUnix": 1700978400,
+      "tvlUSD": "3000274.0",
+      "volumeUSD": "1274.0",
+      "feesUSD": "284.0"
+    },
+    {
+      "periodStartUnix": 1700982000,
+      "tvlUSD": "3000275.0",
+      "volumeUSD": "1275.0",
+      "feesUSD": "285.0"
+    },
+    {
+      "periodStartUnix": 1700985600,
+      "tvlUSD": "3000276.0",
+      "volumeUSD": "1276.0",
+      "feesUSD": "286.0"
+    },
+    {
+      "periodStartUnix": 1700989200,
+      "tvlUSD": "3000277.0",
+      "volumeUSD": "1277.0",
+      "feesUSD": "287.0"
+    },
+    {
+      "periodStartUnix": 1700992800,
+      "tvlUSD": "3000278.0",
+      "volumeUSD": "1278.0",
+      "feesUSD": "288.0"
+    },
+    {
+      "periodStartUnix": 1700996400,
+      "tvlUSD": "3000279.0",
+      "volumeUSD": "1279.0",
+      "feesUSD": "289.0"
+    },
+    {
+      "periodStartUnix": 1701000000,
+      "tvlUSD": "3000280.0",
+      "volumeUSD": "1280.0",
+      "feesUSD": "290.0"
+    },
+    {
+      "periodStartUnix": 1701003600,
+      "tvlUSD": "3000281.0",
+      "volumeUSD": "1281.0",
+      "feesUSD": "291.0"
+    },
+    {
+      "periodStartUnix": 1701007200,
+      "tvlUSD": "3000282.0",
+      "volumeUSD": "1282.0",
+      "feesUSD": "292.0"
+    },
+    {
+      "periodStartUnix": 1701010800,
+      "tvlUSD": "3000283.0",
+      "volumeUSD": "1283.0",
+      "feesUSD": "293.0"
+    },
+    {
+      "periodStartUnix": 1701014400,
+      "tvlUSD": "3000284.0",
+      "volumeUSD": "1284.0",
+      "feesUSD": "294.0"
+    },
+    {
+      "periodStartUnix": 1701018000,
+      "tvlUSD": "3000285.0",
+      "volumeUSD": "1285.0",
+      "feesUSD": "295.0"
+    },
+    {
+      "periodStartUnix": 1701021600,
+      "tvlUSD": "3000286.0",
+      "volumeUSD": "1286.0",
+      "feesUSD": "296.0"
+    },
+    {
+      "periodStartUnix": 1701025200,
+      "tvlUSD": "3000287.0",
+      "volumeUSD": "1287.0",
+      "feesUSD": "297.0"
+    },
+    {
+      "periodStartUnix": 1701028800,
+      "tvlUSD": "3000288.0",
+      "volumeUSD": "1288.0",
+      "feesUSD": "298.0"
+    },
+    {
+      "periodStartUnix": 1701032400,
+      "tvlUSD": "3000289.0",
+      "volumeUSD": "1289.0",
+      "feesUSD": "299.0"
+    },
+    {
+      "periodStartUnix": 1701036000,
+      "tvlUSD": "3000290.0",
+      "volumeUSD": "1290.0",
+      "feesUSD": "300.0"
+    },
+    {
+      "periodStartUnix": 1701039600,
+      "tvlUSD": "3000291.0",
+      "volumeUSD": "1291.0",
+      "feesUSD": "301.0"
+    },
+    {
+      "periodStartUnix": 1701043200,
+      "tvlUSD": "3000292.0",
+      "volumeUSD": "1292.0",
+      "feesUSD": "302.0"
+    },
+    {
+      "periodStartUnix": 1701046800,
+      "tvlUSD": "3000293.0",
+      "volumeUSD": "1293.0",
+      "feesUSD": "303.0"
+    },
+    {
+      "periodStartUnix": 1701050400,
+      "tvlUSD": "3000294.0",
+      "volumeUSD": "1294.0",
+      "feesUSD": "304.0"
+    },
+    {
+      "periodStartUnix": 1701054000,
+      "tvlUSD": "3000295.0",
+      "volumeUSD": "1295.0",
+      "feesUSD": "305.0"
+    },
+    {
+      "periodStartUnix": 1701057600,
+      "tvlUSD": "3000296.0",
+      "volumeUSD": "1296.0",
+      "feesUSD": "306.0"
+    },
+    {
+      "periodStartUnix": 1701061200,
+      "tvlUSD": "3000297.0",
+      "volumeUSD": "1297.0",
+      "feesUSD": "307.0"
+    },
+    {
+      "periodStartUnix": 1701064800,
+      "tvlUSD": "3000298.0",
+      "volumeUSD": "1298.0",
+      "feesUSD": "308.0"
+    },
+    {
+      "periodStartUnix": 1701068400,
+      "tvlUSD": "3000299.0",
+      "volumeUSD": "1299.0",
+      "feesUSD": "309.0"
+    },
+    {
+      "periodStartUnix": 1701072000,
+      "tvlUSD": "3000300.0",
+      "volumeUSD": "1300.0",
+      "feesUSD": "310.0"
+    },
+    {
+      "periodStartUnix": 1701075600,
+      "tvlUSD": "3000301.0",
+      "volumeUSD": "1301.0",
+      "feesUSD": "311.0"
+    },
+    {
+      "periodStartUnix": 1701079200,
+      "tvlUSD": "3000302.0",
+      "volumeUSD": "1302.0",
+      "feesUSD": "312.0"
+    },
+    {
+      "periodStartUnix": 1701082800,
+      "tvlUSD": "3000303.0",
+      "volumeUSD": "1303.0",
+      "feesUSD": "313.0"
+    },
+    {
+      "periodStartUnix": 1701086400,
+      "tvlUSD": "3000304.0",
+      "volumeUSD": "1304.0",
+      "feesUSD": "314.0"
+    },
+    {
+      "periodStartUnix": 1701090000,
+      "tvlUSD": "3000305.0",
+      "volumeUSD": "1305.0",
+      "feesUSD": "315.0"
+    },
+    {
+      "periodStartUnix": 1701093600,
+      "tvlUSD": "3000306.0",
+      "volumeUSD": "1306.0",
+      "feesUSD": "316.0"
+    },
+    {
+      "periodStartUnix": 1701097200,
+      "tvlUSD": "3000307.0",
+      "volumeUSD": "1307.0",
+      "feesUSD": "317.0"
+    },
+    {
+      "periodStartUnix": 1701100800,
+      "tvlUSD": "3000308.0",
+      "volumeUSD": "1308.0",
+      "feesUSD": "318.0"
+    },
+    {
+      "periodStartUnix": 1701104400,
+      "tvlUSD": "3000309.0",
+      "volumeUSD": "1309.0",
+      "feesUSD": "319.0"
+    },
+    {
+      "periodStartUnix": 1701108000,
+      "tvlUSD": "3000310.0",
+      "volumeUSD": "1310.0",
+      "feesUSD": "320.0"
+    },
+    {
+      "periodStartUnix": 1701111600,
+      "tvlUSD": "3000311.0",
+      "volumeUSD": "1311.0",
+      "feesUSD": "321.0"
+    },
+    {
+      "periodStartUnix": 1701115200,
+      "tvlUSD": "3000312.0",
+      "volumeUSD": "1312.0",
+      "feesUSD": "322.0"
+    },
+    {
+      "periodStartUnix": 1701118800,
+      "tvlUSD": "3000313.0",
+      "volumeUSD": "1313.0",
+      "feesUSD": "323.0"
+    },
+    {
+      "periodStartUnix": 1701122400,
+      "tvlUSD": "3000314.0",
+      "volumeUSD": "1314.0",
+      "feesUSD": "324.0"
+    },
+    {
+      "periodStartUnix": 1701126000,
+      "tvlUSD": "3000315.0",
+      "volumeUSD": "1315.0",
+      "feesUSD": "325.0"
+    },
+    {
+      "periodStartUnix": 1701129600,
+      "tvlUSD": "3000316.0",
+      "volumeUSD": "1316.0",
+      "feesUSD": "326.0"
+    },
+    {
+      "periodStartUnix": 1701133200,
+      "tvlUSD": "3000317.0",
+      "volumeUSD": "1317.0",
+      "feesUSD": "327.0"
+    },
+    {
+      "periodStartUnix": 1701136800,
+      "tvlUSD": "3000318.0",
+      "volumeUSD": "1318.0",
+      "feesUSD": "328.0"
+    },
+    {
+      "periodStartUnix": 1701140400,
+      "tvlUSD": "3000319.0",
+      "volumeUSD": "1319.0",
+      "feesUSD": "329.0"
+    },
+    {
+      "periodStartUnix": 1701144000,
+      "tvlUSD": "3000320.0",
+      "volumeUSD": "1320.0",
+      "feesUSD": "330.0"
+    },
+    {
+      "periodStartUnix": 1701147600,
+      "tvlUSD": "3000321.0",
+      "volumeUSD": "1321.0",
+      "feesUSD": "331.0"
+    },
+    {
+      "periodStartUnix": 1701151200,
+      "tvlUSD": "3000322.0",
+      "volumeUSD": "1322.0",
+      "feesUSD": "332.0"
+    },
+    {
+      "periodStartUnix": 1701154800,
+      "tvlUSD": "3000323.0",
+      "volumeUSD": "1323.0",
+      "feesUSD": "333.0"
+    },
+    {
+      "periodStartUnix": 1701158400,
+      "tvlUSD": "3000324.0",
+      "volumeUSD": "1324.0",
+      "feesUSD": "334.0"
+    },
+    {
+      "periodStartUnix": 1701162000,
+      "tvlUSD": "3000325.0",
+      "volumeUSD": "1325.0",
+      "feesUSD": "335.0"
+    },
+    {
+      "periodStartUnix": 1701165600,
+      "tvlUSD": "3000326.0",
+      "volumeUSD": "1326.0",
+      "feesUSD": "336.0"
+    },
+    {
+      "periodStartUnix": 1701169200,
+      "tvlUSD": "3000327.0",
+      "volumeUSD": "1327.0",
+      "feesUSD": "337.0"
+    },
+    {
+      "periodStartUnix": 1701172800,
+      "tvlUSD": "3000328.0",
+      "volumeUSD": "1328.0",
+      "feesUSD": "338.0"
+    },
+    {
+      "periodStartUnix": 1701176400,
+      "tvlUSD": "3000329.0",
+      "volumeUSD": "1329.0",
+      "feesUSD": "339.0"
+    },
+    {
+      "periodStartUnix": 1701180000,
+      "tvlUSD": "3000330.0",
+      "volumeUSD": "1330.0",
+      "feesUSD": "340.0"
+    },
+    {
+      "periodStartUnix": 1701183600,
+      "tvlUSD": "3000331.0",
+      "volumeUSD": "1331.0",
+      "feesUSD": "341.0"
+    },
+    {
+      "periodStartUnix": 1701187200,
+      "tvlUSD": "3000332.0",
+      "volumeUSD": "1332.0",
+      "feesUSD": "342.0"
+    },
+    {
+      "periodStartUnix": 1701190800,
+      "tvlUSD": "3000333.0",
+      "volumeUSD": "1333.0",
+      "feesUSD": "343.0"
+    },
+    {
+      "periodStartUnix": 1701194400,
+      "tvlUSD": "3000334.0",
+      "volumeUSD": "1334.0",
+      "feesUSD": "344.0"
+    },
+    {
+      "periodStartUnix": 1701198000,
+      "tvlUSD": "3000335.0",
+      "volumeUSD": "1335.0",
+      "feesUSD": "345.0"
+    },
+    {
+      "periodStartUnix": 1701201600,
+      "tvlUSD": "3000336.0",
+      "volumeUSD": "1336.0",
+      "feesUSD": "346.0"
+    },
+    {
+      "periodStartUnix": 1701205200,
+      "tvlUSD": "3000337.0",
+      "volumeUSD": "1337.0",
+      "feesUSD": "347.0"
+    },
+    {
+      "periodStartUnix": 1701208800,
+      "tvlUSD": "3000338.0",
+      "volumeUSD": "1338.0",
+      "feesUSD": "348.0"
+    },
+    {
+      "periodStartUnix": 1701212400,
+      "tvlUSD": "3000339.0",
+      "volumeUSD": "1339.0",
+      "feesUSD": "349.0"
+    },
+    {
+      "periodStartUnix": 1701216000,
+      "tvlUSD": "3000340.0",
+      "volumeUSD": "1340.0",
+      "feesUSD": "350.0"
+    },
+    {
+      "periodStartUnix": 1701219600,
+      "tvlUSD": "3000341.0",
+      "volumeUSD": "1341.0",
+      "feesUSD": "351.0"
+    },
+    {
+      "periodStartUnix": 1701223200,
+      "tvlUSD": "3000342.0",
+      "volumeUSD": "1342.0",
+      "feesUSD": "352.0"
+    },
+    {
+      "periodStartUnix": 1701226800,
+      "tvlUSD": "3000343.0",
+      "volumeUSD": "1343.0",
+      "feesUSD": "353.0"
+    },
+    {
+      "periodStartUnix": 1701230400,
+      "tvlUSD": "3000344.0",
+      "volumeUSD": "1344.0",
+      "feesUSD": "354.0"
+    },
+    {
+      "periodStartUnix": 1701234000,
+      "tvlUSD": "3000345.0",
+      "volumeUSD": "1345.0",
+      "feesUSD": "355.0"
+    },
+    {
+      "periodStartUnix": 1701237600,
+      "tvlUSD": "3000346.0",
+      "volumeUSD": "1346.0",
+      "feesUSD": "356.0"
+    },
+    {
+      "periodStartUnix": 1701241200,
+      "tvlUSD": "3000347.0",
+      "volumeUSD": "1347.0",
+      "feesUSD": "357.0"
+    },
+    {
+      "periodStartUnix": 1701244800,
+      "tvlUSD": "3000348.0",
+      "volumeUSD": "1348.0",
+      "feesUSD": "358.0"
+    },
+    {
+      "periodStartUnix": 1701248400,
+      "tvlUSD": "3000349.0",
+      "volumeUSD": "1349.0",
+      "feesUSD": "359.0"
+    },
+    {
+      "periodStartUnix": 1701252000,
+      "tvlUSD": "3000350.0",
+      "volumeUSD": "1350.0",
+      "feesUSD": "360.0"
+    },
+    {
+      "periodStartUnix": 1701255600,
+      "tvlUSD": "3000351.0",
+      "volumeUSD": "1351.0",
+      "feesUSD": "361.0"
+    },
+    {
+      "periodStartUnix": 1701259200,
+      "tvlUSD": "3000352.0",
+      "volumeUSD": "1352.0",
+      "feesUSD": "362.0"
+    },
+    {
+      "periodStartUnix": 1701262800,
+      "tvlUSD": "3000353.0",
+      "volumeUSD": "1353.0",
+      "feesUSD": "363.0"
+    },
+    {
+      "periodStartUnix": 1701266400,
+      "tvlUSD": "3000354.0",
+      "volumeUSD": "1354.0",
+      "feesUSD": "364.0"
+    },
+    {
+      "periodStartUnix": 1701270000,
+      "tvlUSD": "3000355.0",
+      "volumeUSD": "1355.0",
+      "feesUSD": "365.0"
+    },
+    {
+      "periodStartUnix": 1701273600,
+      "tvlUSD": "3000356.0",
+      "volumeUSD": "1356.0",
+      "feesUSD": "366.0"
+    },
+    {
+      "periodStartUnix": 1701277200,
+      "tvlUSD": "3000357.0",
+      "volumeUSD": "1357.0",
+      "feesUSD": "367.0"
+    },
+    {
+      "periodStartUnix": 1701280800,
+      "tvlUSD": "3000358.0",
+      "volumeUSD": "1358.0",
+      "feesUSD": "368.0"
+    },
+    {
+      "periodStartUnix": 1701284400,
+      "tvlUSD": "3000359.0",
+      "volumeUSD": "1359.0",
+      "feesUSD": "369.0"
+    },
+    {
+      "periodStartUnix": 1701288000,
+      "tvlUSD": "3000360.0",
+      "volumeUSD": "1360.0",
+      "feesUSD": "370.0"
+    },
+    {
+      "periodStartUnix": 1701291600,
+      "tvlUSD": "3000361.0",
+      "volumeUSD": "1361.0",
+      "feesUSD": "371.0"
+    },
+    {
+      "periodStartUnix": 1701295200,
+      "tvlUSD": "3000362.0",
+      "volumeUSD": "1362.0",
+      "feesUSD": "372.0"
+    },
+    {
+      "periodStartUnix": 1701298800,
+      "tvlUSD": "3000363.0",
+      "volumeUSD": "1363.0",
+      "feesUSD": "373.0"
+    },
+    {
+      "periodStartUnix": 1701302400,
+      "tvlUSD": "3000364.0",
+      "volumeUSD": "1364.0",
+      "feesUSD": "374.0"
+    },
+    {
+      "periodStartUnix": 1701306000,
+      "tvlUSD": "3000365.0",
+      "volumeUSD": "1365.0",
+      "feesUSD": "375.0"
+    },
+    {
+      "periodStartUnix": 1701309600,
+      "tvlUSD": "3000366.0",
+      "volumeUSD": "1366.0",
+      "feesUSD": "376.0"
+    },
+    {
+      "periodStartUnix": 1701313200,
+      "tvlUSD": "3000367.0",
+      "volumeUSD": "1367.0",
+      "feesUSD": "377.0"
+    },
+    {
+      "periodStartUnix": 1701316800,
+      "tvlUSD": "3000368.0",
+      "volumeUSD": "1368.0",
+      "feesUSD": "378.0"
+    },
+    {
+      "periodStartUnix": 1701320400,
+      "tvlUSD": "3000369.0",
+      "volumeUSD": "1369.0",
+      "feesUSD": "379.0"
+    },
+    {
+      "periodStartUnix": 1701324000,
+      "tvlUSD": "3000370.0",
+      "volumeUSD": "1370.0",
+      "feesUSD": "380.0"
+    },
+    {
+      "periodStartUnix": 1701327600,
+      "tvlUSD": "3000371.0",
+      "volumeUSD": "1371.0",
+      "feesUSD": "381.0"
+    },
+    {
+      "periodStartUnix": 1701331200,
+      "tvlUSD": "3000372.0",
+      "volumeUSD": "1372.0",
+      "feesUSD": "382.0"
+    },
+    {
+      "periodStartUnix": 1701334800,
+      "tvlUSD": "3000373.0",
+      "volumeUSD": "1373.0",
+      "feesUSD": "383.0"
+    },
+    {
+      "periodStartUnix": 1701338400,
+      "tvlUSD": "3000374.0",
+      "volumeUSD": "1374.0",
+      "feesUSD": "384.0"
+    },
+    {
+      "periodStartUnix": 1701342000,
+      "tvlUSD": "3000375.0",
+      "volumeUSD": "1375.0",
+      "feesUSD": "385.0"
+    },
+    {
+      "periodStartUnix": 1701345600,
+      "tvlUSD": "3000376.0",
+      "volumeUSD": "1376.0",
+      "feesUSD": "386.0"
+    },
+    {
+      "periodStartUnix": 1701349200,
+      "tvlUSD": "3000377.0",
+      "volumeUSD": "1377.0",
+      "feesUSD": "387.0"
+    },
+    {
+      "periodStartUnix": 1701352800,
+      "tvlUSD": "3000378.0",
+      "volumeUSD": "1378.0",
+      "feesUSD": "388.0"
+    },
+    {
+      "periodStartUnix": 1701356400,
+      "tvlUSD": "3000379.0",
+      "volumeUSD": "1379.0",
+      "feesUSD": "389.0"
+    },
+    {
+      "periodStartUnix": 1701360000,
+      "tvlUSD": "3000380.0",
+      "volumeUSD": "1380.0",
+      "feesUSD": "390.0"
+    },
+    {
+      "periodStartUnix": 1701363600,
+      "tvlUSD": "3000381.0",
+      "volumeUSD": "1381.0",
+      "feesUSD": "391.0"
+    },
+    {
+      "periodStartUnix": 1701367200,
+      "tvlUSD": "3000382.0",
+      "volumeUSD": "1382.0",
+      "feesUSD": "392.0"
+    },
+    {
+      "periodStartUnix": 1701370800,
+      "tvlUSD": "3000383.0",
+      "volumeUSD": "1383.0",
+      "feesUSD": "393.0"
+    },
+    {
+      "periodStartUnix": 1701374400,
+      "tvlUSD": "3000384.0",
+      "volumeUSD": "1384.0",
+      "feesUSD": "394.0"
+    },
+    {
+      "periodStartUnix": 1701378000,
+      "tvlUSD": "3000385.0",
+      "volumeUSD": "1385.0",
+      "feesUSD": "395.0"
+    },
+    {
+      "periodStartUnix": 1701381600,
+      "tvlUSD": "3000386.0",
+      "volumeUSD": "1386.0",
+      "feesUSD": "396.0"
+    },
+    {
+      "periodStartUnix": 1701385200,
+      "tvlUSD": "3000387.0",
+      "volumeUSD": "1387.0",
+      "feesUSD": "397.0"
+    },
+    {
+      "periodStartUnix": 1701388800,
+      "tvlUSD": "3000388.0",
+      "volumeUSD": "1388.0",
+      "feesUSD": "398.0"
+    },
+    {
+      "periodStartUnix": 1701392400,
+      "tvlUSD": "3000389.0",
+      "volumeUSD": "1389.0",
+      "feesUSD": "399.0"
+    },
+    {
+      "periodStartUnix": 1701396000,
+      "tvlUSD": "3000390.0",
+      "volumeUSD": "1390.0",
+      "feesUSD": "400.0"
+    },
+    {
+      "periodStartUnix": 1701399600,
+      "tvlUSD": "3000391.0",
+      "volumeUSD": "1391.0",
+      "feesUSD": "401.0"
+    },
+    {
+      "periodStartUnix": 1701403200,
+      "tvlUSD": "3000392.0",
+      "volumeUSD": "1392.0",
+      "feesUSD": "402.0"
+    },
+    {
+      "periodStartUnix": 1701406800,
+      "tvlUSD": "3000393.0",
+      "volumeUSD": "1393.0",
+      "feesUSD": "403.0"
+    },
+    {
+      "periodStartUnix": 1701410400,
+      "tvlUSD": "3000394.0",
+      "volumeUSD": "1394.0",
+      "feesUSD": "404.0"
+    },
+    {
+      "periodStartUnix": 1701414000,
+      "tvlUSD": "3000395.0",
+      "volumeUSD": "1395.0",
+      "feesUSD": "405.0"
+    },
+    {
+      "periodStartUnix": 1701417600,
+      "tvlUSD": "3000396.0",
+      "volumeUSD": "1396.0",
+      "feesUSD": "406.0"
+    },
+    {
+      "periodStartUnix": 1701421200,
+      "tvlUSD": "3000397.0",
+      "volumeUSD": "1397.0",
+      "feesUSD": "407.0"
+    },
+    {
+      "periodStartUnix": 1701424800,
+      "tvlUSD": "3000398.0",
+      "volumeUSD": "1398.0",
+      "feesUSD": "408.0"
+    },
+    {
+      "periodStartUnix": 1701428400,
+      "tvlUSD": "3000399.0",
+      "volumeUSD": "1399.0",
+      "feesUSD": "409.0"
+    },
+    {
+      "periodStartUnix": 1701432000,
+      "tvlUSD": "3000400.0",
+      "volumeUSD": "1400.0",
+      "feesUSD": "410.0"
+    },
+    {
+      "periodStartUnix": 1701435600,
+      "tvlUSD": "3000401.0",
+      "volumeUSD": "1401.0",
+      "feesUSD": "411.0"
+    },
+    {
+      "periodStartUnix": 1701439200,
+      "tvlUSD": "3000402.0",
+      "volumeUSD": "1402.0",
+      "feesUSD": "412.0"
+    },
+    {
+      "periodStartUnix": 1701442800,
+      "tvlUSD": "3000403.0",
+      "volumeUSD": "1403.0",
+      "feesUSD": "413.0"
+    },
+    {
+      "periodStartUnix": 1701446400,
+      "tvlUSD": "3000404.0",
+      "volumeUSD": "1404.0",
+      "feesUSD": "414.0"
+    },
+    {
+      "periodStartUnix": 1701450000,
+      "tvlUSD": "3000405.0",
+      "volumeUSD": "1405.0",
+      "feesUSD": "415.0"
+    },
+    {
+      "periodStartUnix": 1701453600,
+      "tvlUSD": "3000406.0",
+      "volumeUSD": "1406.0",
+      "feesUSD": "416.0"
+    },
+    {
+      "periodStartUnix": 1701457200,
+      "tvlUSD": "3000407.0",
+      "volumeUSD": "1407.0",
+      "feesUSD": "417.0"
+    },
+    {
+      "periodStartUnix": 1701460800,
+      "tvlUSD": "3000408.0",
+      "volumeUSD": "1408.0",
+      "feesUSD": "418.0"
+    },
+    {
+      "periodStartUnix": 1701464400,
+      "tvlUSD": "3000409.0",
+      "volumeUSD": "1409.0",
+      "feesUSD": "419.0"
+    },
+    {
+      "periodStartUnix": 1701468000,
+      "tvlUSD": "3000410.0",
+      "volumeUSD": "1410.0",
+      "feesUSD": "420.0"
+    },
+    {
+      "periodStartUnix": 1701471600,
+      "tvlUSD": "3000411.0",
+      "volumeUSD": "1411.0",
+      "feesUSD": "421.0"
+    },
+    {
+      "periodStartUnix": 1701475200,
+      "tvlUSD": "3000412.0",
+      "volumeUSD": "1412.0",
+      "feesUSD": "422.0"
+    },
+    {
+      "periodStartUnix": 1701478800,
+      "tvlUSD": "3000413.0",
+      "volumeUSD": "1413.0",
+      "feesUSD": "423.0"
+    },
+    {
+      "periodStartUnix": 1701482400,
+      "tvlUSD": "3000414.0",
+      "volumeUSD": "1414.0",
+      "feesUSD": "424.0"
+    },
+    {
+      "periodStartUnix": 1701486000,
+      "tvlUSD": "3000415.0",
+      "volumeUSD": "1415.0",
+      "feesUSD": "425.0"
+    },
+    {
+      "periodStartUnix": 1701489600,
+      "tvlUSD": "3000416.0",
+      "volumeUSD": "1416.0",
+      "feesUSD": "426.0"
+    },
+    {
+      "periodStartUnix": 1701493200,
+      "tvlUSD": "3000417.0",
+      "volumeUSD": "1417.0",
+      "feesUSD": "427.0"
+    },
+    {
+      "periodStartUnix": 1701496800,
+      "tvlUSD": "3000418.0",
+      "volumeUSD": "1418.0",
+      "feesUSD": "428.0"
+    },
+    {
+      "periodStartUnix": 1701500400,
+      "tvlUSD": "3000419.0",
+      "volumeUSD": "1419.0",
+      "feesUSD": "429.0"
+    },
+    {
+      "periodStartUnix": 1701504000,
+      "tvlUSD": "3000420.0",
+      "volumeUSD": "1420.0",
+      "feesUSD": "430.0"
+    },
+    {
+      "periodStartUnix": 1701507600,
+      "tvlUSD": "3000421.0",
+      "volumeUSD": "1421.0",
+      "feesUSD": "431.0"
+    },
+    {
+      "periodStartUnix": 1701511200,
+      "tvlUSD": "3000422.0",
+      "volumeUSD": "1422.0",
+      "feesUSD": "432.0"
+    },
+    {
+      "periodStartUnix": 1701514800,
+      "tvlUSD": "3000423.0",
+      "volumeUSD": "1423.0",
+      "feesUSD": "433.0"
+    },
+    {
+      "periodStartUnix": 1701518400,
+      "tvlUSD": "3000424.0",
+      "volumeUSD": "1424.0",
+      "feesUSD": "434.0"
+    },
+    {
+      "periodStartUnix": 1701522000,
+      "tvlUSD": "3000425.0",
+      "volumeUSD": "1425.0",
+      "feesUSD": "435.0"
+    },
+    {
+      "periodStartUnix": 1701525600,
+      "tvlUSD": "3000426.0",
+      "volumeUSD": "1426.0",
+      "feesUSD": "436.0"
+    },
+    {
+      "periodStartUnix": 1701529200,
+      "tvlUSD": "3000427.0",
+      "volumeUSD": "1427.0",
+      "feesUSD": "437.0"
+    },
+    {
+      "periodStartUnix": 1701532800,
+      "tvlUSD": "3000428.0",
+      "volumeUSD": "1428.0",
+      "feesUSD": "438.0"
+    },
+    {
+      "periodStartUnix": 1701536400,
+      "tvlUSD": "3000429.0",
+      "volumeUSD": "1429.0",
+      "feesUSD": "439.0"
+    },
+    {
+      "periodStartUnix": 1701540000,
+      "tvlUSD": "3000430.0",
+      "volumeUSD": "1430.0",
+      "feesUSD": "440.0"
+    },
+    {
+      "periodStartUnix": 1701543600,
+      "tvlUSD": "3000431.0",
+      "volumeUSD": "1431.0",
+      "feesUSD": "441.0"
+    },
+    {
+      "periodStartUnix": 1701547200,
+      "tvlUSD": "3000432.0",
+      "volumeUSD": "1432.0",
+      "feesUSD": "442.0"
+    },
+    {
+      "periodStartUnix": 1701550800,
+      "tvlUSD": "3000433.0",
+      "volumeUSD": "1433.0",
+      "feesUSD": "443.0"
+    },
+    {
+      "periodStartUnix": 1701554400,
+      "tvlUSD": "3000434.0",
+      "volumeUSD": "1434.0",
+      "feesUSD": "444.0"
+    },
+    {
+      "periodStartUnix": 1701558000,
+      "tvlUSD": "3000435.0",
+      "volumeUSD": "1435.0",
+      "feesUSD": "445.0"
+    },
+    {
+      "periodStartUnix": 1701561600,
+      "tvlUSD": "3000436.0",
+      "volumeUSD": "1436.0",
+      "feesUSD": "446.0"
+    },
+    {
+      "periodStartUnix": 1701565200,
+      "tvlUSD": "3000437.0",
+      "volumeUSD": "1437.0",
+      "feesUSD": "447.0"
+    },
+    {
+      "periodStartUnix": 1701568800,
+      "tvlUSD": "3000438.0",
+      "volumeUSD": "1438.0",
+      "feesUSD": "448.0"
+    },
+    {
+      "periodStartUnix": 1701572400,
+      "tvlUSD": "3000439.0",
+      "volumeUSD": "1439.0",
+      "feesUSD": "449.0"
+    },
+    {
+      "periodStartUnix": 1701576000,
+      "tvlUSD": "3000440.0",
+      "volumeUSD": "1440.0",
+      "feesUSD": "450.0"
+    },
+    {
+      "periodStartUnix": 1701579600,
+      "tvlUSD": "3000441.0",
+      "volumeUSD": "1441.0",
+      "feesUSD": "451.0"
+    },
+    {
+      "periodStartUnix": 1701583200,
+      "tvlUSD": "3000442.0",
+      "volumeUSD": "1442.0",
+      "feesUSD": "452.0"
+    },
+    {
+      "periodStartUnix": 1701586800,
+      "tvlUSD": "3000443.0",
+      "volumeUSD": "1443.0",
+      "feesUSD": "453.0"
+    },
+    {
+      "periodStartUnix": 1701590400,
+      "tvlUSD": "3000444.0",
+      "volumeUSD": "1444.0",
+      "feesUSD": "454.0"
+    },
+    {
+      "periodStartUnix": 1701594000,
+      "tvlUSD": "3000445.0",
+      "volumeUSD": "1445.0",
+      "feesUSD": "455.0"
+    },
+    {
+      "periodStartUnix": 1701597600,
+      "tvlUSD": "3000446.0",
+      "volumeUSD": "1446.0",
+      "feesUSD": "456.0"
+    },
+    {
+      "periodStartUnix": 1701601200,
+      "tvlUSD": "3000447.0",
+      "volumeUSD": "1447.0",
+      "feesUSD": "457.0"
+    },
+    {
+      "periodStartUnix": 1701604800,
+      "tvlUSD": "3000448.0",
+      "volumeUSD": "1448.0",
+      "feesUSD": "458.0"
+    },
+    {
+      "periodStartUnix": 1701608400,
+      "tvlUSD": "3000449.0",
+      "volumeUSD": "1449.0",
+      "feesUSD": "459.0"
+    },
+    {
+      "periodStartUnix": 1701612000,
+      "tvlUSD": "3000450.0",
+      "volumeUSD": "1450.0",
+      "feesUSD": "460.0"
+    },
+    {
+      "periodStartUnix": 1701615600,
+      "tvlUSD": "3000451.0",
+      "volumeUSD": "1451.0",
+      "feesUSD": "461.0"
+    },
+    {
+      "periodStartUnix": 1701619200,
+      "tvlUSD": "3000452.0",
+      "volumeUSD": "1452.0",
+      "feesUSD": "462.0"
+    },
+    {
+      "periodStartUnix": 1701622800,
+      "tvlUSD": "3000453.0",
+      "volumeUSD": "1453.0",
+      "feesUSD": "463.0"
+    },
+    {
+      "periodStartUnix": 1701626400,
+      "tvlUSD": "3000454.0",
+      "volumeUSD": "1454.0",
+      "feesUSD": "464.0"
+    },
+    {
+      "periodStartUnix": 1701630000,
+      "tvlUSD": "3000455.0",
+      "volumeUSD": "1455.0",
+      "feesUSD": "465.0"
+    },
+    {
+      "periodStartUnix": 1701633600,
+      "tvlUSD": "3000456.0",
+      "volumeUSD": "1456.0",
+      "feesUSD": "466.0"
+    },
+    {
+      "periodStartUnix": 1701637200,
+      "tvlUSD": "3000457.0",
+      "volumeUSD": "1457.0",
+      "feesUSD": "467.0"
+    },
+    {
+      "periodStartUnix": 1701640800,
+      "tvlUSD": "3000458.0",
+      "volumeUSD": "1458.0",
+      "feesUSD": "468.0"
+    },
+    {
+      "periodStartUnix": 1701644400,
+      "tvlUSD": "3000459.0",
+      "volumeUSD": "1459.0",
+      "feesUSD": "469.0"
+    },
+    {
+      "periodStartUnix": 1701648000,
+      "tvlUSD": "3000460.0",
+      "volumeUSD": "1460.0",
+      "feesUSD": "470.0"
+    },
+    {
+      "periodStartUnix": 1701651600,
+      "tvlUSD": "3000461.0",
+      "volumeUSD": "1461.0",
+      "feesUSD": "471.0"
+    },
+    {
+      "periodStartUnix": 1701655200,
+      "tvlUSD": "3000462.0",
+      "volumeUSD": "1462.0",
+      "feesUSD": "472.0"
+    },
+    {
+      "periodStartUnix": 1701658800,
+      "tvlUSD": "3000463.0",
+      "volumeUSD": "1463.0",
+      "feesUSD": "473.0"
+    },
+    {
+      "periodStartUnix": 1701662400,
+      "tvlUSD": "3000464.0",
+      "volumeUSD": "1464.0",
+      "feesUSD": "474.0"
+    },
+    {
+      "periodStartUnix": 1701666000,
+      "tvlUSD": "3000465.0",
+      "volumeUSD": "1465.0",
+      "feesUSD": "475.0"
+    },
+    {
+      "periodStartUnix": 1701669600,
+      "tvlUSD": "3000466.0",
+      "volumeUSD": "1466.0",
+      "feesUSD": "476.0"
+    },
+    {
+      "periodStartUnix": 1701673200,
+      "tvlUSD": "3000467.0",
+      "volumeUSD": "1467.0",
+      "feesUSD": "477.0"
+    },
+    {
+      "periodStartUnix": 1701676800,
+      "tvlUSD": "3000468.0",
+      "volumeUSD": "1468.0",
+      "feesUSD": "478.0"
+    },
+    {
+      "periodStartUnix": 1701680400,
+      "tvlUSD": "3000469.0",
+      "volumeUSD": "1469.0",
+      "feesUSD": "479.0"
+    },
+    {
+      "periodStartUnix": 1701684000,
+      "tvlUSD": "3000470.0",
+      "volumeUSD": "1470.0",
+      "feesUSD": "480.0"
+    },
+    {
+      "periodStartUnix": 1701687600,
+      "tvlUSD": "3000471.0",
+      "volumeUSD": "1471.0",
+      "feesUSD": "481.0"
+    },
+    {
+      "periodStartUnix": 1701691200,
+      "tvlUSD": "3000472.0",
+      "volumeUSD": "1472.0",
+      "feesUSD": "482.0"
+    },
+    {
+      "periodStartUnix": 1701694800,
+      "tvlUSD": "3000473.0",
+      "volumeUSD": "1473.0",
+      "feesUSD": "483.0"
+    },
+    {
+      "periodStartUnix": 1701698400,
+      "tvlUSD": "3000474.0",
+      "volumeUSD": "1474.0",
+      "feesUSD": "484.0"
+    },
+    {
+      "periodStartUnix": 1701702000,
+      "tvlUSD": "3000475.0",
+      "volumeUSD": "1475.0",
+      "feesUSD": "485.0"
+    },
+    {
+      "periodStartUnix": 1701705600,
+      "tvlUSD": "3000476.0",
+      "volumeUSD": "1476.0",
+      "feesUSD": "486.0"
+    },
+    {
+      "periodStartUnix": 1701709200,
+      "tvlUSD": "3000477.0",
+      "volumeUSD": "1477.0",
+      "feesUSD": "487.0"
+    },
+    {
+      "periodStartUnix": 1701712800,
+      "tvlUSD": "3000478.0",
+      "volumeUSD": "1478.0",
+      "feesUSD": "488.0"
+    },
+    {
+      "periodStartUnix": 1701716400,
+      "tvlUSD": "3000479.0",
+      "volumeUSD": "1479.0",
+      "feesUSD": "489.0"
+    },
+    {
+      "periodStartUnix": 1701720000,
+      "tvlUSD": "3000480.0",
+      "volumeUSD": "1480.0",
+      "feesUSD": "490.0"
+    },
+    {
+      "periodStartUnix": 1701723600,
+      "tvlUSD": "3000481.0",
+      "volumeUSD": "1481.0",
+      "feesUSD": "491.0"
+    },
+    {
+      "periodStartUnix": 1701727200,
+      "tvlUSD": "3000482.0",
+      "volumeUSD": "1482.0",
+      "feesUSD": "492.0"
+    },
+    {
+      "periodStartUnix": 1701730800,
+      "tvlUSD": "3000483.0",
+      "volumeUSD": "1483.0",
+      "feesUSD": "493.0"
+    },
+    {
+      "periodStartUnix": 1701734400,
+      "tvlUSD": "3000484.0",
+      "volumeUSD": "1484.0",
+      "feesUSD": "494.0"
+    },
+    {
+      "periodStartUnix": 1701738000,
+      "tvlUSD": "3000485.0",
+      "volumeUSD": "1485.0",
+      "feesUSD": "495.0"
+    },
+    {
+      "periodStartUnix": 1701741600,
+      "tvlUSD": "3000486.0",
+      "volumeUSD": "1486.0",
+      "feesUSD": "496.0"
+    },
+    {
+      "periodStartUnix": 1701745200,
+      "tvlUSD": "3000487.0",
+      "volumeUSD": "1487.0",
+      "feesUSD": "497.0"
+    },
+    {
+      "periodStartUnix": 1701748800,
+      "tvlUSD": "3000488.0",
+      "volumeUSD": "1488.0",
+      "feesUSD": "498.0"
+    },
+    {
+      "periodStartUnix": 1701752400,
+      "tvlUSD": "3000489.0",
+      "volumeUSD": "1489.0",
+      "feesUSD": "499.0"
+    },
+    {
+      "periodStartUnix": 1701756000,
+      "tvlUSD": "3000490.0",
+      "volumeUSD": "1490.0",
+      "feesUSD": "500.0"
+    },
+    {
+      "periodStartUnix": 1701759600,
+      "tvlUSD": "3000491.0",
+      "volumeUSD": "1491.0",
+      "feesUSD": "501.0"
+    },
+    {
+      "periodStartUnix": 1701763200,
+      "tvlUSD": "3000492.0",
+      "volumeUSD": "1492.0",
+      "feesUSD": "502.0"
+    },
+    {
+      "periodStartUnix": 1701766800,
+      "tvlUSD": "3000493.0",
+      "volumeUSD": "1493.0",
+      "feesUSD": "503.0"
+    },
+    {
+      "periodStartUnix": 1701770400,
+      "tvlUSD": "3000494.0",
+      "volumeUSD": "1494.0",
+      "feesUSD": "504.0"
+    },
+    {
+      "periodStartUnix": 1701774000,
+      "tvlUSD": "3000495.0",
+      "volumeUSD": "1495.0",
+      "feesUSD": "505.0"
+    },
+    {
+      "periodStartUnix": 1701777600,
+      "tvlUSD": "3000496.0",
+      "volumeUSD": "1496.0",
+      "feesUSD": "506.0"
+    },
+    {
+      "periodStartUnix": 1701781200,
+      "tvlUSD": "3000497.0",
+      "volumeUSD": "1497.0",
+      "feesUSD": "507.0"
+    },
+    {
+      "periodStartUnix": 1701784800,
+      "tvlUSD": "3000498.0",
+      "volumeUSD": "1498.0",
+      "feesUSD": "508.0"
+    },
+    {
+      "periodStartUnix": 1701788400,
+      "tvlUSD": "3000499.0",
+      "volumeUSD": "1499.0",
+      "feesUSD": "509.0"
+    },
+    {
+      "periodStartUnix": 1701792000,
+      "tvlUSD": "3000500.0",
+      "volumeUSD": "1500.0",
+      "feesUSD": "510.0"
+    },
+    {
+      "periodStartUnix": 1701795600,
+      "tvlUSD": "3000501.0",
+      "volumeUSD": "1501.0",
+      "feesUSD": "511.0"
+    },
+    {
+      "periodStartUnix": 1701799200,
+      "tvlUSD": "3000502.0",
+      "volumeUSD": "1502.0",
+      "feesUSD": "512.0"
+    },
+    {
+      "periodStartUnix": 1701802800,
+      "tvlUSD": "3000503.0",
+      "volumeUSD": "1503.0",
+      "feesUSD": "513.0"
+    },
+    {
+      "periodStartUnix": 1701806400,
+      "tvlUSD": "3000504.0",
+      "volumeUSD": "1504.0",
+      "feesUSD": "514.0"
+    },
+    {
+      "periodStartUnix": 1701810000,
+      "tvlUSD": "3000505.0",
+      "volumeUSD": "1505.0",
+      "feesUSD": "515.0"
+    },
+    {
+      "periodStartUnix": 1701813600,
+      "tvlUSD": "3000506.0",
+      "volumeUSD": "1506.0",
+      "feesUSD": "516.0"
+    },
+    {
+      "periodStartUnix": 1701817200,
+      "tvlUSD": "3000507.0",
+      "volumeUSD": "1507.0",
+      "feesUSD": "517.0"
+    },
+    {
+      "periodStartUnix": 1701820800,
+      "tvlUSD": "3000508.0",
+      "volumeUSD": "1508.0",
+      "feesUSD": "518.0"
+    },
+    {
+      "periodStartUnix": 1701824400,
+      "tvlUSD": "3000509.0",
+      "volumeUSD": "1509.0",
+      "feesUSD": "519.0"
+    },
+    {
+      "periodStartUnix": 1701828000,
+      "tvlUSD": "3000510.0",
+      "volumeUSD": "1510.0",
+      "feesUSD": "520.0"
+    },
+    {
+      "periodStartUnix": 1701831600,
+      "tvlUSD": "3000511.0",
+      "volumeUSD": "1511.0",
+      "feesUSD": "521.0"
+    },
+    {
+      "periodStartUnix": 1701835200,
+      "tvlUSD": "3000512.0",
+      "volumeUSD": "1512.0",
+      "feesUSD": "522.0"
+    },
+    {
+      "periodStartUnix": 1701838800,
+      "tvlUSD": "3000513.0",
+      "volumeUSD": "1513.0",
+      "feesUSD": "523.0"
+    },
+    {
+      "periodStartUnix": 1701842400,
+      "tvlUSD": "3000514.0",
+      "volumeUSD": "1514.0",
+      "feesUSD": "524.0"
+    },
+    {
+      "periodStartUnix": 1701846000,
+      "tvlUSD": "3000515.0",
+      "volumeUSD": "1515.0",
+      "feesUSD": "525.0"
+    },
+    {
+      "periodStartUnix": 1701849600,
+      "tvlUSD": "3000516.0",
+      "volumeUSD": "1516.0",
+      "feesUSD": "526.0"
+    },
+    {
+      "periodStartUnix": 1701853200,
+      "tvlUSD": "3000517.0",
+      "volumeUSD": "1517.0",
+      "feesUSD": "527.0"
+    },
+    {
+      "periodStartUnix": 1701856800,
+      "tvlUSD": "3000518.0",
+      "volumeUSD": "1518.0",
+      "feesUSD": "528.0"
+    },
+    {
+      "periodStartUnix": 1701860400,
+      "tvlUSD": "3000519.0",
+      "volumeUSD": "1519.0",
+      "feesUSD": "529.0"
+    },
+    {
+      "periodStartUnix": 1701864000,
+      "tvlUSD": "3000520.0",
+      "volumeUSD": "1520.0",
+      "feesUSD": "530.0"
+    },
+    {
+      "periodStartUnix": 1701867600,
+      "tvlUSD": "3000521.0",
+      "volumeUSD": "1521.0",
+      "feesUSD": "531.0"
+    },
+    {
+      "periodStartUnix": 1701871200,
+      "tvlUSD": "3000522.0",
+      "volumeUSD": "1522.0",
+      "feesUSD": "532.0"
+    },
+    {
+      "periodStartUnix": 1701874800,
+      "tvlUSD": "3000523.0",
+      "volumeUSD": "1523.0",
+      "feesUSD": "533.0"
+    },
+    {
+      "periodStartUnix": 1701878400,
+      "tvlUSD": "3000524.0",
+      "volumeUSD": "1524.0",
+      "feesUSD": "534.0"
+    },
+    {
+      "periodStartUnix": 1701882000,
+      "tvlUSD": "3000525.0",
+      "volumeUSD": "1525.0",
+      "feesUSD": "535.0"
+    },
+    {
+      "periodStartUnix": 1701885600,
+      "tvlUSD": "3000526.0",
+      "volumeUSD": "1526.0",
+      "feesUSD": "536.0"
+    },
+    {
+      "periodStartUnix": 1701889200,
+      "tvlUSD": "3000527.0",
+      "volumeUSD": "1527.0",
+      "feesUSD": "537.0"
+    },
+    {
+      "periodStartUnix": 1701892800,
+      "tvlUSD": "3000528.0",
+      "volumeUSD": "1528.0",
+      "feesUSD": "538.0"
+    },
+    {
+      "periodStartUnix": 1701896400,
+      "tvlUSD": "3000529.0",
+      "volumeUSD": "1529.0",
+      "feesUSD": "539.0"
+    },
+    {
+      "periodStartUnix": 1701900000,
+      "tvlUSD": "3000530.0",
+      "volumeUSD": "1530.0",
+      "feesUSD": "540.0"
+    },
+    {
+      "periodStartUnix": 1701903600,
+      "tvlUSD": "3000531.0",
+      "volumeUSD": "1531.0",
+      "feesUSD": "541.0"
+    },
+    {
+      "periodStartUnix": 1701907200,
+      "tvlUSD": "3000532.0",
+      "volumeUSD": "1532.0",
+      "feesUSD": "542.0"
+    },
+    {
+      "periodStartUnix": 1701910800,
+      "tvlUSD": "3000533.0",
+      "volumeUSD": "1533.0",
+      "feesUSD": "543.0"
+    },
+    {
+      "periodStartUnix": 1701914400,
+      "tvlUSD": "3000534.0",
+      "volumeUSD": "1534.0",
+      "feesUSD": "544.0"
+    },
+    {
+      "periodStartUnix": 1701918000,
+      "tvlUSD": "3000535.0",
+      "volumeUSD": "1535.0",
+      "feesUSD": "545.0"
+    },
+    {
+      "periodStartUnix": 1701921600,
+      "tvlUSD": "3000536.0",
+      "volumeUSD": "1536.0",
+      "feesUSD": "546.0"
+    },
+    {
+      "periodStartUnix": 1701925200,
+      "tvlUSD": "3000537.0",
+      "volumeUSD": "1537.0",
+      "feesUSD": "547.0"
+    },
+    {
+      "periodStartUnix": 1701928800,
+      "tvlUSD": "3000538.0",
+      "volumeUSD": "1538.0",
+      "feesUSD": "548.0"
+    },
+    {
+      "periodStartUnix": 1701932400,
+      "tvlUSD": "3000539.0",
+      "volumeUSD": "1539.0",
+      "feesUSD": "549.0"
+    },
+    {
+      "periodStartUnix": 1701936000,
+      "tvlUSD": "3000540.0",
+      "volumeUSD": "1540.0",
+      "feesUSD": "550.0"
+    },
+    {
+      "periodStartUnix": 1701939600,
+      "tvlUSD": "3000541.0",
+      "volumeUSD": "1541.0",
+      "feesUSD": "551.0"
+    },
+    {
+      "periodStartUnix": 1701943200,
+      "tvlUSD": "3000542.0",
+      "volumeUSD": "1542.0",
+      "feesUSD": "552.0"
+    },
+    {
+      "periodStartUnix": 1701946800,
+      "tvlUSD": "3000543.0",
+      "volumeUSD": "1543.0",
+      "feesUSD": "553.0"
+    },
+    {
+      "periodStartUnix": 1701950400,
+      "tvlUSD": "3000544.0",
+      "volumeUSD": "1544.0",
+      "feesUSD": "554.0"
+    },
+    {
+      "periodStartUnix": 1701954000,
+      "tvlUSD": "3000545.0",
+      "volumeUSD": "1545.0",
+      "feesUSD": "555.0"
+    },
+    {
+      "periodStartUnix": 1701957600,
+      "tvlUSD": "3000546.0",
+      "volumeUSD": "1546.0",
+      "feesUSD": "556.0"
+    },
+    {
+      "periodStartUnix": 1701961200,
+      "tvlUSD": "3000547.0",
+      "volumeUSD": "1547.0",
+      "feesUSD": "557.0"
+    },
+    {
+      "periodStartUnix": 1701964800,
+      "tvlUSD": "3000548.0",
+      "volumeUSD": "1548.0",
+      "feesUSD": "558.0"
+    },
+    {
+      "periodStartUnix": 1701968400,
+      "tvlUSD": "3000549.0",
+      "volumeUSD": "1549.0",
+      "feesUSD": "559.0"
+    },
+    {
+      "periodStartUnix": 1701972000,
+      "tvlUSD": "3000550.0",
+      "volumeUSD": "1550.0",
+      "feesUSD": "560.0"
+    },
+    {
+      "periodStartUnix": 1701975600,
+      "tvlUSD": "3000551.0",
+      "volumeUSD": "1551.0",
+      "feesUSD": "561.0"
+    },
+    {
+      "periodStartUnix": 1701979200,
+      "tvlUSD": "3000552.0",
+      "volumeUSD": "1552.0",
+      "feesUSD": "562.0"
+    },
+    {
+      "periodStartUnix": 1701982800,
+      "tvlUSD": "3000553.0",
+      "volumeUSD": "1553.0",
+      "feesUSD": "563.0"
+    },
+    {
+      "periodStartUnix": 1701986400,
+      "tvlUSD": "3000554.0",
+      "volumeUSD": "1554.0",
+      "feesUSD": "564.0"
+    },
+    {
+      "periodStartUnix": 1701990000,
+      "tvlUSD": "3000555.0",
+      "volumeUSD": "1555.0",
+      "feesUSD": "565.0"
+    },
+    {
+      "periodStartUnix": 1701993600,
+      "tvlUSD": "3000556.0",
+      "volumeUSD": "1556.0",
+      "feesUSD": "566.0"
+    },
+    {
+      "periodStartUnix": 1701997200,
+      "tvlUSD": "3000557.0",
+      "volumeUSD": "1557.0",
+      "feesUSD": "567.0"
+    },
+    {
+      "periodStartUnix": 1702000800,
+      "tvlUSD": "3000558.0",
+      "volumeUSD": "1558.0",
+      "feesUSD": "568.0"
+    },
+    {
+      "periodStartUnix": 1702004400,
+      "tvlUSD": "3000559.0",
+      "volumeUSD": "1559.0",
+      "feesUSD": "569.0"
+    },
+    {
+      "periodStartUnix": 1702008000,
+      "tvlUSD": "3000560.0",
+      "volumeUSD": "1560.0",
+      "feesUSD": "570.0"
+    },
+    {
+      "periodStartUnix": 1702011600,
+      "tvlUSD": "3000561.0",
+      "volumeUSD": "1561.0",
+      "feesUSD": "571.0"
+    },
+    {
+      "periodStartUnix": 1702015200,
+      "tvlUSD": "3000562.0",
+      "volumeUSD": "1562.0",
+      "feesUSD": "572.0"
+    },
+    {
+      "periodStartUnix": 1702018800,
+      "tvlUSD": "3000563.0",
+      "volumeUSD": "1563.0",
+      "feesUSD": "573.0"
+    },
+    {
+      "periodStartUnix": 1702022400,
+      "tvlUSD": "3000564.0",
+      "volumeUSD": "1564.0",
+      "feesUSD": "574.0"
+    },
+    {
+      "periodStartUnix": 1702026000,
+      "tvlUSD": "3000565.0",
+      "volumeUSD": "1565.0",
+      "feesUSD": "575.0"
+    },
+    {
+      "periodStartUnix": 1702029600,
+      "tvlUSD": "3000566.0",
+      "volumeUSD": "1566.0",
+      "feesUSD": "576.0"
+    },
+    {
+      "periodStartUnix": 1702033200,
+      "tvlUSD": "3000567.0",
+      "volumeUSD": "1567.0",
+      "feesUSD": "577.0"
+    },
+    {
+      "periodStartUnix": 1702036800,
+      "tvlUSD": "3000568.0",
+      "volumeUSD": "1568.0",
+      "feesUSD": "578.0"
+    },
+    {
+      "periodStartUnix": 1702040400,
+      "tvlUSD": "3000569.0",
+      "volumeUSD": "1569.0",
+      "feesUSD": "579.0"
+    },
+    {
+      "periodStartUnix": 1702044000,
+      "tvlUSD": "3000570.0",
+      "volumeUSD": "1570.0",
+      "feesUSD": "580.0"
+    },
+    {
+      "periodStartUnix": 1702047600,
+      "tvlUSD": "3000571.0",
+      "volumeUSD": "1571.0",
+      "feesUSD": "581.0"
+    },
+    {
+      "periodStartUnix": 1702051200,
+      "tvlUSD": "3000572.0",
+      "volumeUSD": "1572.0",
+      "feesUSD": "582.0"
+    },
+    {
+      "periodStartUnix": 1702054800,
+      "tvlUSD": "3000573.0",
+      "volumeUSD": "1573.0",
+      "feesUSD": "583.0"
+    },
+    {
+      "periodStartUnix": 1702058400,
+      "tvlUSD": "3000574.0",
+      "volumeUSD": "1574.0",
+      "feesUSD": "584.0"
+    },
+    {
+      "periodStartUnix": 1702062000,
+      "tvlUSD": "3000575.0",
+      "volumeUSD": "1575.0",
+      "feesUSD": "585.0"
+    },
+    {
+      "periodStartUnix": 1702065600,
+      "tvlUSD": "3000576.0",
+      "volumeUSD": "1576.0",
+      "feesUSD": "586.0"
+    },
+    {
+      "periodStartUnix": 1702069200,
+      "tvlUSD": "3000577.0",
+      "volumeUSD": "1577.0",
+      "feesUSD": "587.0"
+    },
+    {
+      "periodStartUnix": 1702072800,
+      "tvlUSD": "3000578.0",
+      "volumeUSD": "1578.0",
+      "feesUSD": "588.0"
+    },
+    {
+      "periodStartUnix": 1702076400,
+      "tvlUSD": "3000579.0",
+      "volumeUSD": "1579.0",
+      "feesUSD": "589.0"
+    },
+    {
+      "periodStartUnix": 1702080000,
+      "tvlUSD": "3000580.0",
+      "volumeUSD": "1580.0",
+      "feesUSD": "590.0"
+    },
+    {
+      "periodStartUnix": 1702083600,
+      "tvlUSD": "3000581.0",
+      "volumeUSD": "1581.0",
+      "feesUSD": "591.0"
+    },
+    {
+      "periodStartUnix": 1702087200,
+      "tvlUSD": "3000582.0",
+      "volumeUSD": "1582.0",
+      "feesUSD": "592.0"
+    },
+    {
+      "periodStartUnix": 1702090800,
+      "tvlUSD": "3000583.0",
+      "volumeUSD": "1583.0",
+      "feesUSD": "593.0"
+    },
+    {
+      "periodStartUnix": 1702094400,
+      "tvlUSD": "3000584.0",
+      "volumeUSD": "1584.0",
+      "feesUSD": "594.0"
+    },
+    {
+      "periodStartUnix": 1702098000,
+      "tvlUSD": "3000585.0",
+      "volumeUSD": "1585.0",
+      "feesUSD": "595.0"
+    },
+    {
+      "periodStartUnix": 1702101600,
+      "tvlUSD": "3000586.0",
+      "volumeUSD": "1586.0",
+      "feesUSD": "596.0"
+    },
+    {
+      "periodStartUnix": 1702105200,
+      "tvlUSD": "3000587.0",
+      "volumeUSD": "1587.0",
+      "feesUSD": "597.0"
+    },
+    {
+      "periodStartUnix": 1702108800,
+      "tvlUSD": "3000588.0",
+      "volumeUSD": "1588.0",
+      "feesUSD": "598.0"
+    },
+    {
+      "periodStartUnix": 1702112400,
+      "tvlUSD": "3000589.0",
+      "volumeUSD": "1589.0",
+      "feesUSD": "599.0"
+    },
+    {
+      "periodStartUnix": 1702116000,
+      "tvlUSD": "3000590.0",
+      "volumeUSD": "1590.0",
+      "feesUSD": "600.0"
+    },
+    {
+      "periodStartUnix": 1702119600,
+      "tvlUSD": "3000591.0",
+      "volumeUSD": "1591.0",
+      "feesUSD": "601.0"
+    },
+    {
+      "periodStartUnix": 1702123200,
+      "tvlUSD": "3000592.0",
+      "volumeUSD": "1592.0",
+      "feesUSD": "602.0"
+    },
+    {
+      "periodStartUnix": 1702126800,
+      "tvlUSD": "3000593.0",
+      "volumeUSD": "1593.0",
+      "feesUSD": "603.0"
+    },
+    {
+      "periodStartUnix": 1702130400,
+      "tvlUSD": "3000594.0",
+      "volumeUSD": "1594.0",
+      "feesUSD": "604.0"
+    },
+    {
+      "periodStartUnix": 1702134000,
+      "tvlUSD": "3000595.0",
+      "volumeUSD": "1595.0",
+      "feesUSD": "605.0"
+    },
+    {
+      "periodStartUnix": 1702137600,
+      "tvlUSD": "3000596.0",
+      "volumeUSD": "1596.0",
+      "feesUSD": "606.0"
+    },
+    {
+      "periodStartUnix": 1702141200,
+      "tvlUSD": "3000597.0",
+      "volumeUSD": "1597.0",
+      "feesUSD": "607.0"
+    },
+    {
+      "periodStartUnix": 1702144800,
+      "tvlUSD": "3000598.0",
+      "volumeUSD": "1598.0",
+      "feesUSD": "608.0"
+    },
+    {
+      "periodStartUnix": 1702148400,
+      "tvlUSD": "3000599.0",
+      "volumeUSD": "1599.0",
+      "feesUSD": "609.0"
+    },
+    {
+      "periodStartUnix": 1702152000,
+      "tvlUSD": "3000600.0",
+      "volumeUSD": "1600.0",
+      "feesUSD": "610.0"
+    },
+    {
+      "periodStartUnix": 1702155600,
+      "tvlUSD": "3000601.0",
+      "volumeUSD": "1601.0",
+      "feesUSD": "611.0"
+    },
+    {
+      "periodStartUnix": 1702159200,
+      "tvlUSD": "3000602.0",
+      "volumeUSD": "1602.0",
+      "feesUSD": "612.0"
+    },
+    {
+      "periodStartUnix": 1702162800,
+      "tvlUSD": "3000603.0",
+      "volumeUSD": "1603.0",
+      "feesUSD": "613.0"
+    },
+    {
+      "periodStartUnix": 1702166400,
+      "tvlUSD": "3000604.0",
+      "volumeUSD": "1604.0",
+      "feesUSD": "614.0"
+    },
+    {
+      "periodStartUnix": 1702170000,
+      "tvlUSD": "3000605.0",
+      "volumeUSD": "1605.0",
+      "feesUSD": "615.0"
+    },
+    {
+      "periodStartUnix": 1702173600,
+      "tvlUSD": "3000606.0",
+      "volumeUSD": "1606.0",
+      "feesUSD": "616.0"
+    },
+    {
+      "periodStartUnix": 1702177200,
+      "tvlUSD": "3000607.0",
+      "volumeUSD": "1607.0",
+      "feesUSD": "617.0"
+    },
+    {
+      "periodStartUnix": 1702180800,
+      "tvlUSD": "3000608.0",
+      "volumeUSD": "1608.0",
+      "feesUSD": "618.0"
+    },
+    {
+      "periodStartUnix": 1702184400,
+      "tvlUSD": "3000609.0",
+      "volumeUSD": "1609.0",
+      "feesUSD": "619.0"
+    },
+    {
+      "periodStartUnix": 1702188000,
+      "tvlUSD": "3000610.0",
+      "volumeUSD": "1610.0",
+      "feesUSD": "620.0"
+    },
+    {
+      "periodStartUnix": 1702191600,
+      "tvlUSD": "3000611.0",
+      "volumeUSD": "1611.0",
+      "feesUSD": "621.0"
+    },
+    {
+      "periodStartUnix": 1702195200,
+      "tvlUSD": "3000612.0",
+      "volumeUSD": "1612.0",
+      "feesUSD": "622.0"
+    },
+    {
+      "periodStartUnix": 1702198800,
+      "tvlUSD": "3000613.0",
+      "volumeUSD": "1613.0",
+      "feesUSD": "623.0"
+    },
+    {
+      "periodStartUnix": 1702202400,
+      "tvlUSD": "3000614.0",
+      "volumeUSD": "1614.0",
+      "feesUSD": "624.0"
+    },
+    {
+      "periodStartUnix": 1702206000,
+      "tvlUSD": "3000615.0",
+      "volumeUSD": "1615.0",
+      "feesUSD": "625.0"
+    },
+    {
+      "periodStartUnix": 1702209600,
+      "tvlUSD": "3000616.0",
+      "volumeUSD": "1616.0",
+      "feesUSD": "626.0"
+    },
+    {
+      "periodStartUnix": 1702213200,
+      "tvlUSD": "3000617.0",
+      "volumeUSD": "1617.0",
+      "feesUSD": "627.0"
+    },
+    {
+      "periodStartUnix": 1702216800,
+      "tvlUSD": "3000618.0",
+      "volumeUSD": "1618.0",
+      "feesUSD": "628.0"
+    },
+    {
+      "periodStartUnix": 1702220400,
+      "tvlUSD": "3000619.0",
+      "volumeUSD": "1619.0",
+      "feesUSD": "629.0"
+    },
+    {
+      "periodStartUnix": 1702224000,
+      "tvlUSD": "3000620.0",
+      "volumeUSD": "1620.0",
+      "feesUSD": "630.0"
+    },
+    {
+      "periodStartUnix": 1702227600,
+      "tvlUSD": "3000621.0",
+      "volumeUSD": "1621.0",
+      "feesUSD": "631.0"
+    },
+    {
+      "periodStartUnix": 1702231200,
+      "tvlUSD": "3000622.0",
+      "volumeUSD": "1622.0",
+      "feesUSD": "632.0"
+    },
+    {
+      "periodStartUnix": 1702234800,
+      "tvlUSD": "3000623.0",
+      "volumeUSD": "1623.0",
+      "feesUSD": "633.0"
+    },
+    {
+      "periodStartUnix": 1702238400,
+      "tvlUSD": "3000624.0",
+      "volumeUSD": "1624.0",
+      "feesUSD": "634.0"
+    },
+    {
+      "periodStartUnix": 1702242000,
+      "tvlUSD": "3000625.0",
+      "volumeUSD": "1625.0",
+      "feesUSD": "635.0"
+    },
+    {
+      "periodStartUnix": 1702245600,
+      "tvlUSD": "3000626.0",
+      "volumeUSD": "1626.0",
+      "feesUSD": "636.0"
+    },
+    {
+      "periodStartUnix": 1702249200,
+      "tvlUSD": "3000627.0",
+      "volumeUSD": "1627.0",
+      "feesUSD": "637.0"
+    },
+    {
+      "periodStartUnix": 1702252800,
+      "tvlUSD": "3000628.0",
+      "volumeUSD": "1628.0",
+      "feesUSD": "638.0"
+    },
+    {
+      "periodStartUnix": 1702256400,
+      "tvlUSD": "3000629.0",
+      "volumeUSD": "1629.0",
+      "feesUSD": "639.0"
+    },
+    {
+      "periodStartUnix": 1702260000,
+      "tvlUSD": "3000630.0",
+      "volumeUSD": "1630.0",
+      "feesUSD": "640.0"
+    },
+    {
+      "periodStartUnix": 1702263600,
+      "tvlUSD": "3000631.0",
+      "volumeUSD": "1631.0",
+      "feesUSD": "641.0"
+    },
+    {
+      "periodStartUnix": 1702267200,
+      "tvlUSD": "3000632.0",
+      "volumeUSD": "1632.0",
+      "feesUSD": "642.0"
+    },
+    {
+      "periodStartUnix": 1702270800,
+      "tvlUSD": "3000633.0",
+      "volumeUSD": "1633.0",
+      "feesUSD": "643.0"
+    },
+    {
+      "periodStartUnix": 1702274400,
+      "tvlUSD": "3000634.0",
+      "volumeUSD": "1634.0",
+      "feesUSD": "644.0"
+    },
+    {
+      "periodStartUnix": 1702278000,
+      "tvlUSD": "3000635.0",
+      "volumeUSD": "1635.0",
+      "feesUSD": "645.0"
+    },
+    {
+      "periodStartUnix": 1702281600,
+      "tvlUSD": "3000636.0",
+      "volumeUSD": "1636.0",
+      "feesUSD": "646.0"
+    },
+    {
+      "periodStartUnix": 1702285200,
+      "tvlUSD": "3000637.0",
+      "volumeUSD": "1637.0",
+      "feesUSD": "647.0"
+    },
+    {
+      "periodStartUnix": 1702288800,
+      "tvlUSD": "3000638.0",
+      "volumeUSD": "1638.0",
+      "feesUSD": "648.0"
+    },
+    {
+      "periodStartUnix": 1702292400,
+      "tvlUSD": "3000639.0",
+      "volumeUSD": "1639.0",
+      "feesUSD": "649.0"
+    },
+    {
+      "periodStartUnix": 1702296000,
+      "tvlUSD": "3000640.0",
+      "volumeUSD": "1640.0",
+      "feesUSD": "650.0"
+    },
+    {
+      "periodStartUnix": 1702299600,
+      "tvlUSD": "3000641.0",
+      "volumeUSD": "1641.0",
+      "feesUSD": "651.0"
+    },
+    {
+      "periodStartUnix": 1702303200,
+      "tvlUSD": "3000642.0",
+      "volumeUSD": "1642.0",
+      "feesUSD": "652.0"
+    },
+    {
+      "periodStartUnix": 1702306800,
+      "tvlUSD": "3000643.0",
+      "volumeUSD": "1643.0",
+      "feesUSD": "653.0"
+    },
+    {
+      "periodStartUnix": 1702310400,
+      "tvlUSD": "3000644.0",
+      "volumeUSD": "1644.0",
+      "feesUSD": "654.0"
+    },
+    {
+      "periodStartUnix": 1702314000,
+      "tvlUSD": "3000645.0",
+      "volumeUSD": "1645.0",
+      "feesUSD": "655.0"
+    },
+    {
+      "periodStartUnix": 1702317600,
+      "tvlUSD": "3000646.0",
+      "volumeUSD": "1646.0",
+      "feesUSD": "656.0"
+    },
+    {
+      "periodStartUnix": 1702321200,
+      "tvlUSD": "3000647.0",
+      "volumeUSD": "1647.0",
+      "feesUSD": "657.0"
+    },
+    {
+      "periodStartUnix": 1702324800,
+      "tvlUSD": "3000648.0",
+      "volumeUSD": "1648.0",
+      "feesUSD": "658.0"
+    },
+    {
+      "periodStartUnix": 1702328400,
+      "tvlUSD": "3000649.0",
+      "volumeUSD": "1649.0",
+      "feesUSD": "659.0"
+    },
+    {
+      "periodStartUnix": 1702332000,
+      "tvlUSD": "3000650.0",
+      "volumeUSD": "1650.0",
+      "feesUSD": "660.0"
+    },
+    {
+      "periodStartUnix": 1702335600,
+      "tvlUSD": "3000651.0",
+      "volumeUSD": "1651.0",
+      "feesUSD": "661.0"
+    },
+    {
+      "periodStartUnix": 1702339200,
+      "tvlUSD": "3000652.0",
+      "volumeUSD": "1652.0",
+      "feesUSD": "662.0"
+    },
+    {
+      "periodStartUnix": 1702342800,
+      "tvlUSD": "3000653.0",
+      "volumeUSD": "1653.0",
+      "feesUSD": "663.0"
+    },
+    {
+      "periodStartUnix": 1702346400,
+      "tvlUSD": "3000654.0",
+      "volumeUSD": "1654.0",
+      "feesUSD": "664.0"
+    },
+    {
+      "periodStartUnix": 1702350000,
+      "tvlUSD": "3000655.0",
+      "volumeUSD": "1655.0",
+      "feesUSD": "665.0"
+    },
+    {
+      "periodStartUnix": 1702353600,
+      "tvlUSD": "3000656.0",
+      "volumeUSD": "1656.0",
+      "feesUSD": "666.0"
+    },
+    {
+      "periodStartUnix": 1702357200,
+      "tvlUSD": "3000657.0",
+      "volumeUSD": "1657.0",
+      "feesUSD": "667.0"
+    },
+    {
+      "periodStartUnix": 1702360800,
+      "tvlUSD": "3000658.0",
+      "volumeUSD": "1658.0",
+      "feesUSD": "668.0"
+    },
+    {
+      "periodStartUnix": 1702364400,
+      "tvlUSD": "3000659.0",
+      "volumeUSD": "1659.0",
+      "feesUSD": "669.0"
+    },
+    {
+      "periodStartUnix": 1702368000,
+      "tvlUSD": "3000660.0",
+      "volumeUSD": "1660.0",
+      "feesUSD": "670.0"
+    },
+    {
+      "periodStartUnix": 1702371600,
+      "tvlUSD": "3000661.0",
+      "volumeUSD": "1661.0",
+      "feesUSD": "671.0"
+    },
+    {
+      "periodStartUnix": 1702375200,
+      "tvlUSD": "3000662.0",
+      "volumeUSD": "1662.0",
+      "feesUSD": "672.0"
+    },
+    {
+      "periodStartUnix": 1702378800,
+      "tvlUSD": "3000663.0",
+      "volumeUSD": "1663.0",
+      "feesUSD": "673.0"
+    },
+    {
+      "periodStartUnix": 1702382400,
+      "tvlUSD": "3000664.0",
+      "volumeUSD": "1664.0",
+      "feesUSD": "674.0"
+    },
+    {
+      "periodStartUnix": 1702386000,
+      "tvlUSD": "3000665.0",
+      "volumeUSD": "1665.0",
+      "feesUSD": "675.0"
+    },
+    {
+      "periodStartUnix": 1702389600,
+      "tvlUSD": "3000666.0",
+      "volumeUSD": "1666.0",
+      "feesUSD": "676.0"
+    },
+    {
+      "periodStartUnix": 1702393200,
+      "tvlUSD": "3000667.0",
+      "volumeUSD": "1667.0",
+      "feesUSD": "677.0"
+    },
+    {
+      "periodStartUnix": 1702396800,
+      "tvlUSD": "3000668.0",
+      "volumeUSD": "1668.0",
+      "feesUSD": "678.0"
+    },
+    {
+      "periodStartUnix": 1702400400,
+      "tvlUSD": "3000669.0",
+      "volumeUSD": "1669.0",
+      "feesUSD": "679.0"
+    },
+    {
+      "periodStartUnix": 1702404000,
+      "tvlUSD": "3000670.0",
+      "volumeUSD": "1670.0",
+      "feesUSD": "680.0"
+    },
+    {
+      "periodStartUnix": 1702407600,
+      "tvlUSD": "3000671.0",
+      "volumeUSD": "1671.0",
+      "feesUSD": "681.0"
+    },
+    {
+      "periodStartUnix": 1702411200,
+      "tvlUSD": "3000672.0",
+      "volumeUSD": "1672.0",
+      "feesUSD": "682.0"
+    },
+    {
+      "periodStartUnix": 1702414800,
+      "tvlUSD": "3000673.0",
+      "volumeUSD": "1673.0",
+      "feesUSD": "683.0"
+    },
+    {
+      "periodStartUnix": 1702418400,
+      "tvlUSD": "3000674.0",
+      "volumeUSD": "1674.0",
+      "feesUSD": "684.0"
+    },
+    {
+      "periodStartUnix": 1702422000,
+      "tvlUSD": "3000675.0",
+      "volumeUSD": "1675.0",
+      "feesUSD": "685.0"
+    },
+    {
+      "periodStartUnix": 1702425600,
+      "tvlUSD": "3000676.0",
+      "volumeUSD": "1676.0",
+      "feesUSD": "686.0"
+    },
+    {
+      "periodStartUnix": 1702429200,
+      "tvlUSD": "3000677.0",
+      "volumeUSD": "1677.0",
+      "feesUSD": "687.0"
+    },
+    {
+      "periodStartUnix": 1702432800,
+      "tvlUSD": "3000678.0",
+      "volumeUSD": "1678.0",
+      "feesUSD": "688.0"
+    },
+    {
+      "periodStartUnix": 1702436400,
+      "tvlUSD": "3000679.0",
+      "volumeUSD": "1679.0",
+      "feesUSD": "689.0"
+    },
+    {
+      "periodStartUnix": 1702440000,
+      "tvlUSD": "3000680.0",
+      "volumeUSD": "1680.0",
+      "feesUSD": "690.0"
+    },
+    {
+      "periodStartUnix": 1702443600,
+      "tvlUSD": "3000681.0",
+      "volumeUSD": "1681.0",
+      "feesUSD": "691.0"
+    },
+    {
+      "periodStartUnix": 1702447200,
+      "tvlUSD": "3000682.0",
+      "volumeUSD": "1682.0",
+      "feesUSD": "692.0"
+    },
+    {
+      "periodStartUnix": 1702450800,
+      "tvlUSD": "3000683.0",
+      "volumeUSD": "1683.0",
+      "feesUSD": "693.0"
+    },
+    {
+      "periodStartUnix": 1702454400,
+      "tvlUSD": "3000684.0",
+      "volumeUSD": "1684.0",
+      "feesUSD": "694.0"
+    },
+    {
+      "periodStartUnix": 1702458000,
+      "tvlUSD": "3000685.0",
+      "volumeUSD": "1685.0",
+      "feesUSD": "695.0"
+    },
+    {
+      "periodStartUnix": 1702461600,
+      "tvlUSD": "3000686.0",
+      "volumeUSD": "1686.0",
+      "feesUSD": "696.0"
+    },
+    {
+      "periodStartUnix": 1702465200,
+      "tvlUSD": "3000687.0",
+      "volumeUSD": "1687.0",
+      "feesUSD": "697.0"
+    },
+    {
+      "periodStartUnix": 1702468800,
+      "tvlUSD": "3000688.0",
+      "volumeUSD": "1688.0",
+      "feesUSD": "698.0"
+    },
+    {
+      "periodStartUnix": 1702472400,
+      "tvlUSD": "3000689.0",
+      "volumeUSD": "1689.0",
+      "feesUSD": "699.0"
+    },
+    {
+      "periodStartUnix": 1702476000,
+      "tvlUSD": "3000690.0",
+      "volumeUSD": "1690.0",
+      "feesUSD": "700.0"
+    },
+    {
+      "periodStartUnix": 1702479600,
+      "tvlUSD": "3000691.0",
+      "volumeUSD": "1691.0",
+      "feesUSD": "701.0"
+    },
+    {
+      "periodStartUnix": 1702483200,
+      "tvlUSD": "3000692.0",
+      "volumeUSD": "1692.0",
+      "feesUSD": "702.0"
+    },
+    {
+      "periodStartUnix": 1702486800,
+      "tvlUSD": "3000693.0",
+      "volumeUSD": "1693.0",
+      "feesUSD": "703.0"
+    },
+    {
+      "periodStartUnix": 1702490400,
+      "tvlUSD": "3000694.0",
+      "volumeUSD": "1694.0",
+      "feesUSD": "704.0"
+    },
+    {
+      "periodStartUnix": 1702494000,
+      "tvlUSD": "3000695.0",
+      "volumeUSD": "1695.0",
+      "feesUSD": "705.0"
+    },
+    {
+      "periodStartUnix": 1702497600,
+      "tvlUSD": "3000696.0",
+      "volumeUSD": "1696.0",
+      "feesUSD": "706.0"
+    },
+    {
+      "periodStartUnix": 1702501200,
+      "tvlUSD": "3000697.0",
+      "volumeUSD": "1697.0",
+      "feesUSD": "707.0"
+    },
+    {
+      "periodStartUnix": 1702504800,
+      "tvlUSD": "3000698.0",
+      "volumeUSD": "1698.0",
+      "feesUSD": "708.0"
+    },
+    {
+      "periodStartUnix": 1702508400,
+      "tvlUSD": "3000699.0",
+      "volumeUSD": "1699.0",
+      "feesUSD": "709.0"
+    },
+    {
+      "periodStartUnix": 1702512000,
+      "tvlUSD": "3000700.0",
+      "volumeUSD": "1700.0",
+      "feesUSD": "710.0"
+    },
+    {
+      "periodStartUnix": 1702515600,
+      "tvlUSD": "3000701.0",
+      "volumeUSD": "1701.0",
+      "feesUSD": "711.0"
+    },
+    {
+      "periodStartUnix": 1702519200,
+      "tvlUSD": "3000702.0",
+      "volumeUSD": "1702.0",
+      "feesUSD": "712.0"
+    },
+    {
+      "periodStartUnix": 1702522800,
+      "tvlUSD": "3000703.0",
+      "volumeUSD": "1703.0",
+      "feesUSD": "713.0"
+    },
+    {
+      "periodStartUnix": 1702526400,
+      "tvlUSD": "3000704.0",
+      "volumeUSD": "1704.0",
+      "feesUSD": "714.0"
+    },
+    {
+      "periodStartUnix": 1702530000,
+      "tvlUSD": "3000705.0",
+      "volumeUSD": "1705.0",
+      "feesUSD": "715.0"
+    },
+    {
+      "periodStartUnix": 1702533600,
+      "tvlUSD": "3000706.0",
+      "volumeUSD": "1706.0",
+      "feesUSD": "716.0"
+    },
+    {
+      "periodStartUnix": 1702537200,
+      "tvlUSD": "3000707.0",
+      "volumeUSD": "1707.0",
+      "feesUSD": "717.0"
+    },
+    {
+      "periodStartUnix": 1702540800,
+      "tvlUSD": "3000708.0",
+      "volumeUSD": "1708.0",
+      "feesUSD": "718.0"
+    },
+    {
+      "periodStartUnix": 1702544400,
+      "tvlUSD": "3000709.0",
+      "volumeUSD": "1709.0",
+      "feesUSD": "719.0"
+    },
+    {
+      "periodStartUnix": 1702548000,
+      "tvlUSD": "3000710.0",
+      "volumeUSD": "1710.0",
+      "feesUSD": "720.0"
+    },
+    {
+      "periodStartUnix": 1702551600,
+      "tvlUSD": "3000711.0",
+      "volumeUSD": "1711.0",
+      "feesUSD": "721.0"
+    },
+    {
+      "periodStartUnix": 1702555200,
+      "tvlUSD": "3000712.0",
+      "volumeUSD": "1712.0",
+      "feesUSD": "722.0"
+    },
+    {
+      "periodStartUnix": 1702558800,
+      "tvlUSD": "3000713.0",
+      "volumeUSD": "1713.0",
+      "feesUSD": "723.0"
+    },
+    {
+      "periodStartUnix": 1702562400,
+      "tvlUSD": "3000714.0",
+      "volumeUSD": "1714.0",
+      "feesUSD": "724.0"
+    },
+    {
+      "periodStartUnix": 1702566000,
+      "tvlUSD": "3000715.0",
+      "volumeUSD": "1715.0",
+      "feesUSD": "725.0"
+    },
+    {
+      "periodStartUnix": 1702569600,
+      "tvlUSD": "3000716.0",
+      "volumeUSD": "1716.0",
+      "feesUSD": "726.0"
+    },
+    {
+      "periodStartUnix": 1702573200,
+      "tvlUSD": "3000717.0",
+      "volumeUSD": "1717.0",
+      "feesUSD": "727.0"
+    },
+    {
+      "periodStartUnix": 1702576800,
+      "tvlUSD": "3000718.0",
+      "volumeUSD": "1718.0",
+      "feesUSD": "728.0"
+    },
+    {
+      "periodStartUnix": 1702580400,
+      "tvlUSD": "3000719.0",
+      "volumeUSD": "1719.0",
+      "feesUSD": "729.0"
+    }
+  ]
+}

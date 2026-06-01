@@ -32,7 +32,11 @@ from tests.fixtures.accounting._generate_baselines import (
 
 def test_baseline_versions() -> None:
     """MATCHING_POLICY_VERSIONS exposes the declared per-primitive defaults."""
-    assert MATCHING_POLICY_VERSIONS[Primitive.LP] == 3
+    # VIB-4275 bumped LP v3→v4 (co-pool close→open discriminator resolution).
+    # VIB-4848 bumped LP v4→v5 (T8 fee-separation taxonomy + T9 fee-adjusted
+    # IL + T12 mid-life COLLECT_FEES folded into net_pnl_usd).  Lending /
+    # Perp are untouched — per-primitive isolation contract.
+    assert MATCHING_POLICY_VERSIONS[Primitive.LP] == 5
     assert MATCHING_POLICY_VERSIONS[Primitive.LENDING] == 3
     assert MATCHING_POLICY_VERSIONS[Primitive.PERP] == 1
     # Every Primitive has an entry — no KeyError on writer lookup.
@@ -74,10 +78,14 @@ def test_lp_bump_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
             conn.close()
 
     lp_versions = _versions(lp_db)
-    # The LP DB also has SWAP events stamped at SWAP's primitive version (v3).
+    # The LP DB also has SWAP events stamped at SWAP's primitive version.
+    # VIB-4905 bumped SWAP v3→v4 (partial-match payload contract).  The perp
+    # fixture contains entry/exit SWAPs so it sees {1, 4}; the looping
+    # fixture is lending-only (no SWAPs go through augment) so it stays at
+    # {3}, the LENDING version alone — empirical, not derived.
     assert 99 in lp_versions, f"LP fixture should contain v99 events; got {lp_versions}"
     assert _versions(looping_db) == {3}
-    assert _versions(perp_db) == {1, 3}  # PERP v1 + the entry/exit SWAP v3
+    assert _versions(perp_db) == {1, 4}  # PERP v1 + the entry/exit SWAP v4
 
 
 def test_g13_fail_on_intra_primitive_drift(tmp_path: Path) -> None:

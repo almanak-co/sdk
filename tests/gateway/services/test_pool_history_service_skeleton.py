@@ -88,23 +88,32 @@ def test_killswitch_default_is_false():
 
 
 # ============================================================================
-# Kill-switch on, providers not yet wired -> UNIMPLEMENTED
+# Kill-switch on, POOL-5 closed the UNIMPLEMENTED window -> dispatch
 # ============================================================================
 
 
-def test_killswitch_on_returns_unimplemented_until_pool5():
-    """ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true AND providers absent
-    (POOL-2 -> POOL-5 window): handler returns UNIMPLEMENTED per gRPC."""
+def test_killswitch_on_dispatches_after_pool5():
+    """ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true: POOL-5 (VIB-4753) replaced
+    the transitional UNIMPLEMENTED stub with the provider dispatch path. With
+    all providers forced to fail (deterministic — no network), the handler
+    returns UNAVAILABLE with the D3.F6 failure-envelope shape. (The happy
+    path is in ``test_pool_history_service.py``.)"""
+    from unittest.mock import AsyncMock, patch
+
+    from almanak.gateway.data.pool_history.dispatcher import _DispatchOutcome
+
     settings = GatewaySettings(pool_history_enabled=True)
     servicer = PoolHistoryServiceServicer(settings)
     ctx = _MockContext()
 
-    response = asyncio.run(servicer.GetPoolHistory(_request(), ctx))  # type: ignore[arg-type]
+    failure = _DispatchOutcome(success=False, source="", snapshots=[], error="the_graph: not found; geckoterminal: not found")
+    with patch.object(servicer._dispatcher, "dispatch", new=AsyncMock(return_value=failure)):
+        response = asyncio.run(servicer.GetPoolHistory(_request(), ctx))  # type: ignore[arg-type]
 
-    assert ctx.code == grpc.StatusCode.UNIMPLEMENTED
-    assert "POOL-5" in ctx.details or "VIB-4753" in ctx.details
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
     assert response.success is False
-    # Same failure-envelope shape as the disabled case.
+    assert response.error  # non-empty
+    # Same failure-envelope shape as the disabled case (D3.F6 lock).
     assert response.truncation_reason == gateway_pb2.TruncationReason.TRUNCATION_REASON_UNSPECIFIED
     assert response.next_start_ts == 0
     assert response.source == ""
@@ -125,7 +134,13 @@ def test_health_top_level_keys_locked():
 def test_health_per_rpc_counter_names_locked():
     """The per-RPC counter NAMES are a stable observability contract.
     Adding / removing a key requires bumping POOL-8 acceptance AND
-    the umbrella UAT card. This test is the lockdown."""
+    the umbrella UAT card. This test is the lockdown.
+
+    POOL-8 (VIB-4756) adds the ``truncated`` scalar to the locked keyset
+    (UAT card §D2.M2.b.5). This test now reflects the post-POOL-8 shape;
+    pre-POOL-8 it omitted ``truncated`` from ``expected_scalars`` — the
+    transition is one-way and intentional.
+    """
     servicer = PoolHistoryServiceServicer(GatewaySettings())
     rpc = servicer.health()["per_rpc"]
     expected_scalars = {
@@ -133,6 +148,7 @@ def test_health_per_rpc_counter_names_locked():
         "cache_hits",
         "cache_misses",
         "provider_fallback",
+        "truncated",  # POOL-8 / VIB-4756 — added 2026-05-28.
         "inflight_dedup_hits",
         "cache_evictions_by_entries",
         "cache_evictions_by_bytes",
@@ -145,7 +161,10 @@ def test_health_per_rpc_counter_names_locked():
     }
     assert set(rpc.keys()) == expected_scalars | expected_dicts
     for name in expected_scalars:
-        assert isinstance(rpc[name], int), f"{name} must be int"
+        # Guard `bool` separately — `isinstance(True, int)` is True in
+        # Python, so the schema lock must reject a bool that masquerades
+        # as a counter (UAT card §D2.M2.b.5 fix).
+        assert isinstance(rpc[name], int) and not isinstance(rpc[name], bool), f"{name} must be int (not bool)"
         assert rpc[name] == 0, f"POOL-2 skeleton must initialize {name} to zero"
     for name in expected_dicts:
         assert isinstance(rpc[name], dict), f"{name} must be a dict"

@@ -260,8 +260,10 @@ def _register_once() -> None:
         return
     _registered = True
     try:
-        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
         from almanak.framework.intents.vocabulary import IntentType
+
+        from .addresses import MORPHO_BLUE
 
         register_connector(
             name="morpho_blue",
@@ -273,6 +275,18 @@ def _register_once() -> None:
                 IntentType.FLASH_LOAN,
             ),
             chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
+            # Matrix output is owned by the connector (VIB-4856 / W4).
+            # Single ``lending`` row across every chain Morpho Blue ships;
+            # flash-loan capability exists on-chain but the matrix has
+            # historically scoped ``flash_loan`` to Balancer V2 (the
+            # cross-protocol venue).
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="morpho_blue",
+                    category="lending",
+                    chains=frozenset(MORPHO_BLUE.keys()),
+                ),
+            ),
         )
     except Exception:
         _registered = False

@@ -16,6 +16,7 @@ swap reaches this handler to prevent double-counting.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -130,6 +131,79 @@ def _select_effective_price(
     return None
 
 
+@dataclass(frozen=True)
+class _SwapMatchOutcome:
+    """FIFO matching outcome for one SWAP disposal (VIB-4905 / F1).
+
+    Returned by :func:`_record_basis_lots` so partial-match disposals can
+    surface a matched-portion PnL even when the legacy ``realized_pnl_usd``
+    field is forced to ``None``.
+
+    Field semantics — Empty ≠ Zero throughout:
+
+    * ``realized_pnl_usd`` (legacy): ``amount_in_usd - cost_basis_consumed``
+      ONLY on a full match (``_unmatched == 0``).  ``None`` otherwise.
+      Preserved for backward compat with consumers that expect the v1
+      contract.
+    * ``realized_pnl_usd_matched`` (VIB-4905): matched-portion PnL,
+      computed pro-rated for partial matches too.  ``None`` when no prior
+      basis was matched at all (the "no acquisition lots" case).
+    * ``unmatched_amount_in``: the portion of ``amount_in`` that had no
+      matching basis lot.  ``Decimal("0")`` on a full match; the full
+      ``amount_in`` when no lots existed; the partial residual otherwise.
+      ``None`` when matching was not attempted.
+    * ``unmatched_proceeds_usd``: pro-rated USD proceeds attributable to
+      ``unmatched_amount_in``.  ``None`` when ``amount_in_usd`` was
+      unavailable.
+    * ``cost_basis_recorded``: ``True`` iff a new acquisition lot was
+      written for ``token_out``.
+    """
+
+    realized_pnl_usd: Decimal | None
+    realized_pnl_usd_matched: Decimal | None
+    unmatched_amount_in: Decimal | None
+    unmatched_proceeds_usd: Decimal | None
+    cost_basis_recorded: bool
+
+
+def _split_proceeds(
+    amount_in: Decimal,
+    amount_in_usd: Decimal | None,
+    unmatched: Decimal,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Pro-rate ``amount_in_usd`` into (matched_proceeds, unmatched_proceeds).
+
+    Return shapes — Empty ≠ Zero throughout:
+
+    * ``(None, None)`` — ``amount_in_usd`` is unavailable or ``amount_in <=
+      0``.  Never substitute a zero for an unmeasured price.
+    * ``(None, amount_in_usd)`` — ``matched_amount <= 0`` (the "lots
+      existed but were exhausted" case).  ALL proceeds attribute to the
+      unmatched leg.  Matched proceeds stay ``None`` because the matched
+      quantity was zero, so matched proceeds are *unmeasured* (asking
+      "how much USD attributable to zero tokens" has no answer), not
+      measured-zero.  Empty ≠ Zero.
+    * ``(matched_proceeds, unmatched_proceeds)`` — full pro-rated split.
+      The sum invariant ``matched + unmatched == amount_in_usd`` holds
+      exactly (the unmatched leg is computed as the difference, so
+      Decimal-context rounding noise from the multiplication round-trips).
+    """
+    if amount_in_usd is None or amount_in <= 0:
+        return None, None
+    matched_amount = amount_in - unmatched
+    if matched_amount <= 0:
+        # Nothing matched — matched proceeds undefined; all USD value
+        # attributes to the unmatched leg.  Returning ``None`` for matched
+        # preserves Empty ≠ Zero at the writer boundary; the caller's
+        # ``matched_proceeds_usd is not None`` gate at
+        # ``_record_basis_lots`` then naturally skips stamping
+        # ``realized_pnl_usd_matched`` — defense in depth with the
+        # ``matched_amount > 0`` structural guard at the same call site.
+        return None, amount_in_usd
+    matched_proceeds = amount_in_usd * (matched_amount / amount_in)
+    return matched_proceeds, amount_in_usd - matched_proceeds
+
+
 def _record_basis_lots(
     *,
     basis_store: FIFOBasisStore,
@@ -145,15 +219,19 @@ def _record_basis_lots(
     timestamp: datetime,
     tx_hash: str,
     ledger_entry_id: str,
-) -> tuple[Decimal | None, bool]:
+) -> _SwapMatchOutcome:
     """Consume token_in lots (FIFO) and record token_out acquisition.
 
-    Returns ``(realized_pnl_usd, cost_basis_recorded)``. Skips silently
-    when ``amount_in`` / ``amount_out`` is ``None`` or the position key
-    is empty — caller filters most of these cases up front, this is
-    belt-and-braces.
+    Returns :class:`_SwapMatchOutcome` carrying both the legacy
+    ``realized_pnl_usd`` (full-match-only) and the VIB-4905 matched /
+    unmatched bundle.  Skips silently when ``amount_in`` / ``amount_out``
+    is ``None`` or the position key is empty — caller filters most of
+    these cases up front, this is belt-and-braces.
     """
     realized_pnl_usd: Decimal | None = None
+    realized_pnl_usd_matched: Decimal | None = None
+    unmatched_amount_in: Decimal | None = None
+    unmatched_proceeds_usd: Decimal | None = None
     cost_basis_recorded = False
 
     # 1. Consume token_in lots to compute realized PnL.
@@ -164,8 +242,32 @@ def _record_basis_lots(
             token=token_in,
             amount=amount_in,
         )
-        if cost_basis_consumed is not None and amount_in_usd is not None and _unmatched == Decimal("0"):
-            realized_pnl_usd = amount_in_usd - cost_basis_consumed
+        unmatched_amount_in = _unmatched
+
+        matched_proceeds_usd, unmatched_proceeds_usd = _split_proceeds(
+            amount_in=amount_in,
+            amount_in_usd=amount_in_usd,
+            unmatched=_unmatched,
+        )
+
+        # Codex P2 (VIB-4905 audit): the "lots exist but exhausted" case —
+        # ``match_swap_disposal`` returns ``(Decimal("0"), amount_in)`` when
+        # the FIFO key was registered but every lot has ``remaining == 0``.
+        # ``cost_basis_consumed`` is then ``Decimal("0")``, not ``None``, so
+        # gating on ``is not None`` alone would compute
+        # ``matched_pnl = 0 - 0 = Decimal("0")`` and stamp it as a measured
+        # zero — conflating with "actually $0 matched PnL".  Per Empty ≠
+        # Zero, the matched PnL stays ``None`` when no quantity was matched.
+        # ``matched_amount > 0`` is the structural guard.
+        matched_amount = amount_in - _unmatched
+        if cost_basis_consumed is not None and matched_proceeds_usd is not None and matched_amount > 0:
+            # VIB-4905 (F1): matched-portion PnL — populated on partial
+            # matches too.  The legacy ``realized_pnl_usd`` field below
+            # keeps the v1 "null on partial" contract for consumers that
+            # haven't migrated yet.
+            realized_pnl_usd_matched = matched_proceeds_usd - cost_basis_consumed
+            if _unmatched == Decimal("0"):
+                realized_pnl_usd = realized_pnl_usd_matched
 
     # 2. Record acquisition lot for token_out (only when a positive amount was acquired).
     if token_out and amount_out is not None and amount_out > 0:
@@ -184,7 +286,13 @@ def _record_basis_lots(
         )
         cost_basis_recorded = True
 
-    return realized_pnl_usd, cost_basis_recorded
+    return _SwapMatchOutcome(
+        realized_pnl_usd=realized_pnl_usd,
+        realized_pnl_usd_matched=realized_pnl_usd_matched,
+        unmatched_amount_in=unmatched_amount_in,
+        unmatched_proceeds_usd=unmatched_proceeds_usd,
+        cost_basis_recorded=cost_basis_recorded,
+    )
 
 
 def handle_swap(
@@ -321,9 +429,12 @@ def handle_swap(
     # contract); skip both legs when either amount is unmeasured to avoid
     # consuming/recording fake-zero lots.
     realized_pnl_usd: Decimal | None = None
+    realized_pnl_usd_matched: Decimal | None = None
+    unmatched_amount_in: Decimal | None = None
+    unmatched_proceeds_usd: Decimal | None = None
     cost_basis_recorded = False
     if basis_store is not None and swap_position_key and not amounts_unmeasured:
-        realized_pnl_usd, cost_basis_recorded = _record_basis_lots(
+        outcome = _record_basis_lots(
             basis_store=basis_store,
             deployment_id=deployment_id,
             cycle_id=cycle_id,
@@ -338,6 +449,11 @@ def handle_swap(
             tx_hash=tx_hash,
             ledger_entry_id=ledger_entry_id,
         )
+        realized_pnl_usd = outcome.realized_pnl_usd
+        realized_pnl_usd_matched = outcome.realized_pnl_usd_matched
+        unmatched_amount_in = outcome.unmatched_amount_in
+        unmatched_proceeds_usd = outcome.unmatched_proceeds_usd
+        cost_basis_recorded = outcome.cost_basis_recorded
 
     # ── Confidence ───────────────────────────────────────────────────────────
     confidence, unavailable_reason = _determine_confidence(
@@ -382,6 +498,11 @@ def handle_swap(
         confidence=confidence,
         unavailable_reason=unavailable_reason,
         swap_position_key=swap_position_key,
+        # VIB-4905 (F1): partial-match contract — populated even when
+        # ``realized_pnl_usd`` above is None due to ``_unmatched > 0``.
+        realized_pnl_usd_matched=realized_pnl_usd_matched,
+        unmatched_amount_in=unmatched_amount_in,
+        unmatched_proceeds_usd=unmatched_proceeds_usd,
     )
 
 

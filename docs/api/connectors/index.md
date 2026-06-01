@@ -10,7 +10,7 @@ The matrix below is generated from ``almanak.connectors._strategy_base.registry.
 | Protocol | Type | Chains | Intent Types | Module |
 |----------|------|--------|--------------|--------|
 | [Aave V3](aave_v3.md) | Lending | Arbitrum, Avalanche, Base, BNB Chain, Ethereum, Mantle, Optimism, Polygon, X-Layer | BORROW, FLASH_LOAN, REPAY, SUPPLY, WITHDRAW | `aave_v3` |
-| [Across](across.md) | Bridge | Arbitrum, Base, Ethereum, Optimism, Polygon | BRIDGE | `across` |
+| [Across](across.md) | Bridge | Arbitrum, Base, Ethereum, Linea, Optimism, Polygon | BRIDGE | `across` |
 | [Aerodrome](aerodrome.md) | DEX | Base, Optimism | LP_CLOSE, LP_OPEN, SWAP | `aerodrome` |
 | [Aster Perps](aster_perps.md) | Perp | BNB Chain | PERP_CLOSE, PERP_OPEN | `aster_perps` |
 | Balancer V2 | Flash Loan | Arbitrum, Avalanche, Base, Ethereum, Optimism, Polygon | FLASH_LOAN | `balancer_v2` |

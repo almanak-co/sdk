@@ -1117,7 +1117,8 @@ class _TraderJoeV2CompileImpl:
             from almanak.connectors.traderjoe_v2.sdk import (
                 TraderJoeV2SDKError as _TJSDKError,
             )
-            from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
+
+            from .addresses import TRADERJOE_V2 as TJ_ADDRESSES
 
             if self.chain not in TJ_ADDRESSES:
                 return CompilationResult(

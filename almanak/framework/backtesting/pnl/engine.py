@@ -79,6 +79,7 @@ from almanak.framework.backtesting.adapters.registry import (
     get_adapter_for_strategy_with_config,
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
@@ -1514,6 +1515,32 @@ class PnLBacktester:
         for position in portfolio.positions:
             try:
                 self._adapter.update_position(position, market_state, elapsed_seconds, timestamp)
+            except DataSourceUnavailableError as e:
+                # VIB-4849: a missing-data signal is a *deliberate fail-loud* from the
+                # adapter -- it refused to fabricate a number. It must NEVER be
+                # downgraded to a DEBUG log and silently swallowed, or the position
+                # would accrue no fees this tick and the backtest would report a
+                # silently-wrong number. Surface it: route to the error handler if one
+                # is configured (so a stop policy is honoured), otherwise re-raise so
+                # the backtest fails loudly and clearly flags the missing volume.
+                logger.error(
+                    "Missing data source while updating position %s: %s",
+                    position.position_id,
+                    e,
+                )
+                if self._error_handler:
+                    result = self._error_handler.handle_error(
+                        e,
+                        context=f"adapter_update_position:{position.position_id}:{timestamp.isoformat()}",
+                    )
+                    if result.should_stop:
+                        raise
+                    # Handler explicitly chose to continue: do NOT silently re-raise,
+                    # but the loud ERROR above guarantees the gap is visible.
+                else:
+                    # No handler configured -> propagate. Never swallow a
+                    # missing-data signal into a DEBUG log.
+                    raise
             except Exception as e:
                 # Use error handler for position update errors (typically non-critical)
                 if self._error_handler:

@@ -37,6 +37,7 @@ Hard rules enforced here (from the umbrella UAT card
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import grpc
 
@@ -211,3 +212,112 @@ def invalid_argument(message: str) -> ValidationFailure:
 # rejecting (NTP skew, ``MarketSnapshot.timestamp`` rounding). 5 minutes
 # matches VIB-4727's pattern.
 END_TS_FUTURE_TOLERANCE_SECONDS: int = 300
+
+
+# -----------------------------------------------------------------------------
+# Truncation + finality (POOL-6 / VIB-4754)
+# -----------------------------------------------------------------------------
+#
+# These pure helpers carry the POOL-6 policy that the handler applies AFTER a
+# provider returns a successful (non-empty, ascending) window. Kept here —
+# chain- and protocol-agnostic — so ``RateHistoryService`` (VIB-4747) reuses
+# them. The wire contract is locked in ``gateway.proto`` (TruncationReason
+# enum, ``next_start_ts`` forward cursor) and the umbrella UAT card
+# ``docs/internal/uat-cards/VIB-4728.md`` §D3.F7 / §D3.F9.
+
+
+@dataclass(frozen=True)
+class TruncationOutcome:
+    """Classification of a successful provider response for truncation.
+
+    * ``kept`` — the ascending slice actually returned to the caller. Equal to
+      the input unless the page-cap fired, in which case it is the OLDEST
+      ``page_cap_rows`` rows (forward-cursor: serve oldest-first, re-chunk
+      forward for the rest).
+    * ``reason`` — a ``gateway_pb2.TruncationReason`` enum value.
+    * ``next_start_ts`` — the **inclusive** forward re-chunk cursor: ``> 0`` for
+      ``CAP_EXCEEDED`` / ``PROVIDER_PAGE_CAP`` (caller re-issues with
+      ``start_ts = next_start_ts``, ``end_ts`` unchanged), ``0`` for
+      ``PROVIDER_RETENTION`` (do-not-re-chunk sentinel) and
+      ``TRUNCATION_REASON_UNSPECIFIED``.
+    """
+
+    kept: list[gateway_pb2.PoolSnapshot]
+    reason: gateway_pb2.TruncationReason.ValueType
+    next_start_ts: int
+
+
+def classify_truncation(
+    *,
+    snapshots: list[gateway_pb2.PoolSnapshot],
+    eff_start_ts: int,
+    eff_end_ts: int,
+    clamped: bool,
+    resolution_seconds: int,
+    page_cap_rows: int,
+) -> TruncationOutcome:
+    """Classify a successful (non-empty, ascending) provider response.
+
+    ``eff_start_ts`` / ``eff_end_ts`` describe the half-open ``[start, end)``
+    window actually dispatched — i.e. AFTER the servicer's soft-cap clamp.
+    ``clamped`` is True iff that clamp shortened the caller's original window
+    (the soft cap was exceeded). ``page_cap_rows`` is the serving provider's
+    configured response row ceiling.
+
+    Precedence (locked in UAT card §D3.F7, design decision D-2): the **binding
+    forward limit** wins among the re-chunkable reasons, and the
+    do-not-re-chunk ``PROVIDER_RETENTION`` is strictly lowest so it can never
+    pre-empt a still-advancing forward walk:
+
+    1. **PROVIDER_PAGE_CAP** — the provider returned MORE rows than its ceiling,
+       so the ceiling is the tighter forward boundary. Serve the oldest
+       ``page_cap_rows`` rows; ``next_start_ts = kept[-1].timestamp +
+       resolution_seconds``. (Takes precedence over CAP_EXCEEDED only when it is
+       the tighter limit — otherwise ``n <= page_cap_rows`` and this branch is
+       not taken.)
+    2. **CAP_EXCEEDED** — the window was soft-cap clamped and the provider filled
+       it (no page-cap). ``next_start_ts = eff_end_ts`` (the clamped window's
+       exclusive end — window-based, not data-based, so a sparse trailing gap
+       doesn't strand the caller before the cap boundary).
+    3. **PROVIDER_RETENTION** — neither clamped nor page-capped, but the oldest
+       returned (aligned) row is more than one bar after ``eff_start_ts``: the
+       provider has no older in-window data and never will. ``next_start_ts =
+       0`` (stop). In the forward-cursor model this is informational — its
+       sentinel equals UNSPECIFIED's — so a mis-threshold is a mislabel, never a
+       control-flow bug.
+    4. **TRUNCATION_REASON_UNSPECIFIED** — full requested window served.
+
+    Empty ``snapshots`` (which the handler never passes — empty upstream is a
+    not-found failure) is classified UNSPECIFIED with an empty ``kept``.
+    """
+    tr = gateway_pb2.TruncationReason
+    if not snapshots:
+        return TruncationOutcome(kept=snapshots, reason=tr.TRUNCATION_REASON_UNSPECIFIED, next_start_ts=0)
+
+    if len(snapshots) > page_cap_rows:
+        kept = snapshots[:page_cap_rows]
+        next_start_ts = int(kept[-1].timestamp) + resolution_seconds
+        return TruncationOutcome(kept=kept, reason=tr.PROVIDER_PAGE_CAP, next_start_ts=next_start_ts)
+
+    if clamped:
+        return TruncationOutcome(kept=snapshots, reason=tr.CAP_EXCEEDED, next_start_ts=int(eff_end_ts))
+
+    oldest = int(snapshots[0].timestamp)
+    if oldest - int(eff_start_ts) > resolution_seconds:
+        return TruncationOutcome(kept=snapshots, reason=tr.PROVIDER_RETENTION, next_start_ts=0)
+
+    return TruncationOutcome(kept=snapshots, reason=tr.TRUNCATION_REASON_UNSPECIFIED, next_start_ts=0)
+
+
+def compute_finalized_only(*, newest_ts: int, now_seconds: int, cutoff_seconds: int) -> bool:
+    """Return True iff every row in the series is finalized.
+
+    A series is finalized iff its NEWEST row is older than the serving
+    provider's finality cutoff: ``(now - newest_ts) > cutoff``. The newest row
+    is the binding case — if it is finalized, every earlier row is too. A False
+    result means the trailing bar is still provisional (within the cutoff) and
+    the cache entry must be written under the short-TTL ``provisional`` band so
+    a later revision is re-fetched (or re-promoted once it ages past the
+    cutoff — see ``_history_cache``).
+    """
+    return (int(now_seconds) - int(newest_ts)) > int(cutoff_seconds)

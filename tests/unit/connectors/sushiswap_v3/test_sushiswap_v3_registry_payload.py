@@ -93,11 +93,7 @@ def _pool_mint_log(
             _int24_topic(tick_lower),
             _int24_topic(tick_upper),
         ],
-        "data": "0x"
-        + _addr_topic(_WALLET).removeprefix("0x")
-        + _pad32(amount)
-        + _pad32(amount0)
-        + _pad32(amount1),
+        "data": "0x" + _addr_topic(_WALLET).removeprefix("0x") + _pad32(amount) + _pad32(amount0) + _pad32(amount1),
     }
 
 
@@ -211,10 +207,7 @@ def _pool_collect_log(
             _int24_topic(tick_lower),
             _int24_topic(tick_upper),
         ],
-        "data": "0x"
-        + _addr_topic(recipient).removeprefix("0x")
-        + _pad32(amount0)
-        + _pad32(amount1),
+        "data": "0x" + _addr_topic(recipient).removeprefix("0x") + _pad32(amount0) + _pad32(amount1),
     }
 
 
@@ -259,9 +252,7 @@ class TestExtractRegistryPayloadOpen:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_liquidity_log(
-                token_id=1, liquidity=1, amount0=1, amount1=1
-            ),
+            _npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1),
         ]
         out = parser.extract_registry_payload_open(_receipt(logs), fee_tier=3000)
         assert out is not None
@@ -273,13 +264,9 @@ class TestExtractRegistryPayloadOpen:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_liquidity_log(
-                token_id=1, liquidity=1, amount0=1, amount1=1
-            ),
+            _npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1),
         ]
-        out = parser.extract_registry_payload_open(
-            _receipt(logs), fee_tier=bogus_fee
-        )
+        out = parser.extract_registry_payload_open(_receipt(logs), fee_tier=bogus_fee)
         assert out is not None
         assert "fee_tier" not in out
 
@@ -293,9 +280,7 @@ class TestExtractRegistryPayloadOpen:
         )
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_liquidity_log(
-                token_id=7, liquidity=1, amount0=1, amount1=1
-            ),
+            _npm_increase_liquidity_log(token_id=7, liquidity=1, amount0=1, amount1=1),
         ]
         out = parser.extract_registry_payload_open(_receipt(logs))
         assert out is not None
@@ -313,11 +298,7 @@ class TestExtractRegistryPayloadOpen:
         refuses (would corrupt semantic_grouping_key)."""
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         # Only IncreaseLiquidity present; the NPM-owned Pool Mint is absent.
-        logs = [
-            _npm_increase_liquidity_log(
-                token_id=1, liquidity=1, amount0=1, amount1=1
-            )
-        ]
+        logs = [_npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1)]
         assert parser.extract_registry_payload_open(_receipt(logs)) is None
 
     def test_returns_none_when_ticks_missing(self) -> None:
@@ -326,12 +307,8 @@ class TestExtractRegistryPayloadOpen:
         payload-open refuses on both counts."""
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         logs = [
-            _pool_mint_log(
-                tick_lower=-100, tick_upper=100, owner=_WALLET
-            ),  # not NPM-owned
-            _npm_increase_liquidity_log(
-                token_id=99, liquidity=1, amount0=1, amount1=1
-            ),
+            _pool_mint_log(tick_lower=-100, tick_upper=100, owner=_WALLET),  # not NPM-owned
+            _npm_increase_liquidity_log(token_id=99, liquidity=1, amount0=1, amount1=1),
         ]
         assert parser.extract_registry_payload_open(_receipt(logs)) is None
 
@@ -341,9 +318,7 @@ class TestExtractRegistryPayloadOpen:
         parser = SushiSwapV3ReceiptParser(chain="not-a-real-chain")
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_liquidity_log(
-                token_id=1, liquidity=1, amount0=1, amount1=1
-            ),
+            _npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1),
         ]
         assert parser.extract_registry_payload_open(_receipt(logs)) is None
 
@@ -362,9 +337,7 @@ class TestExtractRegistryPayloadOpen:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         logs = [
             _pool_mint_log(tick_lower=-100, tick_upper=100),
-            _npm_increase_liquidity_log(
-                token_id=1, liquidity=1, amount0=1, amount1=1
-            ),
+            _npm_increase_liquidity_log(token_id=1, liquidity=1, amount0=1, amount1=1),
         ]
         out = parser.extract_registry_payload_open(_receipt(logs))
         assert out is not None
@@ -442,7 +415,6 @@ class TestExtractRegistryPayloadClose:
         assert out["fee_owed_1"] is None
         assert out["liquidity"] == "1000000000000"
 
-
     def test_returns_none_when_no_decreaseliquidity(self) -> None:
         """Burn + Collect present but no DecreaseLiquidity → close refuses
         (token_id identity anchor unrecoverable)."""
@@ -489,10 +461,7 @@ class TestExtractRegistryPayloadClose:
             _npm_decrease_liquidity_log(token_id=5467895),
         ]
         bad_open = {"token_id": "9999999", "pool_address": _POOL}
-        assert (
-            parser.extract_registry_payload_close(_receipt(logs), open_payload=bad_open)
-            is None
-        )
+        assert parser.extract_registry_payload_close(_receipt(logs), open_payload=bad_open) is None
 
     def test_returns_none_on_open_payload_disagreement_pool(self) -> None:
         """Audit M1: open_payload's pool ≠ receipt's pool → refuse."""
@@ -506,10 +475,7 @@ class TestExtractRegistryPayloadClose:
             "token_id": "5467895",
             "pool_address": "0x" + "11" * 20,
         }
-        assert (
-            parser.extract_registry_payload_close(_receipt(logs), open_payload=bad_open)
-            is None
-        )
+        assert parser.extract_registry_payload_close(_receipt(logs), open_payload=bad_open) is None
 
     def test_merges_open_payload_ticks_and_labels(self) -> None:
         """OPEN-side ticks / amounts / labels merge into the close payload."""
@@ -531,9 +497,7 @@ class TestExtractRegistryPayloadClose:
             "_token0_label": "WETH",
             "_token1_label": "USDC",
         }
-        out = parser.extract_registry_payload_close(
-            _receipt(logs), open_payload=open_payload
-        )
+        out = parser.extract_registry_payload_close(_receipt(logs), open_payload=open_payload)
         assert out is not None
         assert out["tick_lower"] == -199740
         assert out["tick_upper"] == -197740
@@ -571,9 +535,7 @@ class TestExtractRegistryPayloadClose:
             "pool_address": _POOL,
             "fee_tier": 500,
         }
-        out = parser.extract_registry_payload_close(
-            _receipt(logs), open_payload=open_payload, fee_tier=3000
-        )
+        out = parser.extract_registry_payload_close(_receipt(logs), open_payload=open_payload, fee_tier=3000)
         assert out is not None
         assert out["fee_tier"] == 500  # OPEN-side wins
 
@@ -588,9 +550,7 @@ class TestExtractRegistryPayloadClose:
             _pool_collect_log(),
             # NOT the Sushi NPM — would match UV3's NPM topic but fail the
             # address gate.
-            _npm_decrease_liquidity_log(
-                token_id=5467895, npm=_OTHER_CONTRACT
-            ),
+            _npm_decrease_liquidity_log(token_id=5467895, npm=_OTHER_CONTRACT),
         ]
         assert parser.extract_registry_payload_close(_receipt(logs)) is None
 
@@ -616,9 +576,7 @@ class TestSushiSpecificNPMFilter:
 
     def test_decreaseliquidity_token_id_known_chain(self) -> None:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
-        receipt = _receipt(
-            [_npm_decrease_liquidity_log(token_id=12345)]
-        )
+        receipt = _receipt([_npm_decrease_liquidity_log(token_id=12345)])
         assert parser._decreaseliquidity_token_id(receipt) == 12345
 
     def test_decreaseliquidity_token_id_uv3_npm_rejected(self) -> None:
@@ -626,18 +584,12 @@ class TestSushiSpecificNPMFilter:
         because we keyed on the Sushi NPM address."""
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         uv3_arb_npm = "0xc36442b4a4522e871399cd717abdd847ab11fe88"
-        receipt = _receipt(
-            [
-                _npm_decrease_liquidity_log(token_id=12345, npm=uv3_arb_npm)
-            ]
-        )
+        receipt = _receipt([_npm_decrease_liquidity_log(token_id=12345, npm=uv3_arb_npm)])
         assert parser._decreaseliquidity_token_id(receipt) is None
 
     def test_decreaseliquidity_token_id_unknown_chain_returns_none(self) -> None:
         parser = SushiSwapV3ReceiptParser(chain="not-a-real-chain")
-        receipt = _receipt(
-            [_npm_decrease_liquidity_log(token_id=12345)]
-        )
+        receipt = _receipt([_npm_decrease_liquidity_log(token_id=12345)])
         assert parser._decreaseliquidity_token_id(receipt) is None
 
     def test_decreaseliquidity_token_id_no_logs(self) -> None:
@@ -654,9 +606,7 @@ class TestSushiSpecificNPMFilter:
     def test_decreaseliquidity_token_id_bytes_topic_decoded(self) -> None:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         log = _npm_decrease_liquidity_log(token_id=88)
-        log["topics"][0] = bytes.fromhex(
-            EVENT_TOPICS["DecreaseLiquidity"].removeprefix("0x")
-        )
+        log["topics"][0] = bytes.fromhex(EVENT_TOPICS["DecreaseLiquidity"].removeprefix("0x"))
         log["topics"][1] = bytes.fromhex(_pad32(88))
         receipt = _receipt([log])
         assert parser._decreaseliquidity_token_id(receipt) == 88

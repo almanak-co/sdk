@@ -106,22 +106,23 @@ def _normalize_topic(topic: str | bytes) -> str:
 
 
 # SushiSwap V3 NonfungiblePositionManager addresses, sourced from the
-# canonical contracts registry (single source of truth — ``SUSHISWAP_V3`` in
-# ``almanak/core/contracts.py``). Adding a new chain is a one-line change in
-# ``contracts.py`` and this dict rebuilds automatically at import time.
+# connector-local address registry (single source of truth — ``SUSHISWAP_V3`` in
+# ``almanak/connectors/sushiswap_v3/addresses.py``). Adding a new chain is a
+# one-line change in ``addresses.py`` and this dict rebuilds automatically
+# at import time.
 def _build_sushiswap_v3_npm_addresses() -> dict[str, str]:
     """Build {chain: position_manager} from the canonical SUSHISWAP_V3 registry.
 
     Mirrors the pattern Aerodrome Slipstream uses for its NPM dict (PR #2241)
     — keeps the parser in lock-step with the rest of the connector (SDK,
     adapter, compiler) and removes the risk of an address drift when a new
-    chain is added to ``contracts.SUSHISWAP_V3`` but forgotten in the parser.
+    chain is added to ``addresses.SUSHISWAP_V3`` but forgotten in the parser.
 
     The ``bsc`` entry in the canonical registry is aliased as ``bnb`` here
     because the framework uses ``bnb`` as the chain key on intent
     construction; both are accepted to avoid a silent miss on either spelling.
     """
-    from almanak.core.contracts import SUSHISWAP_V3
+    from .addresses import SUSHISWAP_V3
 
     out: dict[str, str] = {}
     for chain, entry in SUSHISWAP_V3.items():
@@ -1025,7 +1026,7 @@ class SushiSwapV3ReceiptParser:
             if not position_manager:
                 logger.warning(
                     "SushiSwap V3 NPM not registered for chain %r — extend "
-                    "almanak.core.contracts.SUSHISWAP_V3[<chain>]['position_manager']",
+                    "almanak.connectors.sushiswap_v3.addresses.SUSHISWAP_V3[<chain>]['position_manager']",
                     chain_key,
                 )
                 return None
@@ -1485,7 +1486,7 @@ class SushiSwapV3ReceiptParser:
             # LP accounting end-to-end.
             logger.warning(
                 "SushiSwap V3 NPM not registered for chain %r — extend "
-                "almanak.core.contracts.SUSHISWAP_V3[<chain>]['position_manager']",
+                "almanak.connectors.sushiswap_v3.addresses.SUSHISWAP_V3[<chain>]['position_manager']",
                 chain_key,
             )
             return None

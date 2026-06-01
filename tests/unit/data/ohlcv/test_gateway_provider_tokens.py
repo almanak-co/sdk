@@ -19,8 +19,10 @@ class TestTokenToBinanceSymbol:
             ("WBNB", "BNBUSDT"),  # VIB-1442: was missing
             ("AVAX", "AVAXUSDT"),
             ("WAVAX", "AVAXUSDT"),
-            ("MATIC", "MATICUSDT"),
-            ("WMATIC", "MATICUSDT"),
+            ("MATIC", "POLUSDT"),  # MATIC->POL rebrand: POLUSDT is the live pair
+            ("WMATIC", "POLUSDT"),
+            ("POL", "POLUSDT"),
+            ("WPOL", "POLUSDT"),
             ("SOL", "SOLUSDT"),
             ("ARB", "ARBUSDT"),
             ("OP", "OPUSDT"),

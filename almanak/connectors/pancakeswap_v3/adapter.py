@@ -43,7 +43,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
-from almanak.core.contracts import PANCAKESWAP_V3 as PANCAKESWAP_V3_ADDRESSES
+from .addresses import PANCAKESWAP_V3 as PANCAKESWAP_V3_ADDRESSES
 
 logger = logging.getLogger(__name__)
 

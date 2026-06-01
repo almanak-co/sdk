@@ -228,6 +228,26 @@ Strategy-process-side flags that govern how the SDK locates state and what guard
 | `ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S` | TTL (seconds) for the token-resolution negative cache (unknown-token responses). | `300` |
 | `ALMANAK_TOKEN_NEGATIVE_CACHE_MAX` | Max entries in the token-resolution negative cache. | `1000` |
 
+### Gas cost caps
+
+VIB-4879 made gas-cost caps **chain-safe by default**. The deprecated global `ALMANAK_MAX_GAS_PRICE_GWEI` is the wrong unit for multi-chain (gwei is per-chain — see the [Migration](#migration-vib-4879) note below).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MAX_GAS_COST_USD` / `ALMANAK_MAX_GAS_COST_USD` | **Recommended primary cap.** Per-intent gas cost ceiling in USD. Chain-agnostic by construction; the in-memory price oracle (already maintained for accounting / portfolio valuation) supplies the per-chain native price at zero new I/O cost. When the oracle has no native price (yet-to-be-fetched, fetch failed, circuit open), the USD path is disabled with a WARNING and the gwei descriptor cap is the sole backstop. | unset (off) |
+| `MAX_GAS_COST_NATIVE` / `ALMANAK_MAX_GAS_COST_NATIVE` | Per-intent gas cost ceiling in native-token units. Per-chain by construction; only useful when running a single-chain strategy where the operator knows the native token. | chain descriptor (e.g. Polygon 50 MATIC) |
+| `ALMANAK_MAX_GAS_PRICE_GWEI_<CHAIN>` | Chain-scoped gwei cap (escape hatch). Example: `ALMANAK_MAX_GAS_PRICE_GWEI_POLYGON=600`. Affects only the named chain. Values exceeding 10,000 gwei (the sane absolute ceiling) are clamped with a WARNING; malformed or non-positive values raise `ConfigurationError` at boot. The legacy unprefixed `MAX_GAS_PRICE_GWEI_<CHAIN>` form is also accepted. | chain descriptor default |
+| `ALMANAK_MAX_GAS_PRICE_GWEI` *(deprecated)* | **Deprecated and ignored on mainnet (VIB-4879).** A single global gwei number cannot represent operator intent across chains with ~22,000× native-price spread. Setting this emits a one-time WARNING per chain at boot. Anvil mode is unchanged (gas costs no real money locally). Migrate to `ALMANAK_MAX_GAS_COST_USD` (recommended) or the chain-scoped form above. | unset |
+
+#### Migration (VIB-4879)
+
+If your `.env` contains `ALMANAK_MAX_GAS_PRICE_GWEI=...`:
+
+- **Before VIB-4879:** the global value silently clobbered every chain's descriptor cap — breaking multi-chain strategies on chains with high gwei / cheap native (Polygon, BSC, …). This was the reported "gas price" Polygon symptom.
+- **After VIB-4879:** the global value is ignored with a WARNING. For most operators this is a strict improvement; no action required. To re-enable explicit gas-cost control:
+  - **Recommended:** `ALMANAK_MAX_GAS_COST_USD=25` — one number, every chain.
+  - **Chain-specific:** `ALMANAK_MAX_GAS_PRICE_GWEI_POLYGON=600`, etc.
+
 ---
 
 ## Pool History Service

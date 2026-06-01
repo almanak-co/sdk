@@ -9,6 +9,8 @@ from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext,
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 
+from .addresses import UNISWAP_V4
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,8 +46,6 @@ class UniswapV4Compiler(BaseProtocolCompiler[BaseCompilerContext]):
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4."""
         try:
-            from almanak.core.contracts import UNISWAP_V4
-
             if ctx.chain not in UNISWAP_V4:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,

@@ -106,6 +106,34 @@ class TestLendingRate:
         assert rate.side == "supply"
         assert rate.apy_percent == Decimal("4.25")
 
+    def test_lending_rate_side_is_case_insensitive(self, snapshot_with_rates):
+        """'SUPPLY' and 'supply' resolve identically (VIB-4859 re-review).
+
+        ``side`` is normalized once up front, so mixed-case input must not
+        crash on ``RateSide("SUPPLY")`` nor diverge between the cache key,
+        the legacy RateMonitor lane, and the gateway lane.
+        """
+        lower = snapshot_with_rates.lending_rate("aave_v3", "USDC", "supply")
+        upper = snapshot_with_rates.lending_rate("aave_v3", "USDC", "SUPPLY")
+        mixed = snapshot_with_rates.lending_rate("aave_v3", "USDC", "  Supply  ")
+
+        # Same cache key → same cached object identity for all spellings.
+        assert lower is upper
+        assert lower is mixed
+        assert upper.apy_percent == Decimal("4.25")
+        assert upper.side == "supply"
+
+        # The cache holds exactly one entry for this (protocol, token, side).
+        key = snapshot_with_rates._lending_cache_key("aave_v3", "USDC", "supply")
+        assert key in snapshot_with_rates._lending_rate_cache
+
+    def test_lending_rate_side_accepts_rate_side_enum(self, snapshot_with_rates):
+        """A ``RateSide`` enum and its string spelling resolve identically."""
+        from_enum = snapshot_with_rates.lending_rate("aave_v3", "USDC", RateSide.SUPPLY)
+        from_str = snapshot_with_rates.lending_rate("aave_v3", "USDC", "supply")
+        assert from_enum is from_str
+        assert from_enum.apy_percent == Decimal("4.25")
+
 
 # =============================================================================
 # Stage 1: best_lending_rate() works on the canonical MarketSnapshot

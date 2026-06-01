@@ -74,7 +74,7 @@ def test_handler_context_is_frozen() -> None:
         outbox_row={},
         ledger_row={},
         basis_store=FIFOBasisStore(),
-        prior_open_lookup=lambda _k: None,
+        prior_open_lookup=lambda _k, _d=None: None,
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         ctx.outbox_row = {}  # type: ignore[misc]
@@ -289,7 +289,14 @@ def test_lp_dispatch_uses_prior_open_lookup_on_close() -> None:
     ledger_close = _build_ledger(intent_type="LP_CLOSE", protocol="uniswap_v3", token_in="USDC", token_out="WETH")
     processor._dispatch(outbox, ledger_close)
     assert spy.call_count == 1
-    assert spy.call_args.args == ("lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111",)
+    # VIB-4275 — the dispatcher now threads the closing leg's per-position
+    # discriminator (extracted from the ledger row's lp_close_data) alongside
+    # the pool-level key. This synthetic close carries no discriminator, so it
+    # is None — and the resolver resolves only the single-open legacy case.
+    assert spy.call_args.args == (
+        "lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111",
+        None,
+    )
 
 
 # ─── D2.M3 — Every reachable category routes to the matching handler module ──

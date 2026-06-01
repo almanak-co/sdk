@@ -46,7 +46,7 @@ class TestConstants:
 
     def test_pool_manager_addresses(self):
         # Each chain should have a non-empty pool manager address
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         for chain, addr in POOL_MANAGER_ADDRESSES.items():
             expected = UNISWAP_V4[chain]["pool_manager"].lower()
             assert addr.lower() == expected, f"PoolManager on {chain} mismatch"
@@ -124,7 +124,7 @@ class TestPoolKey:
 
 class TestUniswapV4SDKInit:
     def test_init_supported_chain(self):
-        from almanak.core.contracts import UNISWAP_V4
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
         sdk = UniswapV4SDK(chain="arbitrum")
         assert sdk.chain == "arbitrum"
         assert sdk.pool_manager.lower() == UNISWAP_V4["arbitrum"]["pool_manager"].lower()

@@ -34,21 +34,25 @@ from typing import TYPE_CHECKING
 from almanak.framework.data.ohlcv.dedup_provider import DedupingOHLCVProvider
 from almanak.framework.data.ohlcv.factory import (
     OHLCVStack,
+    assert_provider_chains_registered,
     create_ohlcv_stack,
     create_routing_ohlcv_provider,
 )
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
+    CoinGeckoGatewayDataProvider,
     GatewayOHLCVDataProvider,
     GeckoTerminalGatewayDataProvider,
 )
 from almanak.framework.data.ohlcv.gateway_provider import (
     TOKEN_TO_BINANCE_SYMBOL,
+    GatewayCoinGeckoOHLCVProvider,
     GatewayGeckoTerminalOHLCVProvider,
     GatewayOHLCVProvider,
 )
 from almanak.framework.data.ohlcv.ohlcv_router import (
     OHLCVRouter,
     classify_instrument,
+    provider_names_in_chains,
 )
 from almanak.framework.data.ohlcv.routing_provider import (
     RoutingOHLCVProvider,
@@ -58,6 +62,8 @@ if TYPE_CHECKING:
     from almanak.framework.data.ohlcv.module import GapStrategy, OHLCVModule
 
 __all__ = [
+    "CoinGeckoGatewayDataProvider",
+    "GatewayCoinGeckoOHLCVProvider",
     "GatewayOHLCVProvider",
     "GatewayGeckoTerminalOHLCVProvider",
     "GatewayOHLCVDataProvider",
@@ -69,18 +75,26 @@ __all__ = [
     "OHLCVModule",
     "OHLCVRouter",
     "RoutingOHLCVProvider",
+    "assert_provider_chains_registered",
     "classify_instrument",
     "create_ohlcv_stack",
     "create_routing_ohlcv_provider",
+    "provider_names_in_chains",
 ]
 
 
 def __getattr__(name: str) -> object:
     if name in ("GapStrategy", "OHLCVModule"):
-        import importlib
+        # VIB-4901: switched from the legacy dynamic-loader shape to a
+        # function-local relative `from . import ... as ...` statement
+        # to satisfy the broadened L1 dynamic-import suppression on
+        # Scan B / Scan C. Same lazy semantic — the inner import only
+        # runs when ``__getattr__`` fires; the inner module is NOT
+        # loaded at package-import time. Relative form is idiomatic for
+        # in-package lazy loads (Claude pr-auditor post-PR Potential).
+        from . import module as _module
 
-        module = importlib.import_module("almanak.framework.data.ohlcv.module")
-        attr = getattr(module, name)
+        attr = getattr(_module, name)
         globals()[name] = attr
         return attr
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

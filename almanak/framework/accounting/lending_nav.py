@@ -2,16 +2,31 @@
 
 Pure read-side aggregation of lending-related positions from a PortfolioSnapshot.
 No writes. No persisted semantics are changed. This is additive reporting state.
+
+Empty != Zero discipline (AGENTS.md §Accounting):
+
+* ``PositionValue.unrealized_pnl_usd`` defaults to ``Decimal("0")`` on the dataclass
+  (a measured-zero by construction), but the field can arrive as ``None`` from
+  legacy or partially-constructed payloads.  The aggregator skips ``None`` legs
+  from the unrealized-carry sum and logs at INFO when at least one leg was
+  skipped, so a mixed (measured + unmeasured) snapshot does not silently drop
+  data.  All-unmeasured aggregates still return ``Decimal("0")`` (the typed
+  contract of ``LendingNAVSummary``) — callers that need to distinguish "no
+  positions" from "all unmeasured" inspect ``supply_positions`` /
+  ``borrow_positions`` counts alongside the carry fields.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from almanak.framework.portfolio.models import PortfolioSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,8 @@ def compute_lending_nav(snapshot: PortfolioSnapshot | None) -> LendingNAVSummary
     borrow_unrealized = _ZERO
     n_supply = 0
     n_borrow = 0
+    unmeasured_supply_legs = 0
+    unmeasured_borrow_legs = 0
 
     for pos in snapshot.positions:
         try:
@@ -84,7 +101,13 @@ def compute_lending_nav(snapshot: PortfolioSnapshot | None) -> LendingNAVSummary
                 v = pos.value_usd
                 if v is not None:
                     gross_supply += v
-                supply_unrealized += pos.unrealized_pnl_usd
+                # Empty != Zero: a None unrealized_pnl_usd is unmeasured;
+                # skip it from the sum rather than crashing on (Decimal + None).
+                u = pos.unrealized_pnl_usd
+                if u is None:
+                    unmeasured_supply_legs += 1
+                else:
+                    supply_unrealized += u
 
             elif ptype == PositionType.BORROW:
                 n_borrow += 1
@@ -92,11 +115,31 @@ def compute_lending_nav(snapshot: PortfolioSnapshot | None) -> LendingNAVSummary
                 if v is not None:
                     # BORROW value_usd is signed negative (liability); store abs.
                     gross_debt += abs(v)
-                borrow_unrealized += pos.unrealized_pnl_usd
+                u = pos.unrealized_pnl_usd
+                if u is None:
+                    unmeasured_borrow_legs += 1
+                else:
+                    borrow_unrealized += u
 
         except Exception:  # pragma: no cover
             # Tolerate unexpected shape on any individual position.
             continue
+
+    # AGENTS.md §Accounting: Empty != Zero.  When the snapshot mixes measured
+    # and unmeasured legs, the aggregate is the measured-only sum; log INFO so
+    # operators can see the helper degraded gracefully rather than silently
+    # dropping data.  Never WARN — this is a normal legacy-payload signal,
+    # not an error.
+    total_unmeasured = unmeasured_supply_legs + unmeasured_borrow_legs
+    if total_unmeasured:
+        logger.info(
+            "compute_lending_nav: %d lending position(s) had unrealized_pnl_usd=None "
+            "and were skipped from the carry sum (supply=%d, borrow=%d). "
+            "Reported supply/borrow/net carry reflect measured legs only.",
+            total_unmeasured,
+            unmeasured_supply_legs,
+            unmeasured_borrow_legs,
+        )
 
     net = gross_supply - gross_debt
     net_carry = supply_unrealized + borrow_unrealized

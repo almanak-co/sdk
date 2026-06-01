@@ -57,31 +57,44 @@ from almanak.config.env import _load_dotenv_once
 # import them by name) and feed them into this factory.
 # =============================================================================
 
+
 # Chains the historical providers (Chainlink, TWAP, gas) read archive
 # RPC URLs for. Lowercase to match the field-key convention; the env
 # var itself is uppercased (``ARCHIVE_RPC_URL_ETHEREUM`` etc).
-DEFAULT_ARCHIVE_RPC_CHAINS: tuple[str, ...] = (
-    "ethereum",
-    "arbitrum",
-    "base",
-    "optimism",
-    "polygon",
-    "avalanche",
-)
+#
+# VIB-4857 (W5): derived from ``ChainRegistry``. A chain "supports
+# archive RPC" iff its descriptor sets ``rpc.block_time_seconds`` and
+# ``explorer.api_url`` — same predicate as ``ARCHIVE_RPC_CHAINS`` in
+# ``framework/backtesting/pnl/providers/gas.py``.
+def _build_default_archive_rpc_chains() -> tuple[str, ...]:
+    from almanak.core.chains import ChainRegistry
 
-# Etherscan-family API key env vars by chain. Mirrors
+    return tuple(
+        d.name for d in ChainRegistry.all() if d.rpc.block_time_seconds is not None and d.explorer.api_url is not None
+    )
+
+
+DEFAULT_ARCHIVE_RPC_CHAINS: tuple[str, ...] = _build_default_archive_rpc_chains()
+
+
+# Etherscan-family API key env vars by chain.
+#
+# VIB-4857 (W5): derived from ``ChainRegistry``; mirrors
 # ``ETHERSCAN_API_KEY_ENV_VARS`` in
-# ``almanak/framework/backtesting/pnl/providers/gas.py``; the gas
-# provider re-exports its copy for back-compat.
-DEFAULT_GAS_API_KEY_ENV_VARS: dict[str, str] = {
-    "ethereum": "ETHERSCAN_API_KEY",
-    "arbitrum": "ARBISCAN_API_KEY",
-    "optimism": "OPTIMISTIC_ETHERSCAN_API_KEY",
-    "base": "BASESCAN_API_KEY",
-    "polygon": "POLYGONSCAN_API_KEY",
-    "bsc": "BSCSCAN_API_KEY",
-    "avalanche": "SNOWTRACE_API_KEY",
-}
+# ``framework/backtesting/pnl/providers/gas.py``. The gas provider
+# re-exports its copy for back-compat.
+def _build_default_gas_api_key_env_vars() -> dict[str, str]:
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    return {
+        d.name: d.explorer.api_key_env
+        for d in ChainRegistry.all()
+        if d.family is ChainFamily.EVM and d.explorer.api_key_env is not None
+    }
+
+
+DEFAULT_GAS_API_KEY_ENV_VARS: dict[str, str] = _build_default_gas_api_key_env_vars()
 
 DEFAULT_BACKTEST_SERVICE_HOST: str = "0.0.0.0"
 DEFAULT_BACKTEST_SERVICE_PORT: int = 8000

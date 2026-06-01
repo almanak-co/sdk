@@ -48,7 +48,7 @@ almanak agent install
 almanak strat demo
 ```
 
-这会显示一个交互式菜单，包含 13 个可运行的演示策略。选择一个，它会被复制到您当前的目录中，随时可以运行。您也可以跳过菜单：
+这会显示一个交互式菜单，包含可运行的演示策略。选择一个，它会被复制到您当前的目录中，随时可以运行。您也可以跳过菜单：
 
 ```bash
 almanak strat demo --name uniswap_rsi

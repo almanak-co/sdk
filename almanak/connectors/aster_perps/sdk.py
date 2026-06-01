@@ -49,7 +49,7 @@ from decimal import Decimal
 from eth_abi import encode as abi_encode
 from eth_utils import keccak
 
-from almanak.core.contracts import (
+from .addresses import (
     ASTER_PERPS,
     ASTER_PERPS_MARKETS,
     ASTER_PERPS_TOKENS,

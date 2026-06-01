@@ -36,9 +36,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+
 # STABLECOINS is re-exported from core/constants for backwards compatibility.
 # The JSON copy is a snapshot; the canonical definition lives in core.
 from almanak.core.constants import STABLECOINS as STABLECOINS  # noqa: F401
+from almanak.core.enums import ChainFamily
 
 from .models import BridgeType, ChainTokenConfig, Token
 
@@ -66,12 +69,26 @@ _chains = _chains_blob["chains"]
 # native-token swap / balance call.
 NATIVE_SENTINEL: str = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
+
 # Cross-check: every EVM chain in chains.json must agree. (Solana doesn't use
 # the EVM sentinel; its entry carries the WSOL mint in ``native_sentinel``.)
+def _is_evm_chain_for_sentinel_check(chain: str) -> bool:
+    descriptor = ChainRegistry.try_resolve(chain)
+    # Unknown chains in chains.json (e.g. preview entries not yet registered
+    # in core.chains) are conservatively treated as EVM so the sentinel
+    # cross-check still fires on them — matches the legacy
+    # ``chain != "solana"`` contract exactly.
+    if descriptor is None:
+        return True
+    return descriptor.family is ChainFamily.EVM
+
+
 _unexpected_sentinels = {
     chain: cfg.get("native_sentinel")
     for chain, cfg in _chains.items()
-    if chain != "solana" and cfg.get("native_sentinel") and cfg["native_sentinel"] != NATIVE_SENTINEL
+    if _is_evm_chain_for_sentinel_check(chain)
+    and cfg.get("native_sentinel")
+    and cfg["native_sentinel"] != NATIVE_SENTINEL
 }
 if _unexpected_sentinels:
     raise RuntimeError(

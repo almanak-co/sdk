@@ -24,7 +24,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
+from almanak.connectors.aerodrome.addresses import AERODROME
+from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
+from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
+from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
 from almanak.framework.data.pools.reader import GET_POOL_SELECTOR
 
 if TYPE_CHECKING:
