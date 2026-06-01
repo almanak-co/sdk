@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 
+from almanak.connectors._strategy_base.primitive_registry import PrimitiveRegistry
 from almanak.framework.primitives.types import (
     AccountingCategory,
     EventKind,
@@ -682,19 +683,59 @@ def position_type_for(intent_type: str) -> PositionKind | None:
     return record.position_type
 
 
+# Generic (non-protocol) position-type labels — the taxonomy's own
+# vocabulary, NOT connector folder names. These are shared across every venue
+# (``LP`` is "some LP position", ``LENDING`` is "some money-market position",
+# …) so they have no single connector owner and stay here rather than on a
+# connector ``primitive.py``. Protocol-name labels (``AAVE_V3`` / ``UNI_V3`` /
+# ``GMX_V2`` / …) are owned by their connector and resolved through
+# :class:`PrimitiveRegistry` — see the W-series self-containment blueprint
+# (``docs/internal/blueprints/22-connector-self-containment.md``).
+_GENERIC_LABEL_PRIMITIVES: dict[str, Primitive] = {
+    "LP": Primitive.LP,
+    "LENDING": Primitive.LENDING,
+    "SUPPLY": Primitive.LENDING,
+    "BORROW": Primitive.LENDING,
+    "PERP": Primitive.PERP,
+    "VAULT": Primitive.VAULT,
+    "ERC4626": Primitive.VAULT,
+    "STAKE": Primitive.STAKING,
+    "STAKING": Primitive.STAKING,
+    "STAKED": Primitive.STAKING,
+    "PREDICTION": Primitive.PREDICTION,
+    # CEX holdings + plain token balances are bookkeeping legs the teardown
+    # system unwinds via swap / withdraw — no protocol state machine. Mapping
+    # to UTILITY documents the "no primitive of its own" invariant while
+    # keeping the teardown-coverage test green.
+    "CEX": Primitive.UTILITY,
+    "TOKEN": Primitive.UTILITY,
+    "BALANCE": Primitive.UTILITY,
+}
+
+
 def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     """Map a position-type string (teardown-side or protocol alias) to a top-level primitive.
 
-    T2 (VIB-4162) — consolidates the if-ladder previously hard-coded in
+    T2 (VIB-4162) consolidated the if-ladder previously hard-coded in
     :func:`almanak.framework.accounting.position_state._classify_position`.
+    The protocol→primitive half of that ladder is now resolved through the
+    strategy-side :class:`~almanak.connectors._strategy_base.primitive_registry.PrimitiveRegistry`
+    (per ``docs/internal/blueprints/22-connector-self-containment.md``): each
+    connector OWNS its ``Primitive`` + the position-type alias strings it
+    answers to, and this function iterates the registry instead of branching
+    on a hard-coded dispatch ladder.
+
     Recognises the two label families that historically reached the
     materializer:
 
-    * ``teardown.models.PositionType`` values (``LP`` / ``SUPPLY`` /
-      ``BORROW`` / ``PERP`` / ``VAULT`` / ``STAKE`` / ``PREDICTION`` /
-      ``CEX`` / ``TOKEN``).
+    * ``teardown.models.PositionType`` values and other generic taxonomy
+      labels (``LP`` / ``SUPPLY`` / ``BORROW`` / ``PERP`` / ``VAULT`` /
+      ``STAKE`` / ``PREDICTION`` / ``CEX`` / ``TOKEN`` / ``BALANCE``). These
+      have no single connector owner and resolve via
+      :data:`_GENERIC_LABEL_PRIMITIVES`.
     * Protocol-name strings used by older callers (``UNISWAP_V3`` /
-      ``AAVE_V3`` / ``GMX_V2`` etc.) for backward compat.
+      ``AAVE_V3`` / ``GMX_V2`` etc.). These resolve via the connector-owned
+      :class:`PrimitiveRegistry`.
 
     Every ``teardown.models.PositionType`` value resolves to a non-None
     primitive (``CEX`` and ``TOKEN`` collapse to ``Primitive.UTILITY``
@@ -704,50 +745,38 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     only knows what to do with LP / LENDING / PERP and treats every other
     primitive as "skip" — that's the current materializer scope, not a
     statement about teardown coverage.
+
+    Equivalence guarantee: the (generic table + connector registry) result is
+    identical to the previous hard-coded ladder for every input string the
+    ladder handled — pinned by the characterization test in
+    ``tests/unit/primitives/test_materializer_primitive_equivalence.py``.
+
+    VIB-4477: V4 position-type strings resolve to ``Primitive.LP_V4`` (a
+    parallel version stream owned by the ``uniswap_v4`` connector). The
+    materializer's caller in ``accounting.position_state._classify_position``
+    collapses ``LP_V4`` back to the ``"LP"`` materializer bucket — the
+    materializer code is V3/V4-shared because the LP position state machine is
+    the same. The primitive split only matters at the version-stamping sites.
+
+    VIB-4248: a CDP connector (Maker, Liquity, crvUSD, Lybra, Prisma, Aave
+    GHO, …) declares ``Primitive.CDP`` in its own ``primitive.py`` when it
+    lands; the materialiser then resolves CDP labels through the registry
+    rather than silently misclassifying them back into ``LENDING``. The
+    ``Primitive.CDP`` slot already exists in ``MATCHING_POLICY_VERSIONS`` /
+    ``PRIMITIVE_VERSIONS`` — shipping the connector's ``primitive.py`` is the
+    only step missing.
     """
     s = position_type_str.upper().strip()
-    # VIB-4477: V4 position-type strings resolve to Primitive.LP_V4 (parallel
-    # version stream). The materializer's caller in
-    # ``accounting.position_state._classify_position`` collapses LP_V4 back to
-    # the ``"LP"`` materializer bucket — the materializer code is V3/V4-shared
-    # because the LP position state machine is the same. The primitive split
-    # only matters at the version-stamping sites.
-    if s in {"UNI_V4", "UNISWAP_V4"}:
-        return Primitive.LP_V4
-    if s in {"LP", "UNI_V3", "UNISWAP_V3", "AERODROME", "AERODROME_LP", "TRADERJOE_LP"}:
-        return Primitive.LP
-    if s in {
-        "LENDING",
-        "SUPPLY",
-        "BORROW",
-        "AAVE_V3",
-        "AAVE",
-        "MORPHO",
-        "MORPHO_BLUE",
-        "COMPOUND_V3",
-        "COMPOUND",
-    }:
-        return Primitive.LENDING
-    # VIB-4248: when the first CDP connector lands (Maker, Liquity, crvUSD,
-    # Lybra, Prisma, Aave GHO, etc.), extend this branch with the CDP protocol
-    # strings so the materialiser does not silently misclassify CDP positions
-    # back into LENDING. The Primitive.CDP slot already exists in
-    # MATCHING_POLICY_VERSIONS / PRIMITIVE_VERSIONS — adding the string mapping
-    # is the only step missing.
-    if s in {"PERP", "GMX", "GMX_V2", "DRIFT", "HYPERLIQUID"}:
-        return Primitive.PERP
-    if s in {"VAULT", "ERC4626"}:
-        return Primitive.VAULT
-    if s in {"STAKE", "STAKING", "STAKED"}:
-        return Primitive.STAKING
-    if s in {"PREDICTION", "POLYMARKET"}:
-        return Primitive.PREDICTION
-    if s in {"CEX", "TOKEN", "BALANCE"}:
-        # CEX holdings + plain token balances are bookkeeping legs the
-        # teardown system unwinds via swap / withdraw — no protocol state
-        # machine. Mapping to UTILITY documents the "no primitive of its
-        # own" invariant while keeping the teardown-coverage test green.
-        return Primitive.UTILITY
+    # Generic (non-protocol) labels take precedence: they are the taxonomy's
+    # own vocabulary and a connector must never re-claim one (the registry
+    # only owns protocol-name aliases, never these). Then fall through to the
+    # connector-owned registry for protocol-name labels.
+    primitive = _GENERIC_LABEL_PRIMITIVES.get(s)
+    if primitive is not None:
+        return primitive
+    primitive = PrimitiveRegistry.primitive_for_label(s)
+    if primitive is not None:
+        return primitive
     # T05 (VIB-4190): unknown position-type strings are silently coerced to
     # None today, then the caller in accounting.position_state._classify_position
     # treats them as "skip". WARN here so the operator sees the unrecognized
@@ -755,7 +784,9 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     # this diagnostic to the position-registry epic.
     logger.warning(
         "materializer_primitive_for: unknown position_type_str=%r (normalized=%r); "
-        "returning None — caller will treat as no-primitive. Add a mapping in "
+        "returning None — caller will treat as no-primitive. Declare the "
+        "primitive on the owning connector's primitive.py (resolved via "
+        "PrimitiveRegistry) or add a generic label in "
         "almanak/framework/primitives/taxonomy.py if this is a real primitive.",
         position_type_str,
         s,

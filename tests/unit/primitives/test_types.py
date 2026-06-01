@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import sys
 from dataclasses import FrozenInstanceError, is_dataclass
 from pathlib import Path
 
@@ -172,5 +173,23 @@ def test_primitive_record_is_hashable() -> None:
 
 
 def test_module_imports_clean() -> None:
-    """Re-importing the module must not raise (catches accidental top-level side-effects)."""
+    """Re-importing the module must not raise (catches accidental top-level side-effects).
+
+    ``importlib.reload`` re-executes the module body in-place, minting fresh
+    ``Primitive`` / ``AccountingCategory`` / … enum *classes* on the same
+    module object. Any module already imported in this process (the taxonomy
+    table, every connector ``primitive.py`` declaration, …) still holds
+    members of the *original* classes, so an ``isinstance(member, Primitive)``
+    check run after this test against the reloaded class would spuriously
+    fail. Snapshot the module namespace and restore it after the reload so the
+    reload's blast radius does not leak into sibling tests sharing this xdist
+    worker.
+    """
+    snapshot = dict(primitives_types.__dict__)
     importlib.reload(primitives_types)
+    # Restore the original class/objects so cached references elsewhere in the
+    # process (e.g. connector primitive declarations) keep ``isinstance``
+    # passing against the canonical enum classes.
+    primitives_types.__dict__.clear()
+    primitives_types.__dict__.update(snapshot)
+    sys.modules[primitives_types.__name__] = primitives_types
