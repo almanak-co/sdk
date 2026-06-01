@@ -275,6 +275,40 @@
       "name": "list_lending_positions"
     },
     {
+      "description": "List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+      "inputSchema": {
+        "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain\nreserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a\ncurated table) and reads each reserve's live ``getReserveConfigurationData``.",
+        "properties": {
+          "asset": {
+            "default": "",
+            "description": "Optional single reserve symbol to filter to (e.g. 'WMATIC').",
+            "title": "Asset",
+            "type": "string"
+          },
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "network": {
+            "default": "",
+            "description": "'mainnet' or 'anvil'; empty means gateway default.",
+            "title": "Network",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "aave_v3",
+            "description": "Lending protocol (aave_v3 / Aave-V2-fork shaped for v1).",
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "title": "ListLendingReservesRequest",
+        "type": "object"
+      },
+      "name": "list_lending_reserves"
+    },
+    {
       "description": "Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
       "inputSchema": {
         "description": "Summarize a wallet's on-chain positions on a single chain.\n\nCombines native balance, ERC20 balances (via batch_get_balances for\ncommon symbols or a caller-supplied list), LP positions, and lending\npositions.",
@@ -1958,6 +1992,43 @@
             }
           },
           "title": "ListLendingPositionsRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+        "name": "list_lending_reserves",
+        "parameters": {
+          "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain\nreserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a\ncurated table) and reads each reserve's live ``getReserveConfigurationData``.",
+          "properties": {
+            "asset": {
+              "default": "",
+              "description": "Optional single reserve symbol to filter to (e.g. 'WMATIC').",
+              "title": "Asset",
+              "type": "string"
+            },
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "network": {
+              "default": "",
+              "description": "'mainnet' or 'anvil'; empty means gateway default.",
+              "title": "Network",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "aave_v3",
+              "description": "Lending protocol (aave_v3 / Aave-V2-fork shaped for v1).",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "title": "ListLendingReservesRequest",
           "type": "object"
         }
       },

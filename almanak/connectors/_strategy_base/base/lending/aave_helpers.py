@@ -34,6 +34,16 @@ MAX_UINT256 = compiler_constants.MAX_UINT256
 # keccak256("getReserveConfigurationData(address)")[:4]
 _AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
 
+# Aave V3 PoolDataProvider.getAllReservesTokens() selector.
+# keccak256("getAllReservesTokens()")[:4] — returns TokenData[] { string symbol; address tokenAddress; }
+_AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR = "0xb316ff89"
+
+# Hard sanity ceiling on the declared reserve-array length accepted from a
+# getAllReservesTokens() payload before the full eth_abi decode. Far above any
+# real Aave market (< 100 reserves); a backstop against an oversized/malformed
+# response, NOT the working cap (the agent tool caps actual reads separately).
+MAX_DECODABLE_RESERVES = 4096
+
 
 class AssetNotCollateralEligibleError(ValueError):
     """An asset cannot be enabled as collateral on the target Aave V3 market.
@@ -85,6 +95,108 @@ class _DecodedReserveConfig:
         self.borrowing_enabled = borrowing_enabled
         self.is_active = is_active
         self.is_frozen = is_frozen
+
+
+def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | None:
+    """Decode the 10-word ABI tuple returned by ``getReserveConfigurationData``.
+
+    Pure function — no I/O, no logging. Shared by the compiler pre-flights
+    (collateral-eligibility VIB-3701, frozen-reserve VIB-3749, borrowable
+    VIB-3825) and the ``list_lending_reserves`` agent tool so the word layout
+    lives in exactly one place.
+
+    Word layout (each 32 bytes / 64 hex chars):
+    0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
+    4: reserveFactor, 5: usageAsCollateralEnabled (bool),
+    6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
+    8: isActive (bool), 9: isFrozen (bool).
+
+    Returns ``None`` when the payload is shorter than the 640-hex-char tuple
+    or a word fails to parse — callers decide how to surface that.
+    """
+    if not isinstance(raw_hex, str):
+        return None
+    raw = raw_hex[2:] if raw_hex.startswith("0x") else raw_hex
+    if len(raw) < 640:
+        return None
+    try:
+        ltv = int(raw[64:128], 16)
+        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
+        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
+        is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
+        is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
+    except ValueError:
+        return None
+
+    return _DecodedReserveConfig(
+        ltv=ltv,
+        usage_as_collateral_enabled=usage_as_collateral_enabled,
+        borrowing_enabled=borrowing_enabled,
+        is_active=is_active,
+        is_frozen=is_frozen,
+    )
+
+
+def decode_all_reserves_tokens(raw_hex: str) -> list[tuple[str, str]] | None:
+    """Decode ``PoolDataProvider.getAllReservesTokens()`` → ``TokenData[]``.
+
+    Each ``TokenData`` is ``(string symbol, address tokenAddress)``. Pure
+    function — no I/O. Uses ``eth_abi`` for the dynamic-array-of-tuples decode
+    (the ABI shape has a dynamic ``string`` member, so hand-slicing is brittle;
+    ``eth_abi`` is an encoding utility and introduces no network egress).
+
+    Returns a list of ``(symbol, lowercased_address)`` preserving on-chain
+    order, or ``None`` when the payload is empty / cannot be decoded — the
+    caller decides how to surface that (it must NOT silently fall back to a
+    curated table, or the discovery contract is broken).
+
+    The declared array length is bounded against ``MAX_DECODABLE_RESERVES``
+    *before* the full ``eth_abi`` decode, so an oversized / malformed response
+    cannot exhaust CPU/memory ahead of the caller's reserve-count cap. The
+    ceiling is far above any real Aave market (which carries well under 100
+    reserves) — it is a sanity backstop, not the working cap.
+    """
+    if not isinstance(raw_hex, str):
+        return None
+    raw = raw_hex[2:] if raw_hex.startswith("0x") else raw_hex
+    if not raw:
+        return None
+
+    # Bound the declared element count straight from the ABI head — reading the
+    # hex directly — BEFORE allocating the full payload via bytes.fromhex(), so
+    # a pathological / oversized response cannot exhaust memory ahead of the
+    # caller's reserve cap. Layout for a single ``T[]`` return: word[0] = byte
+    # offset to the array; word[offset] = element count. Each hex word is 64 chars.
+    if len(raw) < 128:  # need at least the offset word + a count word
+        return None
+    try:
+        array_offset = int(raw[:64], 16)
+    except ValueError:
+        return None
+    if array_offset % 32 != 0:
+        return None
+    count_start = array_offset * 2  # byte offset -> hex char offset
+    if count_start + 64 > len(raw):
+        return None
+    try:
+        count = int(raw[count_start : count_start + 64], 16)
+    except ValueError:
+        return None
+    if count > MAX_DECODABLE_RESERVES:
+        return None
+    # Also cap the raw payload size itself, defending a small-count / huge-
+    # trailing-bytes input: a fully populated MAX_DECODABLE_RESERVES array of
+    # (string, address) tuples is comfortably under this hex-char ceiling.
+    if len(raw) > MAX_DECODABLE_RESERVES * 16 * 64:
+        return None
+
+    try:
+        from eth_abi import decode as _abi_decode
+
+        (rows,) = _abi_decode(["(string,address)[]"], bytes.fromhex(raw))
+    except Exception:
+        return None
+    return [(str(symbol), str(address).lower()) for symbol, address in rows]
 
 
 def _resolve_pool_data_provider(chain: str, protocol: str) -> str | None:
@@ -216,12 +328,9 @@ def _fetch_reserve_config(
         )
     raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
 
-    # getReserveConfigurationData returns 10 uint256/bool words, ABI-encoded
-    # as 10 * 32 bytes = 640 hex chars. Word layout:
-    # 0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
-    # 4: reserveFactor, 5: usageAsCollateralEnabled (bool),
-    # 6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
-    # 8: isActive (bool), 9: isFrozen (bool).
+    # getReserveConfigurationData returns 10 uint256/bool words (640 hex chars).
+    # A short payload is a strong "broken response" signal — log it with the
+    # asset/chain context the pure decoder can't see, then fail-open.
     if len(raw) < 640:
         logger.warning(
             "%s pre-flight: unexpected response length %d for asset=%s chain=%s",
@@ -232,22 +341,7 @@ def _fetch_reserve_config(
         )
         return None
 
-    try:
-        ltv = int(raw[64:128], 16)
-        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
-        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
-        is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
-        is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
-    except ValueError:
-        return None
-
-    return _DecodedReserveConfig(
-        ltv=ltv,
-        usage_as_collateral_enabled=usage_as_collateral_enabled,
-        borrowing_enabled=borrowing_enabled,
-        is_active=is_active,
-        is_frozen=is_frozen,
-    )
+    return decode_reserve_configuration_data(raw)
 
 
 def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, asset_symbol: str) -> str | None:

@@ -1076,6 +1076,111 @@ class TestAxReadCommands:
         assert captured["tool_name"] == "list_lending_positions"
         assert captured["args"]["protocol"] == "aave_v3"
 
+    def test_lending_reserves_help(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lending-reserves", "--help"])
+        assert result.exit_code == 0
+        assert "borrowable" in result.output.lower()
+        assert "--asset" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_lending_reserves_forwards_args(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={
+                    "schema_version": 1,
+                    "chain": "polygon",
+                    "protocol": "aave_v3",
+                    "count": 0,
+                    "reserves": [],
+                },
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "polygon", "lending-reserves", "--asset", "WMATIC"])
+        assert result.exit_code == 0
+        assert captured["tool_name"] == "list_lending_reserves"
+        assert captured["args"]["chain"] == "polygon"
+        assert captured["args"]["protocol"] == "aave_v3"
+        assert captured["args"]["asset"] == "WMATIC"
+        # network is forwarded from the group-level --network (default mainnet)
+        assert captured["args"]["network"] == "mainnet"
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_lending_reserves_human_table(self, mock_get_exec):
+        """Human (non-JSON) output renders a scannable column table, not a flat repr."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            return ToolResponse(
+                status="success",
+                data={
+                    "schema_version": 1,
+                    "chain": "polygon",
+                    "protocol": "aave_v3",
+                    "pool_data_provider": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+                    "count": 3,
+                    "total_matched": 3,
+                    "truncated": False,
+                    "reserves": [
+                        {
+                            "symbol": "WPOL",
+                            "address": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+                            "borrowing_enabled": False,
+                            "usage_as_collateral_enabled": True,
+                            "is_active": True,
+                            "is_frozen": False,
+                            "ltv_bps": 6800,
+                            "error": "",
+                        },
+                        {
+                            "symbol": "LINK",
+                            "address": "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39",
+                            "borrowing_enabled": False,
+                            "usage_as_collateral_enabled": True,
+                            "is_active": True,
+                            "is_frozen": False,
+                            "ltv_bps": 0,  # real "no borrowing power" — must render 0.0%, not —
+                            "error": "",
+                        },
+                        {
+                            "symbol": "DAI",
+                            "address": "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063",
+                            "borrowing_enabled": None,
+                            "usage_as_collateral_enabled": None,
+                            "is_active": None,
+                            "is_frozen": None,
+                            "ltv_bps": None,
+                            "error": "execution reverted",
+                        },
+                    ],
+                },
+            )
+
+        mock_executor.execute = mock_execute
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "polygon", "lending-reserves"])
+        assert result.exit_code == 0
+        # Column headers + the WPOL row rendered as a table (not a Python list repr).
+        assert "SYMBOL" in result.output and "BORROW" in result.output and "LTV" in result.output
+        assert "WPOL" in result.output
+        assert "68.0%" in result.output  # 6800 bps formatted
+        assert "0.0%" in result.output  # ltv_bps == 0 is a real value, not "—" (Empty != Zero)
+        assert "[{" not in result.output  # not a flat list-of-dicts repr
+        # Failed reserve surfaced, not hidden.
+        assert "DAI" in result.output and "execution reverted" in result.output
+
     @patch("almanak.framework.cli.ax._get_executor")
     def test_portfolio_parses_token_list(self, mock_get_exec):
         """--tokens 'USDC,WETH' should split into a list before dispatch."""

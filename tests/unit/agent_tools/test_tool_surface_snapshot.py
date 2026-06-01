@@ -99,7 +99,7 @@ def test_tool_surface_matches_golden() -> None:
 
 
 def test_tool_surface_count_is_pinned() -> None:
-    """Sanity pin: 38 tools both ways (mirrors test_catalog.py count pins)."""
+    """Sanity pin: 39 tools both ways (mirrors test_catalog.py count pins)."""
     surface = _render_surface()
-    assert len(surface["openai_tools"]) == 38
-    assert len(surface["mcp_tools"]) == 38
+    assert len(surface["openai_tools"]) == 39
+    assert len(surface["mcp_tools"]) == 39

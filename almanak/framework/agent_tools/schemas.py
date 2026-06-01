@@ -272,6 +272,57 @@ class ListLendingPositionsResponse(BaseModel):
     health_factor: str = Field(default="", description="1e18-scaled health factor as decimal string; '∞' when no debt.")
 
 
+class ListLendingReservesRequest(BaseModel):
+    """List a lending protocol's reserves with per-reserve config flags.
+
+    Read-only discovery. Answers "which assets can I actually borrow / use as
+    collateral on this market?" before configuring a strategy — so an operator
+    doesn't pick a supply-only or paused reserve and only discover it at the
+    borrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain
+    reserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a
+    curated table) and reads each reserve's live ``getReserveConfigurationData``.
+    """
+
+    chain: str = Field(default="arbitrum")
+    protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 / Aave-V2-fork shaped for v1).")
+    asset: str = Field(default="", description="Optional single reserve symbol to filter to (e.g. 'WMATIC').")
+    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
+
+
+class LendingReserveSummary(BaseModel):
+    symbol: str
+    address: str = Field(description="Reserve underlying token address (lowercased)")
+    borrowing_enabled: bool | None = Field(
+        default=None,
+        description="True/False from live reserve config; None when the per-reserve read failed (unknown).",
+    )
+    usage_as_collateral_enabled: bool | None = None
+    is_active: bool | None = None
+    is_frozen: bool | None = None
+    ltv_bps: int | None = Field(default=None, description="Loan-to-value in basis points; None when unknown.")
+    error: str = Field(default="", description="Per-reserve read error, when the config could not be fetched.")
+
+
+class ListLendingReservesResponse(BaseModel):
+    schema_version: int = 1
+    chain: str
+    protocol: str
+    pool_data_provider: str = ""
+    count: int = 0
+    total_matched: int = Field(
+        default=0, description="Reserves matching the query before the safety cap; > count when truncated."
+    )
+    truncated: bool = Field(
+        default=False,
+        description="True when the reserve list was capped (count < total_matched) — list is not complete.",
+    )
+    truncation_reason: str = Field(
+        default="",
+        description="Why the list was truncated: '' | 'max_reserves' | 'latency_budget_exceeded'.",
+    )
+    reserves: list[LendingReserveSummary] = Field(default_factory=list)
+
+
 class GetPortfolioRequest(BaseModel):
     """Summarize a wallet's on-chain positions on a single chain.
 

@@ -214,6 +214,7 @@ Commands:
   lending-borrow    Borrow tokens from a lending protocol.
   lending-list      List a wallet's lending positions (account totals +...
   lending-repay     Repay a lending position.
+  lending-reserves  List a lending market's reserves with borrowable /...
   lending-supply    Supply tokens to a lending protocol.
   lending-withdraw  Withdraw supplied tokens from a lending protocol.
   lp-close          Close (fully withdraw) a liquidity position.

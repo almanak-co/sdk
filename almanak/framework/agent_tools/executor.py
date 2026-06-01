@@ -64,6 +64,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_LP_PROTOCOL = "uniswap_v3"
 DEFAULT_LENDING_PROTOCOL = "aave_v3"
 
+# VIB-4925: bound list_lending_reserves' per-reserve config fan-out so a slow /
+# hanging gateway can't make a read-only discovery call block for minutes.
+# Short per-call timeout + an overall wall-clock budget after enumeration; on
+# budget exhaustion the loop stops early and the response flags truncated with
+# truncation_reason="latency_budget_exceeded".
+_LENDING_RESERVES_PER_CALL_TIMEOUT_S = 3.0
+_LENDING_RESERVES_LATENCY_BUDGET_S = 25.0
+
 # The vault connector the vault tools (deploy/settle/state/approve/deposit/
 # teardown) construct their SDK/deployer/adapter from. Lagoon is the only
 # vault protocol today; the vault tools are not protocol-parameterized, so
@@ -803,6 +811,9 @@ class ToolExecutor:
 
         if tool_name == "list_lending_positions":
             return await self._execute_list_lending_positions(args)
+
+        if tool_name == "list_lending_reserves":
+            return await self._execute_list_lending_reserves(args)
 
         if tool_name == "get_portfolio":
             return await self._execute_get_portfolio(args)
@@ -2270,13 +2281,18 @@ class ToolExecutor:
     _SELECTOR_BALANCE_OF = "0x70a08231"  # ERC20/ERC721 balanceOf(address)
     _SELECTOR_GET_USER_ACCOUNT_DATA = "0xbf92857c"  # Aave V3 Pool.getUserAccountData(address)
 
-    def _rpc_call(self, chain: str, to: str, data: str, id_: str, network: str = "") -> tuple[bool, str]:
+    def _rpc_call(
+        self, chain: str, to: str, data: str, id_: str, network: str = "", timeout: float = 30.0
+    ) -> tuple[bool, str]:
         """Single eth_call helper used by list/portfolio read paths.
 
         Returns (success, result_hex_without_0x | error_message). When the
         gateway surfaces a JSON-RPC error envelope (``{"code": ..., "message":
         ...}``), extract the revert message so callers get something useful
         instead of ``"unexpected rpc result type: dict"``.
+
+        ``timeout`` bounds the per-call gateway wait; callers that fan out over
+        many reserves pass a short value so worst-case latency stays bounded.
         """
         from almanak.gateway.proto import gateway_pb2
 
@@ -2288,7 +2304,7 @@ class ToolExecutor:
                 id=id_,
                 network=network,
             ),
-            timeout=30.0,
+            timeout=timeout,
         )
         if not resp.success:
             return False, resp.error or "rpc error"
@@ -2569,6 +2585,194 @@ class ToolExecutor:
                 "current_liquidation_threshold_bps": current_liq_threshold,
                 "ltv_bps": ltv,
                 "health_factor": hf_str,
+            },
+        )
+
+    async def _execute_list_lending_reserves(self, args: dict) -> ToolResponse:
+        """List a lending market's reserves with per-reserve config flags.
+
+        Read-only discovery (VIB-4925). Answers "which assets can I actually
+        borrow / use as collateral here?" before a strategy is configured, so
+        an operator doesn't pick a supply-only or paused reserve and only learn
+        it at the borrow step of a lifecycle run.
+
+        The reserve set is enumerated live from the PoolDataProvider's
+        ``getAllReservesTokens()`` — NOT a curated table — so the tool cannot
+        have the very blind spot it exists to remove. For each reserve it then
+        reads ``getReserveConfigurationData`` and decodes the
+        ``borrowingEnabled`` / ``usageAsCollateralEnabled`` / ``isActive`` /
+        ``isFrozen`` / ``ltv`` flags via the same shared decoder the compiler
+        pre-flights (VIB-3701/3749/3825) use. A per-reserve *config* read
+        failure is surfaced as an ``error`` on that row (flags left ``None``)
+        rather than failing the whole command — the same fail-open contract as
+        the pre-flight, so one dead reserve doesn't blind the operator to the
+        rest. *Enumeration* failure, by contrast, is fatal: a partial list
+        would silently recreate the blind spot.
+        """
+        from almanak.connectors._strategy_base.base.lending.aave_helpers import (
+            _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR,
+            _AAVE_GET_RESERVE_CONFIG_SELECTOR,
+            _resolve_pool_data_provider,
+            decode_all_reserves_tokens,
+            decode_reserve_configuration_data,
+        )
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
+        asset_filter = (args.get("asset") or "").strip()
+
+        # v1 is Aave-V3 / Aave-V2-fork shaped — they share the
+        # getAllReservesTokens / getReserveConfigurationData ABI.
+        if protocol != DEFAULT_LENDING_PROTOCOL:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lending_reserves: unsupported protocol '{protocol}'. v1 supports: ['aave_v3']",
+                ),
+            )
+
+        provider = _resolve_pool_data_provider(chain, protocol)
+        if not provider:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.UNSUPPORTED_CHAIN,
+                    f"{protocol} PoolDataProvider not configured on chain={chain}",
+                ),
+            )
+
+        # Enumerate the live on-chain reserve set. Fatal on failure — falling
+        # back to a partial / curated list would silently reintroduce the
+        # discovery blind spot this tool exists to remove.
+        ok, raw = self._rpc_call(chain, provider, _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR, "aave_all_reserves", network)
+        if not ok:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.RPC_FAILED, f"getAllReservesTokens() failed: {raw}", recoverable=True),
+            )
+        tokens = decode_all_reserves_tokens(raw)
+        if tokens is None:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED, "could not decode getAllReservesTokens() response", recoverable=True
+                ),
+            )
+
+        # Optional single-reserve filter (case-insensitive symbol match).
+        # Applied BEFORE the DOS cap so a filtered asset that sorts past the cap
+        # boundary on a huge reserve set isn't wrongly reported as not-active;
+        # the "active reserves" hint also lists the full enumerated set.
+        if asset_filter:
+            filtered = [(s, a) for (s, a) in tokens if s.lower() == asset_filter.lower()]
+            if not filtered:
+                known = sorted(s for s, _ in tokens)
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.VALIDATION_ERROR,
+                        # Pre-config-read we only know the symbol is listed by
+                        # getAllReservesTokens(), not that isActive==true.
+                        f"Asset '{asset_filter}' is not a listed reserve on {protocol} {chain}. Listed reserves: {known}",
+                    ),
+                )
+            tokens = filtered
+
+        # DOS cap mirroring list_lp_positions: a hostile / buggy provider can't
+        # make us issue an unbounded number of follow-up config reads. (After
+        # the filter, so a single-asset query is never truncated.)
+        _MAX_RESERVES = 512
+        total_matched = len(tokens)  # reserves matching the query before the cap
+        truncated = total_matched > _MAX_RESERVES
+        truncation_reason = "max_reserves" if truncated else ""
+        if truncated:
+            logger.warning(
+                "list_lending_reserves: %s %s matched %d reserves; capping at %d (response flags truncated=true)",
+                protocol,
+                chain,
+                total_matched,
+                _MAX_RESERVES,
+            )
+            tokens = tokens[:_MAX_RESERVES]
+
+        # Bound total fan-out latency: short per-call timeout + an overall
+        # wall-clock budget started after enumeration. On budget exhaustion we
+        # stop early and flag truncation (latency_budget_exceeded) rather than
+        # block a read-only discovery call for minutes on a slow gateway.
+        reserves: list[dict] = []
+        budget_start = time.monotonic()
+        for symbol, address in tokens:
+            # Hard bound: stop when the budget is spent, and clamp each call's
+            # timeout to the remaining budget so total wall-clock never exceeds
+            # _LENDING_RESERVES_LATENCY_BUDGET_S (a pre-call check alone could be
+            # overshot by up to one per-call timeout).
+            remaining = _LENDING_RESERVES_LATENCY_BUDGET_S - (time.monotonic() - budget_start)
+            if remaining <= 0:
+                truncated = True
+                truncation_reason = "latency_budget_exceeded"
+                logger.warning(
+                    "list_lending_reserves: %s %s exceeded %.0fs latency budget after %d/%d reserves; "
+                    "returning partial (truncated=true)",
+                    protocol,
+                    chain,
+                    _LENDING_RESERVES_LATENCY_BUDGET_S,
+                    len(reserves),
+                    total_matched,
+                )
+                break
+            call_timeout = min(_LENDING_RESERVES_PER_CALL_TIMEOUT_S, remaining)
+            row: dict = {
+                "symbol": symbol,
+                "address": address.lower(),
+                "borrowing_enabled": None,
+                "usage_as_collateral_enabled": None,
+                "is_active": None,
+                "is_frozen": None,
+                "ltv_bps": None,
+                "error": "",
+            }
+            asset_padded = address.removeprefix("0x").lower().zfill(64)
+            ok, raw = self._rpc_call(
+                chain,
+                provider,
+                _AAVE_GET_RESERVE_CONFIG_SELECTOR + asset_padded,
+                f"aave_reserve_cfg:{symbol}",
+                network,
+                timeout=call_timeout,
+            )
+            if not ok:
+                row["error"] = raw
+                reserves.append(row)
+                continue
+            cfg = decode_reserve_configuration_data(raw)
+            if cfg is None:
+                raw_len = len(raw) if isinstance(raw, str) else 0
+                row["error"] = f"unexpected reserve-config payload (len={raw_len} hex chars)"
+                reserves.append(row)
+                continue
+            row.update(
+                borrowing_enabled=cfg.borrowing_enabled,
+                usage_as_collateral_enabled=cfg.usage_as_collateral_enabled,
+                is_active=cfg.is_active,
+                is_frozen=cfg.is_frozen,
+                ltv_bps=cfg.ltv,
+            )
+            reserves.append(row)
+
+        return ToolResponse(
+            status="success",
+            data={
+                "schema_version": 1,
+                "chain": chain,
+                "protocol": protocol,
+                "pool_data_provider": provider,
+                "count": len(reserves),
+                "total_matched": total_matched,
+                "truncated": truncated,
+                "truncation_reason": truncation_reason,
+                "reserves": reserves,
             },
         )
 

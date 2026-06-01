@@ -137,6 +137,7 @@ almanak ax price ETH                           # Get token price
 almanak ax balance USDC --chain base           # Check wallet balance
 almanak ax swap USDC ETH 100 --dry-run         # Simulate a swap
 almanak ax swap USDC ETH 100                   # Execute after confirmation
+almanak ax --chain polygon lending-reserves    # Which Aave reserves are borrowable/active before you configure a strategy
 almanak ax -n "swap 5 USDC to WETH on base"   # Natural language mode
 
 # Strategy development

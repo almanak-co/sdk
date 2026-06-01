@@ -249,6 +249,15 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         latency_class=LatencyClass.MEDIUM,
     ),
     ToolDefinition(
+        name="list_lending_reserves",
+        description="List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+        category=ToolCategory.DATA,
+        risk_tier=RiskTier.NONE,
+        request_schema=schemas.ListLendingReservesRequest,
+        response_schema=schemas.ListLendingReservesResponse,
+        latency_class=LatencyClass.SLOW,
+    ),
+    ToolDefinition(
         name="get_portfolio",
         description="Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
         category=ToolCategory.DATA,

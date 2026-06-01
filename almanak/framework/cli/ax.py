@@ -1477,6 +1477,115 @@ def lending_list(ctx, protocol, wallet_override, lend_network):
         sys.exit(1)
 
 
+@ax.command("lending-reserves")
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option("--asset", default="", help="Filter to a single reserve symbol (e.g. 'WMATIC').")
+@click.pass_context
+def lending_reserves(ctx, protocol, asset):
+    """List a lending market's reserves with borrowable / active flags.
+
+    Read-only. Shows, per reserve, whether borrowing is enabled, whether the
+    reserve is active/frozen, and its LTV — so you can pick a borrowable asset
+    before configuring a strategy, instead of discovering a supply-only reserve
+    at the borrow step of a lifecycle run. Reserves are enumerated live from the
+    market's PoolDataProvider, not a curated list.
+
+    Network follows the group-level ``--network`` (which also controls
+    gateway auto-start): use ``almanak ax --network anvil lending-reserves``
+    for a local Anvil fork.
+
+    \b
+    Examples:
+        almanak ax --chain polygon lending-reserves          # Aave V3 Polygon
+        almanak ax --chain polygon lending-reserves --asset WMATIC
+        almanak ax --chain base --json lending-reserves
+    """
+    from almanak.framework.cli.ax_render import render_error, render_result
+
+    json_output = ctx.obj["json_output"]
+    effective_network = ctx.obj.get("network") or "mainnet"
+    try:
+        response = _run_tool(
+            ctx,
+            "list_lending_reserves",
+            {
+                "chain": ctx.obj["chain"],
+                "protocol": protocol,
+                "asset": asset,
+                "network": effective_network,
+            },
+        )
+        # The generic renderer prints the reserves list as one flat repr, which
+        # is unreadable for an operator scanning 20+ reserves. Render a real
+        # column table for the human path; keep --json untouched for automation.
+        if json_output or response.status == "error":
+            render_result(response, json_output=json_output, title=f"Lending reserves ({protocol}, {ctx.obj['chain']})")
+        else:
+            _render_reserves_table(response, protocol=protocol, chain=ctx.obj["chain"])
+        if response.status == "error":
+            sys.exit(1)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(str(e), json_output=json_output)
+        sys.exit(1)
+
+
+def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
+    """Human-readable column table for `ax lending-reserves` (VIB-4925).
+
+    Columns: SYMBOL ADDRESS BORROW COLLAT ACTIVE FROZEN LTV%. A reserve whose
+    config read failed shows ``err`` in the flag columns and its error text on
+    a trailing line, so a single dead reserve is visible, not hidden.
+    """
+    data = response.data or {}
+    reserves = data.get("reserves", [])
+    header = click.style(f"Lending reserves ({protocol}, {chain})", bold=True)
+    click.echo(f"\n{header}  —  {data.get('count', len(reserves))} reserves @ {data.get('pool_data_provider', '?')}")
+    if data.get("truncated"):
+        reason = data.get("truncation_reason") or "capped"
+        click.echo(
+            click.style(
+                f"  ! list truncated ({reason}) — showing {data.get('count')} of {data.get('total_matched')} reserves",
+                fg="yellow",
+            )
+        )
+
+    def _flag(v) -> str:
+        return "—" if v is None else ("yes" if v else "no")
+
+    def _ltv(v) -> str:
+        # Empty != Zero: ltv_bps == 0 is a real "no borrowing power" value (show
+        # 0.0%); only None / unmeasured renders as "—".
+        return "—" if v is None else f"{v / 100:.1f}%"
+
+    rows = []
+    for r in reserves:
+        rows.append(
+            (
+                str(r.get("symbol", "")),
+                str(r.get("address", "")),
+                "err" if r.get("error") else _flag(r.get("borrowing_enabled")),
+                "err" if r.get("error") else _flag(r.get("usage_as_collateral_enabled")),
+                "err" if r.get("error") else _flag(r.get("is_active")),
+                "err" if r.get("error") else _flag(r.get("is_frozen")),
+                "—" if r.get("error") else _ltv(r.get("ltv_bps")),
+            )
+        )
+    headers = ("SYMBOL", "ADDRESS", "BORROW", "COLLAT", "ACTIVE", "FROZEN", "LTV")
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i]) for i in range(len(headers))
+    ]
+    click.echo("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    click.echo("  ".join("-" * widths[i] for i in range(len(headers))))
+    for row in rows:
+        click.echo("  ".join(str(row[i]).ljust(widths[i]) for i in range(len(headers))))
+    # Surface any per-reserve read errors below the table (not hidden).
+    for r in reserves:
+        if r.get("error"):
+            click.echo(click.style(f"  ! {r.get('symbol', '?')}: {r['error']}", fg="yellow"))
+
+
 @ax.command("portfolio")
 @click.option(
     "--tokens",

@@ -321,3 +321,289 @@ async def test_list_lending_positions_no_debt_infinite_hf_golden() -> None:
     )
     assert result.status == "success", result.error
     assert result.data["health_factor"] == "∞"
+
+
+# ---------------------------------------------------------------------------
+# list_lending_reserves — Aave V3 on polygon (VIB-4925). The tool enumerates the
+# live on-chain reserve set via getAllReservesTokens(), then decodes each
+# reserve's getReserveConfigurationData (10 words). Both decodes are the byte-
+# equivalence contract. Mirrors the real colleague report: WMATIC is supply/
+# collateral-only (borrowingEnabled=false), USDC is borrowable.
+# ---------------------------------------------------------------------------
+
+# Real Polygon Aave V3 reserve addresses (lowercased) — used so the on-chain
+# enumeration fixture and the row assertions line up with reality.
+_WMATIC_POLYGON = "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"
+_USDC_POLYGON = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+_DAI_POLYGON = "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063"
+
+
+def _reserve_cfg_hex(*, ltv: int, usage: bool, borrow: bool, active: bool, frozen: bool) -> str:
+    """Encode the 10-word getReserveConfigurationData tuple (only the decoded words matter)."""
+    return (
+        _hex_word(6)  # decimals (unused by decoder)
+        + _hex_word(ltv)
+        + _hex_word(8250)  # liquidationThreshold (unused)
+        + _hex_word(10500)  # liquidationBonus (unused)
+        + _hex_word(1000)  # reserveFactor (unused)
+        + _hex_word(1 if usage else 0)
+        + _hex_word(1 if borrow else 0)
+        + _hex_word(0)  # stableBorrowRateEnabled (unused)
+        + _hex_word(1 if active else 0)
+        + _hex_word(1 if frozen else 0)
+    )
+
+
+def _all_reserves_hex(tokens: list[tuple[str, str]]) -> str:
+    """ABI-encode getAllReservesTokens() -> TokenData[] (string symbol, address)."""
+    from eth_abi import encode as _abi_encode
+
+    return _abi_encode(["(string,address)[]"], [tokens]).hex()
+
+
+def _make_reserves_executor(gateway: Any) -> ToolExecutor:
+    """Executor allowing any chain so the polygon market is reachable."""
+    executor = _make_executor(gateway)
+    # Read-only discovery isn't wallet- or chain-scoped to the test set.
+    executor._policy_engine.policy.allowed_chains = None
+    return executor
+
+
+def _reserves_gateway(enumeration: list[tuple[str, str]], cfg_for: Any) -> Any:
+    """Scripted gateway: answers getAllReservesTokens() then per-symbol config.
+
+    ``cfg_for(symbol)`` returns either a config-hex string (wrapped via _rpc_ok)
+    or the literal ``"FAIL"`` to simulate a per-reserve RPC failure.
+    """
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "aave_all_reserves":
+            return _rpc_ok(_all_reserves_hex(enumeration))
+        symbol = req.id.split(":", 1)[1]
+        out = cfg_for(symbol)
+        if out == "FAIL":
+            resp = MagicMock()
+            resp.success = False
+            resp.error = "execution reverted"
+            return resp
+        return _rpc_ok(out)
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    return gateway
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_polygon_golden() -> None:
+    # On-chain enumeration returns WMATIC, USDC, DAI. WMATIC is collateral-
+    # capable but NOT borrowable (the reported case); USDC is fully borrowable;
+    # DAI's config read is forced to fail to prove the fail-open per-reserve
+    # contract (row carries an error, flags None, the rest still reported).
+    enumeration = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON), ("DAI", _DAI_POLYGON)]
+
+    def _cfg_for(symbol: str) -> str:
+        if symbol == "DAI":
+            return "FAIL"
+        if symbol == "WMATIC":
+            # Real Polygon values: collateral-enabled, ltv 6800, NOT borrowable.
+            return _reserve_cfg_hex(ltv=6800, usage=True, borrow=False, active=True, frozen=False)
+        return _reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False)
+
+    executor = _make_reserves_executor(_reserves_gateway(enumeration, _cfg_for))
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3"},
+    )
+
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["schema_version"] == 1
+    assert d["chain"] == "polygon"
+    assert d["pool_data_provider"]  # resolved from the chain table
+    assert d["count"] == 3  # every enumerated reserve reported (incl. the failed one)
+    assert d["truncated"] is False  # well under the safety cap
+    assert d["truncation_reason"] == ""
+    assert d["total_matched"] == d["count"]
+    by_symbol = {r["symbol"]: r for r in d["reserves"]}
+
+    # Headline contract: WMATIC is collateral-capable but not borrowable; USDC is borrowable.
+    assert by_symbol["WMATIC"]["borrowing_enabled"] is False
+    assert by_symbol["WMATIC"]["usage_as_collateral_enabled"] is True
+    assert by_symbol["WMATIC"]["is_active"] is True  # pins the isActive (word 8) decode bit
+    assert by_symbol["WMATIC"]["is_frozen"] is False  # pins the isFrozen (word 9) decode bit
+    assert by_symbol["WMATIC"]["ltv_bps"] == 6800
+    assert by_symbol["WMATIC"]["address"] == _WMATIC_POLYGON  # address comes from on-chain enumeration
+    assert by_symbol["USDC"]["borrowing_enabled"] is True
+    assert by_symbol["USDC"]["usage_as_collateral_enabled"] is True
+    assert by_symbol["USDC"]["is_active"] is True
+    assert by_symbol["USDC"]["ltv_bps"] == 7000
+
+    # Fail-open: a dead reserve read surfaces an error row, ALL flags stay None
+    # (Empty != Zero — not fabricated booleans), and the rest is still reported.
+    assert by_symbol["DAI"]["borrowing_enabled"] is None
+    assert by_symbol["DAI"]["is_active"] is None
+    assert by_symbol["DAI"]["is_frozen"] is None
+    assert by_symbol["DAI"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_asset_filter_golden() -> None:
+    enumeration = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=6800, usage=True, borrow=False, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3", "asset": "wmatic"},  # case-insensitive
+    )
+    assert result.status == "success", result.error
+    assert result.data["count"] == 1
+    assert result.data["reserves"][0]["symbol"] == "WMATIC"
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_unknown_asset_returns_error() -> None:
+    enumeration = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=0, usage=False, borrow=False, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3", "asset": "DOGE"},
+    )
+    assert result.status == "error"
+    assert "not a listed reserve" in result.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_truncation_is_signaled() -> None:
+    # A market exceeding the 512 safety cap must NOT be silently truncated:
+    # the response flags truncated=true and reports total_matched.
+    enumeration = [(f"T{i}", "0x" + f"{i:040x}") for i in range(513)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=5000, usage=True, borrow=True, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3"},
+    )
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["truncated"] is True
+    assert d["truncation_reason"] == "max_reserves"
+    assert d["count"] == 512
+    assert d["total_matched"] == 513
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_asset_past_cap_still_found() -> None:
+    # Filter runs BEFORE the DOS cap, so an asset sitting past the 512-reserve
+    # boundary is still found rather than wrongly reported as not-active.
+    enumeration = [(f"T{i}", "0x" + f"{i:040x}") for i in range(600)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=5000, usage=True, borrow=True, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3", "asset": "T599"},
+    )
+    assert result.status == "success", result.error
+    assert result.data["count"] == 1
+    assert result.data["truncated"] is False
+    assert result.data["reserves"][0]["symbol"] == "T599"
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_latency_budget_truncates(monkeypatch) -> None:
+    # An exhausted wall-clock budget stops the per-reserve fan-out early and is
+    # surfaced (truncated + truncation_reason), never silently returning a
+    # partial list as if complete. Force the budget negative so the check trips
+    # on the first iteration, deterministically (no dependence on the clock).
+    from almanak.framework.agent_tools import executor as _executor_mod
+
+    monkeypatch.setattr(_executor_mod, "_LENDING_RESERVES_LATENCY_BUDGET_S", -1.0)
+    enumeration = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON), ("DAI", _DAI_POLYGON)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=5000, usage=True, borrow=True, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3"},
+    )
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["truncated"] is True
+    assert d["truncation_reason"] == "latency_budget_exceeded"
+    assert d["total_matched"] == 3
+    assert d["count"] < d["total_matched"]  # stopped early
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_enumeration_failure_is_fatal() -> None:
+    # getAllReservesTokens() failing is fatal — a partial list would silently
+    # reintroduce the discovery blind spot.
+    def _call(req: Any, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.success = False
+        resp.error = "UNAVAILABLE"
+        return resp
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "aave_v3"},
+    )
+    assert result.status == "error"
+    assert "getAllReservesTokens" in result.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_unsupported_protocol_returns_error() -> None:
+    gateway = MagicMock()
+    executor = _make_reserves_executor(gateway)
+    executor._policy_engine.policy.allowed_protocols = None  # reach the handler's own guard
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "polygon", "protocol": "compound_v3"},
+    )
+    assert result.status == "error"
+    assert "unsupported protocol" in result.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_unsupported_chain_returns_error() -> None:
+    gateway = MagicMock()
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "solana", "protocol": "aave_v3"},
+    )
+    assert result.status == "error"
+    # Aave V3 has no PoolDataProvider on solana → fail before any RPC.
+    gateway.rpc.Call.assert_not_called()
+
+
+def test_decode_all_reserves_tokens_roundtrip_and_garbage() -> None:
+    """Pure decoder: round-trips a TokenData[] payload, returns None on garbage."""
+    from almanak.connectors._strategy_base.base.lending.aave_helpers import decode_all_reserves_tokens
+
+    tokens = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON)]
+    decoded = decode_all_reserves_tokens("0x" + _all_reserves_hex(tokens))
+    assert decoded == [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON)]
+    assert decode_all_reserves_tokens("0x1234") is None
+    assert decode_all_reserves_tokens("") is None
+    # Oversized declared array length is rejected before the full eth_abi decode.
+    oversized = (32).to_bytes(32, "big") + (10**9).to_bytes(32, "big")
+    assert decode_all_reserves_tokens("0x" + oversized.hex()) is None
