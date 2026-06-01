@@ -89,6 +89,79 @@ class NullPoolHistoryReader:
         return {}
 
 
+class NullPriceAggregator:
+    """Always-raises ``twap()`` / ``lwap()`` stub for backtest factories (VIB-4924).
+
+    ``MarketSnapshotBuilder.for_strategy_runner`` injects a real
+    ``GatewayMarketPriceAggregator`` (twap over the gateway ``GetDexTwap``
+    service, lwap over the gateway ``eth_call`` proxy). Doing the same on the
+    backtest / paper-fork surfaces would make replay nondeterministic — a live
+    gateway call at backtest time produces different results across runs. So the
+    backtest factories inject this null aggregator instead; strategies that
+    depend on ``twap(...)`` / ``lwap(...)`` must take a deterministic code path
+    (a static assumption, a fixture, or HOLD) inside backtests.
+
+    Mirrors ``NullPoolHistoryReader``: a thin shell that constructs NO
+    network / subprocess / FFI primitives. ``requires_decimals=False`` so
+    ``MarketSnapshot.twap`` does not attempt decimal-resolution eth_calls before
+    reaching the raising ``twap()``.
+    """
+
+    requires_decimals: bool = False
+
+    def twap(
+        self,
+        pool_address: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        window_seconds: int = 300,  # noqa: ARG002
+        token0_decimals: int | None = None,  # noqa: ARG002
+        token1_decimals: int | None = None,  # noqa: ARG002
+        protocol: str = "uniswap_v3",  # noqa: ARG002
+    ) -> None:
+        raise DataSourceUnavailable(source="twap", reason="backtest")
+
+    def lwap(
+        self,
+        token_a: str,  # noqa: ARG002
+        token_b: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        fee_tiers: list[int] | None = None,  # noqa: ARG002
+        protocols: list[str] | None = None,  # noqa: ARG002
+    ) -> None:
+        raise DataSourceUnavailable(source="lwap", reason="backtest")
+
+
+class NullPoolReaderRegistry:
+    """Always-raises pool-resolution stub for backtest factories (VIB-4924).
+
+    ``MarketSnapshot.twap`` resolves the pool via the registry *before* calling
+    the aggregator, so a ``None`` registry would raise a bare ``ValueError``
+    instead of the deterministic ``DataSourceUnavailable`` the backtest contract
+    expects. Injecting this stub makes ``twap()`` fail with the same
+    backtest-determinism signal as the other Null readers.
+
+    Thin shell — constructs NO primitives. ``supported_protocols`` returns an
+    empty list so the ``lwap`` protocol pre-check never silently passes a
+    backtest call through to a live resolution path.
+    """
+
+    def get_reader(self, chain: str, protocol: str) -> None:  # noqa: ARG002
+        raise DataSourceUnavailable(source="pool_reader_registry", reason="backtest")
+
+    @property
+    def supported_protocols(self) -> list[str]:
+        return []
+
+    def protocols_for_chain(self, chain: str) -> list[str]:  # noqa: ARG002
+        # ``MarketSnapshot.lwap``'s protocol pre-check calls this when explicit
+        # protocols are passed. An empty list means any explicitly-requested
+        # protocol is reported unsupported in a backtest (the lwap call then
+        # fails closed via the Null aggregator) rather than raising AttributeError.
+        return []
+
+
 __all__ = [
     "NullPoolHistoryReader",
+    "NullPoolReaderRegistry",
+    "NullPriceAggregator",
 ]

@@ -103,6 +103,17 @@ class MarketSnapshotBuilder:
 
             pool_analytics_reader = PoolAnalyticsReader(gateway_client=gateway_client)
 
+        # VIB-4924 / ALM-2770: wire the twap()/lwap() providers that were unwired
+        # in the hosted runner (strategy stuck in perpetual safe-HOLD because
+        # MarketSnapshot.twap/lwap raised "No price aggregator configured").
+        # twap routes through the gateway GetDexTwap service; lwap runs the
+        # existing liquidity-weighted aggregator over the gateway eth_call proxy
+        # (source="gateway_rpc"). A strategy may inject its own; otherwise these
+        # are built from the wired gateway_client. When no gateway_client is
+        # available, both stay None and MarketSnapshot.twap/lwap raise a clear
+        # "not configured" error instead of silently degrading.
+        price_aggregator, pool_reader_registry = _build_gateway_price_providers(strategy, gateway_client)
+
         # T3-B (VIB-4844): stateless calculators are pure Python — no gateway,
         # no egress, no secrets. Construct them directly so the documented
         # MarketSnapshot surface (`il_exposure`, `projected_il`, `realized_vol`,
@@ -127,6 +138,8 @@ class MarketSnapshotBuilder:
                 aave_health_factor_provider=aave_health_factor_provider
                 or getattr(strategy, "_aave_health_factor_provider", None),
                 pool_analytics_reader=pool_analytics_reader,
+                price_aggregator=price_aggregator,
+                pool_reader_registry=pool_reader_registry,
                 il_calculator=il_calculator,
                 volatility_calculator=volatility_calculator,
                 risk_calculator=risk_calculator,
@@ -154,6 +167,8 @@ class MarketSnapshotBuilder:
             funding_rate_provider=getattr(strategy, "funding_rate_provider", None)
             or getattr(strategy, "_funding_rate_provider", None),
             pool_analytics_reader=pool_analytics_reader,
+            price_aggregator=price_aggregator,
+            pool_reader_registry=pool_reader_registry,
             il_calculator=il_calculator,
             volatility_calculator=volatility_calculator,
             risk_calculator=risk_calculator,
@@ -189,7 +204,11 @@ class MarketSnapshotBuilder:
         the live ``PoolHistoryReader`` (per VIB-4755 D-4: the cut-over is
         gated on VIB-4730 hosted-egress + VIB-4863 TheGraph API key landing).
         """
-        from almanak.framework.data.null_readers import NullPoolHistoryReader
+        from almanak.framework.data.null_readers import (
+            NullPoolHistoryReader,
+            NullPoolReaderRegistry,
+            NullPriceAggregator,
+        )
         from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
 
         # T3-B (VIB-4844): inject the real stateless calculators on the backtest
@@ -212,6 +231,10 @@ class MarketSnapshotBuilder:
             funding_rate_provider=getattr(state, "funding_rate_provider", None),
             pool_analytics_reader=NullPoolAnalyticsReader(),
             pool_history_reader=NullPoolHistoryReader(),
+            # VIB-4924: twap()/lwap() must fail deterministically in backtests
+            # (a live gateway call at replay time = nondeterministic results).
+            price_aggregator=NullPriceAggregator(),
+            pool_reader_registry=NullPoolReaderRegistry(),
             il_calculator=il_calculator,
             volatility_calculator=volatility_calculator,
             risk_calculator=risk_calculator,
@@ -239,7 +262,11 @@ class MarketSnapshotBuilder:
         # same-fork produce different results across runs.
         # VIB-4728 / POOL-7 (VIB-4755) extends the same injection to pool
         # history via NullPoolHistoryReader.
-        from almanak.framework.data.null_readers import NullPoolHistoryReader
+        from almanak.framework.data.null_readers import (
+            NullPoolHistoryReader,
+            NullPoolReaderRegistry,
+            NullPriceAggregator,
+        )
         from almanak.framework.data.pools.analytics import NullPoolAnalyticsReader
 
         # T3-B (VIB-4844): stateless calculators are pure math and deterministic
@@ -253,6 +280,9 @@ class MarketSnapshotBuilder:
             gateway_client=gateway_client,
             pool_analytics_reader=NullPoolAnalyticsReader(),
             pool_history_reader=NullPoolHistoryReader(),
+            # VIB-4924: deterministic twap()/lwap() failure under fork replay.
+            price_aggregator=NullPriceAggregator(),
+            pool_reader_registry=NullPoolReaderRegistry(),
             il_calculator=il_calculator,
             volatility_calculator=volatility_calculator,
             risk_calculator=risk_calculator,
@@ -400,6 +430,74 @@ def _build_stateless_calculators(
     volatility_calculator = _injected("volatility_calculator") or RealizedVolatilityCalculator()
     risk_calculator = _injected("risk_calculator") or PortfolioRiskCalculator()
     return il_calculator, volatility_calculator, risk_calculator
+
+
+def _build_gateway_price_providers(
+    strategy: Any,
+    gateway_client: Any | None,
+) -> tuple[Any, Any]:
+    """Build the VIB-4924 twap()/lwap() providers for the live runner.
+
+    Returns ``(price_aggregator, pool_reader_registry)``.
+
+    ``twap()`` routes through the gateway ``GetDexTwap`` service and ``lwap()``
+    runs the existing liquidity-weighted aggregator over the gateway ``eth_call``
+    proxy — both gateway-boundary compliant (no direct strategy-container
+    egress). The aggregator and the registry share one ``eth_call`` closure and
+    one ``PoolReaderRegistry`` (constructed with ``source_name="gateway_rpc"``
+    so the lwap envelope carries honest provenance, VIB-4924 H3).
+
+    A strategy may inject its own ``price_aggregator`` / ``pool_reader_registry``
+    (public or private attribute); those are honored first. When no
+    ``gateway_client`` is available (unusual — typically only misconfigured
+    tests) the providers stay ``None`` so ``MarketSnapshot.twap/lwap`` raise a
+    clear "not configured" error instead of silently degrading.
+    """
+    price_aggregator = getattr(strategy, "price_aggregator", None) or getattr(strategy, "_price_aggregator", None)
+    pool_reader_registry = getattr(strategy, "pool_reader_registry", None) or getattr(
+        strategy, "_pool_reader_registry", None
+    )
+
+    if price_aggregator is not None and pool_reader_registry is not None:
+        return price_aggregator, pool_reader_registry
+    if gateway_client is None:
+        # Nothing to build from; return whatever (possibly partial) overrides
+        # exist. A None aggregator yields the clear "not configured" raise.
+        return price_aggregator, pool_reader_registry
+
+    from almanak.framework.data.pools.reader import PoolReaderRegistry
+    from almanak.framework.data.tokens import get_token_resolver
+    from almanak.framework.market.gateway_price_aggregator import GatewayMarketPriceAggregator
+
+    def _rpc_call(chain_name: str, to: str, calldata: str) -> bytes:
+        # Mirror dashboard/custom/api_client.py: the sanctioned gateway eth_call
+        # proxy. None / "0x" → empty bytes so decoders raise the typed
+        # "response too short" error rather than crashing on None.
+        raw = gateway_client.eth_call(chain=chain_name, to=to, data=calldata)
+        if not raw or raw == "0x":
+            return b""
+        return bytes.fromhex(raw.removeprefix("0x"))
+
+    if pool_reader_registry is None:
+        # VIB-4924 B1: wire the registry-based TokenResolver so the readers can
+        # map the canonical *symbols* produced by ``resolve_instrument``
+        # ("WETH", "USDC") to pool-key addresses. Without it,
+        # ``reader._resolve_to_address("WETH")`` returns None and
+        # ``twap("WETH/USDC")`` / ``lwap("WETH/USDC")`` resolve no pool and HOLD
+        # forever (ALM-2770's own call site). ``get_token_resolver()`` is
+        # registry-backed (no egress) — gateway-boundary safe.
+        pool_reader_registry = PoolReaderRegistry(
+            rpc_call=_rpc_call,
+            token_resolver=get_token_resolver(),
+            source_name="gateway_rpc",
+        )
+    if price_aggregator is None:
+        price_aggregator = GatewayMarketPriceAggregator(
+            gateway_client=gateway_client,
+            pool_registry=pool_reader_registry,
+            rpc_call=_rpc_call,
+        )
+    return price_aggregator, pool_reader_registry
 
 
 def _resolve_runtime_surface(runtime_context: Any | None, *, default: str) -> str:

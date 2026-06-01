@@ -5666,6 +5666,38 @@ class DexVolumePoint(_message.Message):
 Global___DexVolumePoint: _TypeAlias = DexVolumePoint  # noqa: Y015
 
 @_typing.final
+class DexLwapPoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    POOL_COUNT_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC — the gateway-side observation timestamp."""
+    price: _builtins.str
+    """Liquidity-weighted average of the pools' pool-native ``token1/token0``
+    human-readable price (Decimal-as-string). All weighted pools share the
+    same ``token0 = min(base, quote)`` orientation (the pair filter + V3
+    invariant), so the caller (MarketSnapshot) re-orients this single value to
+    the requested quote/base. Always non-empty on success — a fully
+    unreadable / zero-liquidity pool set fails closed (success=false), it
+    never emits an empty or fabricated price.
+    """
+    pool_count: _builtins.int
+    """Number of pools that contributed to the weighted average."""
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        price: _builtins.str = ...,
+        pool_count: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["pool_count", b"pool_count", "price", b"price", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexLwapPoint: _TypeAlias = DexLwapPoint  # noqa: Y015
+
+@_typing.final
 class GetLendingRateCurrentRequest(_message.Message):
     """-----------------------------------------------------------------------------
     Request / response envelopes
@@ -6129,6 +6161,102 @@ class DexVolumeHistoryResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DexVolumeHistoryResponse: _TypeAlias = DexVolumeHistoryResponse  # noqa: Y015
+
+@_typing.final
+class GetDexLwapRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESSES_FIELD_NUMBER: _builtins.int
+    MIN_LIQUIDITY_FIELD_NUMBER: _builtins.int
+    AS_OF_BLOCK_FIELD_NUMBER: _builtins.int
+    BASE_TOKEN_FIELD_NUMBER: _builtins.int
+    QUOTE_TOKEN_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    """Required. DEX identifier matching
+    ``GatewayDexLwapCapability.dex_name()`` on the connector. Used for
+    capability gating + provenance. Empty / unknown -> INVALID_ARGUMENT.
+    """
+    chain: _builtins.str
+    """Required. Chain name."""
+    min_liquidity: _builtins.str
+    """Optional. Minimum in-range liquidity (raw uint, Decimal-as-string) a
+    pool must have to be included in the weighting. Empty -> include all.
+    """
+    as_of_block: _builtins.int
+    """Optional. When > 0, pins the reads to this archive block; 0 = head."""
+    base_token: _builtins.str
+    """Optional (strongly recommended). The requested base / quote token
+    ADDRESSES. When both are set, the gateway reads each pool's token0/token1
+    (it already does, for decimals) and DROPS any pool that does not contain
+    exactly {base, quote} — so a wrong/foreign-pair pool address (e.g. a stale
+    known-pools entry pointing at a WETH/USDT pool) cannot poison the
+    liquidity-weighted aggregate of a WETH/USDC request. VIB-4924 B2 follow-on.
+    Empty -> no pair filtering (legacy: weight every readable pool as-is).
+    """
+    quote_token: _builtins.str
+    @_builtins.property
+    def pool_addresses(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """Required. One or more already-resolved pool contract addresses to read
+        and weight. The framework resolves these across fee tiers (reusing the
+        C1-correct best-pool / known-pools resolution); the gateway owns the
+        multi-pool reads + weighting. Empty -> INVALID_ARGUMENT.
+        """
+
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_addresses: _abc.Iterable[_builtins.str] | None = ...,
+        min_liquidity: _builtins.str = ...,
+        as_of_block: _builtins.int = ...,
+        base_token: _builtins.str = ...,
+        quote_token: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["as_of_block", b"as_of_block", "base_token", b"base_token", "chain", b"chain", "dex", b"dex", "min_liquidity", b"min_liquidity", "pool_addresses", b"pool_addresses", "quote_token", b"quote_token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetDexLwapRequest: _TypeAlias = GetDexLwapRequest  # noqa: Y015
+
+@_typing.final
+class DexLwapPointResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESSES_FIELD_NUMBER: _builtins.int
+    POINT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def pool_addresses(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def point(self) -> Global___DexLwapPoint: ...
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_addresses: _abc.Iterable[_builtins.str] | None = ...,
+        point: Global___DexLwapPoint | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "error", b"error", "point", b"point", "pool_addresses", b"pool_addresses", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexLwapPointResponse: _TypeAlias = DexLwapPointResponse  # noqa: Y015
 
 @_typing.final
 class ListStrategiesRequest(_message.Message):

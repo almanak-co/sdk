@@ -343,7 +343,7 @@ class TestTWAP:
         """twap() returns DataEnvelope[AggregatedPrice] from PriceAggregator."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -369,7 +369,7 @@ class TestTWAP:
         """twap() passes custom window_seconds."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -415,7 +415,7 @@ class TestTWAP:
 
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -434,7 +434,7 @@ class TestTWAP:
         """twap('ETH/USDC') canonicalizes to WETH/USDC."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -444,16 +444,16 @@ class TestTWAP:
         snapshot = _make_snapshot(pool_reader_registry=registry, price_aggregator=aggregator)
         snapshot.twap("ETH/USDC")
 
-        # resolve_pool_address should receive WETH (canonicalized)
-        mock_reader.resolve_pool_address.assert_called_once()
-        args = mock_reader.resolve_pool_address.call_args
+        # resolve_best_pool_address should receive WETH (canonicalized)
+        mock_reader.resolve_best_pool_address.assert_called_once()
+        args = mock_reader.resolve_best_pool_address.call_args
         assert args[0][0] == "WETH"  # base canonicalized
 
     def test_twap_pool_not_found_raises(self):
         """twap() raises when pool cannot be resolved."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = None
+        mock_reader.resolve_best_pool_address.return_value = None
         registry.get_reader.return_value = mock_reader
 
         aggregator = MagicMock()
@@ -466,7 +466,7 @@ class TestTWAP:
         """twap() wraps aggregator exceptions in PoolPriceUnavailableError."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -481,7 +481,7 @@ class TestTWAP:
         """twap() uses snapshot's chain when none specified."""
         registry = MagicMock()
         mock_reader = MagicMock()
-        mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 
@@ -681,7 +681,10 @@ class TestIntegration:
         registry.protocols_for_chain.return_value = ["uniswap_v3"]
         mock_reader = MagicMock()
         mock_reader.read_pool_price.return_value = _make_pool_price_envelope()
+        # pool_price_by_pair uses resolve_pool_address; twap uses the C1
+        # best-pool resolver — this test exercises both, so set up both.
         mock_reader.resolve_pool_address.return_value = "0xpool1"
+        mock_reader.resolve_best_pool_address.return_value = "0xpool1"
         mock_reader._get_pool_metadata.return_value = (18, 6, 500)
         registry.get_reader.return_value = mock_reader
 

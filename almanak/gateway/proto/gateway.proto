@@ -2016,6 +2016,14 @@ service RateHistoryService {
   // ``backtesting/pnl/providers/dex/``.
   rpc GetDexVolumeHistory(GetDexVolumeHistoryRequest)
       returns (DexVolumeHistoryResponse);
+
+  // Single liquidity-weighted spot price (LWAP) across the supplied
+  // ``pool_addresses`` for ``(chain, dex)``. The gateway reads slot0 +
+  // in-range liquidity for each pool server-side and returns
+  // ``LWAP = Σ(price·liquidity) / Σ(liquidity)``. Pool resolution stays
+  // framework-side (the caller passes already-resolved pools); the gateway
+  // owns the multi-pool reads + weighting (VIB-4948, L3 of ALM-2770).
+  rpc GetDexLwap(GetDexLwapRequest) returns (DexLwapPointResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -2077,6 +2085,23 @@ message DexVolumePoint {
   // Trading volume over the bucket, in USD. Decimal-as-string.
   // Empty when the upstream subgraph didn't measure this row.
   string volume_usd = 2;
+}
+
+message DexLwapPoint {
+  // Unix seconds, UTC — the gateway-side observation timestamp.
+  int64 timestamp = 1;
+
+  // Liquidity-weighted average of the pools' pool-native ``token1/token0``
+  // human-readable price (Decimal-as-string). All weighted pools share the
+  // same ``token0 = min(base, quote)`` orientation (the pair filter + V3
+  // invariant), so the caller (MarketSnapshot) re-orients this single value to
+  // the requested quote/base. Always non-empty on success — a fully
+  // unreadable / zero-liquidity pool set fails closed (success=false), it
+  // never emits an empty or fabricated price.
+  string price = 2;
+
+  // Number of pools that contributed to the weighted average.
+  int64 pool_count = 3;
 }
 
 // -----------------------------------------------------------------------------
@@ -2264,6 +2289,51 @@ message DexVolumeHistoryResponse {
   string pool_address = 3;
 
   repeated DexVolumePoint points = 4;
+
+  string source = 5;
+  bool success = 6;
+  string error = 7;
+}
+
+message GetDexLwapRequest {
+  // Required. DEX identifier matching
+  // ``GatewayDexLwapCapability.dex_name()`` on the connector. Used for
+  // capability gating + provenance. Empty / unknown -> INVALID_ARGUMENT.
+  string dex = 1;
+
+  // Required. Chain name.
+  string chain = 2;
+
+  // Required. One or more already-resolved pool contract addresses to read
+  // and weight. The framework resolves these across fee tiers (reusing the
+  // C1-correct best-pool / known-pools resolution); the gateway owns the
+  // multi-pool reads + weighting. Empty -> INVALID_ARGUMENT.
+  repeated string pool_addresses = 3;
+
+  // Optional. Minimum in-range liquidity (raw uint, Decimal-as-string) a
+  // pool must have to be included in the weighting. Empty -> include all.
+  string min_liquidity = 4;
+
+  // Optional. When > 0, pins the reads to this archive block; 0 = head.
+  int64 as_of_block = 5;
+
+  // Optional (strongly recommended). The requested base / quote token
+  // ADDRESSES. When both are set, the gateway reads each pool's token0/token1
+  // (it already does, for decimals) and DROPS any pool that does not contain
+  // exactly {base, quote} — so a wrong/foreign-pair pool address (e.g. a stale
+  // known-pools entry pointing at a WETH/USDT pool) cannot poison the
+  // liquidity-weighted aggregate of a WETH/USDC request. VIB-4924 B2 follow-on.
+  // Empty -> no pair filtering (legacy: weight every readable pool as-is).
+  string base_token = 6;
+  string quote_token = 7;
+}
+
+message DexLwapPointResponse {
+  string dex = 1;
+  string chain = 2;
+  repeated string pool_addresses = 3;
+
+  DexLwapPoint point = 4;
 
   string source = 5;
   bool success = 6;

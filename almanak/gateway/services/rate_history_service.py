@@ -55,6 +55,7 @@ import aiohttp
 import grpc
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayDexLwapCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
     GatewayFundingHistoryCapability,
@@ -129,6 +130,19 @@ class DexVolumePoint:
 
     timestamp: int
     volume_usd: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class DexLwapPoint:
+    """One DEX liquidity-weighted spot observation.
+
+    ``price`` is quote/base in human units; ``pool_count`` is the number of
+    pools that contributed to the weighted average.
+    """
+
+    timestamp: int
+    price: Decimal
+    pool_count: int = 0
 
 
 # =============================================================================
@@ -334,6 +348,18 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 )
             self._twap_providers[key] = twap_conn
 
+        self._lwap_providers: dict[str, GatewayDexLwapCapability] = {}
+        for lwap_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexLwapCapability):  # type: ignore[type-abstract]
+            key = str(lwap_conn.dex_name()).lower()
+            existing_lwap = self._lwap_providers.get(key)
+            if existing_lwap is not None and existing_lwap is not lwap_conn:
+                raise RuntimeError(
+                    f"Duplicate DEX LWAP provider for dex {key!r}: "
+                    f"{type(existing_lwap).__qualname__} vs "
+                    f"{type(lwap_conn).__qualname__}"
+                )
+            self._lwap_providers[key] = lwap_conn
+
         self._volume_providers: dict[str, GatewayDexVolumeCapability] = {}
         for volume_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexVolumeCapability):  # type: ignore[type-abstract]
             key = str(volume_conn.dex_name()).lower()
@@ -347,10 +373,11 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             self._volume_providers[key] = volume_conn
 
         logger.debug(
-            "Initialized RateHistoryService (lending=%s, funding=%s, twap=%s, volume=%s)",
+            "Initialized RateHistoryService (lending=%s, funding=%s, twap=%s, lwap=%s, volume=%s)",
             sorted(self._lending_providers.keys()),
             sorted(self._funding_providers.keys()),
             sorted(self._twap_providers.keys()),
+            sorted(self._lwap_providers.keys()),
             sorted(self._volume_providers.keys()),
         )
 
@@ -442,6 +469,14 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         return gateway_pb2.DexVolumePoint(
             timestamp=p.timestamp,
             volume_usd=cls._encode_decimal(p.volume_usd),
+        )
+
+    @classmethod
+    def _encode_lwap_point(cls, p: DexLwapPoint) -> gateway_pb2.DexLwapPoint:
+        return gateway_pb2.DexLwapPoint(
+            timestamp=p.timestamp,
+            price=cls._encode_decimal(p.price),
+            pool_count=p.pool_count,
         )
 
     @dataclass(frozen=True)
@@ -618,6 +653,32 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             msg = (
                 f"dex {dex!r} does not support TWAP on chain {chain!r} "
                 f"(supports: {sorted(provider.twap_supported_chains())})"
+            )
+            _invalid_argument(context, msg)
+            return None, msg
+        return provider, None
+
+    def _resolve_lwap_provider(
+        self,
+        dex: str,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[Any | None, str | None]:
+        """Look up the LWAP provider for ``dex`` and confirm chain support.
+
+        Mirrors ``_resolve_twap_provider``: ``(provider, None)`` on success,
+        ``(None, error_msg)`` + ``INVALID_ARGUMENT`` when the dex is unknown or
+        the chain is unsupported.
+        """
+        provider = self._lwap_providers.get(dex)
+        if provider is None:
+            msg = f"unsupported dex (lwap): {dex!r} (known: {sorted(self._lwap_providers.keys())})"
+            _invalid_argument(context, msg)
+            return None, msg
+        if chain not in provider.lwap_supported_chains():
+            msg = (
+                f"dex {dex!r} does not support LWAP on chain {chain!r} "
+                f"(supports: {sorted(provider.lwap_supported_chains())})"
             )
             _invalid_argument(context, msg)
             return None, msg
@@ -963,6 +1024,93 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             pool_address=pool_address,
             point=self._encode_twap_point(point),
             source="on_chain",
+            success=True,
+        )
+
+    # ---------------------------------------------------------------------
+    # RPC: GetDexLwap (VIB-4948 / L3 of ALM-2770)
+    # ---------------------------------------------------------------------
+
+    async def GetDexLwap(
+        self,
+        request: gateway_pb2.GetDexLwapRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.DexLwapPointResponse:
+        dex = _normalize_key(request.dex)
+        chain = _normalize_key(request.chain)
+        # Dedupe (case-insensitive, order-preserving): a repeated pool address
+        # would otherwise be read and weighted twice, letting a caller bias the
+        # liquidity-weighted average toward one pool (CodeRabbit).
+        pool_addresses: list[str] = []
+        _seen_pools: set[str] = set()
+        for a in request.pool_addresses:
+            a = a.strip()
+            if a and a.lower() not in _seen_pools:
+                _seen_pools.add(a.lower())
+                pool_addresses.append(a)
+        min_liquidity = request.min_liquidity.strip()
+        as_of_block = request.as_of_block if request.as_of_block > 0 else None
+        base_token = request.base_token.strip()
+        quote_token = request.quote_token.strip()
+
+        # Validator-first (mirrors _validate_twap_identity, adapted for the
+        # multi-pool shape — at least one pool address is required).
+        if not dex:
+            _invalid_argument(context, "dex is required")
+            return gateway_pb2.DexLwapPointResponse(success=False, error="dex is required")
+        if not chain:
+            _invalid_argument(context, "chain is required")
+            return gateway_pb2.DexLwapPointResponse(success=False, error="chain is required")
+        if not pool_addresses:
+            _invalid_argument(context, "pool_addresses is required (>= 1 address)")
+            return gateway_pb2.DexLwapPointResponse(success=False, error="pool_addresses is required")
+
+        provider, err = self._resolve_lwap_provider(dex, chain, context)
+        if provider is None:
+            return gateway_pb2.DexLwapPointResponse(
+                dex=dex,
+                chain=chain,
+                pool_addresses=pool_addresses,
+                success=False,
+                error=err or "no provider",
+            )
+
+        try:
+            point = await provider.fetch_lwap(
+                self,
+                chain=chain,
+                pool_addresses=pool_addresses,
+                min_liquidity=min_liquidity,
+                as_of_block=as_of_block,
+                base_token=base_token,
+                quote_token=quote_token,
+            )
+        except RateHistoryUnavailable as exc:
+            return gateway_pb2.DexLwapPointResponse(
+                dex=dex,
+                chain=chain,
+                pool_addresses=pool_addresses,
+                source=exc.source or "none",
+                success=False,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return self._handle_twap_internal_error(
+                exc,
+                context,
+                "GetDexLwap",
+                dex,
+                chain,
+                ",".join(pool_addresses),
+                response_cls=gateway_pb2.DexLwapPointResponse,
+            )
+
+        return gateway_pb2.DexLwapPointResponse(
+            dex=dex,
+            chain=chain,
+            pool_addresses=pool_addresses,
+            point=self._encode_lwap_point(point),
+            source="gateway_rpc",
             success=True,
         )
 

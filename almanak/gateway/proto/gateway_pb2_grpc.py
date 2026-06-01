@@ -3679,6 +3679,11 @@ class RateHistoryServiceStub(object):
                 request_serializer=gateway__pb2.GetDexVolumeHistoryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.DexVolumeHistoryResponse.FromString,
                 _registered_method=True)
+        self.GetDexLwap = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetDexLwap',
+                request_serializer=gateway__pb2.GetDexLwapRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DexLwapPointResponse.FromString,
+                _registered_method=True)
 
 
 class RateHistoryServiceServicer(object):
@@ -3778,6 +3783,18 @@ class RateHistoryServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetDexLwap(self, request, context):
+        """Single liquidity-weighted spot price (LWAP) across the supplied
+        ``pool_addresses`` for ``(chain, dex)``. The gateway reads slot0 +
+        in-range liquidity for each pool server-side and returns
+        ``LWAP = Σ(price·liquidity) / Σ(liquidity)``. Pool resolution stays
+        framework-side (the caller passes already-resolved pools); the gateway
+        owns the multi-pool reads + weighting (VIB-4948, L3 of ALM-2770).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RateHistoryServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3810,6 +3827,11 @@ def add_RateHistoryServiceServicer_to_server(servicer, server):
                     servicer.GetDexVolumeHistory,
                     request_deserializer=gateway__pb2.GetDexVolumeHistoryRequest.FromString,
                     response_serializer=gateway__pb2.DexVolumeHistoryResponse.SerializeToString,
+            ),
+            'GetDexLwap': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetDexLwap,
+                    request_deserializer=gateway__pb2.GetDexLwapRequest.FromString,
+                    response_serializer=gateway__pb2.DexLwapPointResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -4012,6 +4034,33 @@ class RateHistoryService(object):
             '/almanak.gateway.proto.RateHistoryService/GetDexVolumeHistory',
             gateway__pb2.GetDexVolumeHistoryRequest.SerializeToString,
             gateway__pb2.DexVolumeHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetDexLwap(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetDexLwap',
+            gateway__pb2.GetDexLwapRequest.SerializeToString,
+            gateway__pb2.DexLwapPointResponse.FromString,
             options,
             channel_credentials,
             insecure,

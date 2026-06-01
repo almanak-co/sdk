@@ -165,12 +165,17 @@ _PANCAKESWAP_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
         ): "0xd9E2A1A61B6e61b275ceC326465D417E52c1A621",
     },
     "ethereum": {
-        # USDC/WETH 0.05%
+        # USDC/WETH 0.05% — verified on-chain via PancakeSwap V3 factory
+        # getPool(USDC, WETH, 500). The previous entry
+        # (0x6CA298D2983aB03Aa1dA7679389D955A4eFEE15C) was a WETH/USDT pool
+        # (token0=WETH, token1=USDT) — a wrong-pair address that corrupted the
+        # LWAP aggregate for WETH/USDC (VIB-4924; caught in Ethereum mainnet
+        # re-validation). The gateway pair filter now also guards against this.
         (
             "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
             500,
-        ): "0x6CA298D2983aB03Aa1dA7679389D955A4eFEE15C",
+        ): "0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36",
     },
 }
 
@@ -540,6 +545,60 @@ class UniswapV3PoolPriceReader:
                 chain_lower,
             )
             return None
+
+    def resolve_best_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tiers: list[int] | None = None,
+    ) -> str | None:
+        """Resolve the highest-liquidity pool for a pair across fee tiers.
+
+        Enumerates the standard fee tiers, resolves each candidate pool, reads
+        its in-range liquidity, and returns the deepest. This deliberately
+        avoids ``resolve_pool_address``'s blind ``fee_tier=3000`` default
+        (VIB-4924 C1): on Base the canonical WETH/USDC pool is the 0.05% tier,
+        so a default-3000 resolution would pick the thin 0.3% pool and feed a
+        wrong / manipulable source into an EXECUTION_GRADE TWAP.
+
+        Candidates that resolve but cannot be read are skipped. Among readable
+        candidates the deepest by liquidity wins; ties keep the first seen
+        (tier order). Returns None only when no candidate resolves at all — the
+        caller surfaces that as a structured "cannot resolve pool" error.
+
+        Args:
+            token_a: Token address or symbol for token A.
+            token_b: Token address or symbol for token B.
+            chain: Chain name.
+            fee_tiers: Fee tiers to enumerate (default ``[100, 500, 3000, 10000]``).
+
+        Returns:
+            The highest-liquidity pool address, or None if none resolve.
+        """
+        if fee_tiers is None:
+            fee_tiers = [100, 500, 3000, 10000]
+
+        chain_lower = chain.lower()
+        best_addr: str | None = None
+        best_liquidity = -1
+        for fee_tier in fee_tiers:
+            pool_addr = self.resolve_pool_address(token_a, token_b, chain_lower, fee_tier)
+            if pool_addr is None:
+                continue
+            try:
+                liquidity = self.read_pool_price(pool_addr, chain_lower).value.liquidity
+            except DataUnavailableError:
+                # Pool resolved but unreadable (e.g. uninitialized) — still a
+                # candidate the caller could use, but we cannot rank it. Keep it
+                # as a last-resort fallback if nothing readable shows up.
+                if best_addr is None:
+                    best_addr = pool_addr
+                continue
+            if liquidity > best_liquidity:
+                best_liquidity = liquidity
+                best_addr = pool_addr
+        return best_addr
 
     def clear_cache(self) -> None:
         """Clear the price cache."""

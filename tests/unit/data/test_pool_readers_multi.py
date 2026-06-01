@@ -321,7 +321,9 @@ class TestPancakeSwapV3PoolReader:
 
         addr = reader.resolve_pool_address(USDC_ETH, WETH_ETH, "ethereum", fee_tier=500)
         assert addr is not None
-        assert addr.lower() == "0x6ca298d2983ab03aa1da7679389d955a4efee15c"
+        # VIB-4924: corrected from 0x6CA298… (a WETH/USDT pool — wrong pair) to
+        # the genuine PancakeSwap V3 USDC/WETH 0.05% pool (factory getPool).
+        assert addr.lower() == "0x1ac1a8feaaea1900c4166deeed0c11cc10669d36"
 
     def test_resolve_unknown_pool_uses_factory(self):
         """Unknown pools fall back to factory getPool() call."""

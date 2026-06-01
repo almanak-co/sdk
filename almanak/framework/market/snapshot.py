@@ -3215,6 +3215,92 @@ class MarketSnapshot:
             md1 if token1_decimals is None else token1_decimals,
         )
 
+    def _resolve_token_address(self, token: str, chain: str) -> str | None:
+        """Resolve a token symbol/address to a lowercase address (orientation only).
+
+        Address-shaped inputs (``0x`` + 40 hex) pass through; symbols go through
+        the registry-backed ``TokenResolver`` (``get_token_resolver()`` — no
+        egress, gateway-boundary safe). Returns ``None`` when unresolvable.
+        """
+        s = token.strip()
+        if s.lower().startswith("0x") and len(s) == 42:
+            return s.lower()
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            # skip_gateway: orientation is a fast static-registry lookup — the
+            # canonical pair symbols (WETH/USDC/…) are always registered, and we
+            # must not block an EXECUTION_GRADE price on a slow gateway round-trip
+            # (or do non-deterministic egress) just to learn token ordering.
+            resolved = get_token_resolver().resolve(s, chain, skip_gateway=True, log_errors=False)
+        except Exception:  # noqa: BLE001 — unresolvable symbol → orientation unknown
+            return None
+        addr = getattr(resolved, "address", None)
+        return addr.lower() if isinstance(addr, str) and addr else None
+
+    def _orient_to_quote_per_base(
+        self,
+        envelope: DataEnvelope[AggregatedPrice],
+        base: str,
+        quote: str,
+        chain: str,
+        pair_str: str,
+    ) -> DataEnvelope[AggregatedPrice]:
+        """Re-orient a pool-native price into the requested ``quote/base`` convention.
+
+        Uniswap-family pools sort ``token0 = min(token_addr0, token_addr1)`` and
+        the gateway DEX services (``GetDexTwap`` / ``GetDexLwap``) return the
+        pool-native ``token1/token0`` price. ``twap()`` / ``lwap()`` promise
+        ``quote/base`` (e.g. USDC per WETH for ``"WETH/USDC"``). So:
+
+        - base is token0 (``base_addr < quote_addr``): ``token1/token0`` is
+          already ``quote/base`` — return unchanged.
+        - base is token1 (``base_addr > quote_addr``): the pool returns
+          ``base/quote`` — invert (``1/price``) to yield ``quote/base``.
+
+        Orientation needs both token addresses. When either fails to resolve we
+        cannot know the orientation, and returning the raw value would risk a
+        confidently-wrong reciprocal on an inverse-ordered pool/chain
+        (VIB-4924 B2 — e.g. Ethereum WETH/USDC, where token0 is USDC) — so we
+        fail closed with a structured ``PoolPriceUnavailableError``.
+        """
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+
+        base_addr = self._resolve_token_address(base, chain)
+        quote_addr = self._resolve_token_address(quote, chain)
+        if base_addr is None or quote_addr is None or base_addr == quote_addr:
+            raise PoolPriceUnavailableError(
+                pair_str,
+                f"Cannot determine pool token orientation for {pair_str} on {chain}: "
+                f"token address resolution failed (base={base_addr}, quote={quote_addr}). "
+                "Use tokens registered in the SDK token registry or pass 0x addresses.",
+            )
+        if base_addr < quote_addr:
+            # base is token0 → the pool already returns quote/base.
+            return envelope
+        return self._invert_price_envelope(envelope, pair_str)
+
+    def _invert_price_envelope(
+        self,
+        envelope: DataEnvelope[AggregatedPrice],
+        pair_str: str,
+    ) -> DataEnvelope[AggregatedPrice]:
+        """Return a copy of ``envelope`` with aggregate + per-pool prices inverted."""
+        import dataclasses
+
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+
+        aggregated = envelope.value
+        if aggregated.price == 0:
+            raise PoolPriceUnavailableError(
+                pair_str,
+                "Pool returned a zero price; cannot invert to the requested orientation",
+            )
+        one = Decimal(1)
+        inverted_sources = [dataclasses.replace(c, price=(one / c.price)) if c.price else c for c in aggregated.sources]
+        inverted = dataclasses.replace(aggregated, price=one / aggregated.price, sources=inverted_sources)
+        return dataclasses.replace(envelope, value=inverted)
+
     def twap(
         self,
         token_pair: str | Instrument,
@@ -3267,23 +3353,33 @@ class MarketSnapshot:
                 if self._pool_reader_registry is None:
                     raise ValueError("No pool reader registry configured; provide pool_address explicitly")
                 reader = self._pool_reader_registry.get_reader(target_chain, protocol)
-                pool_address = reader.resolve_pool_address(inst.base, inst.quote, target_chain)
+                # VIB-4924 C1: resolve the highest-liquidity pool across fee
+                # tiers instead of blind-defaulting to fee_tier=3000. On Base the
+                # canonical WETH/USDC pool is the 0.05% tier, so a default-3000
+                # resolution would feed a thin 0.3% pool into an EXECUTION_GRADE
+                # TWAP (a wrong / manipulable price).
+                pool_address = reader.resolve_best_pool_address(inst.base, inst.quote, target_chain)
                 if pool_address is None:
                     raise PoolPriceUnavailableError(
                         pair_str,
                         f"Cannot resolve pool for {pair_str} on {target_chain} (protocol={protocol})",
                     )
 
-            token0_decimals, token1_decimals = self._resolve_pool_decimals_for_twap(
-                pool_address=pool_address,
-                chain=target_chain,
-                protocol=protocol,
-                token0_decimals=token0_decimals,
-                token1_decimals=token1_decimals,
-                explicit_pool=explicit_pool,
-            )
+            # VIB-4924 §6.3: aggregators whose price is already human-readable
+            # (the gateway GetDexTwap path) declare requires_decimals=False, so
+            # skip the extra decimal-resolution eth_calls. Decimal-based
+            # aggregators (the direct observe() PriceAggregator) still need them.
+            if getattr(self._price_aggregator, "requires_decimals", True):
+                token0_decimals, token1_decimals = self._resolve_pool_decimals_for_twap(
+                    pool_address=pool_address,
+                    chain=target_chain,
+                    protocol=protocol,
+                    token0_decimals=token0_decimals,
+                    token1_decimals=token1_decimals,
+                    explicit_pool=explicit_pool,
+                )
 
-            return self._price_aggregator.twap(
+            envelope = self._price_aggregator.twap(
                 pool_address=pool_address,
                 chain=target_chain,
                 window_seconds=window_seconds,
@@ -3291,6 +3387,11 @@ class MarketSnapshot:
                 token1_decimals=token1_decimals,
                 protocol=protocol,
             )
+            # VIB-4924 B2: the gateway returns the pool-native token1/token0
+            # price; re-orient to the requested quote/base convention (inverts
+            # on inverse-ordered pools, e.g. Ethereum WETH/USDC where token0 is
+            # USDC). No-op when base is token0 (e.g. Base WETH/USDC).
+            return self._orient_to_quote_per_base(envelope, inst.base, inst.quote, target_chain, pair_str)
         except PoolPriceUnavailableError:
             raise
         except ValueError:
@@ -3336,14 +3437,47 @@ class MarketSnapshot:
         inst = resolve_instrument(token_pair, target_chain)
         pair_str = inst.pair
 
+        # VIB-4924 F3 / I2: validate explicitly-requested protocols BEFORE
+        # delegating. PriceAggregator.lwap swallows an unknown-protocol
+        # ValueError (get_reader) and ends in a generic "No pools found", so a
+        # known-unsupported protocol could not otherwise surface a specific
+        # capability error. Check against the protocols actually supported on
+        # THIS chain (a protocol with a reader class but no factory/known-pool
+        # for target_chain would pass a global check then die in the generic
+        # path), and forward case-normalized names so the downstream exact-match
+        # dispatch cannot miss on a mixed-case input.
+        # Normalize unconditionally (CodeRabbit): a snapshot with a
+        # price_aggregator but no registry must still forward lowercase protocol
+        # names so the downstream exact-match dispatch cannot miss on a
+        # mixed-case input. The registry-gated block below only adds the
+        # supported-on-this-chain capability check.
+        normalized_protocols = protocols
+        if protocols:
+            normalized_protocols = [p.lower() for p in protocols]
+            if self._pool_reader_registry is not None:
+                supported = {p.lower() for p in self._pool_reader_registry.protocols_for_chain(target_chain)}
+                unknown = [
+                    orig for orig, low in zip(protocols, normalized_protocols, strict=True) if low not in supported
+                ]
+                if unknown:
+                    raise PoolPriceUnavailableError(
+                        pair_str,
+                        f"LWAP unsupported protocol(s) {unknown} on {target_chain}; supported: {sorted(supported)}",
+                    )
+
         try:
-            return self._price_aggregator.lwap(
+            envelope = self._price_aggregator.lwap(
                 token_a=inst.base,
                 token_b=inst.quote,
                 chain=target_chain,
                 fee_tiers=fee_tiers,
-                protocols=protocols,
+                protocols=normalized_protocols,
             )
+            # VIB-4924 B2: re-orient the pool-native token1/token0 price to the
+            # requested quote/base convention (same inversion as twap()).
+            return self._orient_to_quote_per_base(envelope, inst.base, inst.quote, target_chain, pair_str)
+        except PoolPriceUnavailableError:
+            raise
         except Exception as e:  # noqa: BLE001
             raise PoolPriceUnavailableError(
                 pair_str,

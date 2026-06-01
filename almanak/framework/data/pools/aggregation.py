@@ -226,7 +226,19 @@ class PriceAggregator:
         reference_price_usd: Reference price for converting liquidity to USD.
             If None, liquidity filtering uses raw liquidity values and the
             threshold is treated as raw liquidity units.
+        source_name: Provenance label stamped on the aggregated ``DataMeta.source``
+            (default ``"alchemy_rpc"``). When every byte flows through the gateway
+            ``eth_call`` proxy, callers MUST pass ``"gateway_rpc"`` so the envelope
+            does not carry a false ``alchemy_rpc`` provenance (VIB-4924 F2/H3).
     """
+
+    # When True (the default for the direct on-chain ``observe()`` aggregator),
+    # ``MarketSnapshot.twap`` resolves token decimals before calling ``twap()``
+    # because ``_tick_to_price`` needs them. Subclasses that source the price
+    # from a layer which returns a human-readable value (e.g. the gateway
+    # ``GetDexTwap`` service) set this False so the snapshot skips the extra
+    # decimal-resolution ``eth_call``s (VIB-4924 §6.3).
+    requires_decimals: bool = True
 
     def __init__(
         self,
@@ -234,11 +246,13 @@ class PriceAggregator:
         rpc_call: RpcCallFn,
         min_liquidity_usd: Decimal = DEFAULT_MIN_LIQUIDITY_USD,
         reference_price_usd: Decimal | None = None,
+        source_name: str = "alchemy_rpc",
     ) -> None:
         self._registry = pool_registry
         self._rpc_call = rpc_call
         self._min_liquidity_usd = min_liquidity_usd
         self._reference_price_usd = reference_price_usd
+        self._source_name = source_name
 
     def twap(
         self,
@@ -316,7 +330,7 @@ class PriceAggregator:
         )
 
         meta = DataMeta(
-            source="alchemy_rpc",
+            source=self._source_name,
             observed_at=datetime.now(UTC),
             finality="latest",
             staleness_ms=0,
@@ -497,7 +511,7 @@ class PriceAggregator:
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
         meta = DataMeta(
-            source="alchemy_rpc",
+            source=self._source_name,
             observed_at=datetime.now(UTC),
             finality="latest",
             staleness_ms=0,

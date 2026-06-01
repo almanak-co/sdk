@@ -18,7 +18,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Feature-flagged off by default; enable via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` |
-| RateHistoryService | 6 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX volume history (VIB-4859 / W7). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
+| RateHistoryService | 7 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -1431,6 +1431,24 @@ TWAP series at `interval_secs` spacing over `[start_ts, end_ts)`.
 
 ```protobuf
 rpc GetDexTwapSeries(GetDexTwapSeriesRequest) returns (DexTwapHistoryResponse)
+```
+
+### GetDexLwap
+
+Liquidity-weighted spot price across the supplied Uniswap-V3-style pools
+(`LWAP = Σ(price·liquidity) / Σ(liquidity)` over each pool's pool-native
+`token1/token0` spot). The framework resolves the candidate pool addresses; the
+gateway reads `slot0()` + `liquidity()` + `token0/token1` per pool server-side.
+When `base_token` / `quote_token` addresses are supplied, pools not containing
+exactly that pair are dropped before weighting, so a stale or foreign-pair pool
+address cannot poison the aggregate. Fails closed (`success=false`) when no pool
+is readable, the requested pair matches nothing, or total in-range liquidity is
+zero — it never emits an empty or fabricated price. The caller
+(`MarketSnapshot.lwap`) re-orients the returned native price to the requested
+quote/base (VIB-4948 / ALM-2770).
+
+```protobuf
+rpc GetDexLwap(GetDexLwapRequest) returns (DexLwapPointResponse)
 ```
 
 ### GetDexVolumeHistory

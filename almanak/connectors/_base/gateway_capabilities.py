@@ -679,6 +679,60 @@ class GatewayDexTwapCapability(Protocol):
 
 
 @runtime_checkable
+class GatewayDexLwapCapability(Protocol):
+    """DEX connector publishes liquidity-weighted spot price (LWAP) over pools.
+
+    The L3 follow-up to ``GatewayDexTwapCapability`` (VIB-4948 / ALM-2770).
+    Where ``GetDexTwap`` is a single-pool time-weighted oracle read,
+    ``GetDexLwap`` is a multi-pool liquidity-weighted *spot* read:
+    ``LWAP = Σ(price_i · liquidity_i) / Σ(liquidity_i)`` over the supplied,
+    already-resolved pools. Pool resolution stays framework-side (the caller
+    passes pool addresses); the connector body only reads slot0 + in-range
+    liquidity per pool and the service owns the web3 helpers.
+
+    **V3-style only.** Pools must expose the Uniswap-V3 ``slot0()`` +
+    ``liquidity()`` ABI (Uniswap V3 + its forks PancakeSwap V3, SushiSwap V3,
+    Aerodrome Slipstream). The read is uniform across these because the
+    framework resolves the per-DEX pool addresses; the connector just decodes
+    ``sqrtPriceX96`` → price and weights by liquidity.
+
+    Contract:
+
+    * ``dex_name() -> str`` — the DEX identifier and the routing key
+      ``RateHistoryService`` uses to dispatch ``GetDexLwap`` by
+      ``request.dex``; MUST match the connector's other DEX capability names.
+    * ``lwap_supported_chains() -> frozenset[str]`` — chains where the DEX
+      exposes V3-style pools the connector can read.
+    * ``fetch_lwap(*, servicer, chain, pool_addresses, min_liquidity,
+      as_of_block, base_token, quote_token) -> DexLwapPoint`` — the
+      liquidity-weighted price across the readable pools. When ``base_token`` /
+      ``quote_token`` addresses are supplied, pools not containing exactly that
+      pair are dropped (so one stale/foreign-pair pool address cannot poison the
+      aggregate). Never fake-success with an empty / zero price.
+
+    The connector receives ``servicer`` so the per-chain web3 cache and
+    archive-RPC helpers stay on the service and the capability body holds only
+    protocol-specific selector + sqrtPriceX96 → price math.
+    """
+
+    def dex_name(self) -> str: ...
+
+    def lwap_supported_chains(self) -> frozenset[str]: ...
+
+    async def fetch_lwap(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_addresses: list[str],
+        min_liquidity: str = "",
+        as_of_block: int | None = None,
+        base_token: str = "",
+        quote_token: str = "",
+    ) -> Any: ...
+
+
+@runtime_checkable
 class GatewayDexVolumeCapability(Protocol):
     """DEX connector publishes historical trading-volume series.
 
