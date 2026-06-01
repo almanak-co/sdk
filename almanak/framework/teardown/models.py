@@ -88,6 +88,24 @@ class PositionType(StrEnum):
     STAKE = "STAKE"  # Staked tokens (Lido, Ethena)
     PREDICTION = "PREDICTION"  # Prediction market positions (Polymarket)
     CEX = "CEX"  # CEX holdings (Kraken)
+    # TOKEN is a polymorphic catch-all for "I hold value here, surface it for
+    # operator visibility / teardown". Two production shapes (VIB-4909):
+    #   1. WALLET PSEUDO-POSITION — strategy reports a token that ALSO lives in
+    #      wallet_balances (SWAP-class: WETH after a buy, Lido stETH if tracked,
+    #      etc.). Set ``details["asset"]`` to the token symbol or
+    #      ``details["address"]`` to its on-chain address so PortfolioValuer
+    #      can detect the wallet-overlap and avoid double-counting in
+    #      ``wallet_total_value_usd``.
+    #   2. DEPLOYED HOLDING — strategy reports a deployed asset NOT in the
+    #      tracked wallet (e.g. ``metamorpho_eth_yield`` vault shares; Pendle
+    #      PT/YT held off the wallet's tracked-token set). Omit
+    #      ``details["asset"]``/``details["address"]`` (or set them to a
+    #      symbol/address that does NOT appear in wallet_balances) — the
+    #      framework treats these as non-overlapping and adds them to
+    #      ``wallet_total_value_usd`` like a real protocol position.
+    # The overlap check is case-insensitive and matched against
+    # ``TokenBalance.symbol`` / ``TokenBalance.address``. See
+    # ``almanak.framework.valuation.portfolio_valuer._is_wallet_pseudo_position``.
     TOKEN = "TOKEN"
 
     @property

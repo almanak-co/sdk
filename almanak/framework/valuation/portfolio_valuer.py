@@ -11,6 +11,7 @@ The framework owns both discovery and math.
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -21,7 +22,7 @@ from almanak.framework.portfolio.models import (
     TokenBalance,
     ValueConfidence,
 )
-from almanak.framework.teardown.models import PositionInfo
+from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.lending_position_reader import LendingPositionReader
 from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
@@ -91,6 +92,135 @@ def _resolve_lp_pool_address_from_details(position: Any) -> str | None:
     if pool_address and not _looks_like_evm_address(pool_address):
         return None
     return pool_address or None
+
+
+@dataclass(frozen=True)
+class _WalletMatchIndex:
+    """Pre-built lookup sets for O(1) wallet-overlap detection (VIB-4909).
+
+    Building once per snapshot — see ``_build_wallet_match_index`` — keeps
+    the per-position classifier O(1) instead of O(M wallet entries), which
+    matters when strategies enumerate hundreds of positions (NFT-LP sweeps
+    etc.). Today's wallets are ~10 entries, so this is forward-looking
+    rather than a hot-path optimization.
+    """
+
+    symbols: frozenset[str]  # case-folded
+    evm_addresses: frozenset[str]  # case-folded, EVM-shape only (0x + 40 hex)
+    exact_addresses: frozenset[str]  # non-EVM (e.g. Solana base58, case-significant)
+
+
+def _is_evm_address_shape(value: str) -> bool:
+    """0x-prefixed 42-char ASCII hex. Case-folding such an address is
+    semantically safe (EVM addresses are case-insensitive at the protocol
+    layer; EIP-55 checksum is a *display* convention).
+
+    Defined here in addition to ``_looks_like_evm_address`` because the two
+    callers have slightly different needs: the LP repricer wants a strict
+    *rejection* signal for non-EVM strings, while the wallet-overlap matcher
+    wants to *choose between* case-folded and exact comparison. Keeping the
+    intent locally readable beats a single all-purpose helper.
+    """
+    return len(value) == 42 and value.startswith("0x") and all(c in "0123456789abcdefABCDEF" for c in value[2:])
+
+
+def _build_wallet_match_index(wallet_balances: list[Any]) -> _WalletMatchIndex:
+    """Build the per-snapshot wallet-overlap index in a single pass.
+
+    Returns a frozen index of:
+    - case-folded ``symbol`` strings,
+    - case-folded ``address`` strings for EVM-shape addresses,
+    - exact-case ``address`` strings for non-EVM addresses (Solana base58
+      is case-significant — case-folding "AB" and "ab" would conflate
+      semantically distinct on-chain accounts).
+    """
+    symbols: set[str] = set()
+    evm_addresses: set[str] = set()
+    exact_addresses: set[str] = set()
+    for tb in wallet_balances:
+        sym = getattr(tb, "symbol", None)
+        if isinstance(sym, str) and sym:
+            symbols.add(sym.casefold())
+        addr = getattr(tb, "address", None)
+        if isinstance(addr, str) and addr:
+            if _is_evm_address_shape(addr):
+                evm_addresses.add(addr.casefold())
+            else:
+                exact_addresses.add(addr)
+    return _WalletMatchIndex(
+        symbols=frozenset(symbols),
+        evm_addresses=frozenset(evm_addresses),
+        exact_addresses=frozenset(exact_addresses),
+    )
+
+
+def _is_wallet_pseudo_position(
+    position: Any,
+    wallet_balances: list[Any],
+) -> bool:
+    """Return True iff ``position`` is a TOKEN-class wallet pseudo-position.
+
+    VIB-4909 — ``PositionType.TOKEN`` is sometimes a wallet pseudo-position
+    (SWAP-class strategies report a wallet token as a TOKEN "position" for
+    teardown enumeration and operator visibility — the value already lives
+    in ``wallet_balances``) and sometimes a deployed holding that is
+    NOT in ``wallet_balances`` (e.g. ``metamorpho_eth_yield`` surfaces vault
+    shares as a TOKEN position while the wallet tracks the deposit token).
+
+    To prevent both double-counting (the SWAP-class case) and under-counting
+    (the vault-shares case) in ``wallet_total_value_usd``, classify per
+    position by checking whether the position's underlying asset overlaps
+    with the wallet:
+
+    - ``position.details["asset"]`` matched case-insensitively against
+      ``TokenBalance.symbol`` of every wallet entry, OR
+    - ``position.details["address"]`` matched against ``TokenBalance.address``.
+      Case-folded for EVM-shape addresses; exact-match otherwise (Solana
+      base58 is case-significant).
+
+    Strategies whose TOKEN-position details carry neither key (e.g.
+    ``metamorpho_eth_yield`` with only ``vault_address`` / ``deposit_token``,
+    or ``pendle_basics`` with ``pt_token`` / ``base_token``) are treated as
+    NON-overlapping and contribute to ``wallet_total_value_usd`` — the
+    defensive choice, since dropping a deployed holding silently is a
+    much worse failure than the legacy double-count this fix targets.
+
+    Returns False for any non-TOKEN PositionType — those are real protocol
+    positions (LP / SUPPLY / BORROW / PERP / VAULT / STAKE / PREDICTION /
+    CEX) that are never represented in ``wallet_balances`` and always
+    contribute to the formula.
+    """
+    if position.position_type != PositionType.TOKEN:
+        return False
+    return _token_overlaps_wallet_index(position, _build_wallet_match_index(wallet_balances))
+
+
+def _token_overlaps_wallet_index(
+    position: Any,
+    index: _WalletMatchIndex,
+) -> bool:
+    """Fast classifier — assumes caller has filtered to TOKEN positions.
+
+    Used by the writer's comprehension where the wallet index is built
+    once per snapshot and reused across every position. Direct callers
+    (tests, dashboards) should prefer ``_is_wallet_pseudo_position`` which
+    builds the index internally.
+    """
+    details = getattr(position, "details", None) or {}
+
+    asset_symbol = details.get("asset")
+    if isinstance(asset_symbol, str) and asset_symbol and asset_symbol.casefold() in index.symbols:
+        return True
+
+    asset_addr = details.get("address")
+    if isinstance(asset_addr, str) and asset_addr:
+        if _is_evm_address_shape(asset_addr):
+            if asset_addr.casefold() in index.evm_addresses:
+                return True
+        elif asset_addr in index.exact_addresses:
+            return True
+
+    return False
 
 
 @runtime_checkable
@@ -316,13 +446,36 @@ class PortfolioValuer:
                 Decimal("0"),
             )
 
+            # VIB-4909: ``wallet_total_value_usd`` is the operator-facing
+            # full-portfolio value (wallet + real protocol positions).
+            # ``PositionType.TOKEN`` is sometimes a wallet pseudo-position
+            # (SWAP-class strategies surfacing a tracked wallet token) and
+            # sometimes a deployed holding NOT represented in
+            # wallet_balances (e.g. ``metamorpho_eth_yield`` surfacing vault
+            # shares while the wallet tracks the deposit token). Distinguish
+            # the two by overlap: if the TOKEN position's asset symbol or
+            # address matches a wallet_balances entry, it is a wallet
+            # pseudo-position and is excluded here to avoid a double-count.
+            # Otherwise it is a deployed holding and contributes like any
+            # other protocol position. See PositionType.TOKEN docstring for
+            # the convention and the matcher rules.
+            wallet_index = _build_wallet_match_index(wallet_balances)
+            non_wallet_position_value = sum(
+                (
+                    p.value_usd
+                    for p in positions
+                    if not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                ),
+                Decimal("0"),
+            )
+
             framework_snapshot = PortfolioSnapshot(
                 timestamp=now,
                 deployment_id=deployment_id,
                 total_value_usd=position_value_positive,
                 available_cash_usd=wallet_value,
                 deployed_capital_usd=deployed_capital_usd,
-                wallet_total_value_usd=wallet_value + position_value,
+                wallet_total_value_usd=wallet_value + non_wallet_position_value,
                 value_confidence=confidence,
                 positions=positions,
                 wallet_balances=wallet_balances,

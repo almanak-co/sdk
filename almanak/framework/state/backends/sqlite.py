@@ -449,7 +449,7 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     total_value_usd TEXT NOT NULL,  -- Decimal as string; strategy-scoped (VIB-3614)
     available_cash_usd TEXT NOT NULL,  -- Decimal as string
     deployed_capital_usd TEXT DEFAULT '0',  -- sum of cost_basis_usd for open positions (VIB-3614)
-    wallet_total_value_usd TEXT DEFAULT '0',  -- full wallet value, debugging only (VIB-3614)
+    wallet_total_value_usd TEXT DEFAULT '0',  -- wallet + non-overlapping positions; TOKEN-class wallet pseudo-positions excluded by symbol/address overlap (VIB-3614 / VIB-4909)
     value_confidence TEXT DEFAULT 'HIGH',  -- HIGH, ESTIMATED, STALE, UNAVAILABLE
     positions_json TEXT NOT NULL,  -- JSON array of positions
     token_prices_json TEXT DEFAULT '{}',  -- {chain:address: {price_usd, symbol, decimals}}
