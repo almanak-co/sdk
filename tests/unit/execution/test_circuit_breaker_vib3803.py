@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import grpc
 
@@ -31,7 +32,8 @@ from almanak.framework.execution.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerState,
 )
-from almanak.framework.runner.failure_kind import FailureKind, classify_failure
+from almanak.framework.runner.failure_kind import FailureKind, classify_failure, kind_for_status
+from almanak.framework.runner.runner_models import IterationStatus
 
 # ---------------------------------------------------------------------------
 # FailureKind
@@ -421,3 +423,123 @@ class TestAprilIncidentRegressionGuard:
         status = breaker.get_status()
         assert status["consecutive_data_failures"] == 0
         assert status["consecutive_action_failures"] == 0
+
+
+# ---------------------------------------------------------------------------
+# kind_for_status: returned-result failures get classified (VIB-3803 parity
+# for the no-live-exception path in handle_iteration_failure)
+# ---------------------------------------------------------------------------
+
+
+class TestKindForStatus:
+    def test_data_error_maps_to_data_class(self) -> None:
+        kind = kind_for_status(IterationStatus.DATA_ERROR)
+        assert kind == FailureKind.DATA_UNAVAILABLE
+        assert kind.is_data_class
+
+    def test_transient_data_error_is_data_class(self) -> None:
+        kind = kind_for_status(
+            IterationStatus.DATA_ERROR,
+            "Critical market-data failures while strategy returned HOLD (classification=transient): ...",
+        )
+        assert kind == FailureKind.DATA_UNAVAILABLE
+        assert kind.is_data_class
+
+    def test_permanent_data_error_is_action_class(self) -> None:
+        # A permanent data failure (unknown token = misconfiguration) must fail
+        # fast like an action error, not idle for the 30-iteration data budget.
+        kind = kind_for_status(
+            IterationStatus.DATA_ERROR,
+            "Critical market-data failures while strategy returned HOLD (classification=permanent): "
+            "rsi(...): Unknown token for Binance: NVDAON",
+        )
+        assert kind == FailureKind.UNKNOWN
+        assert not kind.is_data_class
+
+    def test_data_error_without_message_defaults_to_data_class(self) -> None:
+        assert kind_for_status(IterationStatus.DATA_ERROR, None) == FailureKind.DATA_UNAVAILABLE
+
+    def test_other_statuses_default_to_unknown_action_class(self) -> None:
+        for status in (
+            IterationStatus.STRATEGY_ERROR,
+            IterationStatus.STRATEGY_TIMEOUT,
+            IterationStatus.SUCCESS,
+            IterationStatus.HOLD,
+        ):
+            assert kind_for_status(status) == FailureKind.UNKNOWN
+            assert not kind_for_status(status).is_data_class
+
+
+# ---------------------------------------------------------------------------
+# tripped_on_data_class_only — lets the runner keep the process alive on a pure
+# market-data trip (don't turn a transient/quiet-pool data gap into a dead pod)
+# ---------------------------------------------------------------------------
+
+
+class TestTrippedOnDataClassOnly:
+    def test_data_only_trip_sets_flag(self) -> None:
+        # Closed exposure → the data-class threshold collapses to the standard 3
+        # (this is exactly the NVDAON no-position case): the breaker still trips,
+        # but the trip must be marked data-only so the runner won't exit.
+        cfg = CircuitBreakerConfig(max_consecutive_failures=3, data_class_max_consecutive_failures=30)
+        breaker = CircuitBreaker("nvdaon", cfg)
+        breaker.record_exposure(False)
+
+        for _ in range(3):
+            breaker.record_failure(
+                "All providers failed for NVDAON/USD ... returned stale OHLCV ... provider miss",
+                kind=FailureKind.DATA_UNAVAILABLE,
+            )
+
+        assert breaker.state == CircuitBreakerState.OPEN
+        assert breaker.tripped_on_data_class_only is True
+
+    def test_action_trip_does_not_set_flag(self) -> None:
+        cfg = CircuitBreakerConfig(max_consecutive_failures=3)
+        breaker = CircuitBreaker("test", cfg)
+        for _ in range(3):
+            breaker.record_failure("revert", kind=FailureKind.EXECUTION_REVERTED)
+        assert breaker.state == CircuitBreakerState.OPEN
+        assert breaker.tripped_on_data_class_only is False
+
+    def test_unknown_kind_trip_is_not_data_only(self) -> None:
+        # UNKNOWN is action-class; a trip driven by it is not a data outage.
+        cfg = CircuitBreakerConfig(max_consecutive_failures=3)
+        breaker = CircuitBreaker("test", cfg)
+        for _ in range(3):
+            breaker.record_failure("mystery")
+        assert breaker.state == CircuitBreakerState.OPEN
+        assert breaker.tripped_on_data_class_only is False
+
+    def test_mixed_trip_via_action_is_not_data_only(self) -> None:
+        cfg = CircuitBreakerConfig(max_consecutive_failures=3, data_class_max_consecutive_failures=30)
+        breaker = CircuitBreaker("test", cfg)
+        breaker.record_exposure(True)
+        for _ in range(5):  # data failures accumulate but don't trip (elevated)
+            breaker.record_failure("blip", kind=FailureKind.DATA_UNAVAILABLE)
+        for _ in range(3):  # action failures trip at 3
+            breaker.record_failure("revert", kind=FailureKind.EXECUTION_REVERTED)
+        assert breaker.state == CircuitBreakerState.OPEN
+        assert breaker.tripped_on_data_class_only is False
+
+    def test_cumulative_loss_trip_is_not_data_only(self) -> None:
+        cfg = CircuitBreakerConfig(
+            max_consecutive_failures=100,
+            max_cumulative_loss_usd=Decimal("10"),
+        )
+        breaker = CircuitBreaker("test", cfg)
+        breaker.record_failure("loss", loss_usd=Decimal("11"), kind=FailureKind.DATA_UNAVAILABLE)
+        assert breaker.state == CircuitBreakerState.OPEN  # tripped on loss, not consecutive
+        assert breaker.tripped_on_data_class_only is False
+
+    def test_flag_resets_on_close(self) -> None:
+        cfg = CircuitBreakerConfig(max_consecutive_failures=3, data_class_max_consecutive_failures=30)
+        breaker = CircuitBreaker("test", cfg)
+        breaker.record_exposure(False)
+        for _ in range(3):
+            breaker.record_failure("stale", kind=FailureKind.DATA_UNAVAILABLE)
+        assert breaker.tripped_on_data_class_only is True
+
+        breaker.pause("ops", "alice")
+        breaker.resume("alice")  # _close() path
+        assert breaker.tripped_on_data_class_only is False

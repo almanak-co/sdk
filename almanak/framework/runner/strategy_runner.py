@@ -1397,27 +1397,51 @@ class StrategyRunner:
                 and callable(market.has_critical_data_failures)
                 and market.has_critical_data_failures()
             ):
-                classification = "unknown"
-                if hasattr(market, "classify_critical_data_failures") and callable(
-                    market.classify_critical_data_failures
+                # Quiet-pool liveness backstop: a DEX pool with no recent swaps
+                # returns *stale* (not absent) OHLCV, so trade-derived indicators
+                # can't be computed — but the asset is still continuously
+                # priceable from the 24/7 oracle. Holding through that is benign,
+                # not a data failure; escalating would trip the breaker on a live
+                # pool. Only escalate when the pool is NOT priceable (genuinely
+                # dead/unreachable).
+                # Fail safe: suppress the DATA_ERROR escalation only on an
+                # explicit ``True``. ``is_quiet_pool_hold`` is an optional snapshot
+                # method; anything other than a definite True (missing method,
+                # non-bool) means "not confirmed quiet+live" → escalate as before.
+                if (
+                    hasattr(market, "is_quiet_pool_hold")
+                    and callable(market.is_quiet_pool_hold)
+                    and market.is_quiet_pool_hold() is True
                 ):
-                    classification = market.classify_critical_data_failures()
-                details = ""
-                if hasattr(market, "summarize_critical_data_failures") and callable(
-                    market.summarize_critical_data_failures
-                ):
-                    details = market.summarize_critical_data_failures(limit=3)
-                error = f"Critical market-data failures while strategy returned HOLD (classification={classification})"
-                if details:
-                    error = f"{error}: {details}"
-                logger.error("%s", error)
-                return self._create_error_result(
-                    deployment_id,
-                    IterationStatus.DATA_ERROR,
-                    error,
-                    state.start_time,
-                    intent=hold_intent,
-                )
+                    logger.info(
+                        "%s HOLD on quiet but live pool (no recent trades; price still available) "
+                        "— not escalating to DATA_ERROR",
+                        deployment_id,
+                    )
+                else:
+                    classification = "unknown"
+                    if hasattr(market, "classify_critical_data_failures") and callable(
+                        market.classify_critical_data_failures
+                    ):
+                        classification = market.classify_critical_data_failures()
+                    details = ""
+                    if hasattr(market, "summarize_critical_data_failures") and callable(
+                        market.summarize_critical_data_failures
+                    ):
+                        details = market.summarize_critical_data_failures(limit=3)
+                    error = (
+                        f"Critical market-data failures while strategy returned HOLD (classification={classification})"
+                    )
+                    if details:
+                        error = f"{error}: {details}"
+                    logger.error("%s", error)
+                    return self._create_error_result(
+                        deployment_id,
+                        IterationStatus.DATA_ERROR,
+                        error,
+                        state.start_time,
+                        intent=hold_intent,
+                    )
 
             hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
             logger.info(f"{hold_prefix} {deployment_id} HOLD: {reason}")
@@ -7190,15 +7214,32 @@ class StrategyRunner:
             # terminates and K8s resources are freed.  Local development keeps
             # the loop alive for debugging.
             if self._is_managed_deployment():
-                self._terminal_lifecycle_state = "ERROR"
-                self._terminal_lifecycle_error_message = f"Circuit breaker tripped: {last_result.error or 'unknown'}"
-                self._lifecycle_write_state(
-                    strategy.deployment_id,
-                    "ERROR",
-                    error_message=self._terminal_lifecycle_error_message,
-                )
-                logger.critical("Circuit breaker tripped in managed deployment — exiting process")
-                self.request_shutdown()
+                # A trip driven purely by market-data failures (no execution
+                # faults) must NOT kill the process. The correct response to a
+                # data outage / quiet-pool staleness is to idle-HOLD and let the
+                # breaker cool down -> HALF_OPEN -> recover when data returns.
+                # Exiting would turn a transient or scheduled data gap into a
+                # permanently dead agent (and abandon any position the breaker is
+                # meant to protect). Exit only when action-class failures
+                # contributed to the trip.
+                if self._circuit_breaker.tripped_on_data_class_only:
+                    logger.warning(
+                        "Circuit breaker tripped on market-data failures only for %s — "
+                        "keeping process alive to auto-recover after cooldown (no process exit)",
+                        strategy.deployment_id,
+                    )
+                else:
+                    self._terminal_lifecycle_state = "ERROR"
+                    self._terminal_lifecycle_error_message = (
+                        f"Circuit breaker tripped: {last_result.error or 'unknown'}"
+                    )
+                    self._lifecycle_write_state(
+                        strategy.deployment_id,
+                        "ERROR",
+                        error_message=self._terminal_lifecycle_error_message,
+                    )
+                    logger.critical("Circuit breaker tripped in managed deployment — exiting process")
+                    self.request_shutdown()
         except Exception as e:
             logger.error(f"Failed to trigger emergency stop for {strategy.deployment_id}: {e}")
 

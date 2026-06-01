@@ -83,6 +83,19 @@ DEFAULT_TIMEFRAME = "4h"
 # false transient hit on a purely permanent failure (e.g. "Unknown token for Binance").
 _DSU_BOILERPLATE_RE = re.compile(r"data source '[^']*' unavailable:\s*")
 
+# Matches the DEX quiet-pool staleness miss emitted by the OHLCV router
+# (``ohlcv_router._build_stale_response_miss``). This phrase is unique to that
+# path: it means the provider *returned* data that is merely old (no recent
+# swaps) — a quiet-but-live pool — as opposed to a hard outage (timeout /
+# unreachable), which never emits it. Captures the base token + chain so the
+# liveness probe can confirm the pool is still priceable from the 24/7 oracle.
+_QUIET_POOL_STALE_RE = re.compile(
+    # ``[\w-]+`` for the chain so hyphenated names (arbitrum-one, polygon-zkevm,
+    # zksync-era) are captured whole for the liveness probe, not truncated.
+    r"returned stale OHLCV for (?P<base>[^/\s]+)/\S* on (?P<chain>[\w-]+)",
+    re.IGNORECASE,
+)
+
 # Hard cap on the implicit OHLCV fetch size used by the volatility helpers
 # (``realized_vol`` / ``vol_cone``) when ``ohlcv_limit`` is not supplied
 # explicitly. Without this cap, sub-hourly timeframes balloon the request
@@ -1751,6 +1764,58 @@ class MarketSnapshot:
         if remaining > 0:
             chunks.append(f"... and {remaining} more")
         return "; ".join(chunks)
+
+    def is_quiet_pool_hold(self) -> bool:
+        """Liveness backstop for a DEX pool with no recent swaps.
+
+        Returns True iff **every** recorded critical data failure is a DEX
+        quiet-pool staleness miss *and* the affected token is still priceable
+        from the 24/7 aggregated oracle.
+
+        Rationale: a DEX pool that simply hasn't traded recently returns *stale*
+        (not absent) trade-derived OHLCV, so swap-based indicators (RSI, MACD, …)
+        can't be computed. But the asset itself is continuously priceable — the
+        pool is alive, just quiet. Holding through that is correct and must not
+        be escalated to a ``DATA_ERROR`` (which trips the circuit breaker on a
+        live pool). A genuinely dead/unreachable feed has no oracle price and
+        stays critical, so the dead-pool guard is preserved.
+
+        The check is conservative: any non-quiet-pool failure, any unparseable
+        detail, or any token that is not priceable returns False (escalate).
+        """
+        failures = list(self._critical_data_failures.values())
+        if not failures:
+            return False
+
+        priceable: dict[str, bool] = {}
+        for detail in failures:
+            match = _QUIET_POOL_STALE_RE.search(detail)
+            if match is None:
+                # A failure that is not a DEX quiet-pool staleness miss (e.g. a
+                # hard outage, an unknown token, a price-oracle error) — escalate.
+                return False
+            base = match.group("base")
+            chain = match.group("chain")
+            probe_key = f"{base}@{chain}"
+            if probe_key not in priceable:
+                priceable[probe_key] = self._probe_token_priceable(base, chain)
+            if not priceable[probe_key]:
+                return False
+        return True
+
+    def _probe_token_priceable(self, token: str, chain: str | None) -> bool:
+        """Liveness probe: True when *token* has a positive current price from
+        the 24/7 aggregated oracle, independent of swap-derived OHLCV.
+
+        Never raises — any failure (no oracle, unknown token, chain not
+        configured, non-numeric result) is treated as 'not priceable', so the
+        caller conservatively escalates the data failure as before.
+        """
+        try:
+            price = self.price(token, chain=chain) if chain else self.price(token)
+            return price is not None and Decimal(str(price)) > 0
+        except Exception:  # noqa: BLE001 — a liveness probe must never raise
+            return False
 
     def _fill_balance_usd(
         self,

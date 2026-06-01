@@ -1217,8 +1217,16 @@ async def handle_iteration_failure(
         IterationStatus.STRATEGY_TIMEOUT,  # already recorded in decide() handler
         IterationStatus.STRATEGY_ERROR,  # already recorded in decide() handler
     ):
+        # Classify the returned-result failure so a market-data DATA_ERROR is
+        # recorded as data-class (elevated threshold) rather than the default
+        # UNKNOWN/action-class fast-fail. The decide()-exception path classifies
+        # via classify_failure(); this path has no live exception, so map from
+        # the iteration status instead (VIB-3803 parity).
+        from .failure_kind import kind_for_status
+
         runner._circuit_breaker.record_failure(
             error_message=result.error or f"Iteration failed: {result.status.value}",
+            kind=kind_for_status(result.status, result.error),
         )
 
     # Auto-trigger emergency stop if breaker just tripped to OPEN
@@ -1227,8 +1235,26 @@ async def handle_iteration_failure(
         await runner._maybe_trigger_emergency(strategy, result)
 
     if runner._consecutive_errors >= runner.config.max_consecutive_errors:
-        await runner._alert_consecutive_errors(strategy, result)
-        runner._lifecycle_write_state(deployment_id, "ERROR", error_message=str(result.error) if result.error else None)
+        # A data-class outage the breaker is deliberately tolerating (still
+        # CLOSED) must not flip the deployment to ERROR / alert at the generic
+        # streak threshold — that contradicts the elevated data-class tolerance
+        # and the "idle and recover" intent. Defer the ERROR write + alert until
+        # the breaker actually opens (data threshold hit) or a non-data failure
+        # occurs. Permanent data errors are action-class (not is_data_class), so
+        # a misconfigured strategy still surfaces immediately.
+        from ..execution.circuit_breaker import CircuitBreakerState
+        from .failure_kind import kind_for_status
+
+        breaker_tolerating_data = (
+            runner._circuit_breaker is not None
+            and runner._circuit_breaker.state == CircuitBreakerState.CLOSED
+            and kind_for_status(result.status, result.error).is_data_class
+        )
+        if not breaker_tolerating_data:
+            await runner._alert_consecutive_errors(strategy, result)
+            runner._lifecycle_write_state(
+                deployment_id, "ERROR", error_message=str(result.error) if result.error else None
+            )
 
 
 def handle_iteration_success(

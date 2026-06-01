@@ -164,4 +164,35 @@ def _classify_direct(exc: Any) -> FailureKind:
     return FailureKind.UNKNOWN
 
 
-__all__ = ["FailureKind", "classify_failure"]
+def kind_for_status(status: Any, error_message: str | None = None) -> FailureKind:
+    """Map an ``IterationStatus`` (+ its error message) to a :class:`FailureKind`.
+
+    The runner records *returned* (non-raised) iteration failures on the circuit
+    breaker from ``_run_loop_helpers.handle_iteration_failure`` — a path that,
+    unlike the ``decide()`` exception handler, has no live exception to classify.
+    Without this mapping a ``DATA_ERROR`` (market data unavailable while the
+    strategy held) is recorded as the conservative ``UNKNOWN`` and counts against
+    the *action-class* fast-fail threshold (3), re-introducing the exact VIB-3803
+    failure mode: a transient / quiet-pool data outage trips the breaker at 3
+    instead of the elevated data-class threshold.
+
+    A ``DATA_ERROR`` is data-class **only** when it is transient/quiet-pool. A
+    *permanent* data failure (e.g. an unknown/unsupported token — a strategy
+    misconfiguration that will never recover) must fail fast like an action
+    error rather than idle for the full 30-iteration data-class budget. The
+    runner stamps the verdict into the error string as
+    ``classification=permanent`` on the HOLD-escalation path, so that token is
+    the signal here. Every non-``DATA_ERROR`` status keeps the ``UNKNOWN``
+    default so action-class semantics are unchanged.
+    """
+    # Late import to avoid a circular dependency at module import time.
+    from .runner_models import IterationStatus
+
+    if status == IterationStatus.DATA_ERROR:
+        if error_message is not None and "classification=permanent" in error_message:
+            return FailureKind.UNKNOWN
+        return FailureKind.DATA_UNAVAILABLE
+    return FailureKind.UNKNOWN
+
+
+__all__ = ["FailureKind", "classify_failure", "kind_for_status"]

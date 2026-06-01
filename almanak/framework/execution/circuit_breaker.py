@@ -277,6 +277,11 @@ class CircuitBreaker:
         # Trip tracking
         self._trip_time: datetime | None = None
         self._trip_reason: TripReason | None = None
+        # Whether the most recent trip was driven *solely* by data-class
+        # (market-data) failures. The runner uses this to avoid a permanent
+        # managed-deployment process exit on a transient/quiet-pool data outage
+        # (the strategy should idle-HOLD and auto-recover after cooldown).
+        self._tripped_on_data_class_only: bool = False
 
         # Half-open tracking
         self._half_open_successes = 0
@@ -297,6 +302,18 @@ class CircuitBreaker:
         """Get current circuit breaker state."""
         with self._lock:
             return self._state
+
+    @property
+    def tripped_on_data_class_only(self) -> bool:
+        """True when the most recent trip was caused solely by data-class
+        (market-data) failures, with no action-class failures.
+
+        The runner avoids the managed-deployment process exit in this case so a
+        transient outage or quiet-pool staleness lets the deployment idle-HOLD
+        and auto-recover after cooldown instead of dying permanently. Reset to
+        False on close (return to normal operation)."""
+        with self._lock:
+            return self._tripped_on_data_class_only
 
     def check(self) -> CircuitBreakerCheckResult:
         """Check if execution is currently allowed.
@@ -652,6 +669,14 @@ class CircuitBreaker:
         self._trip_time = datetime.now(UTC)
         self._trip_reason = reason
         self._half_open_successes = 0
+        # A consecutive-failure trip with zero action-class failures was driven
+        # entirely by market-data unavailability — recoverable, not an execution
+        # fault. The runner keys the "don't kill the process" decision on this.
+        self._tripped_on_data_class_only = (
+            reason == TripReason.CONSECUTIVE_FAILURES
+            and self._consecutive_action_failures == 0
+            and self._consecutive_data_failures > 0
+        )
 
         logger.error(
             "CircuitBreaker %s: TRIPPED - reason=%s, consecutive_failures=%d, cumulative_loss=$%s, previous_state=%s",
@@ -684,6 +709,7 @@ class CircuitBreaker:
         self._consecutive_data_failures = 0
         self._trip_time = None
         self._trip_reason = None
+        self._tripped_on_data_class_only = False
         self._half_open_successes = 0
 
         logger.info(
