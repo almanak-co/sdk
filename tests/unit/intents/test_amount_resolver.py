@@ -4,6 +4,7 @@ Tests the resolve_amount_all() function and ProtocolBalanceReader implementation
 without requiring on-chain execution or gateway connectivity.
 """
 
+import json
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -929,3 +930,130 @@ class TestResolveAmountAllWithdrawAdditional:
             intent, chain="ethereum", wallet_address="0x1234", gateway_client=MagicMock()
         )
         assert result.withdraw_all is True
+
+
+# =============================================================================
+# resolve_amount_all - Aave-fork protocol routing (Spark / Radiant data providers)
+# =============================================================================
+
+# Ethereum single-reserve data providers, sourced from each connector's
+# addresses.py. They are DISTINCT per protocol — that distinction is the whole
+# point of the regression below: a Spark/Radiant amount='all' must NOT query
+# Aave V3's contract.
+_ETH_SPARK_DATA_PROVIDER = "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
+_ETH_AAVE_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
+
+
+def _gateway_capturing_eth_call_target(
+    captured: list[str], *, supply_wei: int = 0, debt_wei: int = 0
+):
+    """Build a fake gateway whose _rpc_stub.Call records each eth_call target.
+
+    Records ``params[0]["to"]`` (the contract the reader queries) into
+    ``captured`` and returns a valid 9-word ``getUserReserveData`` response so
+    the full amount='all' resolution path runs end-to-end. ``supply_wei`` lands
+    in word 0 (``currentATokenBalance``, drives WITHDRAW/supply resolution) and
+    ``debt_wei`` in word 2 (``currentVariableDebt``, which feeds REPAY's
+    ``total_debt = stable + variable``).
+    """
+
+    def _call(request, timeout=None):
+        params = json.loads(request.params)
+        captured.append(params[0]["to"])
+        words = [0] * 9
+        words[0] = supply_wei  # currentATokenBalance
+        words[2] = debt_wei  # currentVariableDebt
+        hex_payload = "0x" + "".join(f"{w:064x}" for w in words)
+        resp = MagicMock()
+        resp.success = True
+        resp.result = json.dumps(hex_payload)
+        return resp
+
+    stub = MagicMock()
+    stub.Call.side_effect = _call
+    gw = MagicMock()
+    gw._rpc_stub = stub
+    gw.config = SimpleNamespace(timeout=7)
+    return gw
+
+
+# (protocol, its own ethereum data provider, the OTHER fork's provider). The
+# third element is what a routing regression would wrongly hit — every case
+# asserts both the positive target and that the other fork's address was avoided.
+_FORK_ROUTING_CASES = [
+    ("spark", _ETH_SPARK_DATA_PROVIDER, _ETH_AAVE_DATA_PROVIDER),
+    ("aave_v3", _ETH_AAVE_DATA_PROVIDER, _ETH_SPARK_DATA_PROVIDER),
+]
+
+
+class TestAaveForkProtocolRouting:
+    """Regression (follow-up to PR #2533): the protocol the caller resolved must
+    be threaded all the way to the on-chain read target.
+
+    ``AaveV3BalanceReader`` serves aave_v3 / spark / radiant_v2 — Aave forks that
+    share the ``getUserReserveData`` ABI but live at DIFFERENT
+    ``pool_data_provider`` addresses per chain. Before the protocol was threaded
+    through ``AaveV3BalanceReader`` -> ``LendingPositionReader``, a Spark/Radiant
+    WITHDRAW/REPAY amount='all' defaulted to the registry's default protocol
+    (aave_v3) and silently queried Aave's contract — wrong balance on every chain
+    where the addresses differ. Both the WITHDRAW (supply) and REPAY (debt)
+    branches thread the protocol, so both are exercised below. These tests drive
+    the real ``LendingReadRegistry`` -> ``AddressRegistry`` -> connector address
+    tables, so they fail closed if the routing regresses.
+    """
+
+    _WALLET = "0x" + "1" * 40
+
+    def _make_withdraw_intent(self, protocol, token="USDC", chain="ethereum"):
+        from almanak.framework.intents.lending_intents import WithdrawIntent
+
+        return WithdrawIntent(protocol=protocol, token=token, amount="all", chain=chain)
+
+    def _make_repay_intent(self, protocol, token="USDC", chain="ethereum"):
+        from almanak.framework.intents.lending_intents import RepayIntent
+
+        return RepayIntent(protocol=protocol, token=token, amount="all", chain=chain)
+
+    @pytest.mark.parametrize("protocol,expected_provider,other_provider", _FORK_ROUTING_CASES)
+    def test_withdraw_routes_supply_query_to_protocol_data_provider(
+        self, protocol, expected_provider, other_provider
+    ):
+        """A WITHDRAW amount='all' reads supply from the resolved protocol's own
+        pool_data_provider — Spark/Radiant must not fall back to Aave's, and the
+        aave_v3 case proves the routing is protocol-sensitive, not hardcoded."""
+        captured: list[str] = []
+        gw = _gateway_capturing_eth_call_target(captured, supply_wei=100_000_000)
+
+        intent = self._make_withdraw_intent(protocol=protocol)
+        result = resolve_amount_all(
+            intent, chain="ethereum", wallet_address=self._WALLET, gateway_client=gw
+        )
+
+        assert captured, f"{protocol} withdraw resolution made no eth_call"
+        assert captured[0].lower() == expected_provider.lower()
+        assert captured[0].lower() != other_provider.lower()
+        # End-to-end: 100_000_000 wei / 1e6 (USDC) = 100 USDC supply resolved.
+        assert result.amount == Decimal("100")
+        assert result.withdraw_all is False
+
+    @pytest.mark.parametrize("protocol,expected_provider,other_provider", _FORK_ROUTING_CASES)
+    def test_repay_routes_debt_query_to_protocol_data_provider(
+        self, protocol, expected_provider, other_provider
+    ):
+        """A REPAY amount='all' reads debt from the resolved protocol's own
+        pool_data_provider — the debt branch threads protocol exactly like the
+        supply branch, so a Spark/Radiant repay must not query Aave's contract."""
+        captured: list[str] = []
+        gw = _gateway_capturing_eth_call_target(captured, debt_wei=250_000_000)
+
+        intent = self._make_repay_intent(protocol=protocol)
+        result = resolve_amount_all(
+            intent, chain="ethereum", wallet_address=self._WALLET, gateway_client=gw
+        )
+
+        assert captured, f"{protocol} repay resolution made no eth_call"
+        assert captured[0].lower() == expected_provider.lower()
+        assert captured[0].lower() != other_provider.lower()
+        # End-to-end: 250_000_000 wei / 1e6 (USDC) = 250 USDC debt resolved.
+        assert result.amount == Decimal("250")
+        assert result.repay_full is False

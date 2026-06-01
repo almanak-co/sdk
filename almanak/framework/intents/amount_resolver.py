@@ -64,10 +64,18 @@ class ProtocolBalanceReader(ABC):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
         """Return current supply balance in wei, including accrued interest.
+
+        Args:
+            protocol: The concrete protocol identifier (e.g. ``"aave_v3"``,
+                ``"spark"``, ``"radiant_v2"``) the caller resolved. A single
+                reader may serve several Aave-fork protocols whose on-chain data
+                providers differ per chain, so the protocol must be threaded
+                through to the position query — never inferred from a default.
 
         Returns None if the query fails (no RPC, protocol unsupported on chain, etc.).
         """
@@ -80,10 +88,15 @@ class ProtocolBalanceReader(ABC):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
         """Return current debt balance in wei, including accrued interest.
+
+        Args:
+            protocol: The concrete protocol identifier the caller resolved; see
+                :meth:`get_supply_balance` for why it must be threaded through.
 
         Returns None if the query fails.
         """
@@ -118,13 +131,14 @@ class AaveV3BalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
         from ..valuation.lending_position_reader import LendingPositionReader
 
         reader = LendingPositionReader(gateway_client=gateway_client)
-        position = reader.read_position(chain, token_address, wallet)
+        position = reader.read_position(chain, token_address, wallet, protocol=protocol)
         if position is None:
             return None
         return position.current_atoken_balance
@@ -135,13 +149,14 @@ class AaveV3BalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
         from ..valuation.lending_position_reader import LendingPositionReader
 
         reader = LendingPositionReader(gateway_client=gateway_client)
-        position = reader.read_position(chain, token_address, wallet)
+        position = reader.read_position(chain, token_address, wallet, protocol=protocol)
         if position is None:
             return None
         return position.total_debt
@@ -234,6 +249,7 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,  # noqa: ARG002 — single-protocol reader; accepted for interface symmetry
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
@@ -245,6 +261,7 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,  # noqa: ARG002 — single-protocol reader; accepted for interface symmetry
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
@@ -273,6 +290,7 @@ class MorphoBlueBalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,  # noqa: ARG002 — single-protocol reader; accepted for interface symmetry
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
@@ -290,6 +308,7 @@ class MorphoBlueBalanceReader(ProtocolBalanceReader):
         token_address: str,
         wallet: str,
         *,
+        protocol: str | None = None,  # noqa: ARG002 — single-protocol reader; accepted for interface symmetry
         market_id: str | None = None,
         gateway_client: Any = None,
     ) -> int | None:
@@ -409,6 +428,7 @@ def resolve_amount_all(  # noqa: C901
             chain=chain,
             token_address=token_address,
             wallet=wallet_address,
+            protocol=protocol_lower,
             market_id=market_id,
             gateway_client=gateway_client,
         )
@@ -474,6 +494,7 @@ def resolve_amount_all(  # noqa: C901
             chain=chain,
             token_address=token_address,
             wallet=wallet_address,
+            protocol=protocol_lower,
             market_id=market_id,
             gateway_client=gateway_client,
         )
