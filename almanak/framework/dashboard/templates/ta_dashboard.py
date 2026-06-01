@@ -4,35 +4,51 @@ Technical Analysis (TA) Dashboard Template.
 Reusable template for creating dashboards for indicator-based strategies.
 Supports any TA indicator with configurable signal logic and visualization.
 
-Scope (single-signal / single-position): the template is designed for one
-signal driving one position on one ``base_token``/``quote_token`` pair.
-The 3 accounting sections (PnL, Cost Stack, Trade Tape) are baked in so
-every TA dashboard ships with full accounting by default. For multi-
-position or multi-signal layouts, do **not** stretch this template — write
-a custom dashboard composed from the section helpers
-(``render_pnl_section``, ``render_cost_stack_section``,
-``render_trade_tape_section``) plus primitive plot helpers from
-``almanak.framework.dashboard.plots``. See the dashboard blueprints for
-the recommended composition.
+Scope (single-position): the template drives one position on one
+``base_token``/``quote_token`` pair. The 3 accounting sections (PnL, Cost
+Stack, Trade Tape) are baked in so every TA dashboard ships with full
+accounting by default.
 
-Usage:
+- **Single indicator** — pass one ``TADashboardConfig``.
+- **Multiple indicators (multi-signal, VIB-4897)** — compose with
+  :func:`multi_ta_config`. The template stacks one panel per indicator under a
+  shared price chart (all on one time axis). Useful for confluence strategies
+  (e.g. RSI + MACD + Bollinger).
+
+For genuinely multi-*position* layouts the template is still the wrong tool —
+hand-roll from the section helpers (``render_pnl_section``,
+``render_cost_stack_section``, ``render_trade_tape_section``) plus the
+primitive plot helpers in ``almanak.framework.dashboard.plots``. See the
+dashboard blueprints.
+
+Usage (single indicator):
     from almanak.framework.dashboard.templates import TADashboardConfig, render_ta_dashboard
 
     config = TADashboardConfig(
-        indicator_name="RSI",
-        indicator_period=14,
-        upper_threshold=70,
-        lower_threshold=30,
-        signal_type="reversion",  # or "momentum"
+        indicator_name="RSI", indicator_period=14,
+        upper_threshold=70, lower_threshold=30, signal_type="reversion",
     )
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+        session_state = prepare_ta_session_state(api_client, session_state, config)
+        render_ta_dashboard(deployment_id, strategy_config, session_state, config)
+
+Usage (multi-signal):
+    from almanak.framework.dashboard.templates import (
+        get_rsi_config, get_macd_config, get_bollinger_config,
+        multi_ta_config, prepare_ta_session_state, render_ta_dashboard,
+    )
+
+    config = multi_ta_config(get_rsi_config(), get_macd_config(), get_bollinger_config())
+
+    def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+        session_state = prepare_ta_session_state(api_client, session_state, config)
         render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
@@ -49,6 +65,7 @@ from almanak.framework.dashboard.plots import (
     plot_cci_indicator,
     plot_macd_indicator,
     plot_price_with_signals,
+    plot_rsi_indicator,
     plot_stochastic_indicator,
 )
 from almanak.framework.dashboard.plots.base import get_default_config
@@ -79,6 +96,12 @@ class TADashboardConfig:
         protocol: Default protocol name
         base_token: Default base token
         quote_token: Default quote token
+        extra_indicators: Additional indicator configs to render as stacked
+            panels (multi-signal layout, VIB-4897). Empty by default — the
+            single-indicator path is unchanged. Compose via
+            :func:`multi_ta_config`. Each extra contributes one more panel
+            beneath the price chart; the extras' pair/chain are ignored (the
+            primary config drives the shared OHLCV fetch).
     """
 
     indicator_name: str
@@ -94,6 +117,33 @@ class TADashboardConfig:
     protocol: str = "Uniswap V3"
     base_token: str = "WETH"
     quote_token: str = "USDC"
+    extra_indicators: list["TADashboardConfig"] = field(default_factory=list)
+
+
+def multi_ta_config(primary: TADashboardConfig, *extras: TADashboardConfig) -> TADashboardConfig:
+    """Compose a multi-indicator (multi-signal) TA dashboard config.
+
+    The first config is the **primary** — it drives the dashboard title, the
+    configured pair/chain, the shared OHLCV fetch, and the signal-status
+    section. Each additional config renders as one more stacked indicator panel
+    beneath the price chart. Indicator params (periods / thresholds) on the
+    extras are honoured; their ``base_token`` / ``quote_token`` / ``chain`` are
+    not — the primary's pair is authoritative so every panel shares one time
+    axis.
+
+    Example::
+
+        config = multi_ta_config(
+            get_rsi_config(period=14),
+            get_macd_config(),
+            get_bollinger_config(period=20, std_dev=2.0),
+        )
+        session_state = prepare_ta_session_state(api_client, session_state, config)
+        render_ta_dashboard(deployment_id, strategy_config, session_state, config)
+
+    Returns a new config (does not mutate ``primary``).
+    """
+    return replace(primary, extra_indicators=list(extras))
 
 
 def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
@@ -760,9 +810,25 @@ def prepare_ta_session_state(
         if isinstance(existing, pd.DataFrame):
             price_df = existing
 
-    # Indicator series (RSI / MACD) — computed client-side from price history.
+    # Indicator series — computed client-side from price history. The primary
+    # indicator plus any extras (multi-signal layout, VIB-4897) all share the
+    # same price_df; each handler is a no-op if its series is already present.
     if price_df is not None:
         _apply_indicator_series(result, price_df, config)
+        # Extras may repeat an indicator type (e.g. dual RSI with different
+        # periods). A bare-key apply would collide — _apply_indicator_series
+        # early-returns when ``<key>_*`` already exists — so same-type repeats
+        # are computed in isolation and stored under a disambiguated slot key
+        # (rsi_2, rsi_3, …). VIB-4897.
+        for slot, cfg in _multi_indicator_slots(config)[1:]:
+            base = cfg.indicator_name.lower()
+            if slot == base:
+                _apply_indicator_series(result, price_df, cfg)
+            elif not any(k == slot or k.startswith(f"{slot}_") for k in result):
+                tmp: dict[str, Any] = {}
+                _apply_indicator_series(tmp, price_df, cfg)
+                for k, v in tmp.items():
+                    result[k.replace(base, slot, 1)] = v
 
     # Buy / sell signals from the trade tape (SWAP rows for this pair).
     if "buy_signals" not in result or "sell_signals" not in result:
@@ -787,11 +853,12 @@ def render_ta_dashboard(
 ) -> None:
     """Render a technical analysis dashboard using the provided configuration.
 
-    Single-signal / single-position template — one indicator driving one
-    position on one configured pair. Bakes in the 3 accounting sections
-    (PnL → primitive content → Cost Stack → Trade Tape). For multi-
-    position or multi-signal layouts, compose a custom dashboard from
-    the section helpers directly rather than parameterizing this template.
+    Single-position template. Renders one indicator panel by default; pass a
+    :func:`multi_ta_config` (``config.extra_indicators`` set) to stack one panel
+    per indicator under a shared price chart (multi-signal, VIB-4897). Bakes in
+    the 3 accounting sections (PnL → chart content → Cost Stack → Trade Tape).
+    For multi-*position* layouts, compose a custom dashboard from the section
+    helpers directly rather than parameterizing this template.
 
     Args:
         deployment_id: The deployment identifier
@@ -799,7 +866,11 @@ def render_ta_dashboard(
         session_state: Current session state with indicator values
         config: TADashboardConfig for this dashboard
     """
-    st.title(f"{config.indicator_name} Strategy Dashboard")
+    if config.extra_indicators:
+        names = " + ".join([config.indicator_name, *(c.indicator_name for c in config.extra_indicators)])
+        st.title(f"{names} Strategy Dashboard")
+    else:
+        st.title(f"{config.indicator_name} Strategy Dashboard")
 
     # Extract config overrides
     base_token = strategy_config.get("base_token", config.base_token)
@@ -901,6 +972,13 @@ def _render_charts_section(  # noqa: C901
     buy_df = _coerce_signals(buy_signals)
     sell_df = _coerce_signals(sell_signals)
     strategy_start_time = session_state.get("strategy_start_time")
+
+    # Multi-signal layout (VIB-4897): render price once, then one dedicated
+    # panel per configured indicator. The single-indicator path below is
+    # unchanged.
+    if config.extra_indicators:
+        _render_multi_indicator_charts(session_state, config, price_df, buy_df, sell_df)
+        return
 
     # Get indicator data
     indicator_key = config.indicator_name.lower()
@@ -1166,33 +1244,45 @@ def _as_indicator_series(data: Any) -> pd.Series | None:
     return None
 
 
-def _render_macd_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    macd_data: Any,
-) -> None:
-    """Render the price+signals chart and the MACD line/signal/histogram chart."""
-    _render_price_signals(price_df, buy_df, sell_df)
-    if isinstance(macd_data, pd.DataFrame) and not macd_data.empty:
-        fig_macd = plot_macd_indicator(
-            macd=macd_data["macd"],
-            macd_signal=macd_data["signal"],
-            macd_hist=macd_data["histogram"],
-            time_index=macd_data.index,
-        )
-        st.plotly_chart(fig_macd, use_container_width=True)
+def _indicator_present(data: Any) -> bool:
+    """Module-level twin of the ``_has_indicator_data`` closure, for the panel path."""
+    if data is None:
+        return False
+    if isinstance(data, pd.Series | pd.DataFrame):
+        return not data.empty
+    if isinstance(data, list):
+        return len(data) > 0
+    return bool(data)
 
 
-def _render_bollinger_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    data: Any,
-    config: TADashboardConfig,
-) -> None:
-    """Render price+signals and the upper/middle/lower Bollinger Bands chart."""
-    _render_price_signals(price_df, buy_df, sell_df)
+# --- Standalone indicator panels (the indicator chart only, no price line) ---
+# Shared by the single-indicator dedicated renderers (price + panel) and the
+# multi-signal layout (price once, then one panel per indicator).
+
+
+def _panel_rsi(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+    series = _as_indicator_series(data)
+    if series is None:
+        return
+    fig = plot_rsi_indicator(
+        rsi_data=series,
+        time_index=series.index,
+        overbought=config.upper_threshold if config.upper_threshold is not None else 70,
+        oversold=config.lower_threshold if config.lower_threshold is not None else 30,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _panel_macd(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+    if not (isinstance(data, pd.DataFrame) and not data.empty):
+        return
+    fig = plot_macd_indicator(
+        macd=data["macd"], macd_signal=data["signal"], macd_hist=data["histogram"], time_index=data.index
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _panel_bollinger(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     price_aligned = price_df.set_index("time")["price"].reindex(data.index)
@@ -1206,15 +1296,7 @@ def _render_bollinger_charts(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_cci_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    data: Any,
-    config: TADashboardConfig,
-) -> None:
-    """Render price+signals and the CCI oscillator chart."""
-    _render_price_signals(price_df, buy_df, sell_df)
+def _panel_cci(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
@@ -1227,15 +1309,7 @@ def _render_cci_charts(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_stochastic_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    data: Any,
-    config: TADashboardConfig,
-) -> None:
-    """Render price+signals and the Stochastic %K/%D oscillator chart."""
-    _render_price_signals(price_df, buy_df, sell_df)
+def _panel_stochastic(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_stochastic_indicator(
@@ -1248,15 +1322,7 @@ def _render_stochastic_charts(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_atr_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    data: Any,
-    config: TADashboardConfig,
-) -> None:
-    """Render price+signals and the ATR volatility chart."""
-    _render_price_signals(price_df, buy_df, sell_df)
+def _panel_atr(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
@@ -1264,15 +1330,7 @@ def _render_atr_charts(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_adx_charts(
-    price_df: pd.DataFrame,
-    buy_df: pd.DataFrame | None,
-    sell_df: pd.DataFrame | None,
-    data: Any,
-    config: TADashboardConfig,
-) -> None:
-    """Render price+signals and the ADX trend-strength chart (ADX + DI lines)."""
-    _render_price_signals(price_df, buy_df, sell_df)
+def _panel_adx(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_adx_indicator(
@@ -1285,20 +1343,111 @@ def _render_adx_charts(
     st.plotly_chart(fig, use_container_width=True)
 
 
-# Uppercased ``config.indicator_name`` → dedicated chart renderer. RSI is
-# handled inline in ``_render_charts_section`` (combined price+RSI subplot);
-# everything here gets a price+signals chart plus its purpose-built indicator
-# chart, reusing the ``almanak.framework.dashboard.plots`` primitives.
+def _panel_generic(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+    """Fallback single-line panel for an indicator with no dedicated chart."""
+    series = _as_indicator_series(data)
+    if series is None:
+        return
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=series.index,
+            y=series.values,
+            mode="lines",
+            name=config.indicator_name,
+            line={"color": "#1f77b4", "width": 2},
+        )
+    )
+    fig.update_layout(
+        title=f"{config.indicator_name} Indicator",
+        xaxis_title="Time",
+        yaxis_title=config.indicator_name,
+        height=300,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# Uppercased ``config.indicator_name`` → standalone panel builder.
+_INDICATOR_PANELS: dict[str, Callable[[pd.DataFrame, Any, TADashboardConfig], None]] = {
+    "RSI": _panel_rsi,
+    "MACD": _panel_macd,
+    "BOLLINGER": _panel_bollinger,
+    "CCI": _panel_cci,
+    "STOCHASTIC": _panel_stochastic,
+    "ATR": _panel_atr,
+    "ADX": _panel_adx,
+}
+
+
+def _multi_indicator_slots(config: TADashboardConfig) -> list[tuple[str, TADashboardConfig]]:
+    """Map the primary + extra indicators to unique session-state slot keys.
+
+    The first occurrence of an indicator type keeps its bare key (``rsi``) so the
+    single-indicator path and existing session-state keys are unchanged; a second
+    indicator of the same type becomes ``rsi_2``, a third ``rsi_3``, … so dual
+    same-type configs (e.g. two RSIs with different periods) never collide.
+    """
+    counts: dict[str, int] = {}
+    slots: list[tuple[str, TADashboardConfig]] = []
+    for cfg in [config, *config.extra_indicators]:
+        base = cfg.indicator_name.lower()
+        counts[base] = counts.get(base, 0) + 1
+        slots.append((base if counts[base] == 1 else f"{base}_{counts[base]}", cfg))
+    return slots
+
+
+def _render_multi_indicator_charts(
+    session_state: dict[str, Any],
+    config: TADashboardConfig,
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+) -> None:
+    """Stacked multi-signal layout: price+signals once, then one panel per indicator.
+
+    Iterates the primary config plus ``config.extra_indicators``; each panel
+    reuses the same ``almanak.framework.dashboard.plots`` primitive as the
+    single-indicator path, so all panels share one time axis. An indicator with
+    no computed series is announced (not silently dropped).
+    """
+    _render_price_signals(price_df, buy_df, sell_df)
+    for slot, cfg in _multi_indicator_slots(config):
+        # ``slot`` matches the disambiguated key prepare_ta_session_state wrote,
+        # so a second same-type indicator (rsi_2) reads its own series.
+        data = session_state.get(f"{slot}_data")
+        if data is None:
+            data = session_state.get(f"{slot}_history")
+        st.markdown(f"**{cfg.indicator_name}**")
+        if not _indicator_present(data):
+            st.caption(f"{cfg.indicator_name}: no indicator data available")
+            continue
+        panel = _INDICATOR_PANELS.get(cfg.indicator_name.upper(), _panel_generic)
+        panel(price_df, data, cfg)
+
+
+def _render_indicator_with_price(
+    price_df: pd.DataFrame,
+    buy_df: pd.DataFrame | None,
+    sell_df: pd.DataFrame | None,
+    data: Any,
+    config: TADashboardConfig,
+) -> None:
+    """Single-indicator dedicated render: price+signals chart, then the indicator panel.
+
+    Shares the per-indicator panel builders with the multi-signal layout so the
+    two paths can never drift in how a given indicator is drawn.
+    """
+    _render_price_signals(price_df, buy_df, sell_df)
+    panel = _INDICATOR_PANELS.get(config.indicator_name.upper(), _panel_generic)
+    panel(price_df, data, config)
+
+
+# Uppercased ``config.indicator_name`` → dedicated chart renderer. RSI is handled
+# inline in ``_render_charts_section`` (combined price+RSI subplot); every entry
+# here renders a price+signals chart plus its dedicated indicator panel.
 _DEDICATED_RENDERERS: dict[
     str, Callable[[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, Any, TADashboardConfig], None]
-] = {
-    "MACD": lambda p, b, s, d, _c: _render_macd_charts(p, b, s, d),
-    "BOLLINGER": _render_bollinger_charts,
-    "CCI": _render_cci_charts,
-    "STOCHASTIC": _render_stochastic_charts,
-    "ATR": _render_atr_charts,
-    "ADX": _render_adx_charts,
-}
+] = dict.fromkeys(("MACD", "BOLLINGER", "CCI", "STOCHASTIC", "ATR", "ADX"), _render_indicator_with_price)
 
 
 def _render_signal_status(

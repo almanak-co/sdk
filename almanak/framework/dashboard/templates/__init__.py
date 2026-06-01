@@ -85,6 +85,7 @@ from almanak.framework.dashboard.templates.ta_dashboard import (
     get_macd_config,
     get_rsi_config,
     get_stochastic_config,
+    multi_ta_config,
     prepare_ta_session_state,
     render_ta_dashboard,
 )
@@ -92,6 +93,7 @@ from almanak.framework.dashboard.templates.ta_dashboard import (
 __all__ = [
     # TA templates
     "TADashboardConfig",
+    "multi_ta_config",
     "render_ta_dashboard",
     "prepare_ta_session_state",
     "get_rsi_config",
