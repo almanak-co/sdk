@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.framework.intents.pool_validation import (
+from almanak.connectors.aerodrome.pool_validation import (
     validate_aerodrome_cl_pool,
     validate_aerodrome_pool,
-    validate_traderjoe_pool,
-    validate_v3_pool,
 )
+from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
+from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 
 
 def _get_rpc_url_from_web3(web3) -> str | None:

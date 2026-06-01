@@ -4,28 +4,21 @@ Maps known contract addresses per chain to protocol metadata and action
 capabilities. Used by copy-trading signal decoding for fail-closed behavior.
 
 W1 (VIB-4853): each protocol's per-chain address table is owned by its
-connector folder (``almanak/connectors/<protocol>/addresses.py``). The
-registry composes them by direct module import — the gateway-side
-``GatewayAddressCapability`` interface that mirrors this data is
-gateway-only by import boundary (see
-``tests/static/test_strategy_import_boundary.py``); strategy-side
-foundation code consumes the connector's address module directly.
+connector folder (``almanak/connectors/<protocol>/addresses.py``). This
+registry composes them through the strategy-side
+:class:`almanak.connectors._strategy_base.address_registry.AddressRegistry`
+— the single strategy-side seam that brokers every connector's address
+table — rather than importing each connector ``addresses`` module by name.
+The gateway-side ``GatewayAddressCapability`` interface mirrors the same
+data for gateway callers and is gateway-only by import boundary (see
+``tests/static/test_strategy_import_boundary.py``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from almanak.connectors.aave_v3.addresses import AAVE_V3
-from almanak.connectors.aerodrome.addresses import AERODROME
-from almanak.connectors.gmx_v2.addresses import GMX_V2
-from almanak.connectors.morpho_blue.addresses import MORPHO_BLUE
-from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
-from almanak.connectors.pendle.addresses import PENDLE
-from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
-from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
-from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
-from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.core.constants import resolve_chain_name
 
 
@@ -98,9 +91,16 @@ class ContractRegistry:
 
 @dataclass(frozen=True)
 class _ProtocolDef:
-    addresses_dict: dict[str, dict[str, str]]
-    contract_key: str
+    """One (protocol, contract-kind) → receipt-parser binding.
+
+    ``protocol`` is the :class:`AddressRegistry` identifier whose per-chain
+    address table supplies the on-chain address for ``contract_key``; the
+    registry brokers the connector's ``addresses.py`` so this table never
+    imports a connector module directly.
+    """
+
     protocol: str
+    contract_key: str
     parser_module: str
     parser_class: str
     actions: tuple[str, ...]
@@ -109,133 +109,117 @@ class _ProtocolDef:
 _PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
     # DEX swap routers
     _ProtocolDef(
-        UNISWAP_V3,
-        "swap_router",
         "uniswap_v3",
+        "swap_router",
         "almanak.connectors.uniswap_v3.receipt_parser",
         "UniswapV3ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        AGNI_FINANCE,
-        "swap_router",
         "agni_finance",
+        "swap_router",
         "almanak.connectors.uniswap_v3.receipt_parser",
         "UniswapV3ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        PANCAKESWAP_V3,
-        "swap_router",
         "pancakeswap_v3",
+        "swap_router",
         "almanak.connectors.pancakeswap_v3.receipt_parser",
         "PancakeSwapV3ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        SUSHISWAP_V3,
-        "swap_router",
         "sushiswap_v3",
+        "swap_router",
         "almanak.connectors.sushiswap_v3.receipt_parser",
         "SushiSwapV3ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        AERODROME,
-        "router",
         "aerodrome",
+        "router",
         "almanak.connectors.aerodrome.receipt_parser",
         "AerodromeReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        TRADERJOE_V2,
-        "router",
         "traderjoe_v2",
+        "router",
         "almanak.connectors.traderjoe_v2.receipt_parser",
         "TraderJoeV2ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        PENDLE,
-        "router",
         "pendle",
+        "router",
         "almanak.connectors.pendle.receipt_parser",
         "PendleReceiptParser",
         ("SWAP", "LP_OPEN", "LP_CLOSE"),
     ),
     # Uniswap V4 — singleton PoolManager handles swaps, PositionManager handles LP
     _ProtocolDef(
-        UNISWAP_V4,
-        "pool_manager",
         "uniswap_v4",
+        "pool_manager",
         "almanak.connectors.uniswap_v4.receipt_parser",
         "UniswapV4ReceiptParser",
         ("SWAP",),
     ),
     _ProtocolDef(
-        UNISWAP_V4,
-        "position_manager",
         "uniswap_v4",
+        "position_manager",
         "almanak.connectors.uniswap_v4.receipt_parser",
         "UniswapV4ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),
     ),
     # LP managers
     _ProtocolDef(
-        UNISWAP_V3,
-        "position_manager",
         "uniswap_v3",
+        "position_manager",
         "almanak.connectors.uniswap_v3.receipt_parser",
         "UniswapV3ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),
     ),
     _ProtocolDef(
-        AGNI_FINANCE,
-        "position_manager",
         "agni_finance",
+        "position_manager",
         "almanak.connectors.uniswap_v3.receipt_parser",
         "UniswapV3ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),
     ),
     _ProtocolDef(
-        PANCAKESWAP_V3,
-        "position_manager",
         "pancakeswap_v3",
+        "position_manager",
         "almanak.connectors.pancakeswap_v3.receipt_parser",
         "PancakeSwapV3ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),
     ),
     _ProtocolDef(
-        SUSHISWAP_V3,
-        "position_manager",
         "sushiswap_v3",
+        "position_manager",
         "almanak.connectors.sushiswap_v3.receipt_parser",
         "SushiSwapV3ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),
     ),
     # Lending
     _ProtocolDef(
-        AAVE_V3,
-        "pool",
         "aave_v3",
+        "pool",
         "almanak.connectors.aave_v3.receipt_parser",
         "AaveV3ReceiptParser",
         ("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
     ),
     _ProtocolDef(
-        MORPHO_BLUE,
-        "morpho",
         "morpho_blue",
+        "morpho",
         "almanak.connectors.morpho_blue.receipt_parser",
         "MorphoBlueReceiptParser",
         ("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
     ),
     # Perpetuals
     _ProtocolDef(
-        GMX_V2,
-        "exchange_router",
         "gmx_v2",
+        "exchange_router",
         "almanak.connectors.gmx_v2.receipt_parser",
         "GMXv2ReceiptParser",
         ("PERP_OPEN", "PERP_CLOSE"),
@@ -246,13 +230,15 @@ _PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
 def get_default_registry() -> ContractRegistry:
     """Create a ContractRegistry populated from connector-owned address tables.
 
-    Each protocol's per-chain address table is imported from its connector
-    folder's ``addresses.py`` (W1 / VIB-4853). The previous central registry
-    at ``almanak.core.contracts`` has been deleted.
+    Each protocol's per-chain address table is resolved through the
+    strategy-side :class:`AddressRegistry` (W1 / VIB-4853), which brokers
+    the connector's ``addresses.py``. The previous central registry at
+    ``almanak.core.contracts`` has been deleted.
     """
     registry = ContractRegistry()
     for definition in _PROTOCOL_DEFS:
-        for chain, contracts in definition.addresses_dict.items():
+        for chain in AddressRegistry.address_supported_chains(definition.protocol):
+            contracts = AddressRegistry.addresses_for(definition.protocol, chain)
             address = contracts.get(definition.contract_key)
             if not address:
                 continue
@@ -270,7 +256,8 @@ def get_default_registry() -> ContractRegistry:
 
         # Pendle has dynamic market addresses (`market_*`) where LP actions happen.
         if definition.protocol == "pendle":
-            for chain, contracts in definition.addresses_dict.items():
+            for chain in AddressRegistry.address_supported_chains(definition.protocol):
+                contracts = AddressRegistry.addresses_for(definition.protocol, chain)
                 for key, address in contracts.items():
                     if not key.startswith("market_"):
                         continue

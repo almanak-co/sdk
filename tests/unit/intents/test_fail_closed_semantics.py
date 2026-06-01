@@ -12,7 +12,7 @@ import pytest
 
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.intents.compiler import CompilationStatus
-from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
 ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
 

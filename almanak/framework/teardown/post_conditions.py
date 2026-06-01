@@ -43,6 +43,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -364,27 +366,23 @@ register_teardown_post_condition("traderjoe_v2", _traderjoe_v2_post_condition)
 # Agni Finance, JAINE DEX on 0G) share the same NPM ABI, so the hook
 # registers under each protocol slug.
 
-# Map protocol slug -> contracts registry key. Only protocols whose
-# connector ``addresses.py`` registry actually carries an NPM address are
-# listed here — registering a slug without an NPM would cause every teardown
-# of that protocol to fail-closed with "no NPM registered".
-#
-# Post W1 (VIB-4853) each protocol's address table is owned by its
-# connector folder. The registry name encodes ``(module, attribute)``
-# tuples so the lookup can ``importlib.import_module`` lazily — the
-# dispatch table itself stays free of import-time side effects.
+# V3-fork protocols that expose the canonical NonfungiblePositionManager ABI
+# (``balanceOf`` / ``tokenOfOwnerByIndex`` / ``positions(tokenId)``) this hook
+# verifies against. The membership is connector knowledge, so it lives on the
+# strategy-side ``AddressRegistry`` under :attr:`AbiFamily.V3_NPM` — this module
+# never names a protocol itself. Discovery (``discovery._NPM_PROTOCOLS``) derives
+# from the same capability, so the two lanes cannot drift. Each member's per-chain
+# NonfungiblePositionManager address is resolved through the registry
+# (W1 / VIB-4853); the address tables live on the connectors. A slug only lands
+# here if its connector ships an NPM address, so registering it cannot make a
+# teardown fail-closed with "no NPM registered".
 #
 # PancakeSwap V3 records its NPM under the ``nft`` key (its receipt parser and
 # intent compiler standardise on ``nft``); the others use ``position_manager``.
-# ``_resolve_v3_position_manager`` accepts both so this stays a single per-fork
-# NPM source — the connector's ``addresses.py`` — without a key rename that
-# would ripple through every Pancake reader (VIB-4902).
-_V3_PROTOCOL_TO_REGISTRY: dict[str, tuple[str, str]] = {
-    "uniswap_v3": ("almanak.connectors.uniswap_v3.addresses", "UNISWAP_V3"),
-    "agni_finance": ("almanak.connectors.uniswap_v3.addresses", "AGNI_FINANCE"),
-    "pancakeswap_v3": ("almanak.connectors.pancakeswap_v3.addresses", "PANCAKESWAP_V3"),
-    "sushiswap_v3": ("almanak.connectors.sushiswap_v3.addresses", "SUSHISWAP_V3"),
-}
+# ``_NPM_ADDRESS_KEYS`` lists both so this stays a single per-fork NPM source —
+# the connector's ``addresses.py`` — without a key rename that would ripple
+# through every Pancake reader (VIB-4902).
+_V3_NPM_PROTOCOLS: frozenset[str] = frozenset(AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM))
 
 # Connectors record the NPM under ``position_manager`` (uniswap / agni / sushi)
 # or ``nft`` (pancakeswap). Try both so a single per-fork ``addresses.py`` entry
@@ -398,23 +396,9 @@ def _resolve_v3_position_manager(protocol: str, chain: str) -> str | None:
     Returns ``None`` when the protocol is not registered or the chain has
     no deployment. Callers fail-closed on ``None``.
     """
-    entry = _V3_PROTOCOL_TO_REGISTRY.get(protocol.lower())
-    if entry is None:
+    if protocol.lower() not in _V3_NPM_PROTOCOLS:
         return None
-    module_name, attr_name = entry
-    try:
-        import importlib
-
-        mod = importlib.import_module(module_name)
-    except Exception:  # noqa: BLE001 — defensive
-        return None
-    registry: dict[str, dict[str, str]] = getattr(mod, attr_name, None) or {}
-    chain_entry = registry.get(chain.lower()) or registry.get(chain) or {}
-    for key in _NPM_ADDRESS_KEYS:
-        npm = chain_entry.get(key)
-        if npm:
-            return npm
-    return None
+    return AddressRegistry.resolve_contract_address(protocol, chain, _NPM_ADDRESS_KEYS)
 
 
 def _uniswap_v3_post_condition(
@@ -445,16 +429,19 @@ def _uniswap_v3_post_condition(
     to drive the closure paths inject a fake gateway_client.
 
     Note on the registered slug set: this hook is registered for the
-    slugs in ``_V3_PROTOCOL_TO_REGISTRY`` (``uniswap_v3``, ``agni_finance``,
-    ``sushiswap_v3``) — every V3-fork that exposes the canonical NPM ABI
-    AND has a ``position_manager`` entry in ``almanak.core.contracts``.
-    PancakeSwap V3 is intentionally NOT registered today because no NPM
-    address is published in ``contracts.py`` for it (see the comment
-    above ``_V3_PROTOCOL_TO_REGISTRY``); add it there before adding the
-    slug here. Aerodrome's volatile/stable pools use ERC-20 LP tokens,
-    not NFTs, so they do NOT register here; their teardown closure check
-    is a different primitive and falls through to the legacy in-memory
-    check until a dedicated post-condition is added.
+    slugs in ``_V3_NPM_PROTOCOLS`` (``uniswap_v3``, ``agni_finance``,
+    ``pancakeswap_v3``, ``sushiswap_v3``) — every V3-fork that exposes the
+    canonical NPM ABI AND whose connector ``addresses.py`` publishes a
+    NonfungiblePositionManager address (under ``position_manager`` or, for
+    PancakeSwap V3, ``nft``), resolved through the strategy-side
+    ``AddressRegistry``. The slug set is the registry's
+    :attr:`AbiFamily.V3_NPM` membership, so adding a new V3 fork only
+    requires publishing its NPM address on the connector's ``addresses.py``
+    and listing the slug under ``AbiFamily.V3_NPM`` — no edit here.
+    Aerodrome's volatile/stable pools use ERC-20 LP tokens, not NFTs, so
+    they do NOT register here; their teardown closure check is a different
+    primitive and falls through to the legacy in-memory check until a
+    dedicated post-condition is added.
     """
     protocol_raw = getattr(position, "protocol", "") or ""
     protocol = protocol_raw.lower() or "uniswap_v3"
@@ -641,7 +628,7 @@ def _uniswap_v3_post_condition(
     )
 
 
-for _v3_slug in _V3_PROTOCOL_TO_REGISTRY:
+for _v3_slug in sorted(_V3_NPM_PROTOCOLS):
     register_teardown_post_condition(_v3_slug, _uniswap_v3_post_condition)
 
 

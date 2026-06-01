@@ -158,6 +158,7 @@ def _looks_like_evm_address(value: str) -> bool:
         return False
 
 
+# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResult:
     """Compile LP_OPEN intent for Aerodrome Finance (Solidly fork on Base).
 
@@ -222,7 +223,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
             )
 
         # Validate pool existence (best-effort)
-        from almanak.framework.intents.pool_validation import validate_aerodrome_pool
+        from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_pool
 
         pool_check = validate_aerodrome_pool(
             compiler.chain,
@@ -682,7 +683,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
 
         # Validate pool existence
         if use_classic:
-            from almanak.framework.intents.pool_validation import validate_aerodrome_pool
+            from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_pool
 
             pool_check = validate_aerodrome_pool(
                 compiler.chain,
@@ -693,7 +694,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
                 gateway_client=compiler._gateway_client,
             )
         else:
-            from almanak.framework.intents.pool_validation import validate_aerodrome_cl_pool
+            from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
 
             pool_check = validate_aerodrome_cl_pool(
                 compiler.chain,
@@ -783,6 +784,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
     return result
 
 
+# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> CompilationResult:
     """Compile LP_OPEN intent for Aerodrome Slipstream CL (concentrated liquidity).
 
@@ -877,7 +879,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             )
 
         # Validate pool existence
-        from almanak.framework.intents.pool_validation import validate_aerodrome_cl_pool
+        from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
 
         pool_check = validate_aerodrome_cl_pool(
             compiler.chain,
@@ -1335,6 +1337,7 @@ def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesInten
     return result
 
 
+# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: bool) -> str | None:
     """Query Aerodrome pool address, preferring gateway RPC over direct calls.
 
@@ -1352,11 +1355,13 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
     Returns:
         Pool contract address, or None if pool not found / query failed.
     """
-    from almanak.framework.intents.pool_validation import (
+    from almanak.connectors._strategy_base.pool_validation_base import (
         ZERO_ADDRESS,
-        _decode_address,
-        _encode_get_pool_aerodrome,
     )
+    from almanak.connectors._strategy_base.pool_validation_base import (
+        decode_address as _decode_address,
+    )
+    from almanak.connectors.aerodrome.pool_validation import _encode_get_pool_aerodrome
 
     from .addresses import AERODROME
 
@@ -1401,7 +1406,7 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
         logger.warning("No RPC URL or gateway client — cannot query Aerodrome pool address")
         return None
 
-    from almanak.framework.intents.pool_validation import _eth_call
+    from almanak.connectors._strategy_base.pool_validation_base import eth_call as _eth_call
 
     rpc_raw = _eth_call(rpc_url, factory, calldata)
     pool_address = _process_raw_result(rpc_raw)
@@ -1410,6 +1415,7 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
     return pool_address
 
 
+# crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
 def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, bool] | None:
     """Query an Aerodrome V1 pool's (token0, token1, stable) via ``metadata()``.
 
@@ -1424,7 +1430,7 @@ def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, 
         or ``None`` if the pool can't be read (no gateway/RPC access, the
         address isn't an Aerodrome V1 pool, etc).
     """
-    from almanak.framework.intents.pool_validation import _decode_address
+    from almanak.connectors._strategy_base.pool_validation_base import decode_address as _decode_address
 
     def _decode(raw: bytes | None) -> tuple[str, str, bool] | None:
         # metadata() returns 7 × 32-byte words:
@@ -1468,7 +1474,7 @@ def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, 
         logger.warning("No RPC URL or gateway client — cannot query Aerodrome pool metadata")
         return None
 
-    from almanak.framework.intents.pool_validation import _eth_call
+    from almanak.connectors._strategy_base.pool_validation_base import eth_call as _eth_call
 
     rpc_raw = _eth_call(rpc_url, pool_address, _AERODROME_POOL_METADATA_SELECTOR)
     decoded = _decode(rpc_raw)

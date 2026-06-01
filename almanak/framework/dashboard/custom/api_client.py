@@ -475,15 +475,15 @@ class DashboardAPIClient:
     ) -> str | None:
         """Resolve a V3-compatible pool address through the gateway."""
         try:
-            from almanak.framework.intents.pool_validation import validate_v3_pool
+            from almanak.connectors._strategy_base.pool_validation_registry import PoolValidationRegistry
 
             gateway = self._client._client
-            result = validate_v3_pool(
-                chain=chain,
-                protocol=protocol,
-                token_a=token0_address,
-                token_b=token1_address,
-                fee_tier=fee_tier,
+            result = PoolValidationRegistry.validate(
+                protocol,
+                chain,
+                token0_address,
+                token1_address,
+                {"fee_tier": fee_tier},
                 rpc_url=None,
                 gateway_client=gateway,
             )

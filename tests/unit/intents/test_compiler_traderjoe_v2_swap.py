@@ -92,7 +92,7 @@ class TestTraderJoeV2SwapCompilation:
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
     @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
-    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch("almanak.connectors.traderjoe_v2.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_swap_compiles_with_mocked_adapter(
@@ -105,7 +105,7 @@ class TestTraderJoeV2SwapCompilation:
     ):
         """Full compilation with mocked adapter returns SUCCESS."""
         from almanak.framework.intents.compiler import TransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+        from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
         # Setup mocks
         mock_get_rpc.return_value = "http://localhost:8545"
@@ -243,7 +243,7 @@ class TestTraderJoeV2SwapMetadata:
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
     @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
-    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch("almanak.connectors.traderjoe_v2.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_metadata_contains_protocol_and_bin_step(
@@ -256,7 +256,7 @@ class TestTraderJoeV2SwapMetadata:
     ):
         """ActionBundle metadata must include protocol and bin_step."""
         from almanak.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+        from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
         mock_validate_pool.return_value = PoolValidationResult(
@@ -318,7 +318,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
     @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
-    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch("almanak.connectors.traderjoe_v2.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_quote_persisted_and_reused_in_build_swap_transaction(
@@ -336,7 +336,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
             SwapQuote,
             TransactionData as TJTransactionData,
         )
-        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+        from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
         mock_validate_pool.return_value = PoolValidationResult(
@@ -395,7 +395,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
     @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
-    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch("almanak.connectors.traderjoe_v2.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_quote_failure_fails_compilation_closed(
@@ -415,7 +415,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         on-chain read attempt."""
         from almanak.connectors.traderjoe_v2 import TraderJoeV2SDKError
         from almanak.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+        from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
         mock_validate_pool.return_value = PoolValidationResult(
@@ -456,7 +456,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
     @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
-    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch("almanak.connectors.traderjoe_v2.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_zero_quote_amount_out_fails_closed(
@@ -471,7 +471,7 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         (e.g. drained or malformed pool) would produce ``amount_out_min = 0`` —
         a swap with no slippage floor. Refuse the compile instead."""
         from almanak.connectors.traderjoe_v2.adapter import SwapQuote, TransactionData as TJTransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+        from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
         mock_validate_pool.return_value = PoolValidationResult(

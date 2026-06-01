@@ -228,6 +228,10 @@ class _TraderJoeV2CompileImpl:
             approvals.extend(self._build_approve_tx(token_y_info.address, router_address, amount_y_wei))
         return approvals
 
+    # crap-allowlist: VIB-4139 — import-path swap only (pool-validation moved into
+    # connectors, #2527): the only change to this method is the
+    # ``validate_traderjoe_pool`` import path; function body unchanged, anvil-only
+    # coverage (cov=2%). Refactor + coverage backfill tracked in VIB-4139.
     def _compile_lp_open_traderjoe_v2(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for TraderJoe V2 Liquidity Book.
 
@@ -272,7 +276,7 @@ class _TraderJoeV2CompileImpl:
             )
 
             # Validate pool existence (best-effort; LP_OPEN can seed empty pools).
-            from almanak.framework.intents.pool_validation import validate_traderjoe_pool
+            from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
 
             pool_check = validate_traderjoe_pool(
                 self.chain,
@@ -1175,7 +1179,7 @@ class _TraderJoeV2CompileImpl:
                 bin_step,
             )
 
-            from almanak.framework.intents.pool_validation import validate_traderjoe_pool
+            from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
 
             # Use the same normalised gateway as the adapter: a disconnected
             # ``self._gateway_client`` would otherwise make validation fail

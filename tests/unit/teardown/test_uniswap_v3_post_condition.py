@@ -538,22 +538,31 @@ class TestUniswapV3PostCondition:
 def _v3_protocol_chain_pairs() -> list[tuple[str, str]]:
     """All (protocol, chain) pairs the V3 post-condition registers for.
 
-    Read the protocol→registry mapping straight from
-    ``post_conditions._V3_PROTOCOL_TO_REGISTRY`` and the per-chain entries
-    from the owning connector's ``addresses.py``. Adding a new V3-fork to
-    the production mapping (e.g. PancakeSwap V3 once its NPM lands in the
-    connector's address table) automatically extends this parameterization —
-    no test edit required.
+    Reads the registered V3-fork slugs from
+    ``post_conditions._V3_NPM_PROTOCOLS`` and the per-chain entries from the
+    strategy-side ``AddressRegistry`` (which brokers each connector's
+    ``addresses.py``). Adding a new V3-fork to the production set (e.g. once
+    a new fork's NPM lands in the connector's address table) automatically
+    extends this parameterization — no test edit required.
     """
-    import importlib
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.framework.teardown.discovery import _NPM_PROTOCOLS
+    from almanak.framework.teardown.post_conditions import _V3_NPM_PROTOCOLS
 
-    from almanak.framework.teardown.post_conditions import _V3_PROTOCOL_TO_REGISTRY
+    # Discovery (which V3 forks teardown looks for) and post-conditions (which
+    # V3 forks closure verification checks) must agree on the supported set.
+    # If they drift, teardown would discover a fork it can't verify closed (or
+    # vice versa). Both lists currently live in their own framework files; this
+    # parity assertion fails loudly until they're reconciled (or unified behind
+    # the AddressRegistry AbiFamily mapping — tracked as a follow-up).
+    assert set(_NPM_PROTOCOLS) == set(_V3_NPM_PROTOCOLS), (
+        "discovery._NPM_PROTOCOLS and post_conditions._V3_NPM_PROTOCOLS diverged: "
+        f"{set(_NPM_PROTOCOLS) ^ set(_V3_NPM_PROTOCOLS)}"
+    )
 
     pairs: list[tuple[str, str]] = []
-    for protocol, (module_name, attr_name) in _V3_PROTOCOL_TO_REGISTRY.items():
-        mod = importlib.import_module(module_name)
-        registry = getattr(mod, attr_name, {})
-        for chain in registry:
+    for protocol in sorted(_V3_NPM_PROTOCOLS):
+        for chain in sorted(AddressRegistry.address_supported_chains(protocol)):
             pairs.append((protocol, chain))
     return pairs
 
@@ -575,8 +584,8 @@ class TestNPMRegistryCoverage:
            NPM lookup succeeded — the fail-closed path returns *without*
            hitting the gateway).
 
-        Manually deleting one ``position_manager`` line from
-        ``almanak/core/contracts.py`` should turn this test red with a
+        Manually deleting one ``position_manager`` line from the owning
+        connector's ``addresses.py`` should turn this test red with a
         clear "NonfungiblePositionManager" assertion.
         """
         from almanak.framework.teardown.post_conditions import _resolve_v3_position_manager

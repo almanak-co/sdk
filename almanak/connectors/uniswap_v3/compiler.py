@@ -200,7 +200,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 return resolved_pool
             token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1 = resolved_pool
 
-            from almanak.framework.intents.pool_validation import validate_v3_pool
+            from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 
             pool_check = validate_v3_pool(
                 ctx.chain,
@@ -661,7 +661,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         selected_fee = adapter.last_fee_selection.get("selected_fee_tier")
         if selected_fee is None:
             return None
-        from almanak.framework.intents.pool_validation import validate_v3_pool
+        from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 
         pool_check = validate_v3_pool(
             ctx.chain,
@@ -745,7 +745,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         gateway_connected = ctx.gateway_client is not None and ctx.gateway_client.is_connected
         if not (ctx.rpc_url or gateway_connected):
             return None
-        from almanak.framework.intents.pool_validation import fetch_v3_pool_sqrt_price_x96
+        from almanak.connectors.uniswap_v3.pool_validation import fetch_v3_pool_sqrt_price_x96
 
         try:
             slot0_result = fetch_v3_pool_sqrt_price_x96(

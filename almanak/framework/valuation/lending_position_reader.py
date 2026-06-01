@@ -11,13 +11,26 @@ import json
 import logging
 from dataclasses import dataclass
 
-from almanak.connectors.aave_v3.addresses import AAVE_V3
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 
 logger = logging.getLogger(__name__)
 
-# Aave V3 Pool Data Provider addresses — derived from the connector-owned
-# address table in almanak/connectors/aave_v3/addresses.py (W1 / VIB-4853).
-AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {chain: addrs["pool_data_provider"] for chain, addrs in AAVE_V3.items()}
+# Aave V3 Pool Data Provider addresses — resolved through the strategy-side
+# ``AddressRegistry`` (W1 / VIB-4853), which brokers the connector-owned
+# address table in almanak/connectors/aave_v3/addresses.py. Built once at
+# import. ``address_supported_chains("aave_v3")`` is the canonical
+# supported-chain list, so a chain that declares aave_v3 support but omits
+# ``pool_data_provider`` is registry drift, not a silent opt-out: we fail
+# loudly here rather than letting ``read_position(...)`` return ``None`` and
+# mask a live position during valuation/teardown.
+AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {}
+for _chain in AddressRegistry.address_supported_chains("aave_v3"):
+    _provider = AddressRegistry.addresses_for("aave_v3", _chain).get("pool_data_provider")
+    if not _provider:
+        msg = f"aave_v3 is missing pool_data_provider for supported chain {_chain!r}"
+        raise ValueError(msg)
+    AAVE_V3_POOL_DATA_PROVIDER[_chain] = _provider
+del _chain, _provider
 
 # Function selector for getUserReserveData(address asset, address user)
 GET_USER_RESERVE_DATA_SELECTOR = "0x28dd2d01"

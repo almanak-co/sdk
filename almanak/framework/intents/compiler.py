@@ -39,6 +39,7 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
+from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
@@ -76,10 +77,11 @@ from .vocabulary import (
 if TYPE_CHECKING:
     from web3 import Web3
 
+    from almanak.connectors._strategy_base.pool_validation_base import PoolValidationResult
+
     from ..data.tokens import TokenResolver as TokenResolverType
     from ..gateway_client import GatewayClient
     from .bridge import BridgeIntent
-    from .pool_validation import PoolValidationResult
     from .vocabulary import UnwrapNativeIntent, WrapNativeIntent
 
 logger = logging.getLogger(__name__)
@@ -856,8 +858,6 @@ class IntentCompiler:
         Returns:
             CompilationResult with FAILED status when fail-closed, None if OK to proceed.
         """
-        from .pool_validation import PoolValidationReason
-
         offline_mode = self._using_placeholders or getattr(self._config, "permission_discovery", False)
 
         fail_closed_reasons = {PoolValidationReason.NOT_FOUND}
@@ -1757,14 +1757,14 @@ class IntentCompiler:
         selected_fee = adapter.last_fee_selection.get("selected_fee_tier")
         if selected_fee is None:
             return None
-        from .pool_validation import validate_v3_pool
+        from almanak.connectors._strategy_base.pool_validation_registry import PoolValidationRegistry
 
-        pool_check = validate_v3_pool(
-            self.chain,
+        pool_check = PoolValidationRegistry.validate(
             protocol,
+            self.chain,
             actual_from_token,
             actual_to_token,
-            selected_fee,
+            {"fee_tier": selected_fee},
             self._get_chain_rpc_url(),
             gateway_client=self._gateway_client,
         )
@@ -1845,13 +1845,14 @@ class IntentCompiler:
         if not (rpc_url or gateway_connected):
             return None
 
-        from .pool_validation import fetch_v3_pool_sqrt_price_x96
+        from almanak.connectors._strategy_base.pool_validation_registry import PoolValidationRegistry
 
         try:
-            slot0_result = fetch_v3_pool_sqrt_price_x96(
+            slot0_result = PoolValidationRegistry.fetch_sqrt_price(
+                self.default_protocol,
                 pool_check.pool_address,
+                self.chain,
                 rpc_url,
-                chain=self.chain,
                 gateway_client=self._gateway_client,
             )
         except Exception as exc:

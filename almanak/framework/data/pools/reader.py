@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors.uniswap_v3.pool_validation import V3_GET_POOL_SELECTOR as GET_POOL_SELECTOR
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import (
     DataClassification,
@@ -72,8 +73,10 @@ UNISWAP_V3_FACTORY: dict[str, str] = {
 # Uniswap V3 pool init code hash for CREATE2 address computation
 POOL_INIT_CODE_HASH = "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"
 
-# getPool(address,address,uint24) selector on factory
-GET_POOL_SELECTOR = "0x1698ee82"
+# getPool(address,address,uint24) selector on factory. The canonical literal is
+# owned by the Uniswap V3 connector (it owns the V3 factory ABI); re-exported
+# here (see top-of-module import) so the historical ``reader.GET_POOL_SELECTOR``
+# import path keeps working.
 
 # Well-known Uniswap V3 pool addresses for fast lookup
 # Format: {chain: {(token_a_lower, token_b_lower, fee_tier): pool_address}}

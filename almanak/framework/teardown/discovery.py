@@ -29,9 +29,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
-from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
-from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 from almanak.gateway.proto import gateway_pb2
 
@@ -40,17 +38,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Registry of NPM-style protocols (Uniswap V3 and its forks). All expose the
-# canonical balanceOf / tokenOfOwnerByIndex / positions(tokenId) ABI so a
-# single scan walker can enumerate positions across all of them. Adding a new
-# V3 fork only requires registering its `position_manager` in
-# ``almanak/core/contracts.py`` and adding the protocol slug to this mapping.
-_NPM_PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
-    "uniswap_v3": UNISWAP_V3,
-    "agni_finance": AGNI_FINANCE,
-    "pancakeswap_v3": PANCAKESWAP_V3,
-    "sushiswap_v3": SUSHISWAP_V3,
-}
+# NPM-style protocols (Uniswap V3 and its forks) that expose the canonical
+# balanceOf / tokenOfOwnerByIndex / positions(tokenId) ABI this scan walker
+# speaks, so a single walker can enumerate positions across all of them. The
+# membership is connector knowledge, so it lives on the strategy-side
+# ``AddressRegistry`` under :attr:`AbiFamily.V3_NPM` — this framework module
+# never names a protocol itself. Each member's per-chain
+# NonfungiblePositionManager address is also resolved through the registry
+# (W1 / VIB-4853); the address tables live on the connectors. Supporting a new
+# V3 fork requires only adding its ``position_manager`` to the connector's
+# ``addresses.py`` and listing the slug under ``AbiFamily.V3_NPM`` — no edit
+# here.
+_NPM_PROTOCOLS: tuple[str, ...] = AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM)
 
 # ERC-721 selectors (canonical Uniswap V3 NPM interface)
 _SELECTOR_BALANCE_OF = "0x70a08231"  # balanceOf(address)
@@ -270,20 +269,6 @@ async def _read_position(
         return None
 
 
-def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
-    """Return ``[(protocol_slug, npm_address), ...]`` for all registered V3-fork
-    NPMs on the given chain. Ordered deterministically by protocol slug so
-    discovery output is stable across runs.
-    """
-    found: list[tuple[str, str]] = []
-    for protocol, registry in sorted(_NPM_PROTOCOL_REGISTRIES.items()):
-        chain_entry = registry.get(chain) or {}
-        npm = _npm_from_chain_entry(chain_entry)
-        if npm:
-            found.append((protocol, npm))
-    return found
-
-
 # Connectors record the NonfungiblePositionManager under one of two keys:
 # ``position_manager`` (uniswap_v3 / agni_finance / sushiswap_v3) or ``nft``
 # (pancakeswap_v3, whose receipt parser and intent compiler already standardise
@@ -293,13 +278,17 @@ def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
 _NPM_ADDRESS_KEYS = ("position_manager", "nft")
 
 
-def _npm_from_chain_entry(chain_entry: dict[str, str]) -> str | None:
-    """Resolve the NPM address from a connector chain entry under either key."""
-    for key in _NPM_ADDRESS_KEYS:
-        npm = chain_entry.get(key)
+def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
+    """Return ``[(protocol_slug, npm_address), ...]`` for all registered V3-fork
+    NPMs on the given chain. Ordered deterministically by protocol slug so
+    discovery output is stable across runs.
+    """
+    found: list[tuple[str, str]] = []
+    for protocol in sorted(_NPM_PROTOCOLS):
+        npm = AddressRegistry.resolve_contract_address(protocol, chain, _NPM_ADDRESS_KEYS)
         if npm:
-            return npm
-    return None
+            found.append((protocol, npm))
+    return found
 
 
 async def _call_with_retries(
@@ -363,12 +352,14 @@ async def discover_lp_positions(
 ) -> list[DiscoveredPosition]:
     """Discover all LP positions the wallet holds on NPMs registered for ``chain``.
 
-    Walks every V3-fork NPM registered in ``_NPM_PROTOCOL_REGISTRIES`` for
-    the chain (Uniswap V3, Agni, PancakeSwap V3, SushiSwap V3, ...). A wallet
-    that opened positions on multiple V3-fork protocols on the same chain
-    will have all of them surfaced. Callers that need additional protocols
-    (e.g. Aerodrome CL, Uniswap V4) should extend ``_NPM_PROTOCOL_REGISTRIES``
-    once those NPMs share the same ABI — today they don't.
+    Walks every V3-fork NPM grouped under ``AbiFamily.V3_NPM`` for the chain
+    (Uniswap V3, Agni, PancakeSwap V3, SushiSwap V3, ...), resolving each
+    one's NonfungiblePositionManager address through the strategy-side
+    ``AddressRegistry``. A wallet that opened positions on multiple V3-fork
+    protocols on the same chain will have all of them surfaced. Additional
+    protocols (e.g. Aerodrome CL, Uniswap V4) are surfaced automatically once
+    they join ``AbiFamily.V3_NPM`` on the registry — they are deliberately
+    absent today because their NPMs do not share this canonical ABI.
 
     Args:
         client: Connected GatewayClient — positions are read through the
