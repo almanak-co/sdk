@@ -41,24 +41,9 @@ from tests.intents.conftest import TEST_WALLET as _EOA_ADDR
 CHAIN_NAME = "bsc"
 
 
-@pytest.fixture(scope="session")
-def perps_price_oracle() -> dict[str, Decimal]:
-    """Static prices for Aster Perps open tests.
-
-    The compiler uses these to derive qty (size_usd / mark_price) and the
-    slippage-to-limit-price bound. We pick values close enough to real-market
-    that the computed limit passes Aster's internal "beforePrice" sanity gate
-    (which rejects fills diverging from the oracle price by more than the
-    PriceFacade's highPriceGapP parameter).
-    """
-    return {
-        "BTC": Decimal("95000"),
-        "ETH": Decimal("3500"),
-        "BNB": Decimal("600"),
-        "WBNB": Decimal("600"),
-        "USDT": Decimal("1"),
-        "USDC": Decimal("1"),
-    }
+# ``perps_price_oracle`` is provided by tests/intents/bnb/conftest.py: it reads
+# the live on-chain PriceFacade price at the fork block so derived limit prices
+# stay within the gate's band regardless of the weekly CI fork-block pin roll.
 
 
 def _call_get_pending_trade(web3: Web3, router: str, trade_hash: str) -> bytes:
@@ -79,6 +64,7 @@ class TestAsterPerpsOpenIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
+        require_tradeable_aster_perp_market,
     ):
         """Open a long BTC/USD position with 0.3 BNB native margin, protocol=aster_perps.
 
@@ -97,7 +83,6 @@ class TestAsterPerpsOpenIntent:
         # "Position is too small"). $500 is well above the floor for BTC/USD.
         collateral_amount = Decimal("0.3")  # 0.3 BNB (~ $180 at $600/BNB)
         size_usd = Decimal("500")  # $500 notional
-        mark_price = perps_price_oracle["BTC"]
 
         print(f"\n{'=' * 80}")
         print("Test: Aster Perps OPEN — LONG BTC/USD, native BNB margin, broker=0")

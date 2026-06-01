@@ -47,17 +47,9 @@ from tests.intents.bnb.conftest import (
 CHAIN_NAME = "bsc"
 
 
-@pytest.fixture(scope="session")
-def perps_price_oracle() -> dict[str, Decimal]:
-    """Static prices (matches the open-intent test for consistency)."""
-    return {
-        "BTC": Decimal("95000"),
-        "ETH": Decimal("3500"),
-        "BNB": Decimal("600"),
-        "WBNB": Decimal("600"),
-        "USDT": Decimal("1"),
-        "USDC": Decimal("1"),
-    }
+# ``perps_price_oracle`` is provided by tests/intents/bnb/conftest.py: it reads
+# the live on-chain PriceFacade price at the fork block so derived limit prices
+# stay within the gate's band regardless of the weekly CI fork-block pin roll.
 
 
 @pytest.mark.bsc
@@ -73,6 +65,7 @@ class TestPancakeSwapPerpsCloseViaIntent:
         anvil_rpc_url: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
+        require_tradeable_aster_perp_market,
     ):
         """Open -> keeper-fill -> CLOSE-via-intent -> keeper-settle, verify 4 layers.
 

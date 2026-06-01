@@ -14,6 +14,15 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.aster_perps.addresses import ASTER_PERPS, ASTER_PERPS_MARKETS
+from almanak.connectors.aster_perps.sdk import (
+    NATIVE_BNB_ADDRESS,
+    PRICE_DECIMALS,
+    OpenTradeStruct,
+    encode_open_market_trade_calldata,
+    slippage_to_limit_price,
+    usd_size_to_qty,
+)
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.signer import LocalKeySigner
 from almanak.framework.execution.simulator import DirectSimulator
@@ -211,6 +220,157 @@ def orchestrator(
         rpc_url=anvil_rpc_url,
         tx_timeout_seconds=TEST_TX_TIMEOUT_SECONDS,
     )
+
+
+# =============================================================================
+# Live perps oracle price fixture (single source of truth for all BSC perp
+# intent tests — open / close / keeper / min-notional)
+# =============================================================================
+# The Aster/PCS Perps open path checks the user's limit price against the
+# on-chain PriceFacade oracle and reverts (``ModuleTransactionFailed()``,
+# selector 0xd27b44a9) when the two diverge by more than ``highPriceGapP``.
+# A hardcoded mark price drifts out of that band every time the weekly CI
+# fork-block pin rolls forward (the ISO-week RPC-proxy cache key in
+# ``template_intent_test.yml`` re-pins every fork to current head), which
+# silently reverted every BTC/ETH/BNB perp open in CI. Reading the *exact*
+# cached oracle price at the fork block keeps the derived limit within
+# ``max_slippage`` of the gate's own reference at any block.
+
+# ``PriceFacadeFacet.getPriceFromCacheOrOracle(address) -> (uint64 price,
+# uint40 updatedAt)`` — a view on the same Diamond router as the open
+# entrypoint. ``price`` is 8-decimal fixed point (``PRICE_DECIMALS``), matching
+# the uint64 ``price`` field the router expects in the OpenTradeStruct.
+_PRICE_FACADE_VIEW_ABI = [
+    {
+        "inputs": [{"internalType": "address", "name": "token", "type": "address"}],
+        "name": "getPriceFromCacheOrOracle",
+        "outputs": [
+            {"internalType": "uint64", "name": "price", "type": "uint64"},
+            {"internalType": "uint40", "name": "updatedAt", "type": "uint40"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+# Static fallback — used ONLY if the on-chain oracle cache is unexpectedly
+# empty at the fork block, so the fixture degrades to the pre-existing
+# behaviour instead of erroring every perp test. The live read is the durable
+# path and is taken whenever the oracle is populated (the normal case on a BSC
+# mainnet fork, where BTC/ETH/BNB feeds are continuously updated).
+_PERP_PRICE_FALLBACK: dict[str, Decimal] = {
+    "BTC": Decimal("95000"),
+    "ETH": Decimal("3500"),
+    "BNB": Decimal("600"),
+}
+
+
+def _read_live_perp_price(web3: Web3, router: str, token_addr: str) -> Decimal | None:
+    """Read the live cached oracle price (USD) for ``token_addr`` off the Diamond.
+
+    Returns ``None`` if the call reverts or the cache is empty (price <= 0) so
+    the caller can fall back to a static default rather than crash the fixture.
+    """
+    facade = web3.eth.contract(
+        address=Web3.to_checksum_address(router), abi=_PRICE_FACADE_VIEW_ABI
+    )
+    try:
+        price_raw, _updated_at = facade.functions.getPriceFromCacheOrOracle(
+            Web3.to_checksum_address(token_addr)
+        ).call()
+    except Exception:
+        return None
+    if price_raw <= 0:
+        return None
+    return Decimal(price_raw) / (Decimal(10) ** PRICE_DECIMALS)
+
+
+@pytest.fixture(scope="module")
+def perps_price_oracle(web3: Web3) -> dict[str, Decimal]:
+    """Aster/PancakeSwap Perps mark prices read live from the fork block.
+
+    Replaces the per-file static map (BTC=$95k, …) that every BSC perp intent
+    test previously duplicated. Module-scoped so the read happens once per test
+    module against the shared fork — prices stay deterministic and aligned with
+    the fork block (the on-chain oracle is fixed at that block), satisfying the
+    session/module-scope requirement for fork-aligned price fixtures.
+    """
+    router = ASTER_PERPS[CHAIN_NAME]["router"]
+    markets = ASTER_PERPS_MARKETS[CHAIN_NAME]
+
+    def price_for(symbol: str, market: str) -> Decimal:
+        live = _read_live_perp_price(web3, router, markets[market])
+        return live if live is not None else _PERP_PRICE_FALLBACK[symbol]
+
+    bnb_price = price_for("BNB", "BNB/USD")
+    return {
+        "BTC": price_for("BTC", "BTC/USD"),
+        "ETH": price_for("ETH", "ETH/USD"),
+        "BNB": bnb_price,
+        "WBNB": bnb_price,
+        "USDT": Decimal("1"),
+        "USDC": Decimal("1"),
+    }
+
+
+# =============================================================================
+# Perp market availability gate (skip open-path tests when the venue is paused)
+# =============================================================================
+# Aster's TradingCheckerFacet reverts an open with "The pair is temporarily
+# unavailable for trading" when a market is suspended on-chain — a real,
+# fork-block-dependent condition (the whole Aster/PCS venue was suspended at the
+# 2026-W23 pin: BTC, ETH and BNB all reverted). No open can succeed against a
+# paused market regardless of price or size, so the open-path perp tests skip
+# cleanly here rather than hard-fail CI; coverage resumes automatically once the
+# market is live again at a later fork block.
+_PERP_MARKET_UNAVAILABLE_MARKERS = ("unavailable for trading", "temporarily unavailable")
+
+
+def _aster_perp_open_unavailable(web3: Web3, base: str, price: Decimal) -> str | None:
+    """Return the revert reason if a representative BTC-size open on ``base`` is
+    rejected because the market is paused, else ``None``.
+
+    Read-only ``eth_call`` with a balance state-override (so the native-margin
+    transfer simulates). Matches ONLY the TradingCheckerFacet pause revert — a
+    success or any other revert returns ``None`` so the caller does not skip,
+    keeping genuine regressions loud.
+    """
+    margin = int(Decimal("0.3") * 10**18)
+    trade = OpenTradeStruct(
+        pair_base=Web3.to_checksum_address(base),
+        is_long=True,
+        token_in=NATIVE_BNB_ADDRESS,
+        amount_in=margin,
+        qty=usd_size_to_qty(Decimal("500"), price),
+        price=slippage_to_limit_price(price, Decimal("0.01"), is_long=True),
+        broker=0,
+    )
+    data = "0x" + encode_open_market_trade_calldata(trade, native=True).hex()
+    router = Web3.to_checksum_address(ASTER_PERPS[CHAIN_NAME]["router"])
+    probe = Web3.to_checksum_address(TEST_WALLET)
+    call = {"from": probe, "to": router, "data": data, "value": margin}
+    try:
+        web3.eth.call(call, "latest", {probe: {"balance": hex(1000 * 10**18)}})
+        return None
+    except Exception as exc:
+        msg = str(exc).lower()
+        return str(exc) if any(m in msg for m in _PERP_MARKET_UNAVAILABLE_MARKERS) else None
+
+
+@pytest.fixture
+def require_tradeable_aster_perp_market(web3: Web3, perps_price_oracle: dict[str, Decimal]) -> None:
+    """Skip the test when the Aster/PancakeSwap BTC/USD perp market is paused.
+
+    Every open-path perp test on BSC opens BTC/USD, so one pre-flight probe of
+    that market gates them all. Requested as a fixture argument by those tests;
+    has no return value (its only effect is the conditional ``pytest.skip``).
+    """
+    base = ASTER_PERPS_MARKETS[CHAIN_NAME]["BTC/USD"]
+    reason = _aster_perp_open_unavailable(web3, base, perps_price_oracle["BTC"])
+    if reason is not None:
+        pytest.skip(
+            f"Aster/PCS BTC/USD perp market unavailable on-chain at this fork block: {reason[:160]}"
+        )
 
 
 # =============================================================================

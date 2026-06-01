@@ -98,6 +98,7 @@ class TestPancakeSwapPerpsCloseIntent:
         funded_wallet: str,
         test_private_key: str,
         anvil_rpc_url: str,
+        require_tradeable_aster_perp_market,
     ):
         """Full open -> fill -> close cycle for a LONG BTC/USD position."""
         router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]

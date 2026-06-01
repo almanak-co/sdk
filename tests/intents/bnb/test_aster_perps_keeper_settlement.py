@@ -53,17 +53,9 @@ from tests.intents.conftest import TEST_WALLET as _EOA_ADDR
 CHAIN_NAME = "bsc"
 
 
-@pytest.fixture(scope="session")
-def perps_price_oracle() -> dict[str, Decimal]:
-    """Static prices (matches sibling open/close tests)."""
-    return {
-        "BTC": Decimal("95000"),
-        "ETH": Decimal("3500"),
-        "BNB": Decimal("600"),
-        "WBNB": Decimal("600"),
-        "USDT": Decimal("1"),
-        "USDC": Decimal("1"),
-    }
+# ``perps_price_oracle`` is provided by tests/intents/bnb/conftest.py: it reads
+# the live on-chain PriceFacade price at the fork block so derived limit prices
+# stay within the gate's band regardless of the weekly CI fork-block pin roll.
 
 
 @pytest.mark.bsc
@@ -79,6 +71,7 @@ class TestAsterPerpsKeeperSettlement:
         anvil_rpc_url: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
+        require_tradeable_aster_perp_market,
     ):
         """Open with broker=0, keeper settles, assert OpenMarketTrade carries broker=0."""
         router = ASTER_PERPS[CHAIN_NAME]["router"]

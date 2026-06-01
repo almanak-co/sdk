@@ -50,24 +50,9 @@ CHAIN_NAME = "bsc"
 # =============================================================================
 
 
-@pytest.fixture(scope="session")
-def perps_price_oracle() -> dict[str, Decimal]:
-    """Static prices for PCS Perps open tests.
-
-    The compiler uses these to derive qty (size_usd / mark_price) and the
-    slippage-to-limit-price bound. We pick values close enough to real-market
-    that the computed limit passes ApolloX's internal "beforePrice" sanity gate
-    (which rejects fills diverging from the oracle price by more than the
-    PriceFacade's highPriceGapP parameter).
-    """
-    return {
-        "BTC": Decimal("95000"),
-        "ETH": Decimal("3500"),
-        "BNB": Decimal("600"),
-        "WBNB": Decimal("600"),
-        "USDT": Decimal("1"),
-        "USDC": Decimal("1"),
-    }
+# ``perps_price_oracle`` is provided by tests/intents/bnb/conftest.py: it reads
+# the live on-chain PriceFacade price at the fork block so derived limit prices
+# stay within the gate's band regardless of the weekly CI fork-block pin roll.
 
 
 def _call_get_pending_trade(web3: Web3, router: str, trade_hash: str) -> bytes:
@@ -88,6 +73,7 @@ class TestPancakeSwapPerpsOpenIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
+        require_tradeable_aster_perp_market,
     ):
         """Open a long BTC/USD position with 0.3 BNB native margin.
 

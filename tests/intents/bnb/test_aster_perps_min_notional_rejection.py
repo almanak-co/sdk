@@ -36,17 +36,9 @@ from almanak.framework.intents.vocabulary import IntentType
 CHAIN_NAME = "bsc"
 
 
-@pytest.fixture(scope="session")
-def perps_price_oracle() -> dict[str, Decimal]:
-    """Static prices matching sibling aster_perps tests."""
-    return {
-        "BTC": Decimal("95000"),
-        "ETH": Decimal("3500"),
-        "BNB": Decimal("600"),
-        "WBNB": Decimal("600"),
-        "USDT": Decimal("1"),
-        "USDC": Decimal("1"),
-    }
+# ``perps_price_oracle`` is provided by tests/intents/bnb/conftest.py: it reads
+# the live on-chain PriceFacade price at the fork block so derived limit prices
+# stay within the gate's band regardless of the weekly CI fork-block pin roll.
 
 
 @pytest.mark.bsc
