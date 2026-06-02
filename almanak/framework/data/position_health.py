@@ -184,7 +184,19 @@ class PositionHealthProvider:
         gateway_client: "GatewayClient | None" = None,
     ):
         self._rpc_url = rpc_url
-        self._chain = chain
+        # Canonicalize chain aliases (e.g. "bnb" -> "bsc") via the central
+        # resolver, mirroring the intent compiler / execution path. Connector
+        # address tables (e.g. AAVE_V3_POOL_ADDRESSES) are keyed on canonical
+        # names, so without this an alias would miss the pool lookup and raise
+        # "not configured" even on a supported chain. Fall back to the raw
+        # value if the resolver is unavailable or the name is unknown (an
+        # unknown chain still fails closed at the per-protocol address lookup).
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            self._chain = resolve_chain_name(chain)
+        except (ValueError, ImportError):
+            self._chain = chain
         self._price_oracle = price_oracle
         self._gateway_client = gateway_client
         self._cache: dict[str, _CachedHealth] = {}
@@ -403,15 +415,18 @@ class PositionHealthProvider:
             else:
                 w3 = Web3(Web3.HTTPProvider(self._rpc_url))
 
-            # Aave V3 Pool addresses by chain
-            aave_pool_addresses = {
-                "ethereum": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-                "arbitrum": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-                "optimism": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-                "base": "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
-            }
+            # Aave V3 Pool address by chain. Source the connector's canonical
+            # ``AAVE_V3_POOL_ADDRESSES`` (derived from the ``AAVE_V3`` address
+            # book) rather than a local copy, so health support never drifts
+            # behind execution support. A hardcoded subset here previously
+            # listed only 4 chains and omitted bsc + 7 others the connector
+            # executes on, raising "not configured" at runtime and tripping
+            # HF-based safety logic into false emergency behaviour. Mirrors the
+            # Compound V3 path below, which imports its canonical table for the
+            # same single-source-of-truth reason.
+            from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 
-            pool_address = aave_pool_addresses.get(self._chain)
+            pool_address = AAVE_V3_POOL_ADDRESSES.get(self._chain)
             if not pool_address:
                 raise ValueError(f"Aave V3 not configured for chain: {self._chain}")
 

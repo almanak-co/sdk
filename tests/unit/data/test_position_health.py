@@ -8,15 +8,14 @@ import pytest
 from almanak.framework.data.position_health import (
     DeleverageTrigger,
     HealthFactorProvider,
-    PTPositionHealth,
     PositionHealth,
     PositionHealthProvider,
+    PTPositionHealth,
     _normalize_protocol,
     _PositionHealthProviderAdapter,
     get_health_factor,
     register_health_factor_provider,
 )
-
 
 # =========================================================================
 # PositionHealth Tests
@@ -417,6 +416,95 @@ class TestAaveHealthFactorProvider:
         provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="unknown_chain_x")
         with pytest.raises(ValueError, match="Aave V3 not configured"):
             provider.get_health("aave_v3", "m", "0xabc")
+
+    def test_aave_hf_supported_on_bsc(self):
+        """Regression (ALM-2794): bsc health used to raise "not configured".
+
+        The health path hardcoded a 4-chain subset that omitted bsc, so a live
+        ``aave_v3`` strategy on bsc got "not configured for chain: bsc" while its
+        SUPPLY/BORROW intents executed fine — tripping HF-safety logic into false
+        emergency unwinds. Health now sources the connector's canonical pool table,
+        so bsc resolves and returns the on-chain HF.
+        """
+        fake_pool = MagicMock()
+        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
+            10_000 * 10**8,
+            5_000 * 10**8,
+            2_000 * 10**8,
+            8500,
+            8000,
+            int(Decimal("1.6") * Decimal("1e18")),
+        )
+
+        fake_w3 = MagicMock()
+        fake_w3.to_checksum_address.side_effect = lambda a: a
+        fake_w3.eth.contract.return_value = fake_pool
+
+        with _fake_web3_patch(fake_w3):
+            provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="bsc")
+            health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+
+        assert health.health_factor == Decimal("1.6")
+        assert health.protocol == "aave_v3"
+
+    def test_aave_hf_resolves_bnb_alias_to_bsc(self):
+        """Chain aliases must canonicalize before the pool lookup.
+
+        Connector address tables are keyed on the canonical name ("bsc"). A
+        caller passing the "bnb" alias (as the execution path tolerates) must
+        still resolve, not raise "not configured" — the provider canonicalizes
+        ``self._chain`` at construction.
+        """
+        fake_pool = MagicMock()
+        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
+            10_000 * 10**8,
+            5_000 * 10**8,
+            2_000 * 10**8,
+            8500,
+            8000,
+            int(Decimal("1.6") * Decimal("1e18")),
+        )
+        fake_w3 = MagicMock()
+        fake_w3.to_checksum_address.side_effect = lambda a: a
+        fake_w3.eth.contract.return_value = fake_pool
+
+        with _fake_web3_patch(fake_w3):
+            provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="bnb")
+            assert provider._chain == "bsc"  # canonicalized at construction
+            health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+
+        assert health.protocol == "aave_v3"
+
+    def test_aave_health_chains_match_execution_chains(self):
+        """Drift guard: health support must never fall behind execution support.
+
+        The bug was a private copy of the pool-address table that drifted behind
+        the connector's. Pin the invariant: every chain the connector can execute
+        Aave V3 on must also resolve in the health path (i.e. must not raise
+        "not configured"). If someone re-introduces a hardcoded subset, this fails.
+        """
+        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+
+        fake_pool = MagicMock()
+        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
+            10_000 * 10**8,
+            5_000 * 10**8,
+            2_000 * 10**8,
+            8500,
+            8000,
+            int(Decimal("2.0") * Decimal("1e18")),
+        )
+        fake_w3 = MagicMock()
+        fake_w3.to_checksum_address.side_effect = lambda a: a
+        fake_w3.eth.contract.return_value = fake_pool
+
+        assert "bsc" in AAVE_V3_POOL_ADDRESSES  # the chain that surfaced ALM-2794
+        with _fake_web3_patch(fake_w3):
+            for chain in AAVE_V3_POOL_ADDRESSES:
+                provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain=chain)
+                # Must not raise "Aave V3 not configured for chain: <chain>".
+                health = provider.get_health("aave_v3", f"{chain}_pool", "0xabc")
+                assert health.protocol == "aave_v3"
 
 
 def _fake_web3_patch(fake_w3):
