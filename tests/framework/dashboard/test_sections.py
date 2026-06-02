@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-
 # ---- render_trade_tape_section ----
 
 
@@ -71,9 +70,33 @@ def test_render_pnl_section_is_in_public_api() -> None:
 
 
 def test_render_pnl_section_calls_pnl_summary_rpc_and_money_trail_renderer() -> None:
-    """Helper fetches via ``get_pnl_summary`` and forwards to
-    ``render_money_trail`` — no recomputation of NAV / PnL on the
-    client side."""
+    """Helper fetches ``get_pnl_summary`` + ``get_cost_stack`` and forwards
+    both to ``render_money_trail`` — no recomputation of NAV / PnL on the
+    client side. The cost stack carries the realized-PnL components the
+    Strategy PnL / APR tiles need."""
+    from almanak.framework.dashboard import sections
+
+    fake_pnl = object()
+    fake_cost = object()
+
+    with (
+        patch.object(sections.st, "divider"),
+        patch.object(sections.st, "markdown"),
+        patch.object(sections, "get_pnl_summary", return_value=fake_pnl) as mock_get,
+        patch.object(sections, "get_cost_stack", return_value=fake_cost) as mock_cost,
+        patch.object(sections, "render_money_trail") as mock_render,
+    ):
+        sections.render_pnl_section("sid")
+
+    mock_get.assert_called_once_with("sid")
+    mock_cost.assert_called_once_with("sid")
+    mock_render.assert_called_once_with(fake_pnl, fake_cost)
+
+
+def test_render_pnl_section_degrades_cost_to_none_on_disconnect() -> None:
+    """If the cost-stack RPC is down but PnL is present, still render the
+    money trail (Strategy PnL / APR tiles degrade to "—") rather than
+    dropping the whole PnL row."""
     from almanak.framework.dashboard import sections
 
     fake_pnl = object()
@@ -81,13 +104,17 @@ def test_render_pnl_section_calls_pnl_summary_rpc_and_money_trail_renderer() -> 
     with (
         patch.object(sections.st, "divider"),
         patch.object(sections.st, "markdown"),
-        patch.object(sections, "get_pnl_summary", return_value=fake_pnl) as mock_get,
+        patch.object(sections, "get_pnl_summary", return_value=fake_pnl),
+        patch.object(
+            sections,
+            "get_cost_stack",
+            side_effect=sections.GatewayConnectionError("test"),
+        ),
         patch.object(sections, "render_money_trail") as mock_render,
     ):
         sections.render_pnl_section("sid")
 
-    mock_get.assert_called_once_with("sid")
-    mock_render.assert_called_once_with(fake_pnl)
+    mock_render.assert_called_once_with(fake_pnl, None)
 
 
 def test_render_pnl_section_degrades_to_info_when_rpc_returns_none() -> None:

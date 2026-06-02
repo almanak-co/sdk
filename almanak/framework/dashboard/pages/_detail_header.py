@@ -205,7 +205,7 @@ def render_quant_header(
         return
 
     _maybe_render_beta_banner(pnl)
-    render_money_trail(pnl)
+    render_money_trail(pnl, cost)
     # Position & Risk row depends mostly on ``pnl`` (Open Exposure,
     # Primary Risk, Cash Buffer) — only the Cost Stack tile needs
     # ``cost``. Render all 4 tiles whenever ``pnl`` is present and let
@@ -261,11 +261,92 @@ def _maybe_render_beta_banner(p: PnLSummary) -> None:
 # --- Row 1: Money trail --------------------------------------------------
 
 
-def render_money_trail(p: PnLSummary) -> None:
-    """Render the Money Trail row (Deployed / NAV / Lifetime PnL / Net APR).
+_STRATEGY_PNL_HELP = (
+    "Strategy-scoped PnL = realized (closed positions + swaps, net of LP fees, "
+    "funding, interest and gas — from accounting) + unrealized (open position "
+    "NAV − open cost basis). Excludes idle wallet balances, so unlike the old "
+    "wallet PnL it is NOT moved by gas spend or by another strategy sharing the "
+    "wallet (deployment_id is wallet+chain-scoped)."
+)
+_STRATEGY_APR_HELP = (
+    "Annualised Strategy PnL ÷ open cost basis × (365 / age_days). "
+    "Strategy-scoped, not wallet-level. Expect jumpiness for tiny or "
+    "short-lived positions."
+)
+# A snapshot can carry open positions while its cost-basis column is an
+# *unmeasured* 0 (the intra-run NAV double-count / stale-cost-basis failure
+# mode — VIB-3932 cluster). Below this dust threshold we treat the open
+# position NAV as "no position", so a genuinely-flat (all-closed) strategy is
+# unaffected; above it, a 0 cost basis means "unmeasured", not "free money".
+_COST_BASIS_DUST_USD = Decimal("0.01")
+
+
+def _net_realized_pnl_usd(cost: CostStackInfo) -> Decimal:
+    """Realized component PnL from accounting — mirrors the G6 component
+    decomposition in ``quant_aggregations.compute_reconciliation``
+    (``component_pnl``): realized close/swap PnL + LP fees earned + funding net
+    + interest net − gas. Wallet-independent (sourced from accounting_events,
+    not wallet cash deltas), so idle balances never leak in.
+    """
+    return (
+        cost.realized_pnl_usd
+        + cost.fees_earned_usd
+        + (cost.funding_earned_usd - cost.funding_paid_usd)
+        + (cost.interest_earned_usd - cost.interest_paid_usd)
+        - cost.cost_gas_usd
+    )
+
+
+def _strategy_pnl_usd(p: PnLSummary, cost: CostStackInfo | None, open_position_nav: Decimal) -> Decimal | None:
+    """Strategy PnL = net realized (accounting) + unrealized (open MTM − cost
+    basis). Returns ``None`` (tile renders "—") when the result would be
+    untrustworthy:
+
+    * ``cost`` is None — the realized RPC failed; don't silently drop the
+      realized leg and understate PnL.
+    * open positions exist (``open_position_nav`` above dust) but the cost
+      basis is an unmeasured 0 — or a sub-dust value that would behave like
+      one — **Empty ≠ Zero**. Treating that as a real basis makes unrealized
+      = NAV − ~0 = the whole position value, i.e. a strategy reading "+100%".
+      This is the intermittent intra-run NAV double-count / stale-cost-basis
+      snapshot (VIB-3932 cluster); "—" is correct until a clean snapshot
+      lands. A genuinely-flat (all-closed) strategy has ``open_position_nav``
+      ~ 0 and computes normally (realized only).
+    """
+    if cost is None:
+        return None
+    if p.deployed_capital_usd <= _COST_BASIS_DUST_USD and open_position_nav > _COST_BASIS_DUST_USD:
+        return None
+    unrealized = open_position_nav - p.deployed_capital_usd
+    return _net_realized_pnl_usd(cost) + unrealized
+
+
+def _strategy_apr_pct(strategy_pnl: Decimal | None, deployed_capital_usd: Decimal, age_days: int) -> Decimal | None:
+    """Annualised Strategy PnL ÷ open cost basis. ``None`` when undefined — no
+    realized data, sub-dust cost basis (nothing meaningfully deployed —
+    avoids astronomical APR from a dust denominator), or zero age."""
+    if strategy_pnl is None or deployed_capital_usd <= _COST_BASIS_DUST_USD or age_days <= 0:
+        return None
+    return (strategy_pnl / deployed_capital_usd) * Decimal("365") / Decimal(str(age_days)) * Decimal("100")
+
+
+def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None:
+    """Render the Money Trail rows.
+
+    WALLET TOTALS (idle-inclusive context): Deployed / NAV / Available cash.
+    STRATEGY-CONTROLLED FUNDS: Open position NAV / Open cost basis /
+    Strategy PnL / Strategy APR.
+
+    The PnL + APR tiles are **strategy-scoped** (realized from accounting +
+    unrealized mark-to-market), replacing the old wallet-level ``nav −
+    deployed`` PnL / APR which double-counted idle wallet balances and moved
+    whenever gas was spent or another strategy traded the same wallet
+    (``deployment_id`` is wallet+chain-scoped). VIB-3969.
 
     Public renderer — used by the operator-console quant header AND by
-    ``render_pnl_section`` (custom-dashboard helper). VIB-3969.
+    ``render_pnl_section`` (custom-dashboard helper). ``cost`` carries the
+    realized-PnL components (``GetCostStack``); when ``None`` (its RPC failed)
+    the Strategy PnL / APR tiles render "—" rather than understate PnL.
     """
     st.markdown(
         '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
@@ -273,11 +354,9 @@ def render_money_trail(p: PnLSummary) -> None:
         unsafe_allow_html=True,
     )
     # VIB-3926 — every tile carries a glossary tooltip. A redesigned
-    # dashboard is unreadable without legends; the prior MVP shipped
-    # tooltips on Deployed and NAV but not Lifetime PnL / Net APR /
-    # primary risk / cost stack / cash buffer / audit tiles. Each `help=`
-    # below is the canonical one-liner for the tile.
-    c1, c2, c3, c4 = st.columns(4)
+    # dashboard is unreadable without legends. Each `help=` below is the
+    # canonical one-liner for the tile.
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.metric(
             "Wallet deployed",
@@ -300,25 +379,13 @@ def render_money_trail(p: PnLSummary) -> None:
             ),
         )
     with c3:
-        delta = _signed(p.lifetime_pnl_usd) + f"  ({_pct(p.lifetime_pnl_pct)})"
+        cash_pct = (p.available_cash_usd / p.nav_usd * Decimal("100")) if p.nav_usd > 0 else Decimal("0")
         st.metric(
-            "Wallet lifetime PnL",
-            format_usd(abs(p.lifetime_pnl_usd)),
-            delta=delta,
-            help=(
-                "Wallet method: Wallet NAV now − Wallet deployed. Includes idle wallet assets, "
-                "so use the Strategy Funds row below to separate open positions from cash."
-            ),
-        )
-    with c4:
-        apr_label = f"{_pct(p.net_apr_pct)} APR"
-        sub = f"max DD {_pct(p.max_drawdown_pct, decimals=1)}" if p.max_drawdown_pct > 0 else f"{p.age_days}d age"
-        st.metric(
-            "Net APR",
-            apr_label,
-            delta=sub,
+            "Available wallet cash",
+            format_usd(p.available_cash_usd),
+            delta=f"{cash_pct:.0f}% of wallet NAV",
             delta_color="off",
-            help="Annualised lifetime PnL ÷ Deployed × (365 / age_days). Compare across strategies of different ages.",
+            help="Wallet funds not currently in positions. Includes gas ETH and other idle balances.",
         )
 
     st.markdown(
@@ -329,8 +396,10 @@ def render_money_trail(p: PnLSummary) -> None:
     open_position_nav = p.nav_usd - p.available_cash_usd
     if open_position_nav < Decimal("0"):
         open_position_nav = Decimal("0")
-    c5, c6, c7 = st.columns(3)
-    with c5:
+    strategy_pnl = _strategy_pnl_usd(p, cost, open_position_nav)
+    age_sub = f"max DD {_pct(p.max_drawdown_pct, decimals=1)}" if p.max_drawdown_pct > 0 else f"{p.age_days}d age"
+    c4, c5, c6, c7 = st.columns(4)
+    with c4:
         open_position_delta = (
             f"{p.open_position_count} open position(s)" if p.open_position_count > 0 else "active exposure"
         )
@@ -341,20 +410,42 @@ def render_money_trail(p: PnLSummary) -> None:
             delta_color="off",
             help="Current mark-to-market value of positions controlled by the strategy. Excludes idle wallet cash.",
         )
-    with c6:
+    with c5:
         st.metric(
             "Open cost basis",
             format_usd(p.deployed_capital_usd),
             help="Capital currently deployed into open positions, measured from accounting cost basis.",
         )
+    with c6:
+        if strategy_pnl is None:
+            st.metric(
+                "Strategy PnL",
+                "—",
+                help=_STRATEGY_PNL_HELP + " Shown as — when realized cost data is unavailable or the open "
+                "cost basis is unmeasured for a snapshot with live positions "
+                "(Empty ≠ Zero).",
+            )
+        else:
+            pct = (
+                (strategy_pnl / p.deployed_capital_usd * Decimal("100"))
+                if p.deployed_capital_usd > _COST_BASIS_DUST_USD
+                else None
+            )
+            delta = _signed(strategy_pnl) + (f"  ({_pct(pct)})" if pct is not None else "")
+            st.metric(
+                "Strategy PnL",
+                format_usd(abs(strategy_pnl)),
+                delta=delta,
+                help=_STRATEGY_PNL_HELP,
+            )
     with c7:
-        cash_pct = (p.available_cash_usd / p.nav_usd * Decimal("100")) if p.nav_usd > 0 else Decimal("0")
+        apr = _strategy_apr_pct(strategy_pnl, p.deployed_capital_usd, p.age_days)
         st.metric(
-            "Available wallet cash",
-            format_usd(p.available_cash_usd),
-            delta=f"{cash_pct:.0f}% of wallet NAV",
+            "Strategy APR",
+            f"{_pct(apr)} APR" if apr is not None else "—",
+            delta=age_sub,
             delta_color="off",
-            help="Wallet funds not currently in positions. Includes gas ETH and other idle balances.",
+            help=_STRATEGY_APR_HELP,
         )
 
 

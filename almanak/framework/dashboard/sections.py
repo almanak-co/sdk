@@ -89,7 +89,14 @@ def render_pnl_section(deployment_id: str) -> None:
     if pnl is None:
         st.info("No PnL data yet — run a few iterations to populate the snapshot table.")
         return
-    render_money_trail(pnl)
+    # Strategy PnL / APR tiles need the realized-PnL components from the cost
+    # stack. Fetch it best-effort: a failed cost RPC degrades those two tiles
+    # to "—" rather than blocking the whole PnL row.
+    try:
+        cost = get_cost_stack(deployment_id)
+    except GatewayConnectionError:
+        cost = None
+    render_money_trail(pnl, cost)
 
 
 def render_cost_stack_section(deployment_id: str, *, heading: str = "### Cost Stack") -> None:
