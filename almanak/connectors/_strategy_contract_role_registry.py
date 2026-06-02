@@ -41,9 +41,16 @@ from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRole,
     ContractRoleRegistry,
     ContractRoleSpec,
+    NpmView,
 )
 
-__all__ = ["CONTRACT_ROLE_REGISTRY", "ContractRole", "ContractRoleRegistry", "ContractRoleSpec"]
+__all__ = [
+    "CONTRACT_ROLE_REGISTRY",
+    "ContractRole",
+    "ContractRoleRegistry",
+    "ContractRoleSpec",
+    "NpmView",
+]
 
 
 def _register_all() -> None:
@@ -88,6 +95,9 @@ def _register_all() -> None:
                 protocol=spec.protocol,
                 roles=spec.roles,
                 address_protocol=spec.address_protocol,
+                npm_view=spec.npm_view,
+                surface_exclusions=spec.surface_exclusions,
+                router_aliases=spec.router_aliases,
             )
 
 

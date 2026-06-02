@@ -12,6 +12,7 @@ from __future__ import annotations
 from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRole,
     ContractRoleSpec,
+    NpmView,
 )
 
 CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
@@ -22,5 +23,8 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
             ContractRole.LP_POSITION_MANAGER: ("nft",),
             ContractRole.QUOTER: ("quoter",),
         },
+        # PancakeSwap V3 ships its own NPM at a different address than canonical
+        # UniV3 on the same chain — its own backfill NPM view-map.
+        npm_view=NpmView.PANCAKESWAP,
     ),
 )

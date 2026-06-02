@@ -45,7 +45,7 @@ egress. It holds only role→kind metadata (plain tuples / strings).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import ClassVar
 
@@ -54,6 +54,7 @@ __all__ = [
     "ContractRole",
     "ContractRoleRegistry",
     "ContractRoleSpec",
+    "NpmView",
 ]
 
 
@@ -94,6 +95,31 @@ class ContractRole(StrEnum):
     FLASH_LOAN_VAULT = "flash_loan_vault"
 
 
+class NpmView(StrEnum):
+    """Backfill NFT-position-manager view-map a connector's LP slug feeds.
+
+    The migration backfill keys ``physical_identity_hash`` on the on-chain NPM
+    emitter, grouped into three view-maps by receipt-parser family. A connector
+    declares which view its LP positions hash under via
+    :attr:`ContractRoleSpec.npm_view`; ``compiler_constants`` fans out over this
+    enum (never naming a connector) to materialise the maps. A slug that
+    declares no view is absent from every map — e.g. ``sushiswap_v3`` ships a
+    distinct ``position_manager`` but the backfill binds its LP positions to the
+    canonical Uniswap NPM, so it must NOT join the UniV3 map (see VIB-4971).
+    """
+
+    #: Canonical Uniswap-V3-family NPM (uniswap_v3 + agni_finance) ->
+    #: ``UNIV3_NFT_POSITION_MANAGERS`` (EIP-55 case, ``{blast, linea}`` curated
+    #: out, ``bnb`` alias of ``bsc``).
+    UNIV3 = "univ3"
+    #: PancakeSwap V3's own NPM -> ``PANCAKESWAP_V3_NFT_POSITION_MANAGERS``
+    #: (lowercased, ``bnb`` alias).
+    PANCAKESWAP = "pancakeswap"
+    #: Aerodrome / Velodrome Slipstream ``cl_nft`` ->
+    #: ``SLIPSTREAM_NFT_POSITION_MANAGERS`` (lowercased).
+    SLIPSTREAM = "slipstream"
+
+
 @dataclass(frozen=True)
 class ContractRoleSpec:
     """One protocol slug's contract-role declaration.
@@ -115,11 +141,27 @@ class ContractRoleSpec:
             per-chain table backs this slug. ``None`` → same as ``protocol``;
             set it only for a pseudo-slug riding on another connector's table
             (``aerodrome_slipstream`` → ``"aerodrome"``).
+        npm_view: which backfill NPM view-map this slug's LP/CL position manager
+            feeds (:class:`NpmView`), or ``None`` if it feeds none. Lets
+            ``compiler_constants`` build ``UNIV3_NFT_POSITION_MANAGERS`` etc.
+            without naming a connector.
+        surface_exclusions: per-:class:`ContractRole` set of chains on which
+            this slug's address must NOT be surfaced in the derived table, even
+            though the connector publishes it (e.g. SushiSwap V3 on Avalanche —
+            deployed but zero usable liquidity, VIB-2069). Replaces the central
+            ``_PROTOCOL_ROUTER_EXCLUSIONS`` / ``_SWAP_QUOTER_EXCLUSIONS`` sets.
+        router_aliases: ``alias_slug -> chains`` on which this slug's router
+            address is ALSO surfaced under ``alias_slug`` in ``PROTOCOL_ROUTERS``
+            (Aerodrome's Optimism router is also the Velodrome V2 router, looked
+            up under both names by the Zodiac manifest generator, VIB-4389).
     """
 
     protocol: str
     roles: Mapping[ContractRole, tuple[str, ...]]
     address_protocol: str | None = None
+    npm_view: NpmView | None = None
+    surface_exclusions: Mapping[ContractRole, frozenset[str]] = field(default_factory=dict)
+    router_aliases: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 class ContractRoleRegistry:
@@ -144,6 +186,16 @@ class ContractRoleRegistry:
     #: (``aerodrome_slipstream`` → ``aerodrome``).
     _aliases: ClassVar[dict[str, str]] = {}
 
+    #: protocol slug -> the :class:`NpmView` it feeds (VIB-4928 PR-3c). Absent
+    #: when the slug feeds no backfill NPM view-map.
+    _npm_views: ClassVar[dict[str, NpmView]] = {}
+
+    #: protocol slug -> {role -> chains to exclude from the derived table}.
+    _surface_exclusions: ClassVar[dict[str, dict[ContractRole, frozenset[str]]]] = {}
+
+    #: protocol slug -> {alias_slug -> chains} ``PROTOCOL_ROUTERS`` aliases.
+    _router_aliases: ClassVar[dict[str, dict[str, frozenset[str]]]] = {}
+
     @classmethod
     def register(
         cls,
@@ -151,6 +203,9 @@ class ContractRoleRegistry:
         protocol: str,
         roles: Mapping[ContractRole, tuple[str, ...]],
         address_protocol: str | None = None,
+        npm_view: NpmView | None = None,
+        surface_exclusions: Mapping[ContractRole, frozenset[str]] | None = None,
+        router_aliases: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         """Register (or replace) one protocol slug's role → kinds map.
 
@@ -181,6 +236,21 @@ class ContractRoleRegistry:
             cls._aliases[protocol] = address_protocol
         else:
             cls._aliases.pop(protocol, None)
+        # NPM-view / surface-exclusion / router-alias declarations (VIB-4928
+        # PR-3c). "register (or replace)" — a re-registration that omits a field
+        # clears any stale value, mirroring the alias handling above.
+        if npm_view is not None:
+            cls._npm_views[protocol] = npm_view
+        else:
+            cls._npm_views.pop(protocol, None)
+        if surface_exclusions:
+            cls._surface_exclusions[protocol] = {role: frozenset(chains) for role, chains in surface_exclusions.items()}
+        else:
+            cls._surface_exclusions.pop(protocol, None)
+        if router_aliases:
+            cls._router_aliases[protocol] = {alias: frozenset(chains) for alias, chains in router_aliases.items()}
+        else:
+            cls._router_aliases.pop(protocol, None)
 
     @classmethod
     def protocols_with_role(cls, role: ContractRole) -> tuple[str, ...]:
@@ -227,6 +297,30 @@ class ContractRoleRegistry:
         return tuple(cls._roles)
 
     @classmethod
+    def npm_view(cls, protocol: str) -> NpmView | None:
+        """The :class:`NpmView` ``protocol`` feeds, or ``None`` if it feeds none."""
+        return cls._npm_views.get(protocol)
+
+    @classmethod
+    def protocols_with_npm_view(cls, view: NpmView) -> tuple[str, ...]:
+        """Protocol slugs feeding ``view``, in registration order.
+
+        Lets ``compiler_constants`` materialise each NPM view-map by fanning out
+        over the declaring connectors without naming one.
+        """
+        return tuple(p for p, v in cls._npm_views.items() if v == view)
+
+    @classmethod
+    def surface_exclusions(cls, protocol: str, role: ContractRole) -> frozenset[str]:
+        """Chains on which ``protocol``'s ``role`` address must not be surfaced."""
+        return cls._surface_exclusions.get(protocol, {}).get(role, frozenset())
+
+    @classmethod
+    def router_aliases(cls, protocol: str) -> Mapping[str, frozenset[str]]:
+        """``alias_slug -> chains`` ``PROTOCOL_ROUTERS`` aliases for ``protocol``."""
+        return cls._router_aliases.get(protocol, {})
+
+    @classmethod
     def reset(cls) -> None:
         """Test helper: drop all registrations.
 
@@ -236,6 +330,9 @@ class ContractRoleRegistry:
         """
         cls._roles.clear()
         cls._aliases.clear()
+        cls._npm_views.clear()
+        cls._surface_exclusions.clear()
+        cls._router_aliases.clear()
 
 
 #: The single in-process registry. Concrete connectors are registered into it

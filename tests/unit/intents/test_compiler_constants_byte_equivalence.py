@@ -439,3 +439,93 @@ class TestCrossConnectorCollisionDetection:
             assert merged.default_fee_tier == 100
         finally:
             SwapClassificationRegistry._specs.pop("__test_dex__", None)
+
+
+class TestNftPositionManagerDerivedViews:
+    """UNIV3 / PancakeSwap V3 / Slipstream NPM ``{chain: address}`` views.
+
+    VIB-4928 (PR-3c): these now resolve via ``AddressRegistry`` (was a direct
+    ``connector.addresses`` import). The NPM address is the emitter component of
+    an LP position's ``physical_identity_hash`` — value-bearing, so pin the full
+    maps case-exact (UniV3 = EIP-55, PancakeSwap / Slipstream = lowercased,
+    ``bnb`` alias of ``bsc`` preserved) AND insertion-order-exact, matching the
+    order convention the rest of this file enforces. A drift here is a silent
+    hash corruption on the migration backfill's hot path.
+
+    The expected dicts below are written in the builder's insertion order —
+    connector ``addresses.py`` chain order (uniswap_v3 chains, then the
+    agni_finance Mantle overlay for UniV3), with the ``bnb`` alias appended last.
+    """
+
+    EXPECTED_UNIV3 = {
+        "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "optimism": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "polygon": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "base": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+        "avalanche": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
+        "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+        "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
+        "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",
+        "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",
+        "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
+        "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+    }
+
+    EXPECTED_PANCAKE = {
+        "bsc": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+        "ethereum": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+        "arbitrum": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+        "base": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+        "linea": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+        "bnb": "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364",
+    }
+
+    EXPECTED_SLIPSTREAM = {"base": "0x827922686190790b37229fd06084350e74485b72"}
+
+    def test_univ3_npm(self) -> None:
+        from almanak.framework.intents.compiler_constants import UNIV3_NFT_POSITION_MANAGERS
+
+        assert UNIV3_NFT_POSITION_MANAGERS == self.EXPECTED_UNIV3
+        # Insertion order is part of the byte-equivalence contract (CodeRabbit).
+        assert list(UNIV3_NFT_POSITION_MANAGERS.items()) == list(self.EXPECTED_UNIV3.items())
+
+    def test_pancakeswap_v3_npm(self) -> None:
+        from almanak.framework.intents.compiler_constants import (
+            PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
+        )
+
+        assert PANCAKESWAP_V3_NFT_POSITION_MANAGERS == self.EXPECTED_PANCAKE
+        assert (
+            list(PANCAKESWAP_V3_NFT_POSITION_MANAGERS.items())
+            == list(self.EXPECTED_PANCAKE.items())
+        )
+
+    def test_slipstream_npm(self) -> None:
+        from almanak.framework.intents.compiler_constants import (
+            SLIPSTREAM_NFT_POSITION_MANAGERS,
+        )
+
+        assert SLIPSTREAM_NFT_POSITION_MANAGERS == self.EXPECTED_SLIPSTREAM
+        assert (
+            list(SLIPSTREAM_NFT_POSITION_MANAGERS.items())
+            == list(self.EXPECTED_SLIPSTREAM.items())
+        )
+
+    def test_univ3_excludes_curated_chains(self) -> None:
+        """blast / linea stay excluded (curated subset, VIB-4864)."""
+        from almanak.framework.intents.compiler_constants import UNIV3_NFT_POSITION_MANAGERS
+
+        assert "blast" not in UNIV3_NFT_POSITION_MANAGERS
+        assert "linea" not in UNIV3_NFT_POSITION_MANAGERS
+
+    def test_univ3_does_not_source_sushiswap_v3(self) -> None:
+        """VIB-4971 invariant: the canonical UniV3 NPM map must NOT pick up
+        sushiswap_v3's distinct ``position_manager`` — that would change
+        ``physical_identity_hash`` for sushi LP positions. sushi's ethereum NPM
+        (``0x2214…``) must be absent from the map's values.
+        """
+        from almanak.framework.intents.compiler_constants import UNIV3_NFT_POSITION_MANAGERS
+
+        sushi_eth_npm = "0x2214A42d8e2A1d20635c2cb0664422c528B6A432".lower()
+        assert sushi_eth_npm not in {v.lower() for v in UNIV3_NFT_POSITION_MANAGERS.values()}

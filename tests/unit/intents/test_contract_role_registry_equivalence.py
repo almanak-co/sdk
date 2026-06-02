@@ -258,33 +258,25 @@ class TestAddressTableFullDictSnapshot:
         from almanak.framework.intents.compiler_constants import PROTOCOL_ROUTERS
 
         assert PROTOCOL_ROUTERS == EXPECTED_PROTOCOL_ROUTERS
-        assert _ordered_items_nested(PROTOCOL_ROUTERS) == _ordered_items_nested(
-            EXPECTED_PROTOCOL_ROUTERS
-        )
+        assert _ordered_items_nested(PROTOCOL_ROUTERS) == _ordered_items_nested(EXPECTED_PROTOCOL_ROUTERS)
 
     def test_lp_position_managers(self) -> None:
         from almanak.framework.intents.compiler_constants import LP_POSITION_MANAGERS
 
         assert LP_POSITION_MANAGERS == EXPECTED_LP_POSITION_MANAGERS
-        assert _ordered_items_nested(LP_POSITION_MANAGERS) == _ordered_items_nested(
-            EXPECTED_LP_POSITION_MANAGERS
-        )
+        assert _ordered_items_nested(LP_POSITION_MANAGERS) == _ordered_items_nested(EXPECTED_LP_POSITION_MANAGERS)
 
     def test_swap_quoter_addresses(self) -> None:
         from almanak.framework.intents.compiler_constants import SWAP_QUOTER_ADDRESSES
 
         assert SWAP_QUOTER_ADDRESSES == EXPECTED_SWAP_QUOTER_ADDRESSES
-        assert _ordered_items_nested(SWAP_QUOTER_ADDRESSES) == _ordered_items_nested(
-            EXPECTED_SWAP_QUOTER_ADDRESSES
-        )
+        assert _ordered_items_nested(SWAP_QUOTER_ADDRESSES) == _ordered_items_nested(EXPECTED_SWAP_QUOTER_ADDRESSES)
 
     def test_lending_pool_addresses(self) -> None:
         from almanak.framework.intents.compiler_constants import LENDING_POOL_ADDRESSES
 
         assert LENDING_POOL_ADDRESSES == EXPECTED_LENDING_POOL_ADDRESSES
-        assert _ordered_items_nested(LENDING_POOL_ADDRESSES) == _ordered_items_nested(
-            EXPECTED_LENDING_POOL_ADDRESSES
-        )
+        assert _ordered_items_nested(LENDING_POOL_ADDRESSES) == _ordered_items_nested(EXPECTED_LENDING_POOL_ADDRESSES)
 
     def test_lending_pool_data_providers(self) -> None:
         from almanak.framework.intents.compiler_constants import LENDING_POOL_DATA_PROVIDERS
@@ -298,9 +290,7 @@ class TestAddressTableFullDictSnapshot:
         from almanak.framework.intents.compiler_constants import BALANCER_VAULT_ADDRESSES
 
         assert BALANCER_VAULT_ADDRESSES == EXPECTED_BALANCER_VAULT_ADDRESSES
-        assert list(BALANCER_VAULT_ADDRESSES.items()) == list(
-            EXPECTED_BALANCER_VAULT_ADDRESSES.items()
-        )
+        assert list(BALANCER_VAULT_ADDRESSES.items()) == list(EXPECTED_BALANCER_VAULT_ADDRESSES.items())
 
     def test_spark_lending_data_provider_omitted(self) -> None:
         """Spark publishes a ``pool_data_provider`` but is intentionally absent
@@ -331,7 +321,11 @@ def _legacy_build_protocol_routers() -> dict[str, dict[str, str]]:
     from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
     from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
     from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
-    from almanak.framework.intents.compiler_constants import _PROTOCOL_ROUTER_EXCLUSIONS
+
+    # Pre-PR-3c central exclusions (now connector-declared via
+    # ``ContractRoleSpec.surface_exclusions``) — inlined here so this reference
+    # implementation stays independent of ``compiler_constants`` internals.
+    _PROTOCOL_ROUTER_EXCLUSIONS = frozenset({("sushiswap_v3", "avalanche"), ("uniswap_v3", "blast")})
 
     routers: dict[str, dict[str, str]] = {}
     sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
@@ -366,7 +360,9 @@ def _legacy_build_lp_position_managers() -> dict[str, dict[str, str]]:
     from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
     from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
     from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
-    from almanak.framework.intents.compiler_constants import _PROTOCOL_ROUTER_EXCLUSIONS
+
+    # Pre-PR-3c central exclusions (now connector-declared) — inlined.
+    _PROTOCOL_ROUTER_EXCLUSIONS = frozenset({("sushiswap_v3", "avalanche"), ("uniswap_v3", "blast")})
 
     managers: dict[str, dict[str, str]] = {}
     sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
@@ -398,7 +394,11 @@ def _legacy_build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
     from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
     from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
     from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
-    from almanak.framework.intents.compiler_constants import _SWAP_QUOTER_EXCLUSIONS
+
+    # Pre-PR-3c central exclusions (now connector-declared) — inlined.
+    _SWAP_QUOTER_EXCLUSIONS = frozenset(
+        {("sushiswap_v3", "avalanche"), ("sushiswap_v3", "optimism"), ("uniswap_v3", "blast")}
+    )
 
     quoters: dict[str, dict[str, str]] = {}
     sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
@@ -474,9 +474,7 @@ class TestRegistryMatchesLegacyBuilders:
     source bodies are only deleted once these are green in CI.
     """
 
-    def _assert_nested_identical(
-        self, new: dict[str, dict[str, str]], legacy: dict[str, dict[str, str]]
-    ) -> None:
+    def _assert_nested_identical(self, new: dict[str, dict[str, str]], legacy: dict[str, dict[str, str]]) -> None:
         assert new == legacy
         assert _ordered_items_nested(new) == _ordered_items_nested(legacy)
 
@@ -488,23 +486,17 @@ class TestRegistryMatchesLegacyBuilders:
     def test_lp_position_managers_match(self) -> None:
         from almanak.framework.intents import compiler_constants as cc
 
-        self._assert_nested_identical(
-            cc._build_lp_position_managers(), _legacy_build_lp_position_managers()
-        )
+        self._assert_nested_identical(cc._build_lp_position_managers(), _legacy_build_lp_position_managers())
 
     def test_swap_quoter_addresses_match(self) -> None:
         from almanak.framework.intents import compiler_constants as cc
 
-        self._assert_nested_identical(
-            cc._build_swap_quoter_addresses(), _legacy_build_swap_quoter_addresses()
-        )
+        self._assert_nested_identical(cc._build_swap_quoter_addresses(), _legacy_build_swap_quoter_addresses())
 
     def test_lending_pool_addresses_match(self) -> None:
         from almanak.framework.intents import compiler_constants as cc
 
-        self._assert_nested_identical(
-            cc._build_lending_pool_addresses(), _legacy_build_lending_pool_addresses()
-        )
+        self._assert_nested_identical(cc._build_lending_pool_addresses(), _legacy_build_lending_pool_addresses())
 
     def test_lending_pool_data_providers_match(self) -> None:
         from almanak.framework.intents import compiler_constants as cc
@@ -521,3 +513,76 @@ class TestRegistryMatchesLegacyBuilders:
         legacy = _legacy_build_balancer_vault_addresses()
         assert new == legacy
         assert list(new.items()) == list(legacy.items())
+
+
+class TestConnectorDeclaredSurfaceMetadata:
+    """VIB-4928 PR-3c: the surface metadata that ``compiler_constants`` fans out
+    over (``npm_view`` / ``surface_exclusions`` / ``router_aliases``) is
+    connector-declared on ``ContractRoleSpec``.
+
+    Pins the registry-level declarations directly (independent of the derived
+    tables) so a connector spec edit that would silently change
+    ``PROTOCOL_ROUTERS`` / ``LP_POSITION_MANAGERS`` / ``SWAP_QUOTER_ADDRESSES`` /
+    the NPM views — or break the VIB-4971 sushi invariant — fails loudly here.
+    """
+
+    def test_npm_view_contributors(self) -> None:
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+            NpmView,
+        )
+
+        assert CONTRACT_ROLE_REGISTRY.protocols_with_npm_view(NpmView.UNIV3) == (
+            "uniswap_v3",
+            "agni_finance",
+        )
+        assert CONTRACT_ROLE_REGISTRY.protocols_with_npm_view(NpmView.PANCAKESWAP) == ("pancakeswap_v3",)
+        assert CONTRACT_ROLE_REGISTRY.protocols_with_npm_view(NpmView.SLIPSTREAM) == ("aerodrome_slipstream",)
+
+    def test_sushiswap_v3_declares_no_npm_view(self) -> None:
+        """VIB-4971 invariant at the registry level: sushiswap_v3 must NOT feed
+        the canonical UniV3 NPM map (it ships a distinct ``position_manager``;
+        the backfill binds its LP positions to the Uniswap NPM)."""
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+        )
+
+        assert CONTRACT_ROLE_REGISTRY.npm_view("sushiswap_v3") is None
+
+    def test_surface_exclusions(self) -> None:
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+            ContractRole,
+        )
+
+        # uniswap_v3 blast — published in addresses.py, never surfaced (all 3 tables).
+        for role in (
+            ContractRole.ROUTER,
+            ContractRole.LP_POSITION_MANAGER,
+            ContractRole.QUOTER,
+        ):
+            assert CONTRACT_ROLE_REGISTRY.surface_exclusions("uniswap_v3", role) == frozenset({"blast"})
+        # sushiswap_v3: avalanche (router/lp/quoter) + optimism (quoter only).
+        assert CONTRACT_ROLE_REGISTRY.surface_exclusions("sushiswap_v3", ContractRole.ROUTER) == frozenset(
+            {"avalanche"}
+        )
+        assert CONTRACT_ROLE_REGISTRY.surface_exclusions("sushiswap_v3", ContractRole.LP_POSITION_MANAGER) == frozenset(
+            {"avalanche"}
+        )
+        assert CONTRACT_ROLE_REGISTRY.surface_exclusions("sushiswap_v3", ContractRole.QUOTER) == frozenset(
+            {"avalanche", "optimism"}
+        )
+        # A protocol with no declared exclusions returns empty.
+        assert CONTRACT_ROLE_REGISTRY.surface_exclusions("pancakeswap_v3", ContractRole.ROUTER) == frozenset()
+
+    def test_router_aliases(self) -> None:
+        import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+        from almanak.connectors._strategy_base.contract_role_registry import (
+            CONTRACT_ROLE_REGISTRY,
+        )
+
+        assert dict(CONTRACT_ROLE_REGISTRY.router_aliases("aerodrome")) == {"velodrome": frozenset({"optimism"})}
+        assert dict(CONTRACT_ROLE_REGISTRY.router_aliases("uniswap_v3")) == {}

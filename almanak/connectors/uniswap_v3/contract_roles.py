@@ -16,6 +16,7 @@ from __future__ import annotations
 from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRole,
     ContractRoleSpec,
+    NpmView,
 )
 
 CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
@@ -26,6 +27,18 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
             ContractRole.LP_POSITION_MANAGER: ("position_manager",),
             ContractRole.QUOTER: ("quoter_v2",),
         },
+        # Canonical UniV3-family NPM map. (The backfill hashes both uniswap_v3
+        # and sushiswap_v3 LP positions against this map, but only uniswap_v3 +
+        # agni_finance contribute the *address* — see VIB-4971.)
+        npm_view=NpmView.UNIV3,
+        # Blast is published in addresses.py (router / position_manager /
+        # quoter) but the central PROTOCOL_ROUTERS / LP_POSITION_MANAGERS /
+        # SWAP_QUOTER_ADDRESSES tables never surfaced it.
+        surface_exclusions={
+            ContractRole.ROUTER: frozenset({"blast"}),
+            ContractRole.LP_POSITION_MANAGER: frozenset({"blast"}),
+            ContractRole.QUOTER: frozenset({"blast"}),
+        },
     ),
     ContractRoleSpec(
         protocol="agni_finance",
@@ -34,5 +47,7 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
             ContractRole.LP_POSITION_MANAGER: ("position_manager",),
             ContractRole.QUOTER: ("quoter_v2",),
         },
+        # Agni overlays its own NPM onto the canonical UniV3 map (Mantle).
+        npm_view=NpmView.UNIV3,
     ),
 )

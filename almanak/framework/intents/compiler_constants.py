@@ -11,6 +11,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    # NpmView is imported lazily inside the NPM-view builders (it lives in the
+    # protocol-clean role registry); declare it here so the ``_build_npm_view``
+    # annotation resolves for ruff / mypy without a runtime module-level import.
+    from almanak.connectors._strategy_base.contract_role_registry import NpmView
+
     # PEP 562 + mypy: the six address tables below are resolved at runtime
     # through ``__getattr__`` (lazy — see the note above the accessor map), so
     # they are absent from the module namespace at static-analysis time. Declare
@@ -25,6 +30,9 @@ if TYPE_CHECKING:
     LENDING_POOL_ADDRESSES: dict[str, dict[str, str]]
     LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]]
     BALANCER_VAULT_ADDRESSES: dict[str, str]
+    UNIV3_NFT_POSITION_MANAGERS: dict[str, str]
+    PANCAKESWAP_V3_NFT_POSITION_MANAGERS: dict[str, str]
+    SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str]
 
 # =============================================================================
 # Constants
@@ -233,7 +241,12 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = _build_chain_gas_overrides()
 # import) so ``_register_all()`` runs before resolution — the same idiom
 # ``_build_default_gas_estimates`` uses for its registry.
 def _build_protocol_routers() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from the role registry."""
+    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from the role registry.
+
+    Per-(protocol, chain) surface exclusions and router-table aliases are
+    connector-declared (``ContractRoleSpec.surface_exclusions`` /
+    ``router_aliases``), so this builder names no protocol (VIB-4928 PR-3c).
+    """
     from almanak.connectors._strategy_base.address_registry import AddressRegistry
     from almanak.connectors._strategy_contract_role_registry import (
         CONTRACT_ROLE_REGISTRY,
@@ -246,21 +259,25 @@ def _build_protocol_routers() -> dict[str, dict[str, str]]:
         kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.ROUTER)
         if kinds is None:
             continue
+        excluded = CONTRACT_ROLE_REGISTRY.surface_exclusions(protocol, ContractRole.ROUTER)
         for chain in AddressRegistry.address_chains_ordered(addr_proto):
-            if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
+            if chain in excluded:
                 continue
             address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
                 continue
             routers.setdefault(chain, {})[protocol] = address
 
-    # Optimism's Velodrome V2 router is the same as the Aerodrome router
-    # on Optimism. The legacy dict carried both keys for VIB-4389 (the
-    # Zodiac permissions manifest generator looks up under both names);
-    # preserve that exact shape.
-    optimism = routers.get("optimism")
-    if optimism is not None and "aerodrome" in optimism:
-        optimism.setdefault("velodrome", optimism["aerodrome"])
+    # Router-table aliases: a connector whose router doubles as another
+    # protocol's router declares it (Aerodrome → Velodrome on Optimism,
+    # VIB-4389). Applied as a post-step (after the main fan-out) so the alias
+    # key lands at the same position the legacy hardcoded ``setdefault`` put it.
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.ROUTER):
+        for alias, alias_chains in CONTRACT_ROLE_REGISTRY.router_aliases(protocol).items():
+            for chain in alias_chains:
+                chain_map = routers.get(chain)
+                if chain_map is not None and protocol in chain_map:
+                    chain_map.setdefault(alias, chain_map[protocol])
 
     return routers
 
@@ -287,14 +304,20 @@ def _build_lp_position_managers() -> dict[str, dict[str, str]]:
 
     managers: dict[str, dict[str, str]] = {}
     for protocol in CONTRACT_ROLE_REGISTRY.registered_protocols():
-        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(
-            protocol, ContractRole.LP_POSITION_MANAGER
-        ) or CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        # Resolve whichever position-manager role the slug fills, and honour the
+        # surface exclusions declared for THAT role (uniswap_v3/blast,
+        # sushiswap_v3/avalanche — published in addresses.py but never surfaced).
+        role = ContractRole.LP_POSITION_MANAGER
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, role)
+        if kinds is None:
+            role = ContractRole.CL_POSITION_MANAGER
+            kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, role)
         if kinds is None:
             continue
         addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        excluded = CONTRACT_ROLE_REGISTRY.surface_exclusions(protocol, role)
         for chain in AddressRegistry.address_chains_ordered(addr_proto):
-            if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
+            if chain in excluded:
                 continue
             address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
@@ -302,22 +325,6 @@ def _build_lp_position_managers() -> dict[str, dict[str, str]]:
             managers.setdefault(chain, {})[protocol] = address
 
     return managers
-
-
-# Per-(protocol, chain) exclusions: the connector's ``addresses.py`` may
-# legitimately publish data for more chains than the central
-# ``PROTOCOL_ROUTERS`` dict has historically surfaced. SushiSwap V3 on
-# Avalanche, for instance, has a deployed router but was removed from the
-# legacy dict because of unusable on-chain liquidity (VIB-2069); Uniswap
-# V3 on Blast is published in the connector but the central dict never
-# surfaced it. The derived view honours those exclusions to preserve
-# byte-equivalence at the compile-time lookup boundary.
-_PROTOCOL_ROUTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("sushiswap_v3", "avalanche"),  # VIB-2069: zero usable liquidity
-        ("uniswap_v3", "blast"),  # blast not in legacy PROTOCOL_ROUTERS
-    }
-)
 
 
 @functools.cache
@@ -360,98 +367,129 @@ def _lp_position_managers() -> dict[str, dict[str, str]]:
 # legacy return value exactly so the byte-equivalence harness stays green.)
 
 
-# Chains the uniswap_v3 connector publishes a ``position_manager`` for that
-# the legacy UniV3 backfill NPM map never surfaced. The parser's hand-curated
-# ``POSITION_MANAGER_ADDRESSES`` literal predates these connector additions;
-# surfacing them here would silently widen the backfill's supported-chain set
-# (Empty != Zero — an unrecognised chain must keep returning ``None``). Honour
-# the curated subset to preserve byte-equivalence.
-_UNIV3_NPM_CHAIN_EXCLUSIONS: frozenset[str] = frozenset({"blast", "linea"})
+def _build_npm_view(
+    view: NpmView,
+    *,
+    preserve_case: bool,
+    chain_exclusions: frozenset[str],
+    bnb_alias: bool,
+) -> dict[str, str]:
+    """Materialize one backfill NPM ``{chain: address}`` view-map.
+
+    Fans out over the connectors that declare ``view`` via
+    ``ContractRoleSpec.npm_view`` (registration order), resolving each one's
+    LP / CL position-manager address through ``AddressRegistry`` — so the
+    builder names no connector. ``view`` selects the contributors; the keyword
+    args carry the per-view formatting the legacy parser maps had:
+
+    * ``preserve_case`` — keep the address as-stored (EIP-55) vs lowercase it.
+    * ``chain_exclusions`` — chains a connector publishes a manager for that the
+      legacy curated map never surfaced (Empty != Zero — an unrecognised chain
+      must keep returning ``None``).
+    * ``bnb_alias`` — mirror the ``bsc`` entry under ``bnb`` (VIB-708).
+
+    A connector that declares no ``npm_view`` is absent from every map — e.g.
+    ``sushiswap_v3`` ships a distinct ``position_manager`` but the backfill
+    binds its LP positions to the canonical Uniswap NPM, so it must not join the
+    UniV3 map (VIB-4971).
+    """
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
+
+    managers: dict[str, str] = {}
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_npm_view(view):
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(
+            protocol, ContractRole.LP_POSITION_MANAGER
+        ) or CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        if kinds is None:
+            continue
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
+            chain_lower = chain.lower()
+            if chain_lower in chain_exclusions:
+                continue
+            address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
+            if address:
+                managers[chain_lower] = address if preserve_case else address.lower()
+    if bnb_alias and "bsc" in managers and "bnb" not in managers:
+        managers["bnb"] = managers["bsc"]
+    return managers
 
 
 def _build_univ3_nft_position_managers() -> dict[str, str]:
-    """Materialize the canonical UniV3-family ``{chain: NPM}`` map.
+    """Canonical UniV3-family ``{chain: NPM}`` (uniswap_v3 + agni_finance).
 
-    Byte-equivalent to ``uniswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``:
-    the canonical Uniswap V3 ``position_manager`` per chain, with Agni Finance
-    overlaying Mantle (Agni rides on the uniswap_v3 connector and deploys its
-    own NPM there), the ``bnb`` alias of ``bsc`` preserved, and the curated
-    chain subset honoured (see ``_UNIV3_NPM_CHAIN_EXCLUSIONS``). Returns
-    original-case (EIP-55) addresses.
+    EIP-55 case; ``{blast, linea}`` curated out (published in ``addresses.py``
+    but never surfaced by the legacy map); ``bnb`` alias of ``bsc``.
+    Byte-equivalent to ``uniswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``.
     """
-    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+    from almanak.connectors._strategy_contract_role_registry import NpmView
 
-    managers: dict[str, str] = {}
-    # Lowercase the chain keys (consistent with the PancakeSwap / Slipstream
-    # builders below) so a future mixed-case chain name in the connector
-    # tables can't slip past ``_UNIV3_NPM_CHAIN_EXCLUSIONS`` or a downstream
-    # ``.strip().lower()`` lookup. The connector tables are lowercase today,
-    # so this is byte-equivalent.
-    for chain, kinds in UNISWAP_V3.items():
-        chain_lower = chain.lower()
-        if chain_lower in _UNIV3_NPM_CHAIN_EXCLUSIONS:
-            continue
-        address = kinds.get("position_manager")
-        if address:
-            managers[chain_lower] = address
-    # Agni Finance overlays Mantle with its own NPM (the parser literal pins
-    # the Agni address for ``mantle``, not the canonical Uniswap V3 one).
-    for chain, kinds in AGNI_FINANCE.items():
-        chain_lower = chain.lower()
-        if chain_lower in _UNIV3_NPM_CHAIN_EXCLUSIONS:
-            continue
-        address = kinds.get("position_manager")
-        if address:
-            managers[chain_lower] = address
-    # Preserve the historical ``bnb`` alias of ``bsc``.
-    if "bsc" in managers and "bnb" not in managers:
-        managers["bnb"] = managers["bsc"]
-    return managers
+    return _build_npm_view(
+        NpmView.UNIV3,
+        preserve_case=True,
+        chain_exclusions=frozenset({"blast", "linea"}),
+        bnb_alias=True,
+    )
 
 
 def _build_pancakeswap_v3_nft_position_managers() -> dict[str, str]:
-    """Materialize PancakeSwap V3 ``{chain: NPM}`` (lowercased, ``bnb`` alias).
+    """PancakeSwap V3 ``{chain: NPM}`` (lowercased, ``bnb`` alias).
 
-    Byte-equivalent to
-    ``pancakeswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``.
+    Byte-equivalent to ``pancakeswap_v3.receipt_parser.POSITION_MANAGER_ADDRESSES``.
     """
-    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
+    from almanak.connectors._strategy_contract_role_registry import NpmView
 
-    managers: dict[str, str] = {}
-    for chain, kinds in PANCAKESWAP_V3.items():
-        nft = kinds.get("nft")
-        if nft:
-            managers[chain.lower()] = nft.lower()
-    if "bsc" in managers and "bnb" not in managers:
-        managers["bnb"] = managers["bsc"]
-    return managers
+    return _build_npm_view(
+        NpmView.PANCAKESWAP,
+        preserve_case=False,
+        chain_exclusions=frozenset(),
+        bnb_alias=True,
+    )
 
 
 def _build_slipstream_nft_position_managers() -> dict[str, str]:
-    """Materialize Aerodrome / Velodrome Slipstream ``{chain: NPM}`` (lowercased).
+    """Aerodrome / Velodrome Slipstream ``{chain: NPM}`` (lowercased).
 
     Byte-equivalent to ``aerodrome.receipt_parser._SLIPSTREAM_NPM_ADDRESSES``.
     """
-    from almanak.connectors.aerodrome.addresses import AERODROME
+    from almanak.connectors._strategy_contract_role_registry import NpmView
 
-    managers: dict[str, str] = {}
-    for chain, kinds in AERODROME.items():
-        cl_nft = kinds.get("cl_nft")
-        if cl_nft:
-            managers[chain.lower()] = cl_nft.lower()
-    return managers
+    return _build_npm_view(
+        NpmView.SLIPSTREAM,
+        preserve_case=False,
+        chain_exclusions=frozenset(),
+        bnb_alias=False,
+    )
 
 
-# Canonical UniV3-family NPM map (uniswap_v3 / sushiswap_v3 / agni_finance —
-# Sushi V3 shares the canonical Uniswap V3 NPM on every chain it supports).
-UNIV3_NFT_POSITION_MANAGERS: dict[str, str] = _build_univ3_nft_position_managers()
+# Backfill NPM ``{chain: NPM}`` views — lazy via PEP 562 ``__getattr__`` (see the
+# accessor map below), exactly like the six PR-3a address tables. They resolve
+# through ``CONTRACT_ROLE_REGISTRY`` (the boot file that imports every
+# address-owning connector), so building them eagerly at module load would pull
+# that whole graph the instant *anything* imports ``compiler_constants`` — the
+# pytest-xdist import-interleave hazard the lazy accessors exist to avoid. The
+# canonical UniV3 view covers uniswap_v3 + agni_finance; PancakeSwap V3 and
+# Slipstream ship their own NPM at distinct addresses. (Gemini review, PR #2580.)
+@functools.cache
+def _univ3_nft_position_managers() -> dict[str, str]:
+    """Cached ``UNIV3_NFT_POSITION_MANAGERS`` (lazy — see the ``__getattr__`` note)."""
+    return _build_univ3_nft_position_managers()
 
-# PancakeSwap V3 ships its own NPM at a different address than canonical
-# UniV3 on the same chain.
-PANCAKESWAP_V3_NFT_POSITION_MANAGERS: dict[str, str] = _build_pancakeswap_v3_nft_position_managers()
 
-# Aerodrome / Velodrome Slipstream NPM (Base today; Optimism unpopulated).
-SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str] = _build_slipstream_nft_position_managers()
+@functools.cache
+def _pancakeswap_v3_nft_position_managers() -> dict[str, str]:
+    """Cached ``PANCAKESWAP_V3_NFT_POSITION_MANAGERS`` (lazy)."""
+    return _build_pancakeswap_v3_nft_position_managers()
+
+
+@functools.cache
+def _slipstream_nft_position_managers() -> dict[str, str]:
+    """Cached ``SLIPSTREAM_NFT_POSITION_MANAGERS`` (lazy)."""
+    return _build_slipstream_nft_position_managers()
 
 
 def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
@@ -611,23 +649,14 @@ SWAP_ROUTER_ALGEBRA_PROTOCOLS: frozenset[str] = _build_swap_router_algebra_proto
 # VIB-708 unification) keep working.
 
 
-# Per-(protocol, chain) exclusions for SWAP_QUOTER_ADDRESSES. SushiSwap V3
-# on Optimism / Avalanche had its quoter dropped from the legacy central
-# dict even though the connector publishes the address (Optimism has no
-# Sushi quoter entry in the legacy dict; Avalanche tracks the same
-# VIB-2069 liquidity-impact exclusion as PROTOCOL_ROUTERS / LP managers).
-# Uniswap V3 on Blast was never surfaced in the legacy quoter dict either.
-_SWAP_QUOTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("sushiswap_v3", "avalanche"),
-        ("sushiswap_v3", "optimism"),
-        ("uniswap_v3", "blast"),
-    }
-)
-
-
 def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``SWAP_QUOTER_ADDRESSES`` shape from the role registry."""
+    """Materialize the legacy ``SWAP_QUOTER_ADDRESSES`` shape from the role registry.
+
+    Per-(protocol, chain) surface exclusions are connector-declared
+    (``ContractRoleSpec.surface_exclusions``) — SushiSwap V3 drops Avalanche
+    (VIB-2069 zero liquidity) + Optimism (never in the legacy quoter dict),
+    Uniswap V3 drops Blast — so this builder names no protocol (VIB-4928 PR-3c).
+    """
     from almanak.connectors._strategy_base.address_registry import AddressRegistry
     from almanak.connectors._strategy_contract_role_registry import (
         CONTRACT_ROLE_REGISTRY,
@@ -640,8 +669,9 @@ def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
         kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.QUOTER)
         if kinds is None:
             continue
+        excluded = CONTRACT_ROLE_REGISTRY.surface_exclusions(protocol, ContractRole.QUOTER)
         for chain in AddressRegistry.address_chains_ordered(addr_proto):
-            if (protocol, chain) in _SWAP_QUOTER_EXCLUSIONS:
+            if chain in excluded:
                 continue
             address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
@@ -908,6 +938,9 @@ _LAZY_TABLE_ACCESSORS: dict[str, Callable[[], dict[str, Any]]] = {
     "LENDING_POOL_ADDRESSES": _lending_pool_addresses,
     "LENDING_POOL_DATA_PROVIDERS": _lending_pool_data_providers,
     "BALANCER_VAULT_ADDRESSES": _balancer_vault_addresses,
+    "UNIV3_NFT_POSITION_MANAGERS": _univ3_nft_position_managers,
+    "PANCAKESWAP_V3_NFT_POSITION_MANAGERS": _pancakeswap_v3_nft_position_managers,
+    "SLIPSTREAM_NFT_POSITION_MANAGERS": _slipstream_nft_position_managers,
 }
 
 

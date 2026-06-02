@@ -13,6 +13,7 @@ from __future__ import annotations
 from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRole,
     ContractRoleSpec,
+    NpmView,
 )
 
 CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
@@ -22,10 +23,15 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
             ContractRole.ROUTER: ("router",),
             ContractRole.LP_POSITION_MANAGER: ("router",),
         },
+        # Aerodrome's Optimism router is also the Velodrome V2 router — the
+        # Zodiac manifest generator looks it up under both names (VIB-4389).
+        router_aliases={"velodrome": frozenset({"optimism"})},
     ),
     ContractRoleSpec(
         protocol="aerodrome_slipstream",
         roles={ContractRole.CL_POSITION_MANAGER: ("cl_nft",)},
         address_protocol="aerodrome",
+        # Slipstream's cl_nft is its own backfill NPM view-map (Base today).
+        npm_view=NpmView.SLIPSTREAM,
     ),
 )
