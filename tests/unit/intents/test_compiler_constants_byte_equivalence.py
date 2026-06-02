@@ -158,11 +158,14 @@ class TestProtocolRoutersDerivedView:
 
     EXPECTED_SPOT_CHECKS: list[tuple[str, str, str]] = [
         # (chain, protocol, expected lower-cased address)
+        # NOTE (VIB-4928 PR-2): ``uniswap_v2`` / ``1inch`` were dropped from
+        # this list when the ``_LEGACY_PROTOCOL_ROUTERS`` overlay was retired
+        # — they had no connector folder and no functional consumer. The
+        # anti-regression guard for their *absence* now lives in
+        # ``TestLegacyRoutersRetired`` below.
         ("ethereum", "uniswap_v3", "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45".lower()),
         ("ethereum", "sushiswap_v3", "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F".lower()),
         ("ethereum", "pancakeswap_v3", "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4".lower()),
-        ("ethereum", "uniswap_v2", "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D".lower()),
-        ("ethereum", "1inch", "0x1111111254EEB25477B68fb85Ed929f73A960582".lower()),
         ("arbitrum", "uniswap_v3", "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45".lower()),
         ("arbitrum", "camelot", "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18".lower()),
         ("optimism", "aerodrome", "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858".lower()),
@@ -195,6 +198,89 @@ class TestProtocolRoutersDerivedView:
         assert "sushiswap_v3" not in avalanche, (
             "sushiswap_v3 on avalanche must stay excluded (VIB-2069 — "
             "zero usable liquidity); did the connector data leak?"
+        )
+
+
+class TestLegacyRoutersRetired:
+    """Anti-regression guard for the retired ``_LEGACY_PROTOCOL_ROUTERS`` overlay.
+
+    VIB-4928 (PR-2) deleted the overlay that advertised five connector-less
+    routers. The investigation that authorised the deletion proved none were
+    reachable by a functional consumer:
+
+    * absent from ``synthetic_intents._swap_protocols()`` — permission
+      discovery never read them;
+    * ``get_connector_compiler(...)`` returns ``None`` — no compiler;
+    * not Uniswap-V3 forks — the Pendle pre-swap router scan
+      (``_select_v3_pre_swap_router``) skipped them;
+    * the only path that *could* reach an overlay address (the
+      ``DefaultSwapAdapter`` fall-through) encodes a Uniswap-V3
+      ``exactInputSingle``, which a V2/aggregator router does not implement.
+
+    These tests pin that the entries stay *gone* (so a future connector data
+    edit cannot silently re-surface a dead route) AND that retiring them did
+    not disturb the connector-owned routers that legitimately live on the
+    same chains.
+    """
+
+    # (chain, retired protocol) — every entry the overlay used to inject.
+    RETIRED_ENTRIES: list[tuple[str, str]] = [
+        ("ethereum", "uniswap_v2"),
+        ("ethereum", "1inch"),
+        ("arbitrum", "sushiswap"),
+        ("arbitrum", "1inch"),
+        ("optimism", "1inch"),
+        ("polygon", "quickswap"),
+        ("polygon", "1inch"),
+        ("bsc", "pancakeswap_v2"),
+        ("bsc", "sushiswap"),
+    ]
+
+    @pytest.mark.parametrize(("chain", "protocol"), RETIRED_ENTRIES)
+    def test_retired_router_absent(self, chain: str, protocol: str) -> None:
+        from almanak.framework.intents.compiler_constants import PROTOCOL_ROUTERS
+
+        chain_map = PROTOCOL_ROUTERS.get(chain, {})
+        assert protocol not in chain_map, (
+            f"retired legacy router {protocol!r} re-surfaced on {chain!r} "
+            f"(VIB-4928 PR-2 deleted the _LEGACY_PROTOCOL_ROUTERS overlay; "
+            f"it has no connector folder and no functional consumer). "
+            f"chain map keys: {sorted(chain_map)}"
+        )
+
+    def test_aggregator_never_in_routers(self) -> None:
+        """``1inch`` was an aggregator-only entry — it must appear on no chain."""
+        from almanak.framework.intents.compiler_constants import PROTOCOL_ROUTERS
+
+        offenders = {chain for chain, protos in PROTOCOL_ROUTERS.items() if "1inch" in protos}
+        assert not offenders, (
+            f"1inch (aggregator-only, retired in VIB-4928 PR-2) re-surfaced "
+            f"in PROTOCOL_ROUTERS on chains: {sorted(offenders)}"
+        )
+
+    # Connector-owned routers that share a chain with a retired overlay entry.
+    # Retiring the overlay must leave these byte-identical (they derive from
+    # each connector's addresses.py, never from the overlay).
+    SURVIVING_NEIGHBOURS: list[tuple[str, str, str]] = [
+        ("ethereum", "uniswap_v3", "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45".lower()),
+        ("arbitrum", "uniswap_v3", "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45".lower()),
+        ("arbitrum", "camelot", "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18".lower()),
+        ("optimism", "aerodrome", "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858".lower()),
+        ("polygon", "uniswap_v3", "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45".lower()),
+    ]
+
+    @pytest.mark.parametrize(("chain", "protocol", "expected"), SURVIVING_NEIGHBOURS)
+    def test_surviving_neighbour_unchanged(self, chain: str, protocol: str, expected: str) -> None:
+        from almanak.framework.intents.compiler_constants import PROTOCOL_ROUTERS
+
+        actual = PROTOCOL_ROUTERS.get(chain, {}).get(protocol)
+        assert actual is not None, (
+            f"connector-owned router {protocol!r} on {chain!r} vanished when "
+            f"the overlay was retired — the deletion was not surgical"
+        )
+        assert actual.lower() == expected, (
+            f"PROTOCOL_ROUTERS[{chain!r}][{protocol!r}] drifted from "
+            f"{expected!r} to {actual!r} during overlay retirement"
         )
 
 

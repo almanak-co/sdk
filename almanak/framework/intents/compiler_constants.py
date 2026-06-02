@@ -177,16 +177,24 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = _build_chain_gas_overrides()
 # connector's ``addresses.py`` module. The legacy module-level dicts
 # below are preserved as derived read-only views so downstream SDK
 # consumers (compiler / swap adapter / synthetic intents / permission
-# discovery) keep working unchanged.
+# discovery) keep working unchanged. Every entry derives from connector
+# ``addresses.py`` (canonical, per-connector kind vocabulary).
 #
-# Two sources contribute to each derived view:
-#
-# 1. Connector ``addresses.py`` (canonical, per-connector kind vocabulary).
-# 2. A small ``_LEGACY_*`` overlay for routers that have no dedicated
-#    connector folder today (uniswap_v2 router, 1inch aggregator,
-#    sushiswap V2 router, quickswap V2 router, pancakeswap_v2 router).
-#    Overlay entries are pure pre-refactor literals: byte-equivalence is
-#    preserved.
+# NOTE (VIB-4928, PR-2): the ``_LEGACY_PROTOCOL_ROUTERS`` overlay that
+# advertised five connector-less routers (uniswap_v2, 1inch aggregator,
+# sushiswap V2, quickswap V2, pancakeswap_v2) was *retired*. None were
+# reachable by any functional consumer: they are absent from
+# ``_swap_protocols()`` (so synthetic-intent permission discovery never
+# read them), have no connector compiler, and are not Uniswap-V3 forks
+# (so the Pendle pre-swap router scan skipped them). The only path that
+# could reach an overlay address — the ``DefaultSwapAdapter`` fall-through
+# in ``compiler._compile_default_router_swap_body`` — encodes a Uniswap-V3
+# ``exactInputSingle`` against the address, which a V2/aggregator router
+# does not implement (it would revert on-chain), so the addresses backed
+# no working swap. Retiring them is the end-state sanctioned by the old
+# overlay comment ("retire the entry if no consumer uses it"). See
+# ``tests/unit/intents/test_compiler_constants_byte_equivalence.py``
+# (``TestLegacyRoutersRetired``) for the anti-regression guard.
 #
 # NOTE (VIB-4874): the Uniswap V4 PositionManager was *removed* from the
 # overlay and now derives from ``uniswap_v4/addresses.py`` like every
@@ -202,7 +210,7 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = _build_chain_gas_overrides()
 # central dict re-keys by protocol so the legacy lookup shape stays
 # unchanged.
 def _build_protocol_routers() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from connector data + overlay."""
+    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from connector data."""
     from almanak.connectors.aerodrome.addresses import AERODROME
     from almanak.connectors.camelot.addresses import CAMELOT
     from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
@@ -236,13 +244,6 @@ def _build_protocol_routers() -> dict[str, dict[str, str]]:
     optimism = routers.get("optimism")
     if optimism is not None and "aerodrome" in optimism:
         optimism.setdefault("velodrome", optimism["aerodrome"])
-
-    # Legacy routers without a dedicated connector folder. Kept as a
-    # pre-refactor literal overlay so byte-equivalence holds — see the
-    # block comment at the top of this section.
-    for chain, protocol_to_addr in _LEGACY_PROTOCOL_ROUTERS.items():
-        for protocol, address in protocol_to_addr.items():
-            routers.setdefault(chain, {}).setdefault(protocol, address)
 
     return routers
 
@@ -311,33 +312,6 @@ _PROTOCOL_ROUTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-
-# Legacy router overlay: protocols / chains where the central dict
-# advertises a router/manager that has no connector-folder home today.
-# Editing this overlay is a stopgap; the strategic move is to either
-# create the matching connector folder + ``addresses.py`` and drop the
-# overlay entry, or to retire the entry if no consumer uses it.
-_LEGACY_PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-        "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
-    },
-    "arbitrum": {
-        "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-        "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
-    },
-    "optimism": {
-        "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
-    },
-    "polygon": {
-        "quickswap": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
-        "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
-    },
-    "bsc": {
-        "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
-        "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-    },
-}
 
 PROTOCOL_ROUTERS: dict[str, dict[str, str]] = _build_protocol_routers()
 LP_POSITION_MANAGERS: dict[str, dict[str, str]] = _build_lp_position_managers()
