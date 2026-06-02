@@ -105,7 +105,7 @@ class TestLineaTeardownDoesNotRequireSelfState:
 # VIB-3744 (QA April29 BUG-51): frozen-pool awareness on Aave V3 Linea
 #
 # As of 2026-04-30, WETH on Aave V3 Linea is frozen (isFrozen=true, ltv=0).
-# Mirrors the VIB-3749 pre-flight pattern proven on Radiant V2.
+# Mirrors the VIB-3749 pre-flight pattern.
 # =============================================================================
 
 from unittest.mock import MagicMock, patch  # noqa: E402

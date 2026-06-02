@@ -45,7 +45,7 @@ def test_lending_intents_all_route_to_lending() -> None:
         IntentType.DELEVERAGE,
     }
     for intent_type in lending_intents:
-        for protocol in ("aave_v3", "morpho_blue", "compound_v3", "radiant_v2", ""):
+        for protocol in ("aave_v3", "morpho_blue", "compound_v3", ""):
             category = classify(intent_type.value, protocol=protocol)
             assert category == AccountingCategory.LENDING, (
                 f"IntentType.{intent_type.name} with protocol={protocol!r} "

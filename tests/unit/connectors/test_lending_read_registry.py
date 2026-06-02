@@ -91,10 +91,10 @@ def test_default_protocol_matches_legacy_hardcoded_protocol():
 
 
 def test_supported_protocols_cover_the_aave_fork_family():
-    assert set(LendingReadRegistry.supported_protocols()) == {"aave_v3", "spark", "radiant_v2"}
+    assert set(LendingReadRegistry.supported_protocols()) == {"aave_v3", "spark"}
 
 
-@pytest.mark.parametrize("protocol", ["aave_v3", "spark", "radiant_v2", "aave"])
+@pytest.mark.parametrize("protocol", ["aave_v3", "spark", "aave"])
 def test_known_protocols_recognised(protocol: str):
     assert LendingReadRegistry.has(protocol)
 
@@ -110,7 +110,6 @@ def test_non_lending_or_unknown_protocols_not_recognised(protocol: str):
         ("aave_v3", "aave_v3"),
         ("AAVE_V3", "aave_v3"),
         ("aave", "aave_v3"),  # alias resolves to canonical key
-        ("radiant-v2", "radiant_v2"),  # hyphen normalises to underscore
         ("spark", "spark"),
     ],
 )
@@ -139,7 +138,7 @@ def test_aave_alias_normalises_to_aave_v3():
 
 def test_all_aave_fork_specs_share_the_canonical_read():
     # Each fork connector opts in by publishing the shared spec instance.
-    for protocol in ("aave_v3", "spark", "radiant_v2"):
+    for protocol in ("aave_v3", "spark"):
         spec = LendingReadRegistry._load_spec(protocol)
         assert isinstance(spec, LendingReadSpec)
         assert spec is AAVE_FORK_RESERVE_READ
@@ -148,10 +147,10 @@ def test_all_aave_fork_specs_share_the_canonical_read():
 
 @pytest.mark.parametrize(
     ("protocol", "chain"),
-    [("aave_v3", "ethereum"), ("spark", "ethereum"), ("radiant_v2", "ethereum")],
+    [("aave_v3", "ethereum"), ("spark", "ethereum")],
 )
 def test_each_protocol_key_resolves_a_usable_plan(protocol: str, chain: str):
-    # Every registered protocol key (incl. radiant_v2, otherwise only seen via
+    # Every registered protocol key (otherwise only seen via
     # has()/_load_spec()) must dispatch through resolve() to a usable plan: the
     # spec's data-provider target + the canonical getUserReserveData calldata.
     asset = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"

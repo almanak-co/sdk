@@ -873,9 +873,6 @@ class TestSetHelpers:
 class TestReaderRegistryAdditional:
     """Cover the remaining supported-protocol aliases."""
 
-    def test_radiant_maps_to_aave(self):
-        assert isinstance(get_reader_for_protocol("radiant_v2"), AaveV3BalanceReader)
-
     def test_morpho_short_alias(self):
         assert isinstance(get_reader_for_protocol("morpho"), MorphoBlueBalanceReader)
 
@@ -933,12 +930,12 @@ class TestResolveAmountAllWithdrawAdditional:
 
 
 # =============================================================================
-# resolve_amount_all - Aave-fork protocol routing (Spark / Radiant data providers)
+# resolve_amount_all - Aave-fork protocol routing (Spark data providers)
 # =============================================================================
 
 # Ethereum single-reserve data providers, sourced from each connector's
 # addresses.py. They are DISTINCT per protocol — that distinction is the whole
-# point of the regression below: a Spark/Radiant amount='all' must NOT query
+# point of the regression below: a Spark amount='all' must NOT query
 # Aave V3's contract.
 _ETH_SPARK_DATA_PROVIDER = "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
 _ETH_AAVE_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
@@ -990,10 +987,10 @@ class TestAaveForkProtocolRouting:
     """Regression (follow-up to PR #2533): the protocol the caller resolved must
     be threaded all the way to the on-chain read target.
 
-    ``AaveV3BalanceReader`` serves aave_v3 / spark / radiant_v2 — Aave forks that
+    ``AaveV3BalanceReader`` serves aave_v3 / spark — Aave forks that
     share the ``getUserReserveData`` ABI but live at DIFFERENT
     ``pool_data_provider`` addresses per chain. Before the protocol was threaded
-    through ``AaveV3BalanceReader`` -> ``LendingPositionReader``, a Spark/Radiant
+    through ``AaveV3BalanceReader`` -> ``LendingPositionReader``, a Spark
     WITHDRAW/REPAY amount='all' defaulted to the registry's default protocol
     (aave_v3) and silently queried Aave's contract — wrong balance on every chain
     where the addresses differ. Both the WITHDRAW (supply) and REPAY (debt)
@@ -1019,7 +1016,7 @@ class TestAaveForkProtocolRouting:
         self, protocol, expected_provider, other_provider
     ):
         """A WITHDRAW amount='all' reads supply from the resolved protocol's own
-        pool_data_provider — Spark/Radiant must not fall back to Aave's, and the
+        pool_data_provider — Spark must not fall back to Aave's, and the
         aave_v3 case proves the routing is protocol-sensitive, not hardcoded."""
         captured: list[str] = []
         gw = _gateway_capturing_eth_call_target(captured, supply_wei=100_000_000)
@@ -1042,7 +1039,7 @@ class TestAaveForkProtocolRouting:
     ):
         """A REPAY amount='all' reads debt from the resolved protocol's own
         pool_data_provider — the debt branch threads protocol exactly like the
-        supply branch, so a Spark/Radiant repay must not query Aave's contract."""
+        supply branch, so a Spark repay must not query Aave's contract."""
         captured: list[str] = []
         gw = _gateway_capturing_eth_call_target(captured, debt_wei=250_000_000)
 

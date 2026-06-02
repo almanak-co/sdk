@@ -262,7 +262,7 @@ For the authoritative per-protocol chain matrix, see the [connector reference](h
 
 - **DEXs / AMMs**: Uniswap V3, Uniswap V4, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Camelot, Curve, Fluid, Pendle, Orca, Meteora, Raydium CLMM
 - **Swap aggregators**: Jupiter, Enso, LiFi
-- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark, Euler V2, Radiant V2, Fluid, BenQi, Silo V2, Curvance, Kamino
+- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark, Euler V2, Fluid, BenQi, Silo V2, Curvance, Kamino
 - **Liquid Staking & yield-bearing assets**: Lido, Ethena, Gimo
 - **Yield tokenization**: Pendle
 - **Perpetuals**: GMX V2, Aster Perps, PancakeSwap Perps, Drift

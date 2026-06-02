@@ -58,7 +58,6 @@ class SupportedChainsRegistry:
         # Lending — pooled / forks
         "aave_v3": "almanak.connectors.aave_v3.supported_chains",
         "spark": "almanak.connectors.spark.supported_chains",
-        "radiant_v2": "almanak.connectors.radiant_v2.supported_chains",
         "benqi": "almanak.connectors.benqi.supported_chains",
         "euler_v2": "almanak.connectors.euler_v2.supported_chains",
         "silo_v2": "almanak.connectors.silo_v2.supported_chains",

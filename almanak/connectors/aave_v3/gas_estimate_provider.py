@@ -5,8 +5,8 @@ Publishes the ``lending_*`` and ``flash_loan*`` action gas estimates to
 for these action keys — the legacy ``DEFAULT_GAS_ESTIMATES`` table
 comments explicitly attribute the higher-than-naive numbers to "Aave V3
 on Arbitrum uses ~220k+ for supply due to hooks/incentives" and similar
-profile notes. Every Aave V2/V3 fork that compiles through the
-framework's ``LendingProtocolAdapter`` (Radiant V2, Spark, …) inherits
+profile notes. Every Aave V3 fork that compiles through the
+framework's ``LendingProtocolAdapter`` (Spark, …) inherits
 these numbers transparently.
 
 Byte-equivalence (VIB-4858)

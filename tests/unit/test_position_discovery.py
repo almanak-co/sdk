@@ -38,10 +38,6 @@ class TestHasLendingProtocol:
         """Spark has its own connector-owned lending read — now discoverable."""
         assert _has_lending_protocol(["spark"]) is True
 
-    def test_radiant_v2_supported(self):
-        """Radiant V2 (Aave V2 fork) has its own connector-owned lending read."""
-        assert _has_lending_protocol(["radiant_v2"]) is True
-
     def test_compound_v3_not_supported(self):
         """Compound V3 has no connector-owned single-reserve lending read."""
         assert _has_lending_protocol(["compound_v3"]) is False
@@ -828,18 +824,17 @@ class TestPortfolioValuerFullIntegration:
 
 
 # =============================================================================
-# Aave-fork protocol routing (Spark / Radiant data providers) — regression
+# Aave-fork protocol routing (Spark data providers) — regression
 # =============================================================================
 
 # Ethereum single-reserve data providers, sourced from each connector's
 # addresses.py. DISTINCT per protocol — discovery must query each protocol's
-# OWN contract, never silently default Spark/Radiant to Aave V3.
+# OWN contract, never silently default Spark to Aave V3.
 # Intentionally duplicated from the connector address tables for test isolation
 # (the routing assertion fails closed if a wrong provider is queried); keep
 # these in sync by hand if a connector's pool_data_provider ever changes.
 _ETH_AAVE_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
 _ETH_SPARK_DATA_PROVIDER = "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
-_ETH_RADIANT_DATA_PROVIDER = "0x362f3BB63Cff83bd169aE1793979E9e537993813"
 
 
 def _gateway_capturing_eth_call_target(captured: list[str], supply_wei: int = 1_000_000):
@@ -874,7 +869,7 @@ class TestLendingDiscoveryProtocolRouting:
 
     Before ``read_position`` was threaded a ``protocol``, every discovered
     reserve defaulted to the registry's default (aave_v3) and silently queried
-    Aave's ``pool_data_provider`` — wrong balances for Spark/Radiant on every
+    Aave's ``pool_data_provider`` — wrong balances for Spark on every
     chain where the addresses differ. These tests drive the real
     ``LendingReadRegistry`` -> ``AddressRegistry`` -> connector address tables,
     so they fail closed if the routing regresses to Aave-by-default.
@@ -914,13 +909,6 @@ class TestLendingDiscoveryProtocolRouting:
         assert captured
         assert captured[0].lower() == _ETH_AAVE_DATA_PROVIDER.lower()
         assert captured[0].lower() != _ETH_SPARK_DATA_PROVIDER.lower()
-
-    def test_radiant_discovery_queries_radiant_provider(self):
-        captured: list[str] = []
-        self._discover(["radiant_v2"], captured)
-        assert captured
-        assert captured[0].lower() == _ETH_RADIANT_DATA_PROVIDER.lower()
-        assert captured[0].lower() != _ETH_AAVE_DATA_PROVIDER.lower()
 
     def test_multi_protocol_fans_out_to_each_provider(self):
         """A strategy declaring two lending markets scans BOTH, each routed to

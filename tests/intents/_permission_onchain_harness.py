@@ -1243,7 +1243,7 @@ def _run_lend_borrow_positive(
       the same tx supplies it. The manifest authorises all three calls. No
       seeding helper.
 
-    - **aave_v3 / spark / morpho_blue / radiant_v2**: the compiled BORROW
+    - **aave_v3 / spark / morpho_blue**: the compiled BORROW
       bundle ONLY calls ``borrow`` (plus any debt-token approvals). The
       protocol requires a prior collateral supply on the lending pool —
       without it the borrow reverts for lack of account collateral, not for
@@ -1651,7 +1651,7 @@ def _seed_supply(
         seed_cfg[key] = value
 
     # Protocol-specific use_as_collateral semantics:
-    # - aave_v3 / spark / radiant_v2: first supply auto-enables collateral
+    # - aave_v3 / spark: first supply auto-enables collateral
     #   at the reserve level; the default compiler path also emits a
     #   setUserUseReserveAsCollateral call that can revert as no-op. We
     #   only care about the aToken existing for WITHDRAW, not the
@@ -1660,7 +1660,7 @@ def _seed_supply(
     #   case declares use_as_collateral=False in its cfg; preserve that
     #   intent for the seed too (without this branch, the compiler default
     #   True would route to supply_collateral which is the wrong side).
-    if case.protocol in {"aave_v3", "spark", "radiant_v2"}:
+    if case.protocol in {"aave_v3", "spark"}:
         seed_cfg["use_as_collateral"] = False
     elif case.protocol == "morpho_blue":
         # Mirror the case's own flag for the loan-token vs collateral-token
@@ -1709,9 +1709,8 @@ def _seed_borrow_collateral(
     and executes via Safe. Leaves the Safe with collateral but NO outstanding
     debt — exactly the state the BORROW test needs.
 
-    Used by non-atomic BORROW positive paths (aave_v3, spark, morpho_blue,
-    radiant_v2). Not used by compound_v3 — its BORROW bundle supplies
-    collateral in-line.
+    Used by non-atomic BORROW positive paths (aave_v3, spark, morpho_blue).
+    Not used by compound_v3 — its BORROW bundle supplies collateral in-line.
     """
     cfg = case.config
     collat_symbol = cfg["collateral_token"]
@@ -1726,7 +1725,7 @@ def _seed_borrow_collateral(
         seed_cfg["market_id"] = cfg["market_id"]
     # Protocol-specific ``use_as_collateral`` semantics:
     #
-    # - **aave_v3 / spark / radiant_v2**: first-supply auto-enables the asset
+    # - **aave_v3 / spark**: first-supply auto-enables the asset
     #   as collateral at the reserve level. The compiler's default
     #   ``use_as_collateral=True`` THEN emits an extra
     #   ``setUserUseReserveAsCollateral(asset, true)`` call that reverts
@@ -1739,7 +1738,7 @@ def _seed_borrow_collateral(
     #   test needs.
     if case.protocol == "morpho_blue":
         seed_cfg["use_as_collateral"] = True
-    elif case.protocol in {"aave_v3", "spark", "radiant_v2"}:
+    elif case.protocol in {"aave_v3", "spark"}:
         seed_cfg["use_as_collateral"] = False
 
     seed_case = PermissionTestCase(
@@ -1857,7 +1856,7 @@ def _seed_supply_then_borrow(
     # See ``_seed_borrow_collateral`` — same protocol-specific semantics.
     if case.protocol == "morpho_blue":
         supply_cfg["use_as_collateral"] = True
-    elif case.protocol in {"aave_v3", "spark", "radiant_v2"}:
+    elif case.protocol in {"aave_v3", "spark"}:
         supply_cfg["use_as_collateral"] = False
     supply_case = PermissionTestCase(
         chain=case.chain,

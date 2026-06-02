@@ -514,7 +514,7 @@ EventCallback = Callable[[ExecutionEventType, dict[str, Any]], None]
 # to compare against on-chain ``balanceOf`` values. This set is the single
 # source of truth used by both the description formatter and the pre-flight
 # balance checker — keep them in sync. (VIB-3747)
-_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark", "radiant_v2"})
+_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark"})
 
 # SWAP compilers that ship the input amount as a human-readable Decimal in
 # metadata (``"amount_in": str(amount_decimal)``) instead of the wei-encoded

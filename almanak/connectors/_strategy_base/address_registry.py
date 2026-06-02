@@ -113,7 +113,6 @@ class AddressRegistry:
         "pendle": ("almanak.connectors.pendle.addresses", "PENDLE"),
         # Lending — pooled.
         "aave_v3": ("almanak.connectors.aave_v3.addresses", "AAVE_V3"),
-        "radiant_v2": ("almanak.connectors.radiant_v2.addresses", "RADIANT_V2"),
         "spark": ("almanak.connectors.spark.addresses", "SPARK"),
         "fluid": ("almanak.connectors.fluid.addresses", "FLUID"),
         # Lending — isolated markets.

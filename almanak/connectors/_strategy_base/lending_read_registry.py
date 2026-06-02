@@ -71,14 +71,13 @@ class LendingReadRegistry:
     """Protocol-identifier → connector lending-read-spec dispatch registry."""
 
     # Protocol identifier -> (module path, attribute) naming the connector's
-    # published LendingReadSpec. The Aave V2 / V3 forks (Aave V3, Spark, Radiant
-    # V2) each publish their own spec attribute; the specs happen to be the
-    # shared AAVE_FORK_RESERVE_READ instance, but the *opt-in* lives in each
-    # connector so adding a fork needs no edit here beyond one row.
+    # published LendingReadSpec. The Aave V3 forks (Aave V3, Spark) each
+    # publish their own spec attribute; the specs happen to be the shared
+    # AAVE_FORK_RESERVE_READ instance, but the *opt-in* lives in each connector
+    # so adding a fork needs no edit here beyond one row.
     _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
         "aave_v3": ("almanak.connectors.aave_v3.lending_read", "LENDING_READ_SPEC"),
         "spark": ("almanak.connectors.spark.lending_read", "LENDING_READ_SPEC"),
-        "radiant_v2": ("almanak.connectors.radiant_v2.lending_read", "LENDING_READ_SPEC"),
     }
 
     # Protocol aliases that map onto a canonical key in ``_SPEC_LOADERS``.
@@ -181,7 +180,7 @@ class LendingReadRegistry:
 
         Args:
             protocol: Protocol identifier (e.g. ``"aave_v3"``, ``"spark"``,
-                ``"radiant_v2"``, or the ``"aave"`` alias).
+                or the ``"aave"`` alias).
             chain: Chain identifier (e.g. ``"arbitrum"``).
             asset_address: Underlying reserve asset address.
             wallet_address: User wallet address.

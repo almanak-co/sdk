@@ -13,8 +13,6 @@ from .compiler_constants import (
     AAVE_REPAY_SELECTOR,
     AAVE_SET_COLLATERAL_SELECTOR,
     AAVE_SUPPLY_SELECTOR,
-    AAVE_V2_DEPOSIT_SELECTOR,
-    AAVE_V2_FORKS,
     AAVE_WITHDRAW_SELECTOR,
     BALANCER_FLASH_LOAN_SELECTOR,
     BALANCER_VAULT_ADDRESSES,
@@ -123,8 +121,6 @@ class AaveV3Adapter:
     - Variable and stable interest rates (stable being deprecated)
     """
 
-    _AAVE_V2_FORKS = AAVE_V2_FORKS
-
     def __init__(self, chain: str, protocol: str = "aave_v3") -> None:
         """Initialize the adapter.
 
@@ -134,7 +130,6 @@ class AaveV3Adapter:
         """
         self.chain = chain
         self.protocol = protocol
-        self._is_v2_fork = protocol in self._AAVE_V2_FORKS
 
         # Get pool address
         chain_pools = LENDING_POOL_ADDRESSES.get(chain, {})
@@ -153,9 +148,6 @@ class AaveV3Adapter:
         """Generate calldata for supplying assets.
 
         Aave V3: supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
-        Aave V2 forks (Radiant V2): deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
-
-        Both have identical parameter layouts, only the function selector differs.
 
         Args:
             asset: Token address to supply
@@ -175,8 +167,7 @@ class AaveV3Adapter:
             + self._pad_uint16(referral_code)
         )
 
-        selector = AAVE_V2_DEPOSIT_SELECTOR if self._is_v2_fork else AAVE_SUPPLY_SELECTOR
-        return bytes.fromhex(selector[2:] + params)
+        return bytes.fromhex(AAVE_SUPPLY_SELECTOR[2:] + params)
 
     def get_borrow_calldata(
         self,

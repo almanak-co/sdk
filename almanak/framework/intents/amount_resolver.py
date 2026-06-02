@@ -72,7 +72,7 @@ class ProtocolBalanceReader(ABC):
 
         Args:
             protocol: The concrete protocol identifier (e.g. ``"aave_v3"``,
-                ``"spark"``, ``"radiant_v2"``) the caller resolved. A single
+                ``"spark"``) the caller resolved. A single
                 reader may serve several Aave-fork protocols whose on-chain data
                 providers differ per chain, so the protocol must be threaded
                 through to the position query — never inferred from a default.
@@ -115,7 +115,7 @@ class ProtocolBalanceReader(ABC):
 
 
 class AaveV3BalanceReader(ProtocolBalanceReader):
-    """Balance reader for Aave V3, Spark, and Radiant (Aave-fork) protocols.
+    """Balance reader for Aave V3 and Spark (Aave-fork) protocols.
 
     Uses the existing LendingPositionReader to query getUserReserveData
     via gateway RPC.
@@ -123,7 +123,7 @@ class AaveV3BalanceReader(ProtocolBalanceReader):
 
     @property
     def supported_protocols(self) -> list[str]:
-        return ["aave_v3", "spark", "radiant_v2"]
+        return ["aave_v3", "spark"]
 
     def get_supply_balance(
         self,

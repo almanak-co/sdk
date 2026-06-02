@@ -66,8 +66,8 @@ class LendingPositionReader:
             chain: Chain identifier (e.g., "arbitrum", "base").
             asset_address: Underlying asset contract address.
             wallet_address: User wallet address.
-            protocol: Lending protocol identifier (e.g. "aave_v3", "spark",
-                "radiant_v2"). When ``None``, the registry's default lending
+            protocol: Lending protocol identifier (e.g. "aave_v3", "spark").
+                When ``None``, the registry's default lending
                 protocol is used — preserving the legacy single-reserve read
                 path for callers that do not track the protocol.
 

@@ -61,10 +61,10 @@ class PoolReserveFrozenError(ValueError):
     Raised at intent compile time when a pre-flight reserve-config query shows
     `isActive == false` or `isFrozen == true`. Surfacing this as a typed error
     lets strategies emit a clean ``Intent.hold(...)`` instead of submitting a
-    SUPPLY/BORROW that will revert on-chain (e.g. Radiant V2 Arbitrum after the
-    October 2024 attack — VIB-2445 / VIB-3749).
+    SUPPLY/BORROW that will revert on-chain (e.g. a market whose governance
+    froze a reserve after an exploit — VIB-2445 / VIB-3749).
 
-    Reusable for any Aave V2 fork or Aave V3 market whose governance has
+    Reusable for any Aave V3 market whose governance has
     paused / frozen a reserve.
     """
 
@@ -226,10 +226,10 @@ def _fetch_reserve_config(
     """Call `getReserveConfigurationData(asset)` and decode the result.
 
     Shared low-level helper used by both the Aave V3 collateral-eligibility
-    pre-flight (VIB-3701) and the Aave V2-fork frozen-reserve pre-flight
-    (VIB-3749). Both pre-flights consume the same ABI — the underlying
+    pre-flight (VIB-3701) and the frozen-reserve pre-flight (VIB-3749). Both
+    pre-flights consume the same ABI — the underlying
     `getReserveConfigurationData(address)` selector and 10-word return layout
-    are identical between Aave V2 and Aave V3.
+    are identical across Aave V3 and any Aave-compatible fork.
 
     Returns ``None`` when the check could not be performed (no gateway, RPC
     error, malformed response) — callers fail-open in that case so an offline
@@ -270,9 +270,9 @@ def _fetch_reserve_config(
         return None
 
     if not response.success or not response.result:
-        # When the PoolDataProvider call reverts (as happens on Radiant V2
-        # Arbitrum after the October 2024 attack — every method on the proxy
-        # returns 0x), treat that as a strong "pool is broken / shut down"
+        # When the PoolDataProvider call reverts (as happens on a shut-down
+        # or exploited deployment whose proxy returns 0x for every method),
+        # treat that as a strong "pool is broken / shut down"
         # signal and surface it as a frozen reserve. A healthy data provider
         # never reverts on `getReserveConfigurationData`; only network errors
         # or an RPC-level fault would otherwise reach this branch, and those
@@ -405,7 +405,7 @@ def _check_lending_reserve_borrowable(
 ) -> str | None:
     """VIB-3825 pre-flight: verify the asset has ``borrowingEnabled=true``.
 
-    Aave V3 (and Aave V2 forks) expose a per-reserve ``borrowingEnabled`` bit in
+    Aave V3 exposes a per-reserve ``borrowingEnabled`` bit in
     ``getReserveConfigurationData`` (word 6). When it is false, every BORROW
     against the asset reverts on-chain with short-string code ``11`` (Aave V3:
     ``BORROWING_NOT_ENABLED``) — burning gas + iterations of the strategy's
@@ -467,7 +467,7 @@ def _check_lending_reserve_active(
 
     Reusable across any Aave-compatible lending pool that exposes
     ``getReserveConfigurationData(address)`` on its PoolDataProvider — covers
-    Aave V3 markets and Aave V2 forks (Radiant V2 today, others if added).
+    Aave V3 markets (and any Aave-compatible fork sharing the same ABI).
 
     Returns:
         None when the reserve is active and unfrozen, or when the check could
@@ -898,9 +898,8 @@ def assert_lending_reserve_active(
     Fails open when the gateway / RPC is unavailable — caller continues to
     behave as before in offline / placeholder-mode compiles.
 
-    VIB-3749. Reusable for any Aave V2 fork or Aave V3 market governance can
-    pause: Radiant V2 (Arbitrum frozen post-Oct-2024), Aave V3 markets where a
-    reserve gets paused, etc.
+    VIB-3749. Reusable for any Aave V3 market governance can pause: e.g.
+    markets where a reserve gets paused or frozen, etc.
 
     Raises:
         PoolReserveFrozenError: when the reserve is conclusively frozen or
@@ -1254,7 +1253,7 @@ def _compile_borrow_aave_compatible(
     borrow_token: Any,
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
-    """Compile BORROW for Aave V3 and Aave-compatible forks (Radiant V2)."""
+    """Compile BORROW for Aave V3 and Aave-compatible forks (e.g. Spark)."""
     from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
@@ -2603,7 +2602,7 @@ def _compile_repay_aave_compatible(
     amount_description: str,
     initial_warnings: list[str],
 ) -> CompilationResult:
-    """Compile REPAY for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    """Compile REPAY for Aave-compatible protocols (Aave V3, Spark)."""
     from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
@@ -3668,7 +3667,7 @@ def _compile_supply_aave_compatible(
     supply_token: Any,
     amount_decimal: Decimal,
 ) -> CompilationResult:
-    """Compile SUPPLY for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    """Compile SUPPLY for Aave-compatible protocols (Aave V3, Spark)."""
     from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(
@@ -3712,10 +3711,10 @@ def _compile_supply_aave_compatible(
     # Pre-flight: confirm the reserve for this asset is active and unfrozen on
     # the target pool. Surfaces a typed `PoolReserveFrozenError` (relayed as a
     # FAILED compilation result) instead of submitting a SUPPLY TX that will
-    # revert opaquely on-chain — covering any Aave V2 fork or Aave V3 market
-    # whose governance has paused a reserve. The Radiant V2 Arbitrum
-    # deployment is *not* exercised here: its LendingPool proxy was reduced
-    # to a stub post-Oct-2024 attack, so the chain entry is removed from
+    # revert opaquely on-chain — covering any Aave V3 market
+    # whose governance has paused a reserve. Frozen / stubbed deployments
+    # are not exercised here: their LendingPool proxy reads are unreliable,
+    # so such chain entries are removed from
     # ``LENDING_POOL_ADDRESSES`` and the supply path fails earlier on the
     # zero-address guard above (issues #1842 / #1847 / #1889).
     # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when no
@@ -3788,10 +3787,8 @@ def _compile_supply_aave_compatible(
     if intent.use_as_collateral:
         # Pre-flight: confirm asset can actually be used as collateral on this
         # market. Surfaces a typed error instead of the opaque on-chain
-        # 0x0cafc072 (UnderlyingCannotBeUsedAsCollateral) revert. Aave-only;
-        # V2 forks (Radiant) skip this check because they expose a different
-        # PoolDataProvider interface. VIB-3701.
-        if not adapter._is_v2_fork and protocol_lower == "aave_v3":
+        # 0x0cafc072 (UnderlyingCannotBeUsedAsCollateral) revert. VIB-3701.
+        if protocol_lower == "aave_v3":
             ineligible_reason = _check_aave_v3_collateral_eligibility(
                 compiler,
                 asset_address=actual_supply_address,
@@ -4715,7 +4712,7 @@ def _compile_withdraw_aave_compatible(
     withdraw_amount_decimal: Decimal | None,
     initial_warnings: list[str],
 ) -> CompilationResult:
-    """Compile WITHDRAW for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    """Compile WITHDRAW for Aave-compatible protocols (Aave V3, Spark)."""
     from almanak.framework.intents.compiler_adapters import AaveV3Adapter
 
     result = CompilationResult(

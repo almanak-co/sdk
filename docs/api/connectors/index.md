@@ -40,7 +40,6 @@ The matrix below is generated from ``almanak.connectors._strategy_base.registry.
 | [PancakeSwap V3](pancakeswap_v3.md) | DEX | Arbitrum, Base, BNB Chain, Ethereum | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `pancakeswap_v3` |
 | [Pendle](pendle.md) | DEX | Arbitrum, Ethereum | LP_CLOSE, LP_OPEN, SWAP, WITHDRAW | `pendle` |
 | [Polymarket](polymarket.md) | Prediction | Polygon | PREDICTION_BUY, PREDICTION_REDEEM, PREDICTION_SELL | `polymarket` |
-| [Radiant V2](radiant_v2.md) | Lending | Ethereum | BORROW, REPAY, SUPPLY, WITHDRAW | `radiant_v2` |
 | [Raydium](raydium.md) | DEX | Solana | LP_CLOSE, LP_OPEN | `raydium` |
 | [Silo V2](silo_v2.md) | Lending | Avalanche | BORROW, REPAY, SUPPLY, WITHDRAW | `silo_v2` |
 | [Spark](spark.md) | Lending | Ethereum | BORROW, REPAY, SUPPLY, WITHDRAW | `spark` |

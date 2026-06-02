@@ -18,7 +18,7 @@ the map honest:
 
 2. **Every chain in the map must list a token Aave V3 ships on that chain.**
    The seeder only seeds the lend protocols the harness drives (aave_v3 /
-   spark / radiant_v2 / morpho_blue); for protocols that share Aave's
+   spark / morpho_blue); for protocols that share Aave's
    ``Pool.supply()`` shape, an unsupported token revert with
    ``ReserveDoesNotExist`` would also surface as ``SeedingFailed``.
 
@@ -97,8 +97,8 @@ def test_default_collateral_is_an_aave_v3_reserve(chain: str, expected: str) -> 
     Aave's pool doesn't recognise and the SUPPLY tx will revert with
     ``ReserveDoesNotExist`` — same triage bucket as the original #1845 bug.
 
-    spark / radiant_v2 / morpho_blue ride the same default; spark is
-    Ethereum-only, radiant_v2 is Arbitrum-only and morpho_blue is
+    spark / morpho_blue ride the same default; spark is
+    Ethereum-only and morpho_blue is
     market_id-driven (the case overrides the default downstream of the
     compiler), so the Aave V3 cross-check covers the realistic seed paths.
     """

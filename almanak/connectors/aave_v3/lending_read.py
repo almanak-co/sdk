@@ -11,7 +11,7 @@ contract kind or the ``getUserReserveData`` selector.
 Aave V3 reads per-user reserve state from
 ``PoolDataProvider.getUserReserveData(address asset, address user)``; the shared
 :data:`~almanak.connectors._strategy_base.lending_read_base.AAVE_FORK_RESERVE_READ`
-spec describes that ABI (the same one Spark and Radiant V2 expose).
+spec describes that ABI (the same one Spark exposes).
 """
 
 from __future__ import annotations

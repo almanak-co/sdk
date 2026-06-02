@@ -167,9 +167,6 @@ def _register_all() -> None:
     from almanak.connectors.polymarket.receipt_parser_provider import (
         PolymarketReceiptParserConnector,
     )
-    from almanak.connectors.radiant_v2.receipt_parser_provider import (
-        RadiantV2ReceiptParserConnector,
-    )
     from almanak.connectors.raydium.receipt_parser_provider import (
         RaydiumReceiptParserConnector,
     )
@@ -207,7 +204,6 @@ def _register_all() -> None:
 
     # Lending
     STRATEGY_RECEIPT_PARSER_REGISTRY.register(AaveV3ReceiptParserConnector())
-    STRATEGY_RECEIPT_PARSER_REGISTRY.register(RadiantV2ReceiptParserConnector())
     STRATEGY_RECEIPT_PARSER_REGISTRY.register(SparkReceiptParserConnector())
     STRATEGY_RECEIPT_PARSER_REGISTRY.register(MorphoBlueReceiptParserConnector())
     STRATEGY_RECEIPT_PARSER_REGISTRY.register(CurvanceReceiptParserConnector())

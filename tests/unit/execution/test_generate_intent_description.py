@@ -680,7 +680,6 @@ class TestProtocolNormalizationHelpers:
 
         assert _lending_amount_is_wei("aave_v3") is True
         assert _lending_amount_is_wei("spark") is True
-        assert _lending_amount_is_wei("radiant_v2") is True
         assert _lending_amount_is_wei("morpho_blue") is False
         assert _lending_amount_is_wei("compound_v3") is False
 
@@ -693,7 +692,11 @@ class TestProtocolNormalizationHelpers:
         # to the human branch. Now both sides agree.
         assert _lending_amount_is_wei("AAVE_V3") is True
         assert _lending_amount_is_wei("Spark") is True
-        assert _lending_amount_is_wei("RADIANT_V2") is True
+        assert _lending_amount_is_wei("SPARK") is True
+        # radiant_v2 was removed from _WEI_LENDING_PROTOCOLS when the connector
+        # retired — pin that it now classifies as non-wei so a reintroduction
+        # is caught here.
+        assert _lending_amount_is_wei("radiant_v2") is False
         # Display names with spaces and hyphens are also normalised to the
         # canonical underscore-snake form by ``_normalize_protocol_key``,
         # so legacy / hand-built bundles classify consistently across the

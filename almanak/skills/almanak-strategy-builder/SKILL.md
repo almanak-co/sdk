@@ -1547,7 +1547,6 @@ class MyStrategy(IntentStrategy):
 | Enso | `ENSO` | Aggregator | `enso` |
 | Pendle | `PENDLE` | Yield | `pendle` |
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
-| Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
 | BenQi | `BENQI` | Lending | `benqi` |
 | Joe Lend (DORMANT) | `JOE_LEND` | Lending — wound down on-chain (VIB-3960); compiler short-circuits. Do NOT use. | `joelend` |

@@ -1227,7 +1227,7 @@ def _ray_to_bps(ray_value: int | float | Decimal | str | None) -> int | None:
 
     Accepts two input forms:
     - Already-fractional decimal (e.g. Decimal("0.05") → 500 bps): produced
-      by Aave V3 / Spark / Radiant receipt parsers which pre-normalize from ray.
+      by Aave V3 / Spark receipt parsers which pre-normalize from ray.
     - Raw ray integer (≥ 1, scale 1e27): produced by synthetic test fixtures.
     """
     if ray_value is None:
@@ -1560,9 +1560,9 @@ def build_lending_accounting_event(  # noqa: C901
     morpho_unavailable_reason: str = ""
 
     # Only query getUserAccountData for protocols whose pool address resolves via
-    # AAVE_V3_POOL_ADDRESSES. Spark and Radiant V2 use different pool contracts;
-    # querying the Aave V3 pool for those protocols returns wrong data with HIGH
-    # confidence. Add their addresses to a separate registry when ready.
+    # AAVE_V3_POOL_ADDRESSES. Spark uses different pool contracts;
+    # querying the Aave V3 pool for that protocol returns wrong data with HIGH
+    # confidence. Add its addresses to a separate registry when ready.
     is_aave = protocol.lower() in ("aave_v3", "aave")
     is_morpho = protocol.lower() == "morpho_blue"
     is_compound_v3 = protocol.lower() == "compound_v3"

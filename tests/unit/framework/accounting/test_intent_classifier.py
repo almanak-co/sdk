@@ -21,7 +21,7 @@ def test_lending_category(intent_type: str) -> None:
     assert classify(intent_type) == AccountingCategory.LENDING
     assert classify(intent_type, protocol="aave_v3") == AccountingCategory.LENDING
     assert classify(intent_type, protocol="morpho_blue") == AccountingCategory.LENDING
-    assert classify(intent_type, protocol="radiant_v2") == AccountingCategory.LENDING
+    assert classify(intent_type, protocol="spark") == AccountingCategory.LENDING
 
 
 # ──────────────────────────────────────────────────────────────────────────────

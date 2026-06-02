@@ -4112,7 +4112,7 @@ class StrategyRunner:
         / Morpho Blue / Compound V3) or ``None`` when:
           - ``gateway_client`` is missing (local-without-gateway, paper)
           - intent isn't a lending intent (SWAP, LP_*, PERP_*, …)
-          - protocol isn't yet supported (Spark, Radiant V2, JoeLend, …)
+          - protocol isn't yet supported (JoeLend, …)
           - any underlying gateway eth_call fails
 
         Returning ``None`` is correct: the ledger writer treats it as

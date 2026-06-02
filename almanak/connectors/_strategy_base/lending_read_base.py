@@ -15,8 +15,8 @@ This module owns the strategy-side half every lending connector that exposes a
 * :class:`LendingReadSpec` — the per-capability descriptor a connector publishes:
   the contract-kind it reads from (resolved through ``AddressRegistry``), the
   selector, the calldata encoder, and the return decoder.
-* :data:`AAVE_FORK_RESERVE_READ` — the concrete spec for the Aave V2 / V3 fork
-  family (Aave V3, Spark, Radiant V2). All three forks expose the identical
+* :data:`AAVE_FORK_RESERVE_READ` — the concrete spec for the Aave V3 fork
+  family (Aave V3, Spark). Both forks expose the identical
   ``getUserReserveData(address asset, address user)`` ABI against their own
   ``pool_data_provider`` contract, so they share one spec; only the per-chain
   data-provider address (owned by each connector's ``addresses.py``) differs.
@@ -172,8 +172,8 @@ def parse_user_reserve_data_hex(
         return None
 
 
-#: Read capability shared by every Aave V2 / V3 fork (Aave V3, Spark, Radiant
-#: V2). The forks expose the identical ``getUserReserveData`` ABI against their
+#: Read capability shared by every Aave V3 fork (Aave V3, Spark).
+#: The forks expose the identical ``getUserReserveData`` ABI against their
 #: own ``pool_data_provider`` contract; only the per-chain address (owned by
 #: each connector's ``addresses.py``) differs.
 AAVE_FORK_RESERVE_READ = LendingReadSpec(

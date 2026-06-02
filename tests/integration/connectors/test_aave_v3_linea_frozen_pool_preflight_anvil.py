@@ -25,12 +25,10 @@ Expected on-chain truth as of 2026-04-30 (verified by the implementer via
 
 This module exercises **helper-only** Anvil-fork checks (it only invokes
 ``_fetch_reserve_config`` / ``assert_lending_reserve_active`` against a
-forked node) and therefore lives under ``tests/integration/connectors/``,
-mirroring the layout decision made for the Radiant V2 sibling test
-(``test_radiant_v2_frozen_pool_preflight_anvil.py``) per CodeRabbit feedback
-on PR #1971: ``tests/intents/`` is reserved for canonical intent-test
-coverage that implements all four verification layers (compile / fixture /
-execution / receipt).
+forked node) and therefore lives under ``tests/integration/connectors/``:
+``tests/intents/`` is reserved for canonical intent-test coverage that
+implements all four verification layers (compilation / execution /
+receipt parsing / balance deltas).
 
 Skipped when ``ANVIL_LINEA_PORT`` isn't set. For deterministic, governance-
 proof runs, pin Anvil to the verified historical block::

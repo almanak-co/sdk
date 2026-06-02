@@ -5,7 +5,7 @@ VIB-4864 (W2-followup): the migration backfill keys a compile-time
 that implement the Uniswap-V3-shape LP grouping policy (``univ3_lp@v1`` —
 NFT-position-manager-keyed concentrated liquidity). Per-connector
 membership now lives next to the connector it describes (mirroring the
-VIB-4872 ``AAVE_V2_FORK_PROTOCOLS`` / ``AAVE_V3_FAMILY_PROTOCOLS`` pattern);
+VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` pattern);
 the union is derived in
 ``almanak/framework/intents/compiler_constants.py``.
 

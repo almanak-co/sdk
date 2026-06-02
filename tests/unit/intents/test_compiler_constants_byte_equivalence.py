@@ -43,7 +43,6 @@ class TestLendingAddressDerivedViews:
     EXPECTED_LENDING_POOL = _lower_nested({
         "ethereum": {
             "aave_v3": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-            "radiant_v2": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
             "spark": "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
         },
         "arbitrum": {"aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD"},
@@ -62,7 +61,6 @@ class TestLendingAddressDerivedViews:
     EXPECTED_DATA_PROVIDERS = _lower_nested({
         "ethereum": {
             "aave_v3": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
-            "radiant_v2": "0x362f3BB63Cff83bd169aE1793979E9e537993813",
         },
         "arbitrum": {"aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"},
         "optimism": {"aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"},
@@ -143,15 +141,10 @@ class TestClassificationFrozensetDerivedViews:
 
         assert SWAP_ROUTER_ALGEBRA_PROTOCOLS == frozenset({"camelot"})
 
-    def test_aave_v2_forks(self) -> None:
-        from almanak.framework.intents.compiler_constants import AAVE_V2_FORKS
-
-        assert AAVE_V2_FORKS == {"radiant_v2"}
-
     def test_aave_compatible_protocols(self) -> None:
         from almanak.framework.intents.compiler_constants import AAVE_COMPATIBLE_PROTOCOLS
 
-        assert AAVE_COMPATIBLE_PROTOCOLS == {"aave_v3", "radiant_v2"}
+        assert AAVE_COMPATIBLE_PROTOCOLS == {"aave_v3"}
 
 
 class TestProtocolRoutersDerivedView:

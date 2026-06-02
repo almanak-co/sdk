@@ -45,7 +45,6 @@ class CapabilitiesRegistry:
         "spark": "almanak.connectors.spark.capabilities",
         "compound_v3": "almanak.connectors.compound_v3.capabilities",
         "benqi": "almanak.connectors.benqi.capabilities",
-        "radiant_v2": "almanak.connectors.radiant_v2.capabilities",
         "euler_v2": "almanak.connectors.euler_v2.capabilities",
         # Lending — isolated markets
         "morpho": "almanak.connectors.morpho_blue.capabilities",

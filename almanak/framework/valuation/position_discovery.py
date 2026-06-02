@@ -9,7 +9,7 @@ strategies that don't implement get_open_positions() (or implement it
 poorly) still get accurate position tracking.
 
 Discovery strategies by protocol:
-- **Aave-fork lending (Aave V3 / Spark / Radiant V2 / …)**: Scan tracked
+- **Aave-fork lending (Aave V3 / Spark / …)**: Scan tracked
   tokens via getUserReserveData across every declared, connector-supported
   lending protocol, each routed to its OWN per-chain data provider. Any
   non-zero aToken balance or debt is reported.
@@ -156,7 +156,7 @@ class PositionDiscoveryService:
         connector-supported lending protocol.
 
         A strategy may use more than one Aave-fork market (Aave V3, Spark,
-        Radiant V2, …); each lives at a DIFFERENT per-chain
+        …); each lives at a DIFFERENT per-chain
         ``pool_data_provider``. We fan out across the intersection of the
         strategy's declared protocols and the registry's connector-owned
         lending reads, threading the resolved ``protocol`` into every
@@ -320,7 +320,7 @@ def _lending_protocols_to_scan(protocols: list[str]) -> list[str]:
     """Lending protocols to scan during discovery, in deterministic registry order.
 
     The intersection of the strategy's declared ``protocols`` and the registry's
-    connector-owned lending reads (Aave V3 / Spark / Radiant V2 / …). The
+    connector-owned lending reads (Aave V3 / Spark / …). The
     registry owns the canonical key and resolves aliases (e.g. ``"aave"`` ->
     ``"aave_v3"``), so discovery names no protocol of its own — a strategy that
     declares Spark gets its reserves queried against Spark's data provider
@@ -338,7 +338,7 @@ def _has_lending_protocol(protocols: list[str]) -> bool:
     """Return True when any declared protocol has a connector-owned lending read.
 
     Generalised beyond Aave V3: any Aave-fork the registry knows about (Spark,
-    Radiant V2, …) now gates discovery on. Protocols without a connector-owned
+    …) now gates discovery on. Protocols without a connector-owned
     single-reserve read (e.g. Compound V3, Morpho) are still excluded — they are
     discovered through their own connector paths.
     """
@@ -381,7 +381,7 @@ def _lending_to_position_infos(
 
     Creates separate SUPPLY and BORROW positions as appropriate. ``protocol`` is
     stamped on each PositionInfo (and its id) so the valuation repricing path
-    re-queries the SAME protocol's data provider — a Spark/Radiant position must
+    re-queries the SAME protocol's data provider — a Spark position must
     never be re-priced against Aave V3's contract — and so two reserves of the
     same token across different lending markets stay distinct.
     value_usd is set to 0 here — the portfolio_valuer handles repricing.

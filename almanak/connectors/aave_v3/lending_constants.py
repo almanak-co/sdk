@@ -4,8 +4,7 @@ VIB-4872 (W6-followup): the framework branch ``protocol in
 AAVE_COMPATIBLE_PROTOCOLS`` used to live as a hard-coded set in
 ``almanak/framework/intents/compiler_constants.py``. Lending connectors
 that share the Aave V3 ``supply`` / ``borrow`` / ``repay`` / ``withdraw``
-ABI now publish their membership here (or in their own
-``lending_constants.py`` if they're V2-fork only).
+ABI now publish their membership here.
 
 The shape is intentionally trivial — a frozenset of protocol names — to
 match the legacy lookup site (a single ``in`` membership test). A future
@@ -15,8 +14,7 @@ but the byte-equivalent move is to keep the set shape.
 
 from __future__ import annotations
 
-# Canonical Aave V3 (this connector). Radiant V2 lives in the V2-fork
-# set (sibling module on radiant_v2). Spark intentionally does NOT
+# Canonical Aave V3 (this connector). Spark intentionally does NOT
 # appear in the legacy ``AAVE_COMPATIBLE_PROTOCOLS`` set even though
 # spark's adapter rides on the Aave V3 ABI — preserve that exact
 # coverage to keep byte-equivalence at the compiler's compatibility-

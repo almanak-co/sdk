@@ -208,7 +208,6 @@ nav:
       - api/connectors/silo_v2.md
       - api/connectors/enso.md
       - api/connectors/euler_v2.md
-      - api/connectors/radiant_v2.md
       - api/connectors/polymarket.md
       - api/connectors/lido.md
       - api/connectors/ethena.md

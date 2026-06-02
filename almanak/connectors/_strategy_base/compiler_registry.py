@@ -88,10 +88,6 @@ class CompilerRegistry:
             "almanak.connectors.aave_v3.compiler",
             "AaveV3Compiler",
         ),
-        "radiant_v2": (
-            "almanak.connectors.radiant_v2.compiler",
-            "RadiantV2Compiler",
-        ),
         "compound_v3": (
             "almanak.connectors.compound_v3.compiler",
             "CompoundV3Compiler",

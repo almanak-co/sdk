@@ -472,7 +472,7 @@ def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
     frozenset that lived in the migration backfill. Each connector declares
     the protocol slugs it implements with the ``univ3_lp@v1`` grouping policy
     in its ``lp_constants.py``; this aggregates the union. Mirrors the
-    VIB-4872 ``AAVE_V2_FORKS`` derivation. ``frozenset`` (not ``set``) so a
+    VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` derivation. ``frozenset`` (not ``set``) so a
     downstream ``protocol in UNIV3_LP_GROUPING_PROTOCOLS`` consumer cannot
     silently widen the family by mutation.
     """
@@ -697,7 +697,6 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = _build_swap_quoter_addresses(
 # now live on each lending connector's ``addresses.py`` module:
 #
 # * ``almanak/connectors/aave_v3/addresses.py``    -> ``AAVE_V3``
-# * ``almanak/connectors/radiant_v2/addresses.py`` -> ``RADIANT_V2``
 # * ``almanak/connectors/spark/addresses.py``      -> ``SPARK``
 #
 # Each connector publishes its own contract-kind vocabulary (``pool`` /
@@ -705,23 +704,15 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = _build_swap_quoter_addresses(
 # below are preserved as derived read-only views so downstream SDK
 # consumers that import them directly keep working; mutating them has no
 # production effect.
-#
-# Aave V2 and Aave V3 share the ``getReserveConfigurationData(address)``
-# selector + ABI-encoded return layout, so the same pre-flight code works
-# for both. Radiant V2 is an Aave V2 fork — only Ethereum has a working
-# deployment (Arbitrum's pool was reduced to a stub after Oct 2024; see
-# #1842 / #1847 / #1889 and the Radiant connector's ``addresses.py``).
 
 
 def _build_lending_pool_addresses() -> dict[str, dict[str, str]]:
     """Materialize the legacy ``LENDING_POOL_ADDRESSES`` shape from connector data."""
     from almanak.connectors.aave_v3.addresses import AAVE_V3
-    from almanak.connectors.radiant_v2.addresses import RADIANT_V2
     from almanak.connectors.spark.addresses import SPARK
 
     sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (
         ("aave_v3", AAVE_V3),
-        ("radiant_v2", RADIANT_V2),
         ("spark", SPARK),
     )
 
@@ -739,19 +730,15 @@ def _build_lending_pool_data_providers() -> dict[str, dict[str, str]]:
     """Materialize the legacy ``LENDING_POOL_DATA_PROVIDERS`` shape from connector data.
 
     Spark intentionally omitted — the legacy central dict only carried
-    aave_v3 + radiant_v2 entries for the lending pre-flight; preserving
-    that exact shape avoids accidentally widening the surface as part of
-    a pure-data-move refactor. Adding Spark to the pre-flight surface is
+    aave_v3 entries for the lending pre-flight; preserving that exact
+    shape avoids accidentally widening the surface as part of a
+    pure-data-move refactor. Adding Spark to the pre-flight surface is
     tracked as a separate decision (the Spark adapter already owns its
     own ``pool_data_provider`` address via ``addresses.SPARK``).
     """
     from almanak.connectors.aave_v3.addresses import AAVE_V3
-    from almanak.connectors.radiant_v2.addresses import RADIANT_V2
 
-    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (
-        ("aave_v3", AAVE_V3),
-        ("radiant_v2", RADIANT_V2),
-    )
+    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (("aave_v3", AAVE_V3),)
 
     providers: dict[str, dict[str, str]] = {}
     for protocol, table in sources:
@@ -812,42 +799,18 @@ NFT_POSITION_COLLECT_SELECTOR = "0xfc6f7865"
 NFT_POSITION_BURN_SELECTOR = "0x42966c68"
 
 
-# Aave V2 forks (use ``deposit()`` instead of ``supply()``, otherwise same ABI).
-#
-# VIB-4872 (W6-followup): per-connector membership now lives in each
-# lending connector's ``lending_constants.py``. The derived module-level
-# frozenset below is the union of every V2-fork connector's contribution.
-# CodeRabbit (PR #2478): the derived set is read-only by contract — keep
-# it as a ``frozenset`` rather than ``set`` so accidental mutation by a
-# downstream consumer raises rather than silently widening the family.
-# ``set == frozenset`` semantically (equality, ``in`` membership) so the
-# pre-refactor consumers' ``protocol in AAVE_V2_FORKS`` branches are
-# byte-equivalent at the lookup boundary.
-def _build_aave_v2_forks() -> frozenset[str]:
-    from almanak.connectors.radiant_v2.lending_constants import AAVE_V2_FORK_PROTOCOLS
-
-    return frozenset(AAVE_V2_FORK_PROTOCOLS)
-
-
-AAVE_V2_FORKS: frozenset[str] = _build_aave_v2_forks()
-
-
 # Protocols sharing the Aave V3 lending-pool interface (same ABI,
 # different addresses). VIB-4872: derived from the V3-family connector
-# membership + the V2-fork set (V2 forks share the V3 read surface; the
-# compile-time selector branch handles the ``deposit`` vs ``supply``
-# difference). Same ``frozenset`` immutability as ``AAVE_V2_FORKS``.
+# membership. CodeRabbit (PR #2478): read-only by contract — keep it as a
+# ``frozenset`` rather than ``set`` so accidental mutation by a downstream
+# consumer raises rather than silently widening the family.
 def _build_aave_compatible_protocols() -> frozenset[str]:
     from almanak.connectors.aave_v3.lending_constants import AAVE_V3_FAMILY_PROTOCOLS
 
-    return frozenset(AAVE_V3_FAMILY_PROTOCOLS) | AAVE_V2_FORKS
+    return frozenset(AAVE_V3_FAMILY_PROTOCOLS)
 
 
 AAVE_COMPATIBLE_PROTOCOLS: frozenset[str] = _build_aave_compatible_protocols()
-
-# Aave V2 Pool function selectors (used by V2 forks: Radiant V2, etc.)
-# deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
-AAVE_V2_DEPOSIT_SELECTOR = "0xe8eda9df"
 
 # Aave V3 Pool function selectors
 # supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)

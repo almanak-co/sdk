@@ -513,7 +513,7 @@ def fold_position_events_for_univ3(  # noqa: C901 — explicit identity-anchor c
 # ``lp_constants.UNIV3_LP_GROUPING_PROTOCOLS`` declaration via the
 # framework's ``compiler_constants`` aggregation point — no longer a
 # hardcoded list of protocol slugs in this module. Byte-equivalent to the
-# pre-VIB-4864 frozenset (mirrors the VIB-4872 ``AAVE_V2_FORKS`` pattern).
+# pre-VIB-4864 frozenset (mirrors the VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` pattern).
 _UNIV3_LP_PROTOCOLS: frozenset[str] = UNIV3_LP_GROUPING_PROTOCOLS
 
 

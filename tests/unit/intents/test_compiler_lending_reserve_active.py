@@ -7,9 +7,8 @@ surface as a typed `PoolReserveFrozenError` (compile-time) or as a clean
 `Intent.hold(...)` (strategy-time) instead of an opaque on-chain revert.
 
 Reusable across any Aave-compatible pool — Aave V3 markets where governance
-pauses a reserve, Aave V2 forks (Radiant V2) whose pool was frozen post-attack,
-and any future fork that exposes the same `getReserveConfigurationData(address)`
-selector.
+pauses a reserve, and any future fork that exposes the same
+`getReserveConfigurationData(address)` selector.
 """
 
 from __future__ import annotations
@@ -31,6 +30,9 @@ from almanak.framework.intents.compiler_models import CompilationStatus
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 TEST_POOL = "0xpooladdress000000000000000000000000000001"
 TEST_ASSET_ADDR = "0x" + "ab" * 20
+
+# Aave V3 Ethereum AaveProtocolDataProvider.
+ETH_AAVE_V3_DATA_PROVIDER = "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
 
 AAVE_ADAPTER_CLS = "almanak.framework.intents.compiler_adapters.AaveV3Adapter"
 
@@ -83,7 +85,7 @@ def _mock_token(symbol: str = "WETH", decimals: int = 18) -> MagicMock:
     return tok
 
 
-def _mock_compiler(*, gateway_response: str | None, chain: str = "arbitrum") -> MagicMock:
+def _mock_compiler(*, gateway_response: str | None, chain: str = "ethereum") -> MagicMock:
     """Build a compiler mock with an optional gateway client reply."""
     compiler = MagicMock()
     compiler.chain = chain
@@ -123,7 +125,7 @@ def _mock_compiler(*, gateway_response: str | None, chain: str = "arbitrum") -> 
 def _supply_intent(
     *,
     use_as_collateral: bool = False,
-    protocol: str = "radiant_v2",
+    protocol: str = "aave_v3",
     token: str = "WETH",
 ) -> SupplyIntent:
     return SupplyIntent(
@@ -140,70 +142,40 @@ def _supply_intent(
 
 
 @patch(AAVE_ADAPTER_CLS)
-def test_radiant_v2_frozen_reserve_blocks_compile(mock_adapter_cls):
-    """Generic VIB-3749 case: a radiant_v2 reserve reporting ``isFrozen=True``
-    must surface as a typed compile-time failure rather than producing
-    calldata that would revert on-chain.
-
-    Pre-#1842 this test pinned the *Arbitrum* deployment because the post-Oct-2024
-    pool surfaced as frozen-reserve. Arbitrum is now excluded at the address-table
-    level (compile fails earlier with "not available on chain"), so the helper's
-    behaviour is exercised against ethereum here. The mechanism is reusable across
-    chains: any future Aave V2 fork reserve governance pauses will land on this
-    same path.
+def test_frozen_reserve_blocks_compile(mock_adapter_cls):
+    """Generic VIB-3749 case: a reserve reporting ``isFrozen=True`` must
+    surface as a typed compile-time failure rather than producing calldata
+    that would revert on-chain. The mechanism is reusable across chains and
+    protocols: any reserve a governance pauses lands on this same path.
     """
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(is_frozen=True), chain="ethereum")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = True
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
     mock_adapter_cls.return_value = mock_adapter
 
-    intent = _supply_intent(protocol="radiant_v2")
+    intent = _supply_intent(protocol="aave_v3")
     result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
 
     assert result.status == CompilationStatus.FAILED
     assert "is not active" in result.error
     assert "isFrozen=True" in result.error
-    assert "radiant_v2" in result.error
+    assert "aave_v3" in result.error
     assert "ethereum" in result.error
 
 
-def test_radiant_v2_arbitrum_supply_compile_fails_with_not_available_message():
-    """Regression guard for issues #1842 / #1847 / #1889.
-
-    With ``LENDING_POOL_ADDRESSES["arbitrum"]["radiant_v2"]`` removed, the real
-    ``AaveV3Adapter`` falls back to the zero address. The compile-time supply
-    path returns ``CompilationStatus.FAILED`` with a "not available on chain"
-    error long before the frozen-reserve pre-flight (and any RPC) runs. This
-    test exercises the *real* adapter (no mocking) so a future re-introduction
-    of the dead Arbitrum entry would silently restart routing user funds
-    through the stub pool — and this assertion would catch it.
-    """
-    compiler = _mock_compiler(gateway_response=None, chain="arbitrum")
-
-    intent = _supply_intent(protocol="radiant_v2")
-    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
-
-    assert result.status == CompilationStatus.FAILED
-    assert "not available on chain" in result.error
-    assert "arbitrum" in result.error
-    assert "radiant_v2" in result.error
-
-
 @patch(AAVE_ADAPTER_CLS)
-def test_radiant_v2_inactive_reserve_blocks_compile(mock_adapter_cls):
+def test_inactive_reserve_blocks_compile(mock_adapter_cls):
     """isActive=False is also a hard block (e.g. retired reserve)."""
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(is_active=False), chain="ethereum")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = True
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
     mock_adapter_cls.return_value = mock_adapter
 
-    intent = _supply_intent(protocol="radiant_v2")
+    intent = _supply_intent(protocol="aave_v3")
     result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
 
     assert result.status == CompilationStatus.FAILED
@@ -211,17 +183,16 @@ def test_radiant_v2_inactive_reserve_blocks_compile(mock_adapter_cls):
 
 
 @patch(AAVE_ADAPTER_CLS)
-def test_active_unfrozen_radiant_reserve_compiles(mock_adapter_cls):
+def test_active_unfrozen_reserve_compiles(mock_adapter_cls):
     """Healthy reserve: compile must succeed and produce SUPPLY calldata."""
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(), chain="ethereum")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = True
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
     mock_adapter_cls.return_value = mock_adapter
 
-    intent = _supply_intent(protocol="radiant_v2")
+    intent = _supply_intent(protocol="aave_v3")
     result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
 
     assert result.status == CompilationStatus.SUCCESS
@@ -231,7 +202,7 @@ def test_active_unfrozen_radiant_reserve_compiles(mock_adapter_cls):
 
 @patch(AAVE_ADAPTER_CLS)
 def test_aave_v3_frozen_reserve_blocks_compile(mock_adapter_cls):
-    """The pre-flight is reusable for any Aave V2 fork OR Aave V3 market.
+    """The pre-flight is reusable for any Aave V3 market.
 
     If governance ever freezes an Aave V3 reserve (the WETH-on-Arbitrum
     incident from 2026-04-20 is the closest precedent), the same pre-flight
@@ -239,7 +210,6 @@ def test_aave_v3_frozen_reserve_blocks_compile(mock_adapter_cls):
     """
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(is_frozen=True), chain="arbitrum")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = False
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
@@ -257,13 +227,12 @@ def test_supply_fails_open_when_gateway_unavailable(mock_adapter_cls):
     """No gateway → can't pre-flight; rely on on-chain revert as final guard."""
     compiler = _mock_compiler(gateway_response=None, chain="arbitrum")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = True
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
     mock_adapter_cls.return_value = mock_adapter
 
-    intent = _supply_intent(protocol="radiant_v2")
+    intent = _supply_intent(protocol="aave_v3")
     result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
 
     # Must still produce calldata; we must not block compilation when the
@@ -274,20 +243,19 @@ def test_supply_fails_open_when_gateway_unavailable(mock_adapter_cls):
 
 @patch(AAVE_ADAPTER_CLS)
 def test_chain_without_data_provider_fails_open(mock_adapter_cls):
-    """Chains where Radiant V2 isn't deployed must not block compile.
+    """Chains with no registered data provider must not block compile.
 
     The adapter's pool_address-zero check still rejects unsupported chains
     upstream — this test exercises the explicit data-provider lookup miss.
     """
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(), chain="berachain")
     mock_adapter = MagicMock()
-    mock_adapter._is_v2_fork = True
     mock_adapter.get_pool_address.return_value = TEST_POOL
     mock_adapter.get_supply_calldata.return_value = b"\x01"
     mock_adapter.estimate_supply_gas.return_value = 150_000
     mock_adapter_cls.return_value = mock_adapter
 
-    intent = _supply_intent(protocol="radiant_v2")
+    intent = _supply_intent(protocol="aave_v3")
     result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("0.5"))
     assert result.status == CompilationStatus.SUCCESS
     # Call must have been short-circuited before the gateway was hit.
@@ -306,22 +274,17 @@ def test_pool_reserve_frozen_error_is_value_error_subclass() -> None:
 
 
 def test_assert_helper_raises_on_frozen_reserve():
-    # Use ``ethereum`` because it has a registered radiant_v2 data provider.
-    # The historical "arbitrum" parametrisation was retired alongside the
-    # arbitrum entry in ``LENDING_POOL_DATA_PROVIDERS`` (#1842 / #1847 /
-    # #1889). The helper's behaviour is chain-agnostic — what we exercise
-    # here is the gateway-decoded ``isFrozen`` path.
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(is_frozen=True), chain="ethereum")
     with pytest.raises(PoolReserveFrozenError) as exc_info:
         assert_lending_reserve_active(
             compiler,
             asset_address=TEST_ASSET_ADDR,
             asset_symbol="WETH",
-            protocol="radiant_v2",
+            protocol="aave_v3",
         )
     msg = str(exc_info.value)
     assert "WETH" in msg
-    assert "radiant_v2" in msg
+    assert "aave_v3" in msg
     assert "isFrozen=True" in msg
 
 
@@ -332,7 +295,7 @@ def test_assert_helper_raises_on_inactive_reserve():
             compiler,
             asset_address=TEST_ASSET_ADDR,
             asset_symbol="WETH",
-            protocol="radiant_v2",
+            protocol="aave_v3",
         )
 
 
@@ -345,7 +308,7 @@ def test_assert_helper_passes_on_active_reserve():
             compiler,
             asset_address=TEST_ASSET_ADDR,
             asset_symbol="WETH",
-            protocol="radiant_v2",
+            protocol="aave_v3",
         )
         is None
     )
@@ -364,7 +327,7 @@ def test_assert_helper_fails_open_when_gateway_down():
         compiler,
         asset_address=TEST_ASSET_ADDR,
         asset_symbol="WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
     )
 
 
@@ -372,8 +335,6 @@ def test_assert_helper_caches_result():
     """The strategy-facing helper shares the compiler-side cache — repeated
     calls within a strategy iteration loop must not re-hit the gateway.
     """
-    # Ethereum is the only chain where radiant_v2 has a registered
-    # PoolDataProvider; see ``test_assert_helper_raises_on_frozen_reserve``.
     compiler = _mock_compiler(gateway_response=_encode_reserve_config(is_frozen=True), chain="ethereum")
     for _ in range(5):
         with pytest.raises(PoolReserveFrozenError):
@@ -381,53 +342,49 @@ def test_assert_helper_caches_result():
                 compiler,
                 asset_address=TEST_ASSET_ADDR,
                 asset_symbol="WETH",
-                protocol="radiant_v2",
+                protocol="aave_v3",
             )
     assert compiler._gateway_client.rpc.Call.call_count == 1
 
 
 def test_assert_helper_routes_to_correct_data_provider():
-    """Ethereum Radiant V2 uses 0x362f...3813. Arbitrum has no registered
-    PoolDataProvider for radiant_v2 (issues #1842 / #1847 / #1889 — the pool
-    was reduced to a stub post-Oct-2024 attack), so the helper fails open
-    without hitting the gateway.
+    """Ethereum Aave V3 uses 0x7B4E...8a3. A chain with no registered
+    PoolDataProvider (berachain) makes the helper fail open without hitting
+    the gateway.
     """
     compiler_eth = _mock_compiler(gateway_response=_encode_reserve_config(), chain="ethereum")
     assert_lending_reserve_active(
         compiler_eth,
         asset_address=TEST_ASSET_ADDR,
         asset_symbol="WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
     )
     args, _ = compiler_eth._gateway_client.rpc.Call.call_args
-    assert "0x362f3BB63Cff83bd169aE1793979E9e537993813" in args[0].params
+    assert ETH_AAVE_V3_DATA_PROVIDER in args[0].params
 
-    # Arbitrum has no provider entry — the helper must short-circuit before
-    # any RPC happens (caller fails open). This is the regression guard
-    # mirroring ``test_arbitrum_radiant_v2_data_provider_not_registered``
-    # in tests/unit/connectors/test_radiant_v2.py.
-    compiler_arb = _mock_compiler(gateway_response=_encode_reserve_config(), chain="arbitrum")
+    # A chain with no provider entry — the helper must short-circuit before
+    # any RPC happens (caller fails open).
+    compiler_bera = _mock_compiler(gateway_response=_encode_reserve_config(), chain="berachain")
     assert_lending_reserve_active(
-        compiler_arb,
+        compiler_bera,
         asset_address=TEST_ASSET_ADDR,
         asset_symbol="WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
     )
-    compiler_arb._gateway_client.rpc.Call.assert_not_called()
+    compiler_bera._gateway_client.rpc.Call.assert_not_called()
 
 
 def test_resolve_pool_data_provider_falls_back_to_aave_v3_table():
-    """`AAVE_V3[chain]['pool_data_provider']` must remain the source of truth
-    for Aave V3 entries — `LENDING_POOL_DATA_PROVIDERS` is just the V2-fork
-    extension. If the V2 entry is ever dropped, V3 must keep working.
+    """`AAVE_V3[chain]['pool_data_provider']` is the source of truth for Aave V3
+    data-provider lookups via the derived `LENDING_POOL_DATA_PROVIDERS` view.
     """
     addr = cl._resolve_pool_data_provider("ethereum", "aave_v3")
-    assert addr == "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3"
+    assert addr == ETH_AAVE_V3_DATA_PROVIDER
 
 
 def test_resolve_pool_data_provider_returns_none_when_missing():
     """Unsupported (chain, protocol) — caller must fail-open."""
-    assert cl._resolve_pool_data_provider("unsupported_chain", "radiant_v2") is None
+    assert cl._resolve_pool_data_provider("unsupported_chain", "aave_v3") is None
     assert cl._resolve_pool_data_provider("ethereum", "unsupported_protocol") is None
 
 
@@ -436,12 +393,6 @@ def test_pool_data_provider_revert_is_treated_as_frozen():
     ``getReserveConfigurationData``, so a revert is a strong "pool is broken"
     signal and must be surfaced as a frozen reserve — not silently fail-open
     like a network error would.
-
-    Originally exercised against Arbitrum, whose PoolDataProvider reverted on
-    every call after the October 2024 hack. After dropping arbitrum from the
-    radiant_v2 address tables (#1842 / #1847 / #1889) we exercise the helper
-    against ethereum, which still has a registered provider — the
-    revert-handling behaviour itself is chain-agnostic.
     """
     compiler = MagicMock()
     compiler.chain = "ethereum"
@@ -459,7 +410,7 @@ def test_pool_data_provider_revert_is_treated_as_frozen():
         compiler,
         TEST_ASSET_ADDR,
         "WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
         pre_flight_label="test",
     )
     assert config is not None
@@ -472,7 +423,7 @@ def test_pool_data_provider_revert_is_treated_as_frozen():
             compiler,
             asset_address=TEST_ASSET_ADDR,
             asset_symbol="WETH",
-            protocol="radiant_v2",
+            protocol="aave_v3",
         )
 
 
@@ -482,12 +433,6 @@ def test_pool_data_provider_network_error_still_fails_open():
     limit) must still fail-open so transient infra issues don't wedge the
     strategy.
     """
-    # ``radiant_v2`` is registered on ``ethereum`` (not arbitrum, where it
-    # was dropped per #1842/#1847/#1889). Routing the test through ethereum
-    # ensures ``_resolve_pool_data_provider`` returns a real address and the
-    # mocked gateway RPC actually runs — otherwise the helper short-circuits
-    # before the network-error branch is exercised and this test becomes a
-    # silent no-op.
     compiler = MagicMock()
     compiler.chain = "ethereum"
     compiler.rpc_timeout = 5.0
@@ -504,7 +449,7 @@ def test_pool_data_provider_network_error_still_fails_open():
         compiler,
         TEST_ASSET_ADDR,
         "WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
         pre_flight_label="test",
     )
     assert config is None  # Fail-open
@@ -514,5 +459,5 @@ def test_pool_data_provider_network_error_still_fails_open():
         compiler,
         asset_address=TEST_ASSET_ADDR,
         asset_symbol="WETH",
-        protocol="radiant_v2",
+        protocol="aave_v3",
     )

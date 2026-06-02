@@ -8,7 +8,7 @@ the same chain. The migration backfill keys a compile-time
 ``protocol in _UNIV3_LP_PROTOCOLS`` branch on this set; the union of every
 UniV3-shape connector's contribution is derived in
 ``almanak/framework/intents/compiler_constants.py`` (mirroring the
-VIB-4872 ``AAVE_V2_FORK_PROTOCOLS`` pattern).
+VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` pattern).
 """
 
 from __future__ import annotations

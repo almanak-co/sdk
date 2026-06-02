@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- Radiant V2 lending connector and its incubating strategies. The protocol
+  retired on-chain, so the connector, its receipt parser, registry entries,
+  the now-dead Aave-V2-fork machinery (`AAVE_V2_FORKS`,
+  `AAVE_V2_DEPOSIT_SELECTOR`), and the `Protocol.RADIANT_V2` enum member have
+  been removed.
+
 ### Changed
 
 - Ratchet `fail_under` coverage floor 75 → 77 (main HEAD ec259bf measured 77.73% in CI)
