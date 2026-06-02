@@ -1718,7 +1718,7 @@ class TestLendingAccountingVIB3418:
         """Verify 0xbf92857c = keccak256('getUserAccountData(address)')[:4]."""
         from eth_utils import keccak
 
-        from almanak.framework.accounting.lending_accounting import _AAVE_GET_ACCOUNT_DATA_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _AAVE_GET_ACCOUNT_DATA_SELECTOR
 
         expected = "0x" + keccak(text="getUserAccountData(address)").hex()[:8]
         assert _AAVE_GET_ACCOUNT_DATA_SELECTOR == expected, (

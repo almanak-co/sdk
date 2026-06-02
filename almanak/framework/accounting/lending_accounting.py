@@ -35,22 +35,20 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
 
+from almanak.connectors._strategy_base.lending_read_base import (
+    _AAVE_GET_USER_EMODE_SELECTOR,
+    parse_user_emode_hex,
+)
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
-# ─── Aave V3 Pool.getUserAccountData(address user) ────────────────────────────
-# Selector: keccak256("getUserAccountData(address)")[:4] = 0xbf92857c
-_AAVE_GET_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
-# Selector: keccak256("getUserEMode(address)")[:4] = 0xeddf1b79
-# VIB-4213: per-user efficiency-mode category (uint256; values 0..255 with
-# 0 = no e-mode). Required by the Tier-2 Aave V3 registry identity tuple
-# (VIB-4214) and by the L4 principal/interest split. NOT in getUserAccountData
-# — needs its own call.
-_AAVE_GET_USER_EMODE_SELECTOR = "0xeddf1b79"
-_AAVE_USD_SCALE = Decimal("1e8")  # 8-decimal USD base unit
-_AAVE_HF_SCALE = Decimal("1e18")  # 1.0 HF = 1e18
+# Aave V3 read selectors + decoders live ONCE in the connector-owned spec
+# (``lending_read_base``): ``read_aave_account_state`` routes through
+# ``AAVE_FORK_ACCOUNT_STATE_READ``; ``read_aave_user_emode`` uses the imported
+# ``_AAVE_GET_USER_EMODE_SELECTOR`` + ``parse_user_emode_hex``. No selector,
+# scale, cap, or decode is duplicated here (VIB-4929 PR-2).
 
 # ─── Morpho Blue position/market selectors (VIB-3483) ─────────────────────────
 # position(bytes32 id, address user) → (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
@@ -170,30 +168,10 @@ def read_aave_user_emode(
     """
     calldata = _AAVE_GET_USER_EMODE_SELECTOR + _pad_address(wallet_address)
     hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata, block=block)
-    if not hex_data:
-        return None
-    # gemini review: lowercase before stripping the `0x` prefix so an uppercase
-    # `0X` response (rare but legal eth_call output) is handled robustly.
-    raw = hex_data.lower().replace("0x", "")
-    if len(raw) < 64:  # need at least one uint256 word
-        return None
-    try:
-        value = _decode_word(raw, 0)
-    except ValueError:
-        logger.debug("read_aave_user_emode: non-hex word for chain=%s", chain, exc_info=True)
-        return None
-    # Aave V3 stores category ids as uint8 (CategoryId in EModeLogic.sol). Anything
-    # outside that range is a sign the eth_call response was the wrong shape — a
-    # mock that reused the getUserAccountData hex, a misconfigured pool address,
-    # or a future protocol change we should investigate before trusting.
-    if not 0 <= value <= 255:
-        logger.debug(
-            "read_aave_user_emode: decoded value %d outside uint8 range for chain=%s",
-            value,
-            chain,
-        )
-        return None
-    return value
+    # Decode via the connector-owned spec parser (single source) — identical
+    # uint8 / Empty≠Zero semantics to the former inline decode, pinned by PR-1's
+    # account-state spec test.
+    return parse_user_emode_hex(hex_data)
 
 
 def read_aave_account_state(
@@ -226,42 +204,73 @@ def read_aave_account_state(
 
     getUserEMode returns:
       uint256 category (0 = no e-mode; 1..255 = a configured category id).
+
+    VIB-4929 (PR-2): this reader now *routes through* the connector-owned
+    account-state spec
+    (:data:`~almanak.connectors._strategy_base.lending_read_base.AAVE_FORK_ACCOUNT_STATE_READ`)
+    instead of carrying its own copy of the selectors / scales / HF-cap. The
+    spec *describes + decodes* the read (pure, no egress); this framework
+    function still owns the gateway-routed ``eth_call`` per the Gateway-boundary
+    rule. The decode is therefore the single source of truth shared with the
+    strategy-side oracle↔spec equivalence test — they can no longer drift.
+    ``interest_rate_mode`` is intent-derived and stays sourced from the caller
+    (:func:`_capture_aave_v3_pre_state`); it is never decoded from the read.
     """
     try:
-        from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.connectors._strategy_base.lending_read_base import (
+            AccountStateQuery,
+        )
+        from almanak.connectors._strategy_base.lending_read_registry import (
+            LendingReadRegistry,
+        )
 
-        pool_address = AAVE_V3_POOL_ADDRESSES.get(chain.lower())
+        # Resolve the per-chain Aave pool through the registry (contract kind
+        # ``pool`` from the connector's own ``addresses.py``). This is the same
+        # address the pre-VIB-4929 path read from ``AAVE_V3_POOL_ADDRESSES`` —
+        # both derive from ``aave_v3.addresses.AAVE_V3[chain]["pool"]`` — so the
+        # read target is unchanged. Fail closed when the chain has no pool.
+        pool_address = LendingReadRegistry.position_manager_address("aave_v3", chain)
         if not pool_address:
             return None
 
-        calldata = _AAVE_GET_ACCOUNT_DATA_SELECTOR + _pad_address(wallet_address)
-        hex_data = _gateway_eth_call(gateway_client, chain, pool_address, calldata, block=block)
-        if not hex_data:
+        query = AccountStateQuery(
+            chain=chain,
+            wallet_address=wallet_address,
+            position_manager_address=pool_address,
+            block=block,
+        )
+        plan = LendingReadRegistry.resolve_account_state_plan("aave_v3", query)
+        if plan is None:
             return None
 
-        # gemini review: lowercase before stripping so an uppercase `0X` prefix
-        # is handled robustly (consistent with read_aave_user_emode).
-        raw = hex_data.lower().replace("0x", "")
-        if len(raw) < 6 * 64:  # expect ≥ 6 words
+        # The framework owns the gateway round-trip; the spec only describes the
+        # reads. Execute each planned call via the same gateway helper (block
+        # pinning + legacy-signature fallback preserved). ``None`` for any read
+        # that failed — the reducer fails closed on a missing primary read and
+        # decodes a missing e-mode read to ``None`` (not a fabricated 0).
+        results = [_gateway_eth_call(gateway_client, chain, call.to, call.data, block=block) for call in plan.calls]
+
+        state = plan.reduce(plan.query, results)
+        if state is None:
             return None
 
-        collateral_usd = Decimal(_decode_word(raw, 0)) / _AAVE_USD_SCALE
-        debt_usd = Decimal(_decode_word(raw, 1)) / _AAVE_USD_SCALE
-        liquidation_threshold_bps = _decode_word(raw, 3)
-        hf_raw = _decode_word(raw, 5)
-        # Cap unrealistically large HF (empty position → max sentinel)
-        health_factor = min(Decimal(hf_raw) / _AAVE_HF_SCALE, Decimal("999999"))
-
-        # VIB-4213: best-effort e-mode read. Pin to the same block so the
-        # (collateral, debt, HF, e-mode) tuple is internally consistent.
-        e_mode_category = read_aave_user_emode(gateway_client, chain, wallet_address, pool_address, block=block)
+        # Map the canonical aggregate result onto the existing return shape. For
+        # the Aave family the spec always populates these fields when it returns
+        # non-None (the decode is byte-identical to the legacy inline path);
+        # guard the Optional types so we fail closed rather than fabricate.
+        if state.collateral_usd is None or state.debt_usd is None or state.health_factor is None:
+            return None
+        if state.liquidation_threshold_bps is None:
+            return None
 
         return AaveAccountState(
-            collateral_usd=collateral_usd,
-            debt_usd=debt_usd,
-            health_factor=health_factor,
-            liquidation_threshold_bps=liquidation_threshold_bps,
-            e_mode_category=e_mode_category,
+            collateral_usd=state.collateral_usd,
+            debt_usd=state.debt_usd,
+            health_factor=state.health_factor,
+            liquidation_threshold_bps=state.liquidation_threshold_bps,
+            e_mode_category=state.e_mode_category,
+            # interest_rate_mode is intent-derived; threaded in by the caller
+            # (_capture_aave_v3_pre_state), never decoded from the read.
         )
     except Exception:
         logger.debug("read_aave_account_state failed", exc_info=True)

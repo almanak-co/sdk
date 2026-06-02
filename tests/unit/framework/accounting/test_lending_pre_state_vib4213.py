@@ -37,8 +37,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors._strategy_base.lending_read_base import _AAVE_GET_USER_EMODE_SELECTOR
 from almanak.framework.accounting.lending_accounting import (
-    _AAVE_GET_USER_EMODE_SELECTOR,
     AaveAccountState,
     MorphoBlueAccountState,
     _capture_aave_v3_pre_state,
@@ -47,7 +47,6 @@ from almanak.framework.accounting.lending_accounting import (
     read_aave_account_state,
     read_aave_user_emode,
 )
-
 
 # ─── Shared helpers (parity with VIB-3489 test file) ──────────────────────────
 

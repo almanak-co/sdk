@@ -25,6 +25,8 @@ import pytest
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.connectors._strategy_base.lending_read_base import (
+    _AAVE_GET_ACCOUNT_DATA_SELECTOR,
+    _AAVE_GET_USER_EMODE_SELECTOR,
     AAVE_FORK_ACCOUNT_STATE_READ,
     AccountStateQuery,
     AccountStateReadSpec,
@@ -36,11 +38,7 @@ from almanak.connectors._strategy_base.lending_read_registry import (
     LendingReadRegistry,
 )
 from almanak.connectors.aave_v3.lending_read import ACCOUNT_STATE_READ_SPEC
-from almanak.framework.accounting.lending_accounting import (
-    _AAVE_GET_ACCOUNT_DATA_SELECTOR,
-    _AAVE_GET_USER_EMODE_SELECTOR,
-    read_aave_account_state,
-)
+from almanak.framework.accounting.lending_accounting import read_aave_account_state
 
 _WALLET = "0xABCDEF0123456789abcdef0123456789ABCDEF01"
 _ARBITRUM_AAVE_POOL = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
