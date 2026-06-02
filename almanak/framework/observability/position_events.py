@@ -919,12 +919,88 @@ def _refine_lending_event_type(
     event.event_type = PositionEventType.CLOSE.value if value_d <= dust else PositionEventType.DECREASE.value
 
 
-def _build_lending_attribution(event: PositionEvent, post: dict, asset: str, intent_type: str) -> None:
-    """v1 lending attribution. Fully derivable from the ledger row's
-    post_state — no FIFO replay required. Schema-version-stamped so a
-    future v2 producer (e.g. a dedicated lending PnL attributor that
-    splits principal vs interest the way the FIFO basis store does for
-    swaps) is distinguishable from this seed-time payload."""
+def lending_realized_net_pnl_usd(
+    intent_type: str,
+    interest_delta_usd: Decimal | str | float | int | None,
+) -> Decimal | None:
+    """Signed realized PnL for one lending action from its interest delta.
+
+    VIB-4977 — the lending CLOSE attribution lane omitted ``net_pnl_usd``,
+    so ``almanak strat pnl`` scored every leveraged-lending close as
+    *unattributed* (win rate ``0/0``). The realized PnL is the FIFO
+    interest split computed by the Layer-5 lending handler
+    (``interest_delta_usd``):
+
+    * REPAY / DELEVERAGE → ``-interest`` (debt-side interest paid is a cost)
+    * WITHDRAW           → ``+interest`` (supply-side yield received is a gain)
+
+    This is the correct sign convention. It matches
+    ``accounting/position_pnl.py:compute_position_pnl`` for REPAY / WITHDRAW
+    on every base. Cross-surface consistency for **DELEVERAGE** depends on
+    VIB-4974 (PR #2584): on the pre-VIB-4974 base, ``compute_position_pnl``
+    gates only ``("REPAY", "WITHDRAW")`` and drops DELEVERAGE interest, so
+    that surface and this helper agree on DELEVERAGE only once VIB-4974
+    widens the gate (and fixes the symmetric ``portfolio_valuer`` BORROW-side
+    DELEVERAGE filter). This helper's DELEVERAGE→``-interest`` sign is the
+    target both surfaces converge on — do not narrow it.
+
+    Returns ``None`` (Empty ≠ Zero) when:
+
+    * ``interest_delta_usd`` is unmeasured (``None`` — e.g. no matching FIFO
+      borrow/supply lots), so the close stays unattributed rather than
+      scoring as a fabricated break-even win, OR
+    * the intent type does not carry a realized-interest leg (SUPPLY /
+      BORROW open the position; only the debt-reducing / supply-unlocking
+      legs realize interest).
+
+    ``Decimal("0")`` interest is a *measured* zero (e.g. a same-block
+    open→close) and yields ``Decimal("0")`` net PnL — a scored break-even
+    close, distinct from the unattributed ``None`` case above.
+    """
+    if interest_delta_usd is None:
+        return None
+    it = (intent_type or "").upper()
+    if it not in ("REPAY", "DELEVERAGE", "WITHDRAW"):
+        return None
+    try:
+        interest = Decimal(str(interest_delta_usd))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not interest.is_finite():
+        return None
+    # Debt-side interest paid is a cost; supply-side yield received is a gain.
+    return -interest if it in ("REPAY", "DELEVERAGE") else interest
+
+
+def _build_lending_attribution(
+    event: PositionEvent,
+    post: dict,
+    asset: str,
+    intent_type: str,
+    net_pnl_usd: Decimal | None = None,
+) -> None:
+    """v1 lending attribution. The after-state fields (collateral / debt /
+    HF / APR) are fully derivable from the ledger row's post_state — no
+    FIFO replay required.
+
+    ``net_pnl_usd`` (VIB-4977) is the signed realized PnL for this action,
+    sourced from the Layer-5 FIFO interest split (``interest_delta_usd``)
+    which is NOT available at seed time. The production seed caller
+    (``_apply_lending``) therefore always passes ``net_pnl_usd=None`` — this
+    parameter exists for back-fill / seed-time parity and is currently
+    written ONLY by the AccountingProcessor drain
+    (``AccountingProcessor._backfill_lending_position_pnl``), which has the
+    interest split in hand. The seed path itself never stamps realized PnL.
+    ``None`` ⇒ the key is omitted (Empty ≠ Zero — an unattributed close,
+    distinct from a measured ``"0"`` break-even). When present,
+    ``almanak strat pnl`` scores the close via ``_pnl_from_attribution``.
+
+    Schema-version-stamped (``lending_v1``) so a future v2 producer is
+    distinguishable from this payload. Adding an OPTIONAL ``net_pnl_usd``
+    key is additive and does NOT bump the schema version — readers that
+    don't know the key ignore it, and ``_pnl_from_attribution`` keys off
+    its presence, not the schema version.
+    """
     if not post:
         return
     attribution = {
@@ -940,6 +1016,8 @@ def _build_lending_attribution(event: PositionEvent, post: dict, asset: str, int
         "asset": asset or None,
         "intent_type": intent_type or None,
     }
+    if net_pnl_usd is not None:
+        attribution["net_pnl_usd"] = str(net_pnl_usd)
     try:
         event.attribution_json = json.dumps(attribution, default=str)
     except (TypeError, ValueError):  # noqa: BLE001 — defensive; payload is small + flat

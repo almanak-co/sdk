@@ -28,13 +28,16 @@ Idempotency (VIB-3478: _try_write_* legacy writers removed):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.accounting.category_handlers import HANDLERS, HandlerContext
 from almanak.framework.accounting.classifier import AccountingCategory, classify
+from almanak.framework.accounting.models import LendingAccountingEvent
 from almanak.framework.accounting.writer import AccountingWriter
 
 if TYPE_CHECKING:
@@ -43,6 +46,66 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+
+
+def _is_lending_event(event: Any) -> bool:
+    """True iff the typed accounting event is a lending event (VIB-4977)."""
+    return isinstance(event, LendingAccountingEvent)
+
+
+def _position_event_field(row: Any, name: str) -> Any:
+    """Read ``name`` from a position-event row regardless of dict / ORM shape.
+
+    ``get_position_history`` returns dicts on the SQLite backend and may
+    return ORM-ish objects on the gateway backend — tolerate both.
+    """
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
+def _find_position_event_for_ledger(history: list[Any], ledger_entry_id: str) -> Any | None:
+    """Return the position-event row whose ``ledger_entry_id`` matches.
+
+    The ledger_entry_id is 1:1 between an accounting event and its position
+    event for the same on-chain action (VIB-4977), so this isolates THIS
+    action's row — a partial DECREASE never picks up the final CLOSE's row
+    or vice versa.
+    """
+    for row in history:
+        if _position_event_field(row, "ledger_entry_id") == ledger_entry_id:
+            return row
+    return None
+
+
+def _merge_net_pnl(raw_attribution: str | dict[str, Any], net_pnl_usd: Decimal) -> str | None:
+    """Merge ``net_pnl_usd`` into an existing attribution payload.
+
+    Accepts either a JSON string (SQLite + gateway-proto backends return the
+    ``attribution_json`` column as a string) OR an already-deserialized
+    ``dict`` (some state-manager / DB layers auto-deserialize a JSON column).
+    Tolerating both avoids a silent no-op: a dict reaching ``json.loads``
+    would raise ``TypeError`` → caught → ``None`` → back-fill skips — the
+    same silent-skip class made loud for the key-mismatch case. The input
+    dict is copied (never mutated in place) so the caller's row object is
+    untouched.
+
+    Preserves every other key already on the payload (the ``lending_v1``
+    after-state fields stamped at seed time). Returns ``None`` when the
+    existing payload is not a JSON object (defensive — never clobber an
+    unexpected shape).
+    """
+    if isinstance(raw_attribution, dict):
+        parsed: Any = dict(raw_attribution)
+    else:
+        try:
+            parsed = json.loads(raw_attribution) if raw_attribution else {}
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    parsed["net_pnl_usd"] = str(net_pnl_usd)
+    return json.dumps(parsed)
 
 
 class AccountingProcessor:
@@ -137,6 +200,15 @@ class AccountingProcessor:
                         "drain_one: writer.write returned False for %s (backend may not support write)",
                         ledger_entry_id,
                     )
+                elif _is_lending_event(event):
+                    # VIB-4977: back-fill the matching lending PositionEvent's
+                    # attribution_json with the signed realized net_pnl_usd
+                    # (the FIFO interest split this drain just computed). The
+                    # position event was saved by the runner BEFORE this drain
+                    # task fired, so the row exists. Best-effort: a failure
+                    # degrades win-rate attribution but never blocks the books
+                    # (mirrors run_attribution_on_close for LP/perp).
+                    await self._backfill_lending_position_pnl(event)
 
             await self._update_outbox(outbox_id, "processed")
             return True
@@ -438,6 +510,109 @@ class AccountingProcessor:
             )
             return rows or []
         return []
+
+    async def _backfill_lending_position_pnl(self, event: Any) -> None:
+        """VIB-4977 — stamp signed realized ``net_pnl_usd`` onto the lending
+        PositionEvent (Layer 3) whose attribution lane omitted it.
+
+        The realized PnL is the FIFO interest split (``interest_delta_usd``)
+        that the lending handler computed for THIS action; the position event
+        was seeded earlier (Layer 3, before this drain task fired) with a
+        ``lending_v1`` payload that has no ``net_pnl_usd`` key, so
+        ``almanak strat pnl`` scored every lending close as unattributed
+        (win rate ``0/0``).
+
+        Join is on ``(position_key, ledger_entry_id)``:
+
+        * ``position_key`` (Layer 5, ``_derive_position_key``) equals
+          ``position_id`` (Layer 3, ``lending_position_id``) ONLY for
+          NON-market-scoped (Aave-style) lending. The two derivations
+          DIVERGE for market-scoped (isolated) lending — Morpho Blue and
+          friends — because ``_derive_position_key`` appends ``market_id``
+          when present (``lending:chain:protocol:wallet:market_id:asset``)
+          while ``lending_position_id`` never includes it
+          (``lending:chain:protocol:wallet:asset``). When they diverge,
+          ``get_position_history(...)`` keyed on the L5 ``position_key``
+          returns no L3 row and the back-fill cannot find its target. This
+          PR's win-rate fix therefore covers Aave-style lending; the
+          isolated-lending class is tracked by VIB-4981 (Morpho/market-scoped
+          lending Layer-3/Layer-5 position-key alignment — align the two key
+          derivations, coordinated because ``position_id`` is a stored join
+          column). The mismatch is logged at WARNING (not a silent skip) so
+          the gap is visible in prod log pipelines until VIB-4981 lands.
+        * ``ledger_entry_id`` is 1:1 between the accounting event and the
+          position event for the same on-chain action — so a partial DECREASE
+          and the final CLOSE each get ONLY their own action's realized PnL.
+          No summing, no double-counting; the win-rate scorer reads only the
+          terminal CLOSE row (stamping a DECREASE row is inert across current
+          readers, which filter to CLOSE — see ``strat_pnl``).
+
+        ``net_pnl_usd is None`` (interest UNAVAILABLE — no matching FIFO lots,
+        or a non-interest leg) ⇒ leave the payload untouched (Empty ≠ Zero).
+
+        Best-effort: every failure is swallowed with a debug log. A missing
+        back-fill degrades win-rate attribution but must never block the
+        books or fail the drain (mirrors ``run_attribution_on_close``).
+        """
+        from almanak.framework.observability.position_events import lending_realized_net_pnl_usd
+
+        try:
+            event_type_value = getattr(event.event_type, "value", str(event.event_type))
+            net_pnl = lending_realized_net_pnl_usd(event_type_value, event.interest_delta_usd)
+            if net_pnl is None:
+                return
+
+            position_key = event.position_key or ""
+            ledger_entry_id = event.identity.ledger_entry_id or ""
+            deployment_id = event.identity.deployment_id or self._deployment_id
+            if not position_key or not ledger_entry_id or not deployment_id:
+                return
+
+            if not hasattr(self._state_manager, "get_position_history"):
+                return
+            history = await self._call_async(self._state_manager.get_position_history, deployment_id, position_key)
+            target = _find_position_event_for_ledger(history or [], ledger_entry_id)
+            if target is None:
+                # WARNING (not debug) so the gap is visible in prod log
+                # pipelines — mirrors run_attribution_on_close's warning level.
+                # The common cause is the Layer-3/Layer-5 key divergence for
+                # market-scoped (Morpho) lending (VIB-4981): the L5
+                # ``position_key`` carries ``market_id`` but the L3
+                # ``position_id`` does not, so no L3 row matches and the
+                # lending close stays unattributed (win rate 0/0) with no
+                # other operator-visible signal.
+                logger.warning(
+                    "_backfill_lending_position_pnl: no Layer-3 position event for "
+                    "position_key=%s ledger_entry_id=%s — net_pnl_usd not stamped "
+                    "(likely market-scoped lending L3/L5 key divergence, VIB-4981)",
+                    position_key,
+                    ledger_entry_id,
+                )
+                return
+
+            event_id = _position_event_field(target, "id")
+            if not event_id:
+                return
+            raw_attr = _position_event_field(target, "attribution_json") or "{}"
+            merged = _merge_net_pnl(raw_attr, net_pnl)
+            if merged is None:
+                return
+
+            if hasattr(self._state_manager, "update_position_attribution"):
+                version = _position_event_field(target, "attribution_version") or 1
+                try:
+                    version_int = int(version)
+                except (TypeError, ValueError):
+                    version_int = 1
+                await self._call_async(
+                    self._state_manager.update_position_attribution,
+                    event_id,
+                    merged,
+                    version_int,
+                    deployment_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort attribution back-fill
+            logger.debug("_backfill_lending_position_pnl failed (non-blocking)", exc_info=True)
 
     @staticmethod
     async def _call_async(fn: Any, *args: Any) -> Any:
