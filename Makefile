@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation scan-coupling scan-coupling-report scan-coupling-baseline
+.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
 
 # Load .env file if it exists
 -include .env
@@ -85,6 +85,19 @@ check-deployment-id-proto-surface:
 # scripts/ci/connector-chain-allowlist.yml.
 check-connector-chains:
 	uv run python scripts/ci/check_connector_chains.py
+
+# Accountant-Test ratchet gate (VIB-3836). Runs the 21-cell Accountant Test
+# against the committed frozen fixtures (tests/fixtures/accounting/{lp,looping,
+# perp}/expected_baseline.sqlite) and compares each cell's status to the
+# committed manifest (expected_cells.json). Ratchet semantics: any cell that
+# the manifest records as currently-passing must not regress below its floor
+# (PASS->XFAIL/FAIL, XFAIL->FAIL). Existing XFAILs are tolerated — the matrix
+# is ~18/21, not full-green. Improvements (XFAIL->PASS) print a NEW_PASS
+# advisory but do not fail; ratchet the manifest forward in the same PR to lock
+# the win in. Offline + deterministic (no live Anvil); the heavier managed-Anvil
+# sweep stays nightly (make test-accounting-matrix).
+check-accounting-ratchet:
+	uv run python scripts/ci/check_accounting_ratchet.py --check --verbose
 
 # Chain/protocol coupling scanner (VIB-4851 / VIB-4852). Re-scans the
 # repo for chain- and protocol-coupled code outside its canonical home
