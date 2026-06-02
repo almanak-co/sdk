@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,6 +51,7 @@ _receipt_has_lp_topic = StrategyRunner._receipt_has_lp_topic
 _extract_block_number_from_result = StrategyRunner._extract_block_number_from_result
 _intent_fee_tier = StrategyRunner._intent_fee_tier
 _extract_receipt_from_result = StrategyRunner._extract_receipt_from_result
+_registry_resolve_receipt_and_parser = StrategyRunner._registry_resolve_receipt_and_parser
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +174,7 @@ class TestCollectCandidateReceipts:
 
     def test_receipts_list_collected(self) -> None:
         # GatewayExecutionResult shape.
-        result = SimpleNamespace(
-            receipts=[{"logs": ["a"]}, {"logs": ["b"]}]
-        )
+        result = SimpleNamespace(receipts=[{"logs": ["a"]}, {"logs": ["b"]}])
         out = _collect_candidate_receipts(result)
         assert len(out) == 2
 
@@ -233,11 +232,7 @@ class TestReceiptHasLpTopic:
 
     def test_unrelated_topic_returns_false(self) -> None:
         # Approval signature.
-        rec = {
-            "logs": [
-                {"topics": ["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"]}
-            ]
-        }
+        rec = {"logs": [{"topics": ["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"]}]}
         assert _receipt_has_lp_topic(rec) is False
 
     def test_empty_logs(self) -> None:
@@ -444,9 +439,7 @@ class TestLookupOpenRegistryPayload:
     @pytest.mark.asyncio
     async def test_supplied_token_id_skips_parser(self) -> None:
         runner = self._runner(rows=[])
-        parser = SimpleNamespace(
-            _decreaseliquidity_token_id=MagicMock(return_value=999)
-        )
+        parser = SimpleNamespace(_decreaseliquidity_token_id=MagicMock(return_value=999))
         await StrategyRunner._lookup_open_registry_payload(
             runner,
             deployment_id="dep-1",
@@ -763,11 +756,7 @@ class TestExtractReceiptFromResult:
         # Per audit P1, the LP-topic one MUST be returned (not the first).
         result = SimpleNamespace(
             receipts=[
-                {
-                    "logs": [
-                        {"topics": ["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"]}
-                    ]
-                },
+                {"logs": [{"topics": ["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"]}]},
                 {"logs": [{"topics": [self.DECREASE_TOPIC]}]},
             ]
         )
@@ -828,9 +817,7 @@ class TestMaybeSaveLedgerWithRegistry:
         runner = SimpleNamespace()
         runner.config = SimpleNamespace(chain="arbitrum")
         runner.state_manager = MagicMock()
-        runner._cutover_complete_cache = (
-            {(Primitive.LP, "lp")} if cutover_active else set()
-        )
+        runner._cutover_complete_cache = {(Primitive.LP, "lp")} if cutover_active else set()
         runner._lookup_open_registry_payload = AsyncMock(return_value=None)
         runner._extract_block_number_from_result = MagicMock(return_value=100)
         runner._extract_receipt_from_result = MagicMock(return_value=None)
@@ -981,9 +968,7 @@ class TestMaybeSaveLedgerWithRegistry:
     @pytest.mark.asyncio
     async def test_returns_false_when_open_row_build_fails(self) -> None:
         runner = self._runner(cutover_active=True)
-        runner._registry_resolve_receipt_and_parser = MagicMock(
-            return_value=({"logs": []}, SimpleNamespace())
-        )
+        runner._registry_resolve_receipt_and_parser = MagicMock(return_value=({"logs": []}, SimpleNamespace()))
         runner._build_lp_open_registry_row = MagicMock(return_value=None)
         intent = SimpleNamespace(
             intent_type=SimpleNamespace(value="LP_OPEN"),
@@ -1002,9 +987,7 @@ class TestMaybeSaveLedgerWithRegistry:
     @pytest.mark.asyncio
     async def test_returns_false_when_close_row_build_fails(self) -> None:
         runner = self._runner(cutover_active=True)
-        runner._registry_resolve_receipt_and_parser = MagicMock(
-            return_value=({"logs": []}, SimpleNamespace())
-        )
+        runner._registry_resolve_receipt_and_parser = MagicMock(return_value=({"logs": []}, SimpleNamespace()))
         runner._build_lp_close_registry_row = AsyncMock(return_value=None)
         intent = SimpleNamespace(
             intent_type=SimpleNamespace(value="LP_CLOSE"),
@@ -1023,14 +1006,10 @@ class TestMaybeSaveLedgerWithRegistry:
     @pytest.mark.asyncio
     async def test_returns_true_after_atomic_write_for_open(self, monkeypatch) -> None:
         runner = self._runner(cutover_active=True)
-        runner._registry_resolve_receipt_and_parser = MagicMock(
-            return_value=({"logs": []}, SimpleNamespace())
-        )
+        runner._registry_resolve_receipt_and_parser = MagicMock(return_value=({"logs": []}, SimpleNamespace()))
         registry_row = SimpleNamespace(status="open", physical_identity_hash="0xpih-open")
         payload = {"pool_address": "0xPOOL", "token_id": "42"}
-        runner._build_lp_open_registry_row = MagicMock(
-            return_value=(registry_row, payload, 42)
-        )
+        runner._build_lp_open_registry_row = MagicMock(return_value=(registry_row, payload, 42))
 
         # Stub save_ledger_and_registry at the module level.
         save_mock = AsyncMock(return_value=None)
@@ -1062,14 +1041,10 @@ class TestMaybeSaveLedgerWithRegistry:
     @pytest.mark.asyncio
     async def test_returns_true_after_atomic_write_for_close(self, monkeypatch) -> None:
         runner = self._runner(cutover_active=True)
-        runner._registry_resolve_receipt_and_parser = MagicMock(
-            return_value=({"logs": []}, SimpleNamespace())
-        )
+        runner._registry_resolve_receipt_and_parser = MagicMock(return_value=({"logs": []}, SimpleNamespace()))
         registry_row = SimpleNamespace(status="closed", physical_identity_hash="0xpih-close")
         payload = {"pool_address": "0xPOOL", "token_id": "42"}
-        runner._build_lp_close_registry_row = AsyncMock(
-            return_value=(registry_row, payload, 42)
-        )
+        runner._build_lp_close_registry_row = AsyncMock(return_value=(registry_row, payload, 42))
         save_mock = AsyncMock(return_value=None)
         monkeypatch.setattr(
             "almanak.framework.accounting.commit.save_ledger_and_registry",
@@ -1093,3 +1068,144 @@ class TestMaybeSaveLedgerWithRegistry:
         call_kwargs = runner._update_lp_registry_id_cache.call_args.kwargs
         assert call_kwargs["is_open"] is False
         assert call_kwargs["token_id"] == 42
+
+
+# ---------------------------------------------------------------------------
+# _registry_resolve_receipt_and_parser — parser-routing matrix
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryResolveReceiptAndParser:
+    """The protocol → registry-key routing + ``get_parser`` dispatch (VIB-4932).
+
+    Pins the per-protocol ``parser_key`` the method routes to, the ``chain``
+    it forwards to ``get_parser``, and the two ``None``-return failure modes
+    (``get_parser`` raises, ``get_parser`` returns ``None``).
+
+    The reachable ``protocol`` set is gated by the caller against
+    ``_UNIV3_LP_PROTOCOLS`` (= ``UNIV3_LP_GROUPING_PROTOCOLS``):
+    ``{uniswap_v3, sushiswap_v3, pancakeswap_v3, aerodrome_slipstream,
+    velodrome_slipstream}``. The empty string / unknown cases pin the
+    default-to-UV3 fallback the method keeps for defence-in-depth even
+    though the gate would normally exclude them.
+
+    ``get_parser`` is patched at its definition module
+    (``almanak.framework.execution.receipt_registry``) because the method
+    imports it locally inside the function body, so the name resolves to the
+    module attribute at call time.
+    """
+
+    GET_PARSER = "almanak.framework.execution.receipt_registry.get_parser"
+
+    @staticmethod
+    def _runner(receipt: Any) -> SimpleNamespace:
+        # ``_extract_receipt_from_result`` is the first collaborator the
+        # method calls; stub it to return a fixed receipt so the test drives
+        # the routing branches directly.
+        return SimpleNamespace(
+            _extract_receipt_from_result=MagicMock(return_value=receipt),
+        )
+
+    def _resolve(
+        self,
+        *,
+        protocol: str,
+        chain: str = "base",
+        receipt: Any = None,
+    ) -> Any:
+        if receipt is None:
+            receipt = {"logs": [{"topics": ["0xabc"]}]}
+        runner = self._runner(receipt)
+        return runner, _registry_resolve_receipt_and_parser(
+            runner,
+            result=SimpleNamespace(success=True),
+            chain=chain,
+            intent_type_str="LP_OPEN",
+            protocol=protocol,
+        )
+
+    def test_velodrome_slipstream_routes_to_aerodrome_alias(self) -> None:
+        receipt = {"logs": [{"topics": ["0xfeed"]}]}
+        sentinel = MagicMock(name="aerodrome_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            runner, out = self._resolve(protocol="velodrome_slipstream", chain="base", receipt=receipt)
+        get_parser.assert_called_once_with("aerodrome_slipstream", chain="base")
+        assert out == (receipt, sentinel)
+
+    def test_aerodrome_slipstream_routes_to_same_key(self) -> None:
+        sentinel = MagicMock(name="aerodrome_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="aerodrome_slipstream", chain="base")
+        get_parser.assert_called_once_with("aerodrome_slipstream", chain="base")
+        assert out[1] is sentinel
+
+    def test_sushiswap_v3_routes_to_same_key(self) -> None:
+        sentinel = MagicMock(name="sushi_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="sushiswap_v3", chain="arbitrum")
+        get_parser.assert_called_once_with("sushiswap_v3", chain="arbitrum")
+        assert out[1] is sentinel
+
+    def test_pancakeswap_v3_routes_to_same_key(self) -> None:
+        sentinel = MagicMock(name="pancake_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="pancakeswap_v3", chain="bsc")
+        get_parser.assert_called_once_with("pancakeswap_v3", chain="bsc")
+        assert out[1] is sentinel
+
+    def test_uniswap_v3_routes_to_uniswap_v3(self) -> None:
+        sentinel = MagicMock(name="uniswap_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="uniswap_v3", chain="arbitrum")
+        get_parser.assert_called_once_with("uniswap_v3", chain="arbitrum")
+        assert out[1] is sentinel
+
+    def test_empty_protocol_falls_back_to_uniswap_v3(self) -> None:
+        sentinel = MagicMock(name="uniswap_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="", chain="arbitrum")
+        get_parser.assert_called_once_with("uniswap_v3", chain="arbitrum")
+        assert out[1] is sentinel
+
+    def test_unknown_protocol_falls_back_to_uniswap_v3(self) -> None:
+        sentinel = MagicMock(name="uniswap_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="curve", chain="arbitrum")
+        get_parser.assert_called_once_with("uniswap_v3", chain="arbitrum")
+        assert out[1] is sentinel
+
+    def test_protocol_case_insensitive(self) -> None:
+        # ``protocol_norm`` lower-cases before routing.
+        sentinel = MagicMock(name="sushi_parser")
+        with patch(self.GET_PARSER, return_value=sentinel) as get_parser:
+            _, out = self._resolve(protocol="SushiSwap_V3", chain="arbitrum")
+        get_parser.assert_called_once_with("sushiswap_v3", chain="arbitrum")
+        assert out[1] is sentinel
+
+    def test_get_parser_raises_returns_none(self) -> None:
+        with patch(self.GET_PARSER, side_effect=RuntimeError("registry boom")):
+            _, out = self._resolve(protocol="uniswap_v3", chain="arbitrum")
+        assert out is None
+
+    def test_get_parser_returns_none_returns_none(self) -> None:
+        # Gemini guard (VIB-4932 review): a registry that resolves to None
+        # without raising must not yield ``(receipt, None)``.
+        with patch(self.GET_PARSER, return_value=None) as get_parser:
+            _, out = self._resolve(protocol="uniswap_v3", chain="arbitrum")
+        get_parser.assert_called_once_with("uniswap_v3", chain="arbitrum")
+        assert out is None
+
+    def test_no_receipt_returns_none_without_calling_get_parser(self) -> None:
+        # When no receipt is recoverable the method short-circuits before
+        # ever touching the registry.
+        with patch(self.GET_PARSER) as get_parser:
+            runner = self._runner(None)
+            out = _registry_resolve_receipt_and_parser(
+                runner,
+                result=SimpleNamespace(success=True),
+                chain="arbitrum",
+                intent_type_str="LP_OPEN",
+                protocol="uniswap_v3",
+            )
+        assert out is None
+        get_parser.assert_not_called()

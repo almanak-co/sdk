@@ -2669,44 +2669,43 @@ class StrategyRunner:
             )
             return None
         protocol_norm = (protocol or "").lower()
+        # Resolve to a receipt-parser registry key rather than importing each
+        # connector's parser by name (VIB-4932). The per-protocol routing
+        # rationale is unchanged — each fork emits IncreaseLiquidity /
+        # DecreaseLiquidity from its own NPM address, so the canonical Uniswap
+        # V3 parser would filter every event out by NPM-address and silently
+        # return None (the ghost-position class VIB-4305 caught for Slipstream;
+        # the same failure mode applies to Sushi and PancakeSwap). The registry
+        # routes each key to the fork-specific parser class:
+        #   * ``sushiswap_v3``   -> SushiSwapV3ReceiptParser
+        #   * ``pancakeswap_v3`` -> PancakeSwapV3ReceiptParser
+        #   * ``aerodrome_slipstream`` -> AerodromeSlipstreamReceiptParser
+        # ``velodrome_slipstream`` is not a registered key (and is not a
+        # protocol-alias rename), so it is mapped to ``aerodrome_slipstream``
+        # here exactly as the pre-VIB-4932 branch did. Every other protocol —
+        # including ``uniswap_v3`` itself, the empty string, and anything
+        # unknown — falls back to the canonical Uniswap V3 parser, preserving
+        # the original default-to-UV3 behaviour (the registry would otherwise
+        # raise ``ValueError`` on an unknown key).
+        from almanak.framework.execution.receipt_registry import get_parser
+
+        if protocol_norm == "velodrome_slipstream":
+            parser_key = "aerodrome_slipstream"
+        elif protocol_norm in ("aerodrome_slipstream", "sushiswap_v3", "pancakeswap_v3"):
+            parser_key = protocol_norm
+        else:
+            parser_key = "uniswap_v3"
         try:
-            if protocol_norm in ("aerodrome_slipstream", "velodrome_slipstream"):
-                from almanak.connectors.aerodrome.receipt_parser import (
-                    AerodromeSlipstreamReceiptParser,
-                )
-
-                return receipt, AerodromeSlipstreamReceiptParser(chain=chain)
-            if protocol_norm == "sushiswap_v3":
-                # SushiSwap V3's NPM lives at a distinct address per chain
-                # (e.g. Arbitrum: 0xf0cbce1942... vs UV3's 0xC36442b4...).
-                # The UV3 parser would filter every Sushi IncreaseLiquidity /
-                # DecreaseLiquidity log out by NPM-address and silently emit
-                # "no payload extractable" — same mode-skip pattern VIB-4305
-                # caught for Slipstream. Route to the Sushi-specific parser.
-                from almanak.connectors.sushiswap_v3.receipt_parser import (
-                    SushiSwapV3ReceiptParser,
-                )
-
-                return receipt, SushiSwapV3ReceiptParser(chain=chain)
-            if protocol_norm == "pancakeswap_v3":
-                # PancakeSwap V3 deploys its own NPM at
-                # 0x46A15B0b27311cedF172AB29E4f4766fbE7F4364, distinct from
-                # canonical Uniswap V3. Using the UV3 parser against a
-                # Pancake receipt finds zero IncreaseLiquidity events
-                # (different emitter) and silently returns None — the same
-                # ghost-position class the Aerodrome / Sushi branches above
-                # fix.
-                from almanak.connectors.pancakeswap_v3.receipt_parser import (
-                    PancakeSwapV3ReceiptParser,
-                )
-
-                return receipt, PancakeSwapV3ReceiptParser(chain=chain)
-            from almanak.connectors.uniswap_v3.receipt_parser import (
-                UniswapV3ReceiptParser,
-            )
-        except Exception:  # noqa: BLE001 — defensive
+            parser = get_parser(parser_key, chain=chain)
+        except Exception:  # noqa: BLE001 — defensive: parser import/construction failure
             return None
-        return receipt, UniswapV3ReceiptParser(chain=chain)
+        if parser is None:
+            # Defensive: a registry that resolves to None without raising
+            # would otherwise return ``(receipt, None)`` and trip an
+            # AttributeError downstream. Honour the "return None on failure"
+            # contract instead.
+            return None
+        return receipt, parser
 
     def _build_lp_open_registry_row(
         self,
