@@ -2095,6 +2095,51 @@ def _lp4_il_sanity_cell(
     )
 
 
+# The decomposition legs ``attribute_lp`` writes onto the CLOSE
+# ``attribution_json`` (pnl_attributor.py). LP5 PASSes only when a CLOSE event
+# carries the LP marker plus all four — anything short means attribution did
+# not run end-to-end.
+_LP5_REQUIRED_FIELDS = (
+    "net_pnl_usd",
+    "principal_deposited_usd",
+    "principal_recovered_usd",
+    "price_pnl_usd",
+)
+
+
+def _lp5_decomposition_cell(pos_events: list[dict[str, Any]]) -> CellResult:
+    """LP5 (VIB-4263): open→close delta decomposition present on a CLOSE event.
+
+    Data-presence predicate over each CLOSE position_event's
+    ``attribution_json``, mirroring LP2 / LP6. PASS when some CLOSE event's
+    decomposition has ``position_type == "LP"`` and every field in
+    ``_LP5_REQUIRED_FIELDS`` is present and non-empty (Empty != zero — an
+    empty-string leg is "not computed", not measured zero). Otherwise XFAIL
+    with the original diagnostic (no regression to the prior verdict when
+    attribution has not run).
+    """
+    for r in pos_events:
+        if r.get("event_type") != "CLOSE":
+            continue
+        decomp = _json(r.get("attribution_json"))
+        if decomp.get("position_type") != "LP":
+            continue
+        if all(decomp.get(f) not in (None, "") for f in _LP5_REQUIRED_FIELDS):
+            present = ", ".join(_LP5_REQUIRED_FIELDS)
+            return CellResult(
+                "LP5",
+                "LP open→close delta decomposition",
+                "PASS",
+                f"CLOSE attribution_json carries LP decomposition ({present})",
+            )
+    return CellResult(
+        "LP5",
+        "LP open→close delta decomposition",
+        "XFAIL",
+        "attribution_json LP decomposition not yet computed",
+    )
+
+
 def _cells_lp(
     pos_events: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
@@ -2167,15 +2212,20 @@ def _cells_lp(
         out.append(blocked)
     else:
         out.append(_lp4_il_sanity_cell(lp_acct, acct_payloads))
-    # LP5: open→close delta decomposition
-    out.append(
-        CellResult(
-            "LP5",
-            "LP open→close delta decomposition",
-            "XFAIL",
-            "attribution_json LP decomposition not yet computed",
-        )
-    )
+    # LP5: open→close delta decomposition (VIB-4263).
+    #
+    # Gate on data presence in the CLOSE position_event's ``attribution_json``,
+    # mirroring the conditional-XFAIL shape of LP2 / LP6 (which gate on Track-C
+    # row presence). Before VIB-4263 this cell was an UNCONDITIONAL XFAIL with
+    # no PASS branch, so it could never validate what it claims even once the
+    # upstream attribution (VIB-3954, computed by ``attribute_lp`` →
+    # ``run_attribution_on_close``) lands. The required decomposition fields are
+    # exactly the ones ``attribute_lp`` emits (pnl_attributor.py): the marker
+    # ``position_type == "LP"`` plus the four core USD legs. A field present but
+    # empty-string is treated as "not computed" — Empty != zero per CLAUDE.md;
+    # the genuine values are always non-empty ``str(Decimal(...))`` when
+    # attribution ran.
+    out.append(_lp5_decomposition_cell(pos_events))
     # LP6: liquidity over time (Track C)
     if lp_state_rows:
         # CodeRabbit (2026-05-02): position_state.py materialises liquidity as
