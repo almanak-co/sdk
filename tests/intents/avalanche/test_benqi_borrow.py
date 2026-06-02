@@ -6,27 +6,74 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for BENQI bo
 3. Execute via ExecutionOrchestrator (full production pipeline)
 4. Parse receipts using BenqiReceiptParser
 5. Verify balance changes and debt accounting are correct
+6. Layer 5 — persist the real ExecutionResult through the real accounting
+   pipeline (ledger -> outbox -> AccountingProcessor.drain_one) into a
+   throwaway SQLite and assert the typed LendingAccountingEvent is correct.
 
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
 IMPORTANT: All borrow amounts target ~30% LTV to handle CoinGecko price fluctuations.
 
+Layer 5 (epic VIB-4591 / ticket VIB-4607): mirrors the merged Spark and Aave V3
+goldens. The lending category handler is protocol-agnostic — it keys on
+``intent_type`` and the FIFO basis store, not on the protocol — so the FIFO
+principal / interest split assertions are identical to the Aave V3 / Spark
+goldens.
+
+THE BENQI DEGRADATION (genuine production gap, tracked by VIB-4967):
+BENQI is a Compound-V2-style market (qiTokens) and has NO pre/post-state reader.
+``_PROTOCOL_PRE_STATE_READERS`` in
+``almanak/framework/accounting/lending_accounting.py`` has entries for
+``aave_v3`` / ``aave`` / ``morpho_blue`` / ``compound_v3`` but NOT ``benqi``,
+so ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
+``None`` for a BENQI intent. With no ``post_state_json`` the lending handler
+sets ``confidence=ESTIMATED`` and leaves every before/after collateral / debt /
+health-factor field ``None`` with a populated ``unavailable_reason``
+(Empty≠Zero≠None — nothing is fabricated). So BENQI Layer 5 asserts the
+DEGRADATION contract for chain state (``_assert_state_degraded_no_reader``),
+NOT the HIGH-confidence contract the Aave / Compound goldens use.
+
+TWO STACKED PRODUCTION GAPS (both VIB-4967, both encoded as degradation):
+  1. No pre/post-state reader — confidence=ESTIMATED, before/after fields None.
+  2. No lending amount extractors on ``BenqiReceiptParser`` (no
+     ``SUPPORTED_EXTRACTIONS`` / ``extract_borrow_amount`` etc., unlike Spark),
+     so ``ResultEnricher`` cannot populate ``extracted_data`` and the handler's
+     ``_extract_amount_human`` returns ``None`` → ``amount_token``,
+     ``principal_delta_usd`` and ``interest_delta_usd`` all degrade to ``None``
+     (no FIFO lot recorded; the borrow→repay split therefore cannot be exact).
+     The typed event still persists with correct identity + event_type. Closing
+     both gaps lights up the Spark/Aave HIGH contract with no test rewrite.
+
 To run:
     uv run pytest tests/intents/avalanche/test_benqi_borrow.py -v -s
 """
 
+import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from web3 import Web3
 
 from almanak.connectors.benqi.receipt_parser import BenqiReceiptParser
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.accounting.lending_accounting import (
+    capture_lending_post_state,
+    capture_lending_pre_state,
+    lending_state_to_dict,
+)
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import BorrowIntent, RepayIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_accounting_persisted,
+    assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -39,10 +86,204 @@ pytestmark = pytest.mark.no_zodiac(reason="benqi connector not in manifest matri
 # =============================================================================
 
 CHAIN_NAME = "avalanche"
+PROTOCOL = "benqi"
 
 # BENQI qiToken addresses for receipt filtering
 BENQI_QI_USDC = "0xB715808a78F6041E46d61Cb123C9B4A27056AE9C"
 BENQI_QI_WAVAX = "0x5C0401e81Bc07Ca70fAD469b451682c0d747Ef1c"
+
+
+# =============================================================================
+# Layer 5 helpers (shared)
+# =============================================================================
+#
+# Mirror the merged Spark / Aave V3 goldens. ``enrich_result`` makes the ledger
+# entry carry extracted_data; ``capture_lending_pre_state`` /
+# ``capture_lending_post_state`` dispatch on ``intent.protocol``. BENQI has NO
+# entry in ``_PROTOCOL_PRE_STATE_READERS`` (VIB-4967), so both captures
+# return ``None`` and ``lending_state_to_dict`` serializes ``None`` — the
+# persisted event therefore degrades to ``confidence=ESTIMATED`` with no
+# before/after chain state.
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    """Build the ExecutionContext used to enrich a BENQI lending result for Layer 5."""
+    # The deployment_id here labels enrichment only — the persisted accounting
+    # row's deployment_id is stamped by the conftest helper default
+    # ("layer5-intent-test"), which ``_assert_identity`` checks. Mirrors the
+    # merged Spark / Aave V3 goldens.
+    return ExecutionContext(
+        deployment_id="layer5-benqi-lending",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol=PROTOCOL,
+        simulation_enabled=True,
+    )
+
+
+def _enrich_for_accounting(
+    execution_result: ExecutionResult,
+    intent: Any,
+    wallet: str,
+    bundle_metadata: dict | None = None,
+) -> ExecutionResult:
+    """Enrich the raw execution result for accounting (paper mode, no live writes)."""
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _capture_lending_state(
+    intent: Any,
+    wallet: str,
+    reader: Any,
+    price_oracle: dict[str, Decimal],
+    *,
+    post: bool,
+    block: int | str | None = None,
+) -> dict | None:
+    """Capture and serialize BENQI pre/post state via the Anvil eth_call adapter.
+
+    Returns the runner-shaped state dict or ``None`` — never a fabricated zero.
+    For BENQI this currently ALWAYS returns ``None`` (no pre/post-state reader,
+    VIB-4967); the call mirrors the runner's wiring so a future reader
+    fix lights up the HIGH-confidence path with no test change.
+
+    ``block`` (VIB-4589 / F7) pins the read: pre-state passes ``None`` (→
+    ``"latest"``, safe because the read precedes submission); post-state passes
+    the confirmed receipt's ``block_number`` so a future reader cannot race the
+    upstream RPC's receipt indexer. Threaded now so the wiring is byte-for-byte
+    the runner's the moment a BENQI reader lands.
+    """
+    capture = capture_lending_post_state if post else capture_lending_pre_state
+    state = capture(
+        intent=intent,
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        gateway_client=reader,
+        price_oracle=price_oracle,
+        block=block,
+    )
+    return lending_state_to_dict(state, protocol=PROTOCOL)
+
+
+def _receipt_block(execution_result: ExecutionResult) -> int | None:
+    """Block number of the last confirmed receipt (for post-state pinning)."""
+    results = getattr(execution_result, "transaction_results", None) or []
+    for tx_result in reversed(results):
+        receipt = getattr(tx_result, "receipt", None)
+        block_number = getattr(receipt, "block_number", None) if receipt else None
+        if block_number is not None:
+            return block_number
+    return None
+
+
+def _payload(row: dict) -> dict:
+    """Deserialize an accounting_events row's ``payload_json`` to a dict."""
+    return json.loads(row["payload_json"])
+
+
+def _assert_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    """Identity sextuple per epic VIB-4591 decision #5 (no agent_id)."""
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+
+
+def _assert_no_lot_id(row: dict, payload: dict) -> None:
+    """Epic decision #6: no lot_id on the persisted lending event."""
+    assert "lot_id" not in row
+    assert "lot_id" not in payload
+
+
+def _assert_state_degraded_no_reader(payload: dict) -> None:
+    """BENQI genuine production degradation contract (VIB-4967).
+
+    BENQI is absent from ``_PROTOCOL_PRE_STATE_READERS`` in
+    ``almanak/framework/accounting/lending_accounting.py``, so the pre/post
+    captures return ``None`` for a BENQI intent and the lending handler sets
+    ``confidence=ESTIMATED`` with every before/after field ``None`` and a
+    populated ``unavailable_reason``. This is the TRUE current production
+    behavior (deterministic across the avalanche Anvil-fork CI), NOT a flake.
+    The HIGH-confidence expectation (before/after collateral / debt / HF
+    fidelity) is the gap tracked by VIB-4967 — wire a BENQI
+    Compound-V2-style qiToken pre/post-state reader into the registry.
+    Empty≠Zero≠None: ``unavailable_reason`` is set, nothing is fabricated.
+    """
+    assert payload["confidence"] == "ESTIMATED", (
+        f"BENQI lending genuinely degrades to confidence=ESTIMATED today "
+        f"(VIB-4967: no BENQI entry in _PROTOCOL_PRE_STATE_READERS); "
+        f"got {payload['confidence']!r}"
+    )
+    assert payload.get("unavailable_reason"), (
+        "degraded BENQI lending must carry a non-empty unavailable_reason (never fabricated)"
+    )
+    # Degradation must not fabricate before/after chain state.
+    assert payload["collateral_value_before_usd"] is None, (
+        "VIB-4967: degraded BENQI must not fabricate before-collateral"
+    )
+    assert payload["collateral_value_after_usd"] is None, (
+        "VIB-4967: degraded BENQI must not fabricate after-collateral"
+    )
+    assert payload["debt_value_before_usd"] is None, "VIB-4967: degraded BENQI must not fabricate before-debt"
+    assert payload["debt_value_after_usd"] is None, "VIB-4967: degraded BENQI must not fabricate after-debt"
+    assert payload["health_factor_before"] is None, (
+        "VIB-4967: degraded BENQI must not fabricate before-health-factor"
+    )
+    assert payload["health_factor_after"] is None, (
+        "VIB-4967: degraded BENQI must not fabricate after-health-factor"
+    )
+
+
+def _assert_amount_and_fifo_degraded_no_extractor(payload: dict) -> None:
+    """BENQI amount/FIFO degradation contract (VIB-4967).
+
+    DISTINCT from the missing chain-state reader above. The
+    ``BenqiReceiptParser`` (a strategy-side ``ReceiptParserConnector``) exposes
+    NO standalone lending amount extractors — there is no ``SUPPORTED_EXTRACTIONS``
+    set and no ``extract_supply_amount`` / ``extract_borrow_amount`` /
+    ``extract_repay_amount`` / ``extract_withdraw_amount`` methods (contrast
+    ``almanak/connectors/spark/receipt_parser.py``, which has them and returns a
+    raw ``int``). So ``ResultEnricher`` cannot populate
+    ``extracted_data["borrow_amount" | "repay_amount" | ...]`` for a BENQI
+    intent, and ``lending_handler._extract_amount_human`` returns ``None``.
+
+    With ``amount_human is None`` the handler emits ``amount_token=None`` AND
+    skips the FIFO basis-store block entirely (gated on
+    ``amount_human is not None``). For BORROW this means NO lot is recorded, so
+    a later REPAY cannot match anything; ``principal_delta_usd`` and
+    ``interest_delta_usd`` both stay ``None`` — measured-as-unavailable, never
+    fabricated (Empty≠Zero≠None). The typed event row IS still persisted with
+    the correct ``event_type`` and identity; only the value legs degrade.
+
+    This is the TRUE current production behavior (deterministic on the avalanche
+    Anvil-fork CI), NOT a flake. Closing it (a BENQI lending extraction spec on
+    the receipt parser, mirroring Spark/Aave) is the gap tracked by
+    VIB-4967; the moment those extractors land, ``amount_token`` and the
+    FIFO legs populate (and the borrow→repay FIFO split becomes exact like the
+    Spark/Aave goldens) and these asserts must be tightened.
+    """
+    assert payload["amount_token"] is None, (
+        "VIB-4967: BENQI receipt parser exposes no lending amount extractors, "
+        "so the enricher cannot populate extracted_data and amount_token degrades to None "
+        f"(never fabricated); got {payload['amount_token']!r}"
+    )
+    assert payload["principal_delta_usd"] is None, (
+        "VIB-4967: with amount_human=None the FIFO block is skipped, "
+        "so principal_delta_usd degrades to None (measured-unavailable, never a fabricated 0)"
+    )
+    assert payload["interest_delta_usd"] is None, (
+        "VIB-4967: with amount_human=None the FIFO block is skipped, "
+        "so interest_delta_usd degrades to None (measured-unavailable, never a fabricated 0)"
+    )
 
 
 # =============================================================================
@@ -62,6 +303,8 @@ class TestBenqiBorrowIntent:
     - Transactions execute successfully on-chain
     - BenqiReceiptParser correctly interprets Mint/Borrow/RepayBorrow events
     - Balance changes match expected amounts
+    - Layer 5: the real accounting pipeline persists a correct
+      LendingAccountingEvent (degraded chain state per VIB-4967, FIFO split)
     """
 
     @pytest.mark.intent(IntentType.BORROW)
@@ -73,6 +316,8 @@ class TestBenqiBorrowIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test borrowing USDC with WAVAX collateral using BorrowIntent.
 
@@ -82,6 +327,7 @@ class TestBenqiBorrowIntent:
         3. Execute via ExecutionOrchestrator
         4. Parse receipt for Mint (supply) and Borrow events
         5. Verify WAVAX decreased (collateral) and USDC increased (borrowed)
+        6. Layer 5: assert persisted BORROW accounting event
 
         LTV calculation: ~10 WAVAX at ~$20 = $200 collateral.
         Borrow $50 USDC = ~25% LTV (safe under 30% cap).
@@ -95,9 +341,9 @@ class TestBenqiBorrowIntent:
         collateral_amount = Decimal("10")
         borrow_amount = Decimal("50")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} AVAX collateral using BorrowIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Record balances BEFORE
         # BENQI qiAVAX uses native AVAX (not WAVAX ERC-20), so check native balance
@@ -137,6 +383,9 @@ class TestBenqiBorrowIntent:
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
+        # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
+
         # Execute via ExecutionOrchestrator
         print("\nExecuting via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
@@ -147,7 +396,7 @@ class TestBenqiBorrowIntent:
         # Parse receipts - track that we found expected events
         found_borrow_event = False
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
@@ -178,9 +427,7 @@ class TestBenqiBorrowIntent:
 
         # Calculate total gas cost across all transactions
         total_gas_cost = sum(
-            tx.gas_used * tx.receipt.effective_gas_price
-            for tx in execution_result.transaction_results
-            if tx.receipt
+            tx.gas_used * tx.receipt.effective_gas_price for tx in execution_result.transaction_results if tx.receipt
         )
 
         print("\n--- Results ---")
@@ -200,9 +447,44 @@ class TestBenqiBorrowIntent:
         # Verify USDC was received (exact for BENQI)
         expected_usdc_received = int(borrow_amount * Decimal(10**usdc_decimals))
         assert usdc_received == expected_usdc_received, (
-            f"USDC received must EXACTLY equal borrow amount. "
-            f"Expected: {expected_usdc_received}, Got: {usdc_received}"
+            f"USDC received must EXACTLY equal borrow amount. Expected: {expected_usdc_received}, Got: {usdc_received}"
         )
+
+        # ── Layer 5: real accounting pipeline ────────────────────────────────
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(
+            intent,
+            funded_wallet,
+            anvil_eth_call_adapter,
+            price_oracle,
+            post=True,
+            block=_receipt_block(execution_result),
+        )
+
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="BORROW",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_state_degraded_no_reader(payload)
+        assert payload["asset"] == "USDC"
+        # VIB-4967: BENQI receipt parser exposes no lending amount
+        # extractors, so amount_token + the FIFO principal/interest legs all
+        # degrade to None (no lot is recorded). The typed BORROW event still
+        # persists with correct identity + event_type.
+        _assert_amount_and_fifo_degraded_no_extractor(payload)
 
         print("\nALL CHECKS PASSED")
 
@@ -215,15 +497,19 @@ class TestBenqiBorrowIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test repaying USDC debt using RepayIntent.
 
         Flow:
-        1. Setup: Borrow USDC with WAVAX collateral first
+        1. Setup: Borrow USDC with WAVAX collateral first (persisted through the
+           Layer-5 harness so the FIFO basis pool holds the matching lot)
         2. Create RepayIntent to repay partial debt
         3. Compile and execute
         4. Parse receipt for RepayBorrow event
         5. Verify USDC balance decreased by exact repay amount
+        6. Layer 5: assert the EXACT principal/interest FIFO split
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
@@ -237,27 +523,66 @@ class TestBenqiBorrowIntent:
             rpc_url=anvil_rpc_url,
         )
 
+        setup_borrow = Decimal("50")
         borrow_intent = BorrowIntent(
             protocol="benqi",
             collateral_token="AVAX",
             collateral_amount=Decimal("10"),
             borrow_token="USDC",
-            borrow_amount=Decimal("50"),
+            borrow_amount=setup_borrow,
             chain=CHAIN_NAME,
         )
 
         borrow_result = compiler.compile(borrow_intent)
         assert borrow_result.status.value == "SUCCESS"
         assert borrow_result.action_bundle is not None
+        borrow_pre_state = _capture_lending_state(
+            borrow_intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
+        )
         borrow_exec = await orchestrator.execute(borrow_result.action_bundle)
         assert borrow_exec.success, f"Initial borrow failed: {borrow_exec.error}"
+
+        # Layer 5: persist the BORROW. In the Spark/Aave goldens this seeds the
+        # FIFO basis pool with the matching lot so the REPAY split is exact. For
+        # BENQI it does NOT — the receipt parser exposes no lending amount
+        # extractors, so amount_human is None and record_borrow is never called
+        # (VIB-4967). We still persist + assert the BORROW degradation
+        # contract so the row's existence and identity are verified, and so this
+        # block lights up the exact-split path automatically once the extractors
+        # land.
+        borrow_enriched = _enrich_for_accounting(
+            borrow_exec, borrow_intent, funded_wallet, borrow_result.action_bundle.metadata
+        )
+        borrow_post_state = _capture_lending_state(
+            borrow_intent,
+            funded_wallet,
+            anvil_eth_call_adapter,
+            price_oracle,
+            post=True,
+            block=_receipt_block(borrow_exec),
+        )
+        borrow_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=borrow_intent,
+            result=borrow_enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="BORROW",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=borrow_pre_state,
+            post_state=borrow_post_state,
+        )
+        borrow_payload = _payload(borrow_row)
+        _assert_state_degraded_no_reader(borrow_payload)
+        _assert_amount_and_fifo_degraded_no_extractor(borrow_payload)
 
         # Now repay partial debt
         repay_amount = Decimal("25")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Repay {repay_amount} USDC debt using RepayIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         print(f"USDC before repay: {format_token_amount(usdc_before, usdc_decimals)}")
@@ -276,6 +601,8 @@ class TestBenqiBorrowIntent:
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
+
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
@@ -305,9 +632,46 @@ class TestBenqiBorrowIntent:
 
         expected_usdc_spent = int(repay_amount * Decimal(10**usdc_decimals))
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal repay amount. "
-            f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal repay amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
+
+        # ── Layer 5: borrow-then-repay (degraded — no exact FIFO split) ──────
+        # In the Spark/Aave goldens the prior BORROW lot makes this REPAY split
+        # exact (matched principal + measured-zero interest). For BENQI the
+        # BORROW recorded NO lot (amount_human=None, VIB-4967), so the
+        # REPAY likewise cannot derive amount_token or match a lot: amount_token
+        # + principal + interest all degrade to None. The typed REPAY event is
+        # still persisted with correct identity + event_type.
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(
+            intent,
+            funded_wallet,
+            anvil_eth_call_adapter,
+            price_oracle,
+            post=True,
+            block=_receipt_block(execution_result),
+        )
+
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="REPAY",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_state_degraded_no_reader(payload)
+        assert payload["asset"] == "USDC"
+        _assert_amount_and_fifo_degraded_no_extractor(payload)
 
         print("\nALL CHECKS PASSED")
 
@@ -320,6 +684,8 @@ class TestBenqiBorrowIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test borrow-only path: BorrowIntent with collateral_amount=0.
 
@@ -335,6 +701,7 @@ class TestBenqiBorrowIntent:
         5. Execute
         6. Parse receipt for Borrow event
         7. Verify USDC increased, AVAX unchanged (no collateral spent)
+        8. Layer 5: assert persisted BORROW accounting event
 
         VIB-1381: This is the untested borrow-only codepath found in iter 88.
         """
@@ -373,9 +740,9 @@ class TestBenqiBorrowIntent:
 
         borrow_amount = Decimal("20")  # Borrow more against existing collateral
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Test: Borrow-only {borrow_amount} USDC (collateral_amount=0) using BorrowIntent")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"Native AVAX before: {format_token_amount(avax_before, 18)}")
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
 
@@ -417,6 +784,9 @@ class TestBenqiBorrowIntent:
                 "Compiler should warn about borrowing against existing collateral"
             )
 
+        # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
+
         # ── Layer 2: Execution ──
         print("\nExecuting via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(bundle)
@@ -454,9 +824,7 @@ class TestBenqiBorrowIntent:
 
         # Calculate gas cost
         total_gas_cost = sum(
-            tx.gas_used * tx.receipt.effective_gas_price
-            for tx in execution_result.transaction_results
-            if tx.receipt
+            tx.gas_used * tx.receipt.effective_gas_price for tx in execution_result.transaction_results if tx.receipt
         )
 
         usdc_received = usdc_after - usdc_before
@@ -470,8 +838,7 @@ class TestBenqiBorrowIntent:
         # Verify USDC received matches borrow amount exactly
         expected_usdc = int(borrow_amount * Decimal(10**usdc_decimals))
         assert usdc_received == expected_usdc, (
-            f"USDC received must EXACTLY equal borrow amount. "
-            f"Expected: {expected_usdc}, Got: {usdc_received}"
+            f"USDC received must EXACTLY equal borrow amount. Expected: {expected_usdc}, Got: {usdc_received}"
         )
 
         # Verify NO native AVAX was spent as collateral (only gas)
@@ -479,6 +846,43 @@ class TestBenqiBorrowIntent:
             f"Borrow-only path must NOT spend native AVAX as collateral. "
             f"AVAX spent (excluding gas): {avax_spent_excluding_gas}"
         )
+
+        # ── Layer 5: real accounting pipeline ────────────────────────────────
+        # VIB-4967: the BENQI receipt parser exposes no lending amount
+        # extractors, so this borrow-only BORROW degrades identically to the
+        # main borrow test — amount_token + principal/interest legs all None
+        # (no lot recorded). The typed BORROW event still persists with correct
+        # identity + event_type.
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(
+            intent,
+            funded_wallet,
+            anvil_eth_call_adapter,
+            price_oracle,
+            post=True,
+            block=_receipt_block(execution_result),
+        )
+
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="BORROW",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_state_degraded_no_reader(payload)
+        assert payload["asset"] == "USDC"
+        _assert_amount_and_fifo_degraded_no_extractor(payload)
 
         print("\nALL CHECKS PASSED — borrow-only path verified")
 
@@ -508,18 +912,23 @@ class TestBenqiBorrowIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test that borrowing far more than collateral supports fails gracefully.
 
         Supply minimal collateral (1 AVAX ~ $20) but try to borrow $100,000 USDC.
         This exceeds any collateral factor and must revert on-chain.
+
+        Layer 5 failure contract: a failed execution must write ZERO
+        accounting_events rows.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: BorrowIntent with Excessive Amount (BENQI - should fail)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
@@ -552,6 +961,20 @@ class TestBenqiBorrowIntent:
         # Verify no USDC received
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
         assert usdc_after == usdc_before, "USDC balance must be unchanged after failed borrow"
+
+        # ── Layer 5: failure-path accounting contract ────────────────────────
+        failed_result = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=intent,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+        )
 
         print("\nALL CHECKS PASSED")
 
