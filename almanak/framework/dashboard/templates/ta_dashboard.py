@@ -763,11 +763,14 @@ def prepare_ta_session_state(
     """Enrich session state for ``render_ta_dashboard`` (chart subplot).
 
     Mirrors :func:`prepare_lp_session_state`: fetches OHLCV via the
-    api_client, computes the indicator series client-side, and reads the
-    trade tape for buy/sell markers — strategy authors don't write any of
-    that plumbing. Without this helper the chart section silently degrades
-    to ``Price history data not available`` because nothing populates
-    ``price_history`` / ``rsi_history`` / ``buy_signals`` / ``sell_signals``.
+    api_client, computes the indicator series client-side, reads the trade
+    tape for buy/sell markers, and loads wallet balances for the Current
+    Position section — strategy authors don't write any of that plumbing.
+    Without this helper the chart section silently degrades to ``Price
+    history data not available`` (nothing populates ``price_history`` /
+    ``rsi_history`` / ``buy_signals`` / ``sell_signals``) and the Current
+    Position section reads 0.0000 / $0.00 / $0.00 (nothing populates
+    ``base_balance`` / ``quote_balance`` / ``base_price``).
 
     Args:
         api_client: ``DashboardAPIClient`` (or a duck-typed mock).
@@ -842,7 +845,74 @@ def prepare_ta_session_state(
         if start_time is not None:
             result["strategy_start_time"] = start_time
 
+    # Current Position section: balances + base price. Without this the
+    # section silently shows 0.0000 / $0.00 / $0.00 even when the wallet
+    # holds funds, because _render_position reads keys nothing else fills.
+    _populate_position_balances(api_client, result, base_token, quote_token, chain)
+
     return result
+
+
+def _populate_position_balances(
+    api_client: Any,
+    result: dict[str, Any],
+    base_token: str,
+    quote_token: str,
+    chain: str | None,
+) -> None:
+    """Fill ``base_balance`` / ``quote_balance`` / ``base_price`` for the
+    Current Position section from the gateway position snapshot.
+
+    Mirrors the token-amount block in :func:`prepare_lp_session_state`: the
+    snapshot is the same source of truth the strategy itself trades against,
+    so the dashboard reads balances from there rather than asking the author
+    to wire ``api_client.get_balance()`` by hand. ``base_price`` prefers the
+    snapshot's own USD valuation so the rendered Total matches the value the
+    strategy sees, falling back to a live price lookup only when the snapshot
+    can't value the position.
+
+    Caller-supplied keys are preserved (``setdefault``); degrades silently on
+    any API failure — the section just shows zeros, as it did before.
+    """
+    if api_client is None:
+        return
+    if "base_balance" in result and "quote_balance" in result and "base_price" in result:
+        return
+    try:
+        position = api_client.get_position() or {}
+        balances = position.get("token_balances") or []
+        # Coerce balances to non-None strings: a snapshot may carry an
+        # explicit ``None`` for an unmeasured field, and ``_render_position``
+        # does ``Decimal(str(...))`` — ``Decimal("None")`` would raise and
+        # trip the dashboard's error boundary instead of degrading to zeros.
+        bal_map = {str(b.get("symbol", "")).upper(): b for b in balances if isinstance(b, dict)}
+        base_entry = bal_map.get(base_token.upper())
+        quote_entry = bal_map.get(quote_token.upper())
+
+        if base_entry is not None:
+            result.setdefault("base_balance", str(base_entry.get("balance") or "0"))
+        if quote_entry is not None:
+            result.setdefault("quote_balance", str(quote_entry.get("balance") or "0"))
+
+        if "base_price" not in result:
+            price: str | None = None
+            # Prefer the snapshot's own valuation (value_usd / balance).
+            if base_entry is not None:
+                try:
+                    bal = Decimal(str(base_entry.get("balance") or "0"))
+                    val = Decimal(str(base_entry.get("value_usd") or "0"))
+                    if bal > 0 and val > 0:
+                        price = str(val / bal)
+                except (InvalidOperation, ValueError, TypeError):
+                    price = None
+            if price is None:
+                live = api_client.get_price(base_token, "USD", chain=chain)
+                if live is not None:
+                    price = str(live)
+            if price is not None:
+                result["base_price"] = price
+    except Exception:  # noqa: BLE001
+        logger.debug("api_client.get_position() failed for TA position section", exc_info=True)
 
 
 def render_ta_dashboard(

@@ -51,11 +51,16 @@ class _FakeClient:
         ohlcv: list[dict[str, Any]] | None = None,
         tape_rows: list[dict[str, Any]] | None = None,
         timeline: list[dict[str, Any]] | None = None,
+        token_balances: list[dict[str, Any]] | None = None,
+        price: float | None = None,
     ) -> None:
         self._ohlcv = ohlcv or []
         self._tape_rows = tape_rows or []
         self._timeline = timeline or []
+        self._token_balances = token_balances or []
+        self._price = price
         self.ohlcv_call_count = 0
+        self.get_price_call_count = 0
 
     def get_ohlcv(self, **_: Any) -> list[dict[str, Any]]:
         self.ohlcv_call_count += 1
@@ -66,6 +71,13 @@ class _FakeClient:
 
     def get_timeline(self, **_: Any) -> list[dict[str, Any]]:
         return self._timeline
+
+    def get_position(self) -> dict[str, Any]:
+        return {"token_balances": self._token_balances}
+
+    def get_price(self, token: str, quote: str = "USD", chain: str | None = None) -> float | None:
+        self.get_price_call_count += 1
+        return self._price
 
 
 # ----------------------------------------------------------------------
@@ -262,6 +274,101 @@ def test_prepare_populates_chart_keys_from_api_client():
     assert len(out["buy_signals"]) == 1
     assert out["sell_signals"].empty
     assert out["strategy_start_time"] == pd.Timestamp("2026-05-12T04:00:00Z")
+
+
+def test_prepare_populates_position_balances_from_snapshot():
+    # Regression: the Current Position section read base_balance/quote_balance
+    # that nothing populated, so every TA dashboard showed 0.0000 / $0.00 /
+    # $0.00 even with funds in the wallet. prepare_ta_session_state must load
+    # them from the gateway position snapshot, mirroring the LP template.
+    client = _FakeClient(
+        token_balances=[
+            {"symbol": "WETH", "balance": "0.0017", "value_usd": "4.33"},
+            {"symbol": "USDC", "balance": "0.77", "value_usd": "0.77"},
+        ],
+    )
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["base_balance"] == "0.0017"
+    assert out["quote_balance"] == "0.77"
+    # base_price is derived from the snapshot's own valuation (value_usd / balance),
+    # so the rendered Total matches the strategy's view — no extra price lookup.
+    assert float(out["base_price"]) == pytest.approx(4.33 / 0.0017)
+    assert client.get_price_call_count == 0
+
+
+def test_prepare_falls_back_to_live_price_when_snapshot_unvalued():
+    # Balance present but value_usd missing/zero → derive price via get_price.
+    client = _FakeClient(
+        token_balances=[{"symbol": "WETH", "balance": "0.0017", "value_usd": "0"}],
+        price=2500.0,
+    )
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["base_balance"] == "0.0017"
+    assert float(out["base_price"]) == pytest.approx(2500.0)
+    assert client.get_price_call_count == 1
+
+
+def test_prepare_position_balances_coerce_none_to_zero_string():
+    # A snapshot may carry an explicit None for an unmeasured field. Storing
+    # None would make _render_position do Decimal(str(None)) -> InvalidOperation
+    # and trip the dashboard's error boundary. Coerce to "0" instead so the
+    # section degrades to zeros, as intended.
+    client = _FakeClient(
+        token_balances=[
+            {"symbol": "WETH", "balance": None, "value_usd": None},
+            {"symbol": "USDC", "balance": None, "value_usd": None},
+        ],
+        price=None,
+    )
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["base_balance"] == "0"
+    assert out["quote_balance"] == "0"
+    # No usable price anywhere → key stays absent, _render_position uses its default.
+    assert "base_price" not in out
+    # And the stored values are safe to feed straight into Decimal(str(...)).
+    from decimal import Decimal
+
+    assert Decimal(str(out["base_balance"])) == Decimal("0")
+
+
+def test_prepare_position_balances_tolerate_non_dict_entries():
+    # Defensive: a malformed snapshot entry that isn't a dict must not crash
+    # the comprehension — it's skipped, and the well-formed entry still loads.
+    client = _FakeClient(
+        token_balances=[
+            "garbage",
+            {"symbol": "WETH", "balance": "2.0", "value_usd": "5000"},
+        ],
+    )
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["base_balance"] == "2.0"
+
+
+def test_prepare_preserves_caller_supplied_balances():
+    client = _FakeClient(
+        token_balances=[{"symbol": "WETH", "balance": "9.9", "value_usd": "99"}],
+        price=1234.0,
+    )
+    out = prepare_ta_session_state(
+        client,
+        session_state={"base_balance": "1.5", "quote_balance": "10", "base_price": "2000"},
+        config=_config(),
+    )
+    assert out["base_balance"] == "1.5"
+    assert out["quote_balance"] == "10"
+    assert out["base_price"] == "2000"
+    # All three supplied → no snapshot price lookup needed.
+    assert client.get_price_call_count == 0
+
+
+def test_prepare_position_balances_absent_when_snapshot_empty():
+    # Empty snapshot (or a client whose get_position raises) must not crash;
+    # the section falls back to its zero defaults (keys simply absent, so
+    # _render_position uses its "0" fallbacks).
+    client = _FakeClient(ohlcv=_ohlcv_payload([100.0] * 60))  # no token_balances
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert "base_balance" not in out
+    assert "quote_balance" not in out
 
 
 def test_prepare_prefers_strategy_started_for_start_marker():
