@@ -521,7 +521,8 @@ class TestBuildLedgerEntryPopulatesGasUsd:
         result = _make_result()
         intent = _make_intent("SWAP")
 
-        with caplog.at_level("WARNING", logger="almanak.framework.observability.ledger"):
+        ledger_logger = "almanak.framework.observability.ledger"
+        with caplog.at_level("WARNING", logger=ledger_logger):
             entry = build_ledger_entry(
                 deployment_id="strat_oracle_gap",
                 cycle_id="cycle_test",
@@ -533,8 +534,19 @@ class TestBuildLedgerEntryPopulatesGasUsd:
 
         assert entry.gas_usd == ""
         # Exactly one warning, mentioning the chain and the missing symbol
-        # — not silent, not spammy.
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        # — not silent, not spammy. Scope the count to the ledger logger:
+        # ``caplog.records`` captures WARNINGs from EVERY logger, and the
+        # ``at_level(logger=...)`` arg only sets that logger's threshold, it
+        # does not filter what is captured. If ``build_ledger_entry`` happens
+        # to be the first call in this process to build the token registry
+        # (order-dependent under xdist), the resolver/cache emit unrelated
+        # ``*_registry_address_collision`` WARNINGs that would otherwise
+        # inflate this count and make the test flaky.
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and r.name == ledger_logger
+        ]
         assert len(warnings) == 1
         assert "arbitrum" in warnings[0].getMessage()
         assert "ETH" in warnings[0].getMessage()
