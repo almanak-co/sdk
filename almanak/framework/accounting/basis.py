@@ -64,6 +64,12 @@ class _ReplayContext:
     timestamp: datetime | None
     swap_wallet_key: str
     ledger_entry_id: str | None
+    # VIB-4487 audit Fold B: the row's chain (lowercased), used by
+    # ``_replay_swap`` to canonicalize a persisted address-shaped token to
+    # its symbol on read so OLD address-keyed acquisition lots match NEW
+    # symbol-keyed disposals after a runner restart. Empty string when the
+    # row carries no chain (resolution then no-ops and the raw value is used).
+    chain: str = ""
 
 
 @dataclass
@@ -198,6 +204,7 @@ class FIFOBasisStore:
             timestamp=ts,
             swap_wallet_key=swap_wallet_key,
             ledger_entry_id=ledger_entry_id,
+            chain=chain_norm,
         )
 
     def _replay_borrow(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
@@ -449,9 +456,27 @@ class FIFOBasisStore:
         if not swap_position_key:
             return 0
 
+        # VIB-4487 audit Fold B — retroactive FIFO-key healing.
+        #
+        # Pre-VIB-4487 the 4 address-emitting connectors persisted a raw
+        # contract address in the SWAP payload's ``token_in`` / ``token_out``.
+        # Replaying those verbatim keys the lot under the address (lowercased
+        # by ``_key``), so a NEW symbol-keyed disposal written post-upgrade
+        # would orphan it (unmatched basis → realized_pnl None). Run the SAME
+        # canonical resolution the live path now uses on the persisted token
+        # before keying, so an OLD address-keyed acquisition lot resolves to
+        # its symbol on read and matches the new symbol-keyed disposal — the
+        # fix becomes retroactive and the upgrade transition window vanishes.
+        #
+        # The resolver fast path is cache + static registry (``skip_gateway``
+        # inside the helper), so this works offline at boot. A payload already
+        # carrying a symbol passes through unchanged (idempotent); a row with
+        # no chain no-ops back to the raw value (no regression vs. today).
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
         # 1. Replay disposal of token_in to consume any prior acquisition lots,
         #    keeping the FIFO store consistent with the state before this swap.
-        token_in_r = ctx.payload.get("token_in", "")
+        token_in_r = resolve_swap_token_symbol(ctx.payload.get("token_in", ""), ctx.chain) or ""
         amount_in_r = _parse_decimal(ctx.payload.get("amount_in"))
         if token_in_r and amount_in_r is not None and amount_in_r > 0:
             self.match_swap_disposal(
@@ -462,7 +487,7 @@ class FIFOBasisStore:
             )
 
         # 2. Replay acquisition lot for token_out so future disposals can match it.
-        token_out = ctx.payload.get("token_out", "")
+        token_out = resolve_swap_token_symbol(ctx.payload.get("token_out", ""), ctx.chain) or ""
         if not token_out:
             return 0
         amount_out = _parse_decimal(ctx.payload.get("amount_out"))

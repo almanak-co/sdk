@@ -19,6 +19,75 @@ TEvent = TypeVar("TEvent")  # Protocol-specific event type (e.g., UniswapV3Event
 TResult = TypeVar("TResult")  # Protocol-specific result type (e.g., ParseResult)
 
 
+def resolve_swap_token_symbol(addr: str | None, chain: str) -> str | None:
+    """Resolve a swap token contract address to its canonical symbol (VIB-4487).
+
+    Shared by the SWAP receipt parsers (Aerodrome, PancakeSwap V3, SushiSwap
+    V3, Uniswap V4) that historically stamped a raw contract address into
+    ``SwapAmounts.token_in`` / ``token_out``. A raw address propagates to
+    ``transaction_ledger.token_in`` / ``token_out`` and then into the
+    accounting swap handler, where it (a) renders as a hex string in the
+    dashboard Trade Tape and (b) — the money-correctness hazard — keys the
+    FIFO basis lot under the address while a symbol-emitting connector
+    (Uniswap V3 / Aave V3) keys the same token under its symbol, so the two
+    lots can never reconcile.
+
+    Centralising the resolution in one helper eliminates the four-way
+    duplication called out in VIB-4487 and prevents the same bug regressing
+    in any future connector.
+
+    Behaviour (Empty != zero — never fabricate a symbol):
+
+    * ``None`` / empty in → returned unchanged (caller keeps its own
+      fallback semantics; this helper does not invent a value).
+    * Non-address-shaped input (a symbol already, or Solana base58 on a
+      non-Solana chain) → returned unchanged. EVM symbols are upper-cased
+      to match the canonical form used downstream.
+    * Address-shaped input that resolves → ``ResolvedToken.symbol`` upper-cased.
+    * Address-shaped input that the resolver cannot map (unknown token,
+      missing chain, resolver exception) → the **original** address
+      lower-cased for EVM (case-insensitive) / preserved for Solana
+      (base58 is case-sensitive), so the audit trail still points back to
+      chain state.
+
+    ``skip_gateway=True`` keeps the parser latency-bounded against the
+    static + memory cache (no 30s gateway timeout on the receipt-parse hot
+    path); ``log_errors=False`` silences expected misses for exotic tokens.
+    """
+    if not addr:
+        return addr
+    chain_lower = (chain or "").lower().strip()
+    s = addr.strip()
+    s_lower = s.lower()
+    looks_like_evm = s_lower.startswith("0x") and len(s) == 42
+    # Solana base58 is case-SENSITIVE, so we must NOT gate this on
+    # ``chain_lower == "solana"`` (Gemini review): a base58 mint that arrives
+    # with a missing / empty chain would otherwise fall into the symbol branch
+    # below and be ``.upper()``-ed, corrupting the address. Detect base58
+    # shape by structure alone (no ``0x`` prefix, 32–44 chars) and preserve
+    # its case on every downstream path.
+    looks_like_solana = not s_lower.startswith("0x") and 32 <= len(s) <= 44
+    if not (looks_like_evm or looks_like_solana):
+        # Already a symbol (or non-address text) — canonicalise EVM-style
+        # symbols to upper-case; address-shaped values are handled below.
+        return s.upper()
+    if not chain_lower:
+        # No chain → cannot disambiguate cross-chain addresses. Preserve the
+        # original (lower-cased for EVM) so downstream keys stay consistent.
+        return s_lower if looks_like_evm else s
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        lookup_value = s_lower if looks_like_evm else s
+        info = resolver.resolve(lookup_value, chain=chain_lower, log_errors=False, skip_gateway=True)
+    except Exception:  # noqa: BLE001 — resolver miss is expected; fall through to the address.
+        return s_lower if looks_like_evm else s
+    if info is None or not info.symbol:
+        return s_lower if looks_like_evm else s
+    return info.symbol.upper()
+
+
 @dataclass
 class ParseResult[TResult]:
     """Generic parse result wrapper.

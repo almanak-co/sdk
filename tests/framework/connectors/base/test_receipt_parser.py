@@ -608,3 +608,68 @@ class TestParseReceiptEdgeCases:
         if len(result.events) > 0:
             assert result.events[0].contract_address == ""
             assert result.events[0].log_index == 0
+
+
+class TestResolveSwapTokenSymbol:
+    """VIB-4487: the shared address->symbol resolver used by the SWAP
+    receipt parsers (Aerodrome, PancakeSwap V3, SushiSwap V3, Uniswap V4)
+    so the ledger ``token_in`` / ``token_out`` carry canonical symbols and
+    the downstream FIFO basis key / accounting identity reconcile across
+    connectors.
+    """
+
+    # Real Base mainnet addresses present in the static registry.
+    _USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    _WETH_BASE = "0x4200000000000000000000000000000000000006"
+
+    def test_resolves_known_evm_address_to_symbol(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        assert resolve_swap_token_symbol(self._USDC_BASE, "base") == "USDC"
+        assert resolve_swap_token_symbol(self._WETH_BASE, "base") == "WETH"
+        # Upper-cased input still resolves (helper lowercases internally).
+        assert resolve_swap_token_symbol(self._USDC_BASE.upper(), "base") == "USDC"
+
+    def test_symbol_passes_through_uppercased(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        assert resolve_swap_token_symbol("USDC", "base") == "USDC"
+        assert resolve_swap_token_symbol("weth", "base") == "WETH"
+
+    def test_none_and_empty_pass_through_unchanged(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        assert resolve_swap_token_symbol(None, "base") is None
+        assert resolve_swap_token_symbol("", "base") == ""
+
+    def test_unresolvable_address_falls_through_lowercased(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        unknown = "0x000000000000000000000000000000000000dEAD"
+        # Not in the registry -> falls through to the lower-cased address
+        # (audit trail preserved; FIFO key lowercases anyway). Empty != zero.
+        assert resolve_swap_token_symbol(unknown, "base") == unknown.lower()
+
+    def test_no_chain_preserves_evm_address_lowercased(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        # Without a chain the resolver cannot disambiguate -> fall through.
+        assert resolve_swap_token_symbol(self._USDC_BASE, "") == self._USDC_BASE.lower()
+
+    def test_solana_base58_resolves_with_case_preserved(self) -> None:
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        # Solana USDC mint (case-sensitive base58).
+        usdc_sol = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        assert resolve_swap_token_symbol(usdc_sol, "solana") == "USDC"
+
+    def test_solana_base58_case_preserved_without_chain(self) -> None:
+        """Gemini review: a base58 mint that arrives with a missing / empty
+        chain must NOT be uppercased (base58 is case-sensitive). Detection is
+        by structure alone — not gated on ``chain == "solana"`` — so the
+        original case is preserved on the no-chain fall-through path."""
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        usdc_sol = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        # No chain → cannot resolve, but must preserve case verbatim (NOT upper).
+        assert resolve_swap_token_symbol(usdc_sol, "") == usdc_sol

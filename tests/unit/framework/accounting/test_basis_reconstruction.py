@@ -1013,3 +1013,97 @@ class TestVIB4078ReplayHelpers:
         result = store.match_repay(dep, pk, "USDC", Decimal("1004"))
         assert result.matching_policy_version == MATCHING_POLICY_VERSION
         assert result.matching_policy_version >= 3  # bumped by VIB-3964
+
+
+# ---------------------------------------------------------------------------
+# VIB-4487 audit Fold B — retroactive FIFO-key healing on replay
+# ---------------------------------------------------------------------------
+
+# Real Base mainnet WETH address (present in the static registry → resolves
+# offline at boot via the resolver fast path).
+_WETH_BASE = "0x4200000000000000000000000000000000000006"
+
+
+class TestSwapFifoKeyHealingOnReplay:
+    """VIB-4487 audit Fold B: an OLD address-keyed SWAP acquisition payload
+    (written by a pre-fix address-emitting connector) must reconcile against
+    a NEW symbol-keyed disposal after a runner restart. The replay path
+    canonicalizes the persisted token to its symbol on read, so the lot keys
+    under the canonical identity and the upgrade transition window vanishes.
+
+    Reuses the module-level ``_swap_row`` helper (signature: deployment_id,
+    position_key, chain, wallet, token_in, token_out, amount_in, amount_out,
+    amount_out_usd) — ``chain`` is a TOP-LEVEL row column, which is where
+    ``_row_context`` reads it for the Fold-B canonicalization.
+    """
+
+    def test_old_address_keyed_acquisition_matches_new_symbol_disposal(self):
+        dep = "dep-heal"
+        chain = "base"
+        wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        events = [
+            # OLD acquisition: 1 WETH bought with 2000 USDC, token_out
+            # persisted as the raw ADDRESS (pre-VIB-4487 address-emitting
+            # connector), cost $2000.
+            _swap_row(
+                dep, swap_pk, chain, wallet,
+                token_in="USDC", token_out=_WETH_BASE,  # address — pre-fix shape
+                amount_in=Decimal("2000"), amount_out=Decimal("1"),
+                amount_out_usd=Decimal("2000"),
+            ),
+        ]
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events(events)
+
+        # After replay the acquisition lot must be keyed under canonical
+        # "WETH". A symbol-keyed disposal of 1 WETH fully matches it.
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="WETH",  # canonical symbol, as a post-fix disposal emits
+            amount=Decimal("1"),
+        )
+        assert unmatched == Decimal("0")  # fully reconciled — no orphan
+        assert cost_consumed == Decimal("2000")
+
+    def test_without_healing_address_lot_would_orphan_symbol_disposal(self):
+        """Control: prove the heal is doing the work. Replaying the SAME old
+        acquisition but with NO chain on the row means the address cannot be
+        resolved, so the lot stays address-keyed and a symbol-keyed disposal
+        orphans (unmatched). This is exactly the pre-fix corruption — the
+        chain column on the row is what enables the heal.
+        """
+        dep = "dep-heal-control"
+        chain = ""  # no chain → resolver no-ops → address-keyed lot
+        wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+        # _swap_row builds the payload swap_position_key from chain+wallet, so
+        # with an empty chain it is ``swap::<wallet>``; use the SAME key for
+        # the disposal so the ONLY thing that can mismatch is the token
+        # identity (address-keyed lot vs symbol disposal) — that isolates the
+        # heal as the variable under test.
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        events = [
+            _swap_row(
+                dep, swap_pk, chain, wallet,
+                token_in="USDC", token_out=_WETH_BASE,
+                amount_in=Decimal("2000"), amount_out=Decimal("1"),
+                amount_out_usd=Decimal("2000"),
+            ),
+        ]
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events(events)
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="WETH",
+            amount=Decimal("1"),
+        )
+        # No lot under "WETH" → entire disposal unmatched.
+        assert cost_consumed is None
+        assert unmatched == Decimal("1")

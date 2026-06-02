@@ -871,12 +871,15 @@ class TestSwapAddressKeyedTokenResolution:
         # USD amounts must be priced — 2 * $1 and 0.001 * $2000 = $2 each.
         assert event.amount_in_usd == Decimal("2.0")
         assert event.amount_out_usd == Decimal("2.000")
-        # The event still surfaces the ORIGINAL address values on the
-        # ``token_in`` / ``token_out`` fields (uppercased, same as today).
-        # The resolved symbol is used ONLY as the price lookup key — it is
-        # NOT a substitute for the source-of-truth ledger value.
-        assert event.token_in == self._USDC_BASE.upper()
-        assert event.token_out == self._WETH_BASE.upper()
+        # VIB-4487: the resolved symbol is now the CANONICAL token identity —
+        # it drives the FIFO basis-store key and the SwapAccountingEvent
+        # identity hash, not just the price lookup. So ``token_in`` /
+        # ``token_out`` surface the resolved symbol (``USDC`` / ``WETH``)
+        # rather than the raw address. This is the whole point of VIB-4487:
+        # two swaps of the same token via different connectors must share one
+        # canonical identity so their FIFO lots reconcile.
+        assert event.token_in == "USDC"
+        assert event.token_out == "WETH"
 
     def test_handle_swap_address_keyed_only_one_side_still_resolves(self) -> None:
         """A row where one side is an address and the other is a symbol —
@@ -954,11 +957,15 @@ class TestSwapAddressKeyedTokenResolution:
         assert event.amount_out_usd == Decimal("2.000")
         # token_in misses → USD amount is None.
         assert event.amount_in_usd is None
-        # The unavailable_reason names the ORIGINAL token (uppercased
-        # address, same shape as the event.token_in field), not a phantom
-        # symbol nor an empty string.
+        # The unavailable_reason names the ORIGINAL token (not a phantom
+        # symbol nor an empty string), so the audit trail still points back
+        # to chain state — Empty != zero. VIB-4487 audit Fold A: on a
+        # resolver miss the shared canonicalization lowercases the EVM
+        # address (byte-identical regardless of source case, so the FIFO
+        # lot key and the ledger value cannot diverge across connectors).
         assert "missing prices" in event.unavailable_reason
-        assert unknown_addr.upper() in event.unavailable_reason
+        assert unknown_addr.lower() in event.unavailable_reason
+        assert event.token_in == unknown_addr.lower()
 
     def test_handle_swap_no_chain_falls_through(self) -> None:
         """Defensive: a ledger row with no ``chain`` cannot be resolved
@@ -984,9 +991,12 @@ class TestSwapAddressKeyedTokenResolution:
         # Both lookups miss → both USD amounts None.
         assert event.amount_in_usd is None
         assert event.amount_out_usd is None
-        # Both addresses surface in the unavailable_reason.
-        assert self._USDC_BASE.upper() in event.unavailable_reason
-        assert self._WETH_BASE.upper() in event.unavailable_reason
+        # Both addresses surface in the unavailable_reason. VIB-4487 audit
+        # Fold A: with no chain the resolver cannot run, so the shared
+        # canonicalization falls through to the EVM address lowercased
+        # (byte-identical regardless of source case).
+        assert self._USDC_BASE.lower() in event.unavailable_reason
+        assert self._WETH_BASE.lower() in event.unavailable_reason
 
     def test_resolve_price_lookup_key_helper_pass_through_for_symbol(self) -> None:
         """Direct unit test for ``_resolve_price_lookup_key``: symbol-shaped
@@ -1046,3 +1056,101 @@ class TestSwapAddressKeyedTokenResolution:
 
         assert _resolve_price_lookup_key("usdc", "base") == "USDC"
         assert _resolve_price_lookup_key("WeTh", "base") == "WETH"
+
+
+class TestSwapCrossConnectorBasisIdentity:
+    """VIB-4487 proving tests: the token identity that seeds the FIFO basis
+    key and the SwapAccountingEvent identity hash must be the resolved
+    canonical symbol, not the raw per-connector ``token_in`` / ``token_out``
+    string. Otherwise a token acquired via an address-emitting connector
+    (Aerodrome / PancakeSwap V3 / SushiSwap V3 / Uniswap V4) can never match
+    a disposal of the same token that came in as a symbol-keyed lot
+    (Uniswap V3 / Aave V3) — latent cross-event basis corruption.
+    """
+
+    _USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    _WETH_BASE = "0x4200000000000000000000000000000000000006"
+
+    def test_acquisition_and_disposal_across_connectors_land_in_same_fifo_lot(self) -> None:
+        """Acquire WETH via an address-emitting connector, then dispose of it
+        via a symbol-emitting connector. The disposal must FIFO-match the
+        earlier acquisition (cost basis fully consumed, zero unmatched), which
+        is only possible if both keyed the lot under the canonical ``WETH``
+        identity.
+        """
+        store = FIFOBasisStore()
+        price_json = _price_json({"USDC": "1.0", "WETH": "2000.0"})
+
+        # SWAP 1 — buy 0.001 WETH with 2 USDC via Aerodrome, which stamps the
+        # WETH contract ADDRESS into token_out. Records a WETH acquisition lot.
+        ledger_buy = _make_ledger_row(
+            token_in=self._USDC_BASE,
+            amount_in="2",
+            token_out=self._WETH_BASE,  # address-shaped
+            amount_out="0.001",
+            protocol="aerodrome",
+            chain="base",
+            price_inputs_json=price_json,
+            tx_hash="0xbuy",
+        )
+        buy = handle_swap(_make_outbox_row(), ledger_buy, store)
+        assert buy is not None
+        assert buy.token_out == "WETH"  # canonical identity, not the address
+        assert buy.cost_basis_recorded is True
+
+        # SWAP 2 — sell the 0.001 WETH for 2.10 USDC via Uniswap V3, which
+        # stamps the WETH SYMBOL into token_in. Must consume the lot above.
+        ledger_sell = _make_ledger_row(
+            token_in="WETH",  # symbol-shaped
+            amount_in="0.001",
+            token_out="USDC",
+            amount_out="2.10",
+            protocol="uniswap_v3",
+            chain="base",
+            price_inputs_json=price_json,
+            tx_hash="0xsell",
+        )
+        sell = handle_swap(_make_outbox_row(), ledger_sell, store)
+        assert sell is not None
+        assert sell.token_in == "WETH"
+        # The lot matched: nothing unmatched and a MEASURED realized PnL
+        # (not None — None would mean "no lot found"). This is the core
+        # VIB-4487 proof: the address-keyed acquisition and the symbol-keyed
+        # disposal reconciled because both keyed under canonical ``WETH``.
+        assert sell.unmatched_amount_in == Decimal("0")
+        assert sell.realized_pnl_usd is not None
+        # Realized PnL here = disposed-WETH USD value ($2.00 at the oracle
+        # $2000/WETH) - recorded cost basis ($2.00) = $0.00, measured.
+        assert sell.realized_pnl_usd == Decimal("0")
+
+    def test_pre_fix_address_keyed_lot_would_not_match_symbol_disposal(self) -> None:
+        """Control: prove the match in the test above depends on canonical
+        resolution. If the acquisition lot is keyed under the raw ADDRESS
+        (the pre-VIB-4487 shape, simulated by recording directly), a
+        symbol-keyed disposal finds NO lot and reports the full amount as
+        unmatched — the exact latent corruption VIB-4487 closes.
+        """
+        store = FIFOBasisStore()
+        wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+        position_key = f"swap:base:{wallet.lower()}"
+
+        # Simulate the buggy past: a WETH lot keyed under the raw address.
+        store.record_swap_acquisition(
+            deployment_id=_DEPLOYMENT_ID,
+            position_key=position_key,
+            token=self._WETH_BASE,  # raw address — the bug
+            amount=Decimal("0.001"),
+            cost_usd=Decimal("2.0"),
+            timestamp=datetime.now(UTC),
+            lot_id="lot-addr",
+        )
+
+        # A symbol-keyed disposal of the same token cannot find the lot.
+        cost, unmatched = store.match_swap_disposal(
+            deployment_id=_DEPLOYMENT_ID,
+            position_key=position_key,
+            token="WETH",  # canonical symbol
+            amount=Decimal("0.001"),
+        )
+        assert cost is None  # no lot matched
+        assert unmatched == Decimal("0.001")  # entire disposal unmatched

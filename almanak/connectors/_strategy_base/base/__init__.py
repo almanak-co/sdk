@@ -42,7 +42,11 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.connectors._strategy_base.base.event import BaseEvent
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
-from almanak.connectors._strategy_base.base.receipt_parser import BaseReceiptParser, ParseResult
+from almanak.connectors._strategy_base.base.receipt_parser import (
+    BaseReceiptParser,
+    ParseResult,
+    resolve_swap_token_symbol,
+)
 from almanak.connectors._strategy_base.base.registry import EventRegistry
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 
@@ -58,4 +62,5 @@ __all__ = [
     "EventRegistry",
     "HexDecoder",
     "ParseResult",
+    "resolve_swap_token_symbol",
 ]
