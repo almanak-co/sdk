@@ -457,28 +457,20 @@ SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str] = _build_slipstream_nft_positio
 def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
     """Union of every UniV3-shape DEX connector's LP-grouping membership.
 
-    VIB-4864 (W2-followup): replaces the hardcoded ``_UNIV3_LP_PROTOCOLS``
-    frozenset that lived in the migration backfill. Each connector declares
-    the protocol slugs it implements with the ``univ3_lp@v1`` grouping policy
-    in its ``lp_constants.py``; this aggregates the union. Mirrors the
-    VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` derivation. ``frozenset`` (not ``set``) so a
-    downstream ``protocol in UNIV3_LP_GROUPING_PROTOCOLS`` consumer cannot
-    silently widen the family by mutation.
+    VIB-4928 (PR-3b): fans out over the connector-self-registering
+    ``PROTOCOL_FAMILY_REGISTRY`` (``UNIV3_LP_GROUPING`` family) instead of
+    hand-importing each connector's ``lp_constants``. Each DEX connector
+    declares its ``univ3_lp@v1`` membership in its ``protocol_family.py``.
+    ``members`` returns a fresh ``frozenset`` (not ``set``) so a downstream
+    ``protocol in UNIV3_LP_GROUPING_PROTOCOLS`` consumer cannot silently widen
+    the family by mutation.
     """
-    from almanak.connectors.aerodrome.lp_constants import (
-        UNIV3_LP_GROUPING_PROTOCOLS as _aero_lp,
-    )
-    from almanak.connectors.pancakeswap_v3.lp_constants import (
-        UNIV3_LP_GROUPING_PROTOCOLS as _pcs_lp,
-    )
-    from almanak.connectors.sushiswap_v3.lp_constants import (
-        UNIV3_LP_GROUPING_PROTOCOLS as _sushi_lp,
-    )
-    from almanak.connectors.uniswap_v3.lp_constants import (
-        UNIV3_LP_GROUPING_PROTOCOLS as _uni_lp,
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
     )
 
-    return frozenset(_uni_lp | _sushi_lp | _pcs_lp | _aero_lp)
+    return PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.UNIV3_LP_GROUPING)
 
 
 # Protocol slugs using the Uniswap-V3-shape LP grouping policy
@@ -516,78 +508,70 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = _build_chain_tokens()
 
 # Swap-router classification + fee-tier metadata.
 #
-# VIB-4872 (W6-followup): per-DEX-connector data now lives in each
-# connector's ``swap_constants.py``:
-#
-# * ``almanak/connectors/uniswap_v3/swap_constants.py``     (uniswap_v3 + agni_finance)
-# * ``almanak/connectors/sushiswap_v3/swap_constants.py``   (sushiswap_v3)
-# * ``almanak/connectors/pancakeswap_v3/swap_constants.py`` (pancakeswap_v3)
-# * ``almanak/connectors/camelot/swap_constants.py``        (camelot — Algebra V1.9)
-#
-# The legacy module-level dicts / frozensets below are preserved as
-# derived read-only views aggregated at view-build time. Mutating them
-# has no production effect; edit the connector's ``swap_constants.py``
-# to change behaviour.
-
-
-def _swap_constants_sources() -> tuple[Any, ...]:
-    """Lazy-import every DEX connector's ``swap_constants`` module.
-
-    Returns the modules themselves so the per-dict aggregator helpers
-    below can pluck whichever symbol they need without each helper
-    re-paying the import cost.
-    """
-    from almanak.connectors.pancakeswap_v3 import swap_constants as _pcsv3_sc
-    from almanak.connectors.sushiswap_v3 import swap_constants as _sushi_sc
-    from almanak.connectors.uniswap_v3 import swap_constants as _uni_sc
-
-    return (_uni_sc, _sushi_sc, _pcsv3_sc)
+# VIB-4928 (PR-3b): per-DEX-connector classification now lives in each
+# connector's ``swap_classification.py`` (a ``SWAP_CLASSIFICATION`` spec tuple)
+# and fans out over the connector-self-registering
+# ``SWAP_CLASSIFICATION_REGISTRY`` (``_strategy_swap_classification_registry.py``)
+# — uniswap_v3 (+ agni_finance), sushiswap_v3, pancakeswap_v3, camelot (Algebra
+# V1.9). The legacy module-level dicts / frozensets below are preserved as
+# derived read-only views built from the registry. Mutating them has no
+# production effect; edit the connector's ``swap_classification.py`` (or add one
+# + a boot-file import line for a new DEX) to change behaviour. Cross-connector
+# fee-tier collisions raise at registration time (see
+# ``SwapClassificationRegistry.register``).
 
 
 def _build_swap_fee_tiers() -> dict[str, tuple[int, ...]]:
-    tiers: dict[str, tuple[int, ...]] = {}
-    for source in _swap_constants_sources():
-        for protocol, entry in source.SWAP_FEE_TIERS.items():
-            if protocol in tiers and tiers[protocol] != entry:
-                raise ValueError(
-                    f"protocol {protocol!r} has conflicting SWAP_FEE_TIERS contributions: {tiers[protocol]} vs {entry}"
-                )
-            tiers[protocol] = entry
-    return tiers
+    """Materialize ``SWAP_FEE_TIERS`` from the swap-classification registry.
+
+    VIB-4928 (PR-3b): fans out over the connector-self-registering
+    ``SWAP_CLASSIFICATION_REGISTRY`` instead of hand-importing each DEX
+    connector's ``swap_constants``. Cross-connector fee-tier collisions are
+    detected at registration time by ``SwapClassificationRegistry.register``
+    (raising ``SwapClassificationConflictError``, a ``ValueError``), preserving
+    the pre-PR-3b guard that lived in this builder.
+    """
+    from almanak.connectors._strategy_swap_classification_registry import (
+        SWAP_CLASSIFICATION_REGISTRY,
+    )
+
+    return SWAP_CLASSIFICATION_REGISTRY.fee_tiers()
 
 
 def _build_default_swap_fee_tier() -> dict[str, int]:
-    defaults: dict[str, int] = {}
-    for source in _swap_constants_sources():
-        for protocol, fee in source.DEFAULT_SWAP_FEE_TIER.items():
-            if protocol in defaults and defaults[protocol] != fee:
-                raise ValueError(
-                    f"protocol {protocol!r} has conflicting DEFAULT_SWAP_FEE_TIER contributions: "
-                    f"{defaults[protocol]} vs {fee}"
-                )
-            defaults[protocol] = fee
-    return defaults
+    """Materialize ``DEFAULT_SWAP_FEE_TIER`` from the swap-classification registry."""
+    from almanak.connectors._strategy_swap_classification_registry import (
+        SWAP_CLASSIFICATION_REGISTRY,
+    )
+
+    return SWAP_CLASSIFICATION_REGISTRY.default_fee_tiers()
 
 
 def _build_swap_router_v1_protocols() -> frozenset[str]:
-    members: set[str] = set()
-    for source in _swap_constants_sources():
-        members |= source.SWAP_ROUTER_V1_PROTOCOLS
-    return frozenset(members)
+    """Materialize ``SWAP_ROUTER_V1_PROTOCOLS`` from the registry (union)."""
+    from almanak.connectors._strategy_swap_classification_registry import (
+        SWAP_CLASSIFICATION_REGISTRY,
+    )
+
+    return SWAP_CLASSIFICATION_REGISTRY.router_v1_protocols()
 
 
 def _build_swap_router_v1_chain_overrides() -> dict[str, frozenset[str]]:
-    overrides: dict[str, set[str]] = {}
-    for source in _swap_constants_sources():
-        for chain, protocols in source.SWAP_ROUTER_V1_CHAIN_OVERRIDES.items():
-            overrides.setdefault(chain, set()).update(protocols)
-    return {chain: frozenset(protos) for chain, protos in overrides.items()}
+    """Materialize ``SWAP_ROUTER_V1_CHAIN_OVERRIDES`` from the registry (per-chain union)."""
+    from almanak.connectors._strategy_swap_classification_registry import (
+        SWAP_CLASSIFICATION_REGISTRY,
+    )
+
+    return SWAP_CLASSIFICATION_REGISTRY.router_v1_chain_overrides()
 
 
 def _build_swap_router_algebra_protocols() -> frozenset[str]:
-    from almanak.connectors.camelot.swap_constants import SWAP_ROUTER_ALGEBRA_PROTOCOLS as _ca
+    """Materialize ``SWAP_ROUTER_ALGEBRA_PROTOCOLS`` from the registry (union)."""
+    from almanak.connectors._strategy_swap_classification_registry import (
+        SWAP_CLASSIFICATION_REGISTRY,
+    )
 
-    return _ca
+    return SWAP_CLASSIFICATION_REGISTRY.router_algebra_protocols()
 
 
 SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = _build_swap_fee_tiers()
@@ -810,14 +794,18 @@ NFT_POSITION_BURN_SELECTOR = "0x42966c68"
 
 
 # Protocols sharing the Aave V3 lending-pool interface (same ABI,
-# different addresses). VIB-4872: derived from the V3-family connector
-# membership. CodeRabbit (PR #2478): read-only by contract — keep it as a
-# ``frozenset`` rather than ``set`` so accidental mutation by a downstream
-# consumer raises rather than silently widening the family.
+# different addresses). VIB-4928 (PR-3b): derived from the connector-self-
+# registering ``PROTOCOL_FAMILY_REGISTRY`` (``AAVE_V3`` family) instead of
+# hand-importing ``aave_v3.lending_constants``. Read-only by contract —
+# ``members`` returns a fresh ``frozenset`` so a downstream consumer cannot
+# silently widen the family by mutation.
 def _build_aave_compatible_protocols() -> frozenset[str]:
-    from almanak.connectors.aave_v3.lending_constants import AAVE_V3_FAMILY_PROTOCOLS
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
 
-    return frozenset(AAVE_V3_FAMILY_PROTOCOLS)
+    return PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.AAVE_V3)
 
 
 AAVE_COMPATIBLE_PROTOCOLS: frozenset[str] = _build_aave_compatible_protocols()

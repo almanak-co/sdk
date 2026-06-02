@@ -2,10 +2,12 @@
 
 VIB-4872 collapsed the per-(chain, protocol) address dicts in
 ``framework/intents/compiler_constants.py`` into derived views over each
-connector's ``addresses.py`` / ``swap_constants.py`` / ``lending_constants.py``
-data. Behaviour is byte-equivalent by construction — but the only thing
-keeping it that way is the exact aggregation logic in the
-``_build_*`` helpers.
+connector's ``addresses.py`` / ``swap_classification.py`` / ``protocol_family.py``
+data (VIB-4928 PR-3b moved the swap/lending classification half off the retired
+``swap_constants.py`` / ``lp_constants.py`` / ``lending_constants.py`` onto the
+connector-self-registering registries). Behaviour is byte-equivalent by
+construction — but the only thing keeping it that way is the exact aggregation
+logic in the ``_build_*`` helpers.
 
 These tests pin the historical snapshot of every migrated dict /
 frozenset so a future "tidy up the helper" refactor cannot silently
@@ -339,38 +341,101 @@ class TestLpPositionManagersDerivedView:
 
 
 class TestCrossConnectorCollisionDetection:
-    """The collision guard in `_build_swap_fee_tiers` / `_build_default_swap_fee_tier`
-    raises if two connectors publish conflicting values for the same protocol.
+    """The swap-classification registry raises if two connectors register the
+    same protocol slug with conflicting fee-tier / default-fee-tier values.
 
-    Smoke-test the guard by monkey-patching one connector's contribution
-    to disagree with another's — the rebuild should fail loudly.
+    VIB-4928 (PR-3b) moved this collision gate from the ``_build_swap_fee_tiers``
+    / ``_build_default_swap_fee_tier`` consumers onto
+    ``SwapClassificationRegistry.register``; the SEMANTIC — two conflicting
+    contributions for one slug raise ``ValueError`` — is preserved (the
+    ``match=`` strings are byte-identical). A synthetic ``__test_dex__`` slug is
+    registered so the assertion never collides with a boot-populated real slug,
+    and it is popped afterwards so it cannot leak into the shared registry other
+    tests read.
     """
 
-    def test_swap_fee_tiers_collision_detected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from almanak.connectors.sushiswap_v3 import swap_constants as _sushi_sc
-        from almanak.framework.intents import compiler_constants as cc
-
-        # Fake a conflicting contribution from sushiswap (publishes
-        # "uniswap_v3" with a different fee-tier set than the canonical
-        # uniswap_v3 connector). The aggregator should raise.
-        monkeypatch.setattr(
-            _sushi_sc,
-            "SWAP_FEE_TIERS",
-            {"uniswap_v3": (1, 2, 3)},
+    def test_swap_fee_tiers_collision_detected(self) -> None:
+        from almanak.connectors._strategy_base.swap_classification_registry import (
+            SwapClassificationRegistry,
+            SwapClassificationSpec,
         )
-        with pytest.raises(ValueError, match="conflicting SWAP_FEE_TIERS"):
-            cc._build_swap_fee_tiers()
 
-    def test_default_swap_fee_tier_collision_detected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from almanak.connectors.sushiswap_v3 import swap_constants as _sushi_sc
-        from almanak.framework.intents import compiler_constants as cc
+        try:
+            SwapClassificationRegistry.register(
+                SwapClassificationSpec(protocol="__test_dex__", fee_tiers=(100, 500), default_fee_tier=100)
+            )
+            # A second registration of the same slug with a different fee-tier
+            # set must fail loudly.
+            with pytest.raises(ValueError, match="conflicting SWAP_FEE_TIERS"):
+                SwapClassificationRegistry.register(
+                    SwapClassificationSpec(protocol="__test_dex__", fee_tiers=(1, 2, 3), default_fee_tier=100)
+                )
+        finally:
+            SwapClassificationRegistry._specs.pop("__test_dex__", None)
 
-        monkeypatch.setattr(
-            _sushi_sc,
-            "DEFAULT_SWAP_FEE_TIER",
-            {"uniswap_v3": 100},
+    def test_default_swap_fee_tier_collision_detected(self) -> None:
+        from almanak.connectors._strategy_base.swap_classification_registry import (
+            SwapClassificationRegistry,
+            SwapClassificationSpec,
         )
-        with pytest.raises(ValueError, match="conflicting DEFAULT_SWAP_FEE_TIER"):
-            cc._build_default_swap_fee_tier()
+
+        try:
+            SwapClassificationRegistry.register(
+                SwapClassificationSpec(protocol="__test_dex__", fee_tiers=(100, 500), default_fee_tier=100)
+            )
+            # Same fee tiers, conflicting default tier → DEFAULT collision.
+            with pytest.raises(ValueError, match="conflicting DEFAULT_SWAP_FEE_TIER"):
+                SwapClassificationRegistry.register(
+                    SwapClassificationSpec(protocol="__test_dex__", fee_tiers=(100, 500), default_fee_tier=500)
+                )
+        finally:
+            SwapClassificationRegistry._specs.pop("__test_dex__", None)
+
+    def test_router_roles_union_not_overwritten(self) -> None:
+        """Same slug, matching fee tiers, differing router roles → union (merge).
+
+        The fee-tier roles are collision-checked; the router roles
+        (``router_v1`` / ``router_v1_chains`` / ``router_algebra``) are
+        union-semantics, mirroring the pre-PR-3b ``_build_swap_router_*``
+        builders' ``|=`` / ``.update``. A second contribution for one slug must
+        merge — not clobber — those roles, else a fork adding a chain-specific
+        V1 override for an existing slug would silently lose it depending on
+        registration order.
+        """
+        from almanak.connectors._strategy_base.swap_classification_registry import (
+            SwapClassificationRegistry,
+            SwapClassificationSpec,
+        )
+
+        try:
+            SwapClassificationRegistry.register(
+                SwapClassificationSpec(
+                    protocol="__test_dex__",
+                    fee_tiers=(100, 500),
+                    default_fee_tier=100,
+                    router_v1=False,
+                    router_v1_chains=("mantle",),
+                    router_algebra=False,
+                )
+            )
+            # Same fee-tier roles; each router role flips / adds a chain.
+            SwapClassificationRegistry.register(
+                SwapClassificationSpec(
+                    protocol="__test_dex__",
+                    fee_tiers=(100, 500),
+                    default_fee_tier=100,
+                    router_v1=True,
+                    router_v1_chains=("zerog",),
+                    router_algebra=True,
+                )
+            )
+            merged = SwapClassificationRegistry._specs["__test_dex__"]
+            assert merged.router_v1 is True
+            assert merged.router_algebra is True
+            # Ordered set-union: first contribution's chain precedes the second's.
+            assert merged.router_v1_chains == ("mantle", "zerog")
+            # Fee-tier roles are untouched by the merge.
+            assert merged.fee_tiers == (100, 500)
+            assert merged.default_fee_tier == 100
+        finally:
+            SwapClassificationRegistry._specs.pop("__test_dex__", None)

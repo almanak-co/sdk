@@ -157,9 +157,10 @@ def test_fold_skips_non_univ3_protocol() -> None:
     assert row is None
 
 
-# VIB-4864: ``_UNIV3_LP_PROTOCOLS`` is no longer a hardcoded literal — it is
-# the ``UNIV3_LP_GROUPING_PROTOCOLS`` union derived in ``compiler_constants``
-# from each UniV3-shape connector's ``lp_constants``. These tests pin the
+# VIB-4864 / VIB-4928 PR-3b: ``_UNIV3_LP_PROTOCOLS`` is no longer a hardcoded
+# literal — it is the ``UNIV3_LP_GROUPING_PROTOCOLS`` union derived in
+# ``compiler_constants`` from each UniV3-shape connector's ``protocol_family.py``.
+# These tests pin the
 # expected membership so a regression in any per-connector contribution (a
 # dropped slug, a typo'd alias) fails loudly here rather than silently making
 # the backfill skip a family's LP ``position_events``.

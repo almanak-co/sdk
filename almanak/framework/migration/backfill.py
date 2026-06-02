@@ -508,12 +508,12 @@ def fold_position_events_for_univ3(  # noqa: C901 — explicit identity-anchor c
 # =============================================================================
 
 
-# Protocols using the Uniswap-V3-shape LP grouping policy. VIB-4864
-# (W2-followup): derived from each UniV3-shape DEX connector's
-# ``lp_constants.UNIV3_LP_GROUPING_PROTOCOLS`` declaration via the
-# framework's ``compiler_constants`` aggregation point — no longer a
-# hardcoded list of protocol slugs in this module. Byte-equivalent to the
-# pre-VIB-4864 frozenset (mirrors the VIB-4872 ``AAVE_V3_FAMILY_PROTOCOLS`` pattern).
+# Protocols using the Uniswap-V3-shape LP grouping policy. VIB-4928
+# (PR-3b): derived from each UniV3-shape DEX connector's
+# ``protocol_family.PROTOCOL_FAMILY`` (``UNIV3_LP_GROUPING`` family)
+# declaration via the framework's ``compiler_constants`` aggregation point
+# (``PROTOCOL_FAMILY_REGISTRY``) — no longer a hardcoded list of protocol slugs
+# in this module. Byte-equivalent to the pre-VIB-4864 frozenset.
 _UNIV3_LP_PROTOCOLS: frozenset[str] = UNIV3_LP_GROUPING_PROTOCOLS
 
 
