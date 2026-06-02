@@ -516,37 +516,47 @@ class TestInferredClosedState:
 
 
 class TestRealizedInterestRendering:
-    """W1-6 (T3b): sub-cent realized interest must be visible in the renderer."""
+    """W1-6 (T3b) + VIB-4974: sub-cent realized interest must be visible in
+    the renderer AND signed/labelled by side (paid vs earned)."""
 
-    def test_subcent_realized_interest_renders_with_six_decimals(self):
+    def test_subcent_supply_yield_renders_earned_positive(self):
+        # VIB-4974: supply-side yield → "Interest earned: +$…".
         pos = LendingPositionSummary(
             position_key="key",
             protocol="aave_v3",
             chain="arbitrum",
             asset="USDC",
             market_id="0xm",
+            total_interest_earned_usd=Decimal("0.000634"),
             total_interest_delta_usd=Decimal("0.000634"),
         )
         section = LendingSection(positions=[pos])
         out = render_lending_section(section)
         # Old _m() formatter would have shown "$0.00".  _m_signed preserves
         # the 6th decimal so the value is honest.
-        assert "Realized interest:" in out
+        assert "Interest earned:" in out
         assert "+$0.000634" in out
+        assert "Interest paid:" not in out
 
-    def test_negative_realized_interest_for_borrow_side(self):
+    def test_subcent_borrow_cost_renders_paid_negative(self):
+        # VIB-4974 core fix: borrow interest paid is a COST.  Pre-fix this
+        # printed "+$0.000237" (a phantom gain); it must now render under an
+        # "Interest paid" label with a leading minus.
         pos = LendingPositionSummary(
             position_key="key",
             protocol="aave_v3",
             chain="arbitrum",
             asset="USDT",
             market_id="0xm",
+            total_interest_paid_usd=Decimal("0.000237"),
             total_interest_delta_usd=Decimal("-0.000237"),
         )
         section = LendingSection(positions=[pos])
         out = render_lending_section(section)
-        assert "Realized interest:" in out
+        assert "Interest paid:" in out
         assert "-$0.000237" in out
+        assert "Interest earned:" not in out
+        assert "+$0.000237" not in out  # never a gain
 
     def test_zero_interest_line_suppressed(self):
         pos = LendingPositionSummary(
@@ -555,11 +565,73 @@ class TestRealizedInterestRendering:
             chain="arbitrum",
             asset="USDC",
             market_id="0xm",
-            total_interest_delta_usd=Decimal("0"),
         )
         section = LendingSection(positions=[pos])
         out = render_lending_section(section)
-        assert "Realized interest:" not in out
+        assert "Interest paid:" not in out
+        assert "Interest earned:" not in out
+        assert "Net interest:" not in out
+
+    def test_mixed_same_asset_shows_both_gross_components(self):
+        # VIB-4974: a same-asset supply+borrow position sharing one key must
+        # show BOTH gross legs plus a net line — never collapse the paid
+        # borrow cost into a single netted figure.
+        pos = LendingPositionSummary(
+            position_key="key",
+            protocol="aave_v3",
+            chain="arbitrum",
+            asset="USDC",
+            market_id="0xm",
+            position_type="MIXED",
+            total_interest_paid_usd=Decimal("0.30"),
+            total_interest_earned_usd=Decimal("0.50"),
+            total_interest_delta_usd=Decimal("0.20"),
+        )
+        section = LendingSection(positions=[pos])
+        out = render_lending_section(section)
+        assert "Interest paid:    -$0.300000" in out
+        assert "Interest earned:  +$0.500000" in out
+        assert "Net interest:     +$0.200000" in out
+
+
+class TestRealizedInterestSigningFromEvents:
+    """VIB-4974: ``build_lending_report`` must SIGN realized interest by the
+    event side.  ``interest_delta_usd`` is a positive magnitude on the event
+    for both debt- and supply-side closes; the read-side report applies the
+    sign (debt = cost = negative; supply = yield = positive)."""
+
+    def test_repay_interest_aggregates_negative(self):
+        # Borrow leg: BORROW then REPAY carrying +0.000237 interest magnitude.
+        repay = _repay_event(asset="USDT")
+        repay.interest_delta_usd = Decimal("0.000237")
+        data = _make_data([repay, _borrow_event(asset="USDT")], snapshot=None)
+        pos = build_lending_report(data).positions[0]
+        assert pos.position_type == "BORROW"
+        assert pos.total_interest_paid_usd == Decimal("0.000237")
+        assert pos.total_interest_earned_usd == Decimal("0")
+        # Net is a COST → negative.
+        assert pos.total_interest_delta_usd == Decimal("-0.000237")
+
+    def test_deleverage_interest_aggregates_negative(self):
+        # DELEVERAGE routes through match_repay like REPAY → debt-side cost.
+        delev = _repay_event(asset="USDT")
+        delev.event_type = LendingEventType.DELEVERAGE
+        delev.interest_delta_usd = Decimal("0.001500")
+        data = _make_data([delev, _borrow_event(asset="USDT")], snapshot=None)
+        pos = build_lending_report(data).positions[0]
+        assert pos.total_interest_paid_usd == Decimal("0.001500")
+        assert pos.total_interest_delta_usd == Decimal("-0.001500")
+        assert pos.deleverage_count == 1
+
+    def test_withdraw_interest_aggregates_positive(self):
+        # Supply leg: SUPPLY then WITHDRAW carrying +0.000634 yield magnitude.
+        data = _make_data([_withdraw_event(asset="USDC"), _supply_event(asset="USDC")], snapshot=None)
+        pos = build_lending_report(data).positions[0]
+        assert pos.position_type == "SUPPLY"
+        assert pos.total_interest_earned_usd == Decimal("0.0006340")
+        assert pos.total_interest_paid_usd == Decimal("0")
+        # Net is a YIELD → positive.
+        assert pos.total_interest_delta_usd == Decimal("0.0006340")
 
 
 # ---------------------------------------------------------------------------
@@ -583,9 +655,7 @@ class TestSubCentUnrealizedCarryRendering:
         section = build_lending_report(data)
         out = render_lending_section(section, snapshot=snap)
         assert "Unrealized carry:" in out
-        assert "+$0.000528" in out, (
-            f"sub-cent supply unrealized must render with 6dp precision; got:\n{out}"
-        )
+        assert "+$0.000528" in out, f"sub-cent supply unrealized must render with 6dp precision; got:\n{out}"
         # Critically not collapsed to "$0.00" — the bug the PRD §A.6.3 names.
         assert "Unrealized carry: +$0.00\n" not in out
         assert "Unrealized carry:  $0.00\n" not in out
@@ -625,8 +695,7 @@ class TestSubCentUnrealizedCarryRendering:
         out = render_lending_section(section, snapshot=snap)
         assert "Unrealized carry:" in out
         assert "-$0.000196" in out, (
-            f"sub-cent borrow unrealized must render with 6dp precision and "
-            f"minus sign; got:\n{out}"
+            f"sub-cent borrow unrealized must render with 6dp precision and minus sign; got:\n{out}"
         )
 
     def test_subcent_net_carry_footer_renders_with_six_decimals(self):
@@ -664,9 +733,7 @@ class TestSubCentUnrealizedCarryRendering:
         section = build_lending_report(data)
         out = render_lending_section(section, snapshot=snap)
         assert "Net unrealized:" in out
-        assert "+$0.000332" in out, (
-            f"net carry footer must render the sub-cent aggregate; got:\n{out}"
-        )
+        assert "+$0.000332" in out, f"net carry footer must render the sub-cent aggregate; got:\n{out}"
 
 
 # ---------------------------------------------------------------------------
@@ -750,19 +817,13 @@ class TestMultiProtocolRender:
         assert "+$0.000528" in out
         assert "+$0.000300" in out
         # Net footer combines them: 0.0005280 + 0.0003 = 0.000828.
-        assert "+$0.000828" in out, (
-            f"multi-protocol Net unrealized footer must sum both legs; got:\n{out}"
-        )
+        assert "+$0.000828" in out, f"multi-protocol Net unrealized footer must sum both legs; got:\n{out}"
 
     def test_multi_chain_carry_renders_both_protocols(self):
         """Aave V3 supply on Arbitrum + Aave V3 supply on Base — same
         protocol, different chains.  Both carry lines must render."""
-        arb_pos = _supply_snapshot_position(
-            chain="arbitrum", unrealized="0.0005280"
-        )
-        base_pos = _supply_snapshot_position(
-            chain="base", value_usd="7.50", unrealized="0.0002500"
-        )
+        arb_pos = _supply_snapshot_position(chain="arbitrum", unrealized="0.0005280")
+        base_pos = _supply_snapshot_position(chain="base", value_usd="7.50", unrealized="0.0002500")
         # Make the base event match its position so build_lending_report
         # finds it and enrichment links the snapshot row.
         base_identity = AccountingIdentity(

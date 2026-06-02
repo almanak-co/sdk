@@ -149,16 +149,12 @@ class TestRenderLpSection:
         assert "Fees:" not in out_zero
 
         # Either fee field nonzero → Fees line present.
-        out_nonzero = render_lp_section(
-            LPSection(positions=[_lp_pos(fees_token0=Decimal("0.5"))])
-        )
+        out_nonzero = render_lp_section(LPSection(positions=[_lp_pos(fees_token0=Decimal("0.5"))]))
         assert "Fees:" in out_nonzero
         assert "0.5000 WETH" in out_nonzero
 
     def test_protocol_fees_only_when_positive(self):
-        out = render_lp_section(
-            LPSection(positions=[_lp_pos(protocol_fees_usd=Decimal("12.34"))])
-        )
+        out = render_lp_section(LPSection(positions=[_lp_pos(protocol_fees_usd=Decimal("12.34"))]))
         assert "Proto fees:" in out
 
     def test_il_field_when_set(self):
@@ -264,20 +260,64 @@ class TestRenderLendingSection:
 
     def test_liquidation_threshold_converted_to_percent(self):
         # Stored as fraction (0.85), rendered as 85.0%.
-        out = render_lending_section(
-            LendingSection(positions=[_lend_pos(liquidation_threshold=Decimal("0.85"))])
-        )
+        out = render_lending_section(LendingSection(positions=[_lend_pos(liquidation_threshold=Decimal("0.85"))]))
         assert "Liq. thr.:  85.0%" in out
 
     def test_interest_block_only_when_nonzero(self):
         out_zero = render_lending_section(LendingSection(positions=[_lend_pos()]))
-        assert "Realized interest:" not in out_zero
-        out_pos = render_lending_section(
-            LendingSection(positions=[_lend_pos(total_interest_delta_usd=Decimal("12.34"))])
+        assert "Interest paid:" not in out_zero
+        assert "Interest earned:" not in out_zero
+        # VIB-4974: supply-side yield renders as a positive "Interest earned"
+        # line (was the single "Realized interest:" line pre-fix).
+        out_earned = render_lending_section(
+            LendingSection(
+                positions=[
+                    _lend_pos(
+                        total_interest_earned_usd=Decimal("12.34"),
+                        total_interest_delta_usd=Decimal("12.34"),
+                    )
+                ]
+            )
         )
-        # W1-6 (T3b, VIB-4789) renamed "Interest:" → "Realized interest:" and
-        # switched to _m_signed (6 decimals) so sub-cent values stay visible.
-        assert "Realized interest:" in out_pos
+        assert "Interest earned:" in out_earned
+        assert "+$12.340000" in out_earned
+        assert "Interest paid:" not in out_earned
+
+    def test_debt_side_interest_renders_as_paid_negative(self):
+        # VIB-4974: borrow interest paid is a COST — must render negative under
+        # an "Interest paid" label, never a +gain.
+        out = render_lending_section(
+            LendingSection(
+                positions=[
+                    _lend_pos(
+                        total_interest_paid_usd=Decimal("0.000237"),
+                        total_interest_delta_usd=Decimal("-0.000237"),
+                    )
+                ]
+            )
+        )
+        assert "Interest paid:" in out
+        assert "-$0.000237" in out
+        assert "Interest earned:" not in out
+
+    def test_mixed_position_shows_both_gross_components_not_netted(self):
+        # VIB-4974: a same-asset supply+borrow position sharing one key must
+        # show BOTH gross legs plus a net line — never collapse the paid
+        # borrow cost into a single netted figure.
+        out = render_lending_section(
+            LendingSection(
+                positions=[
+                    _lend_pos(
+                        total_interest_paid_usd=Decimal("0.30"),
+                        total_interest_earned_usd=Decimal("0.50"),
+                        total_interest_delta_usd=Decimal("0.20"),
+                    )
+                ]
+            )
+        )
+        assert "Interest paid:    -$0.300000" in out
+        assert "Interest earned:  +$0.500000" in out
+        assert "Net interest:     +$0.200000" in out
 
     def test_deleverage_count_only_when_nonzero(self):
         out_zero = render_lending_section(LendingSection(positions=[_lend_pos()]))
@@ -286,9 +326,7 @@ class TestRenderLendingSection:
         assert "Deleverages: 3" in out_some
 
     def test_position_key_truncated_to_16_chars(self):
-        out = render_lending_section(
-            LendingSection(positions=[_lend_pos(position_key="A" * 50)])
-        )
+        out = render_lending_section(LendingSection(positions=[_lend_pos(position_key="A" * 50)]))
         # 16 chars + ellipsis.
         assert "A" * 16 + "…" in out
 
@@ -343,14 +381,18 @@ class TestRenderPendleSection:
     def test_apr_only_emits_latest_when_different_from_entry(self):
         # Same APR → only "APR at entry" line.
         out_same = render_pendle_section(
-            PendleSection(positions=[_pendle_pos(implied_apr_pct_at_entry=Decimal("8"), implied_apr_pct_latest=Decimal("8"))])
+            PendleSection(
+                positions=[_pendle_pos(implied_apr_pct_at_entry=Decimal("8"), implied_apr_pct_latest=Decimal("8"))]
+            )
         )
         assert "APR at entry:" in out_same
         assert "APR latest:" not in out_same
 
         # Different APR → both lines.
         out_diff = render_pendle_section(
-            PendleSection(positions=[_pendle_pos(implied_apr_pct_at_entry=Decimal("8"), implied_apr_pct_latest=Decimal("9"))])
+            PendleSection(
+                positions=[_pendle_pos(implied_apr_pct_at_entry=Decimal("8"), implied_apr_pct_latest=Decimal("9"))]
+            )
         )
         assert "APR at entry:" in out_diff
         assert "APR latest:" in out_diff
@@ -358,9 +400,7 @@ class TestRenderPendleSection:
     def test_realized_yield_only_when_nonzero(self):
         out_zero = render_pendle_section(PendleSection(positions=[_pendle_pos()]))
         assert "Realized yld:" not in out_zero
-        out_some = render_pendle_section(
-            PendleSection(positions=[_pendle_pos(realized_yield_usd=Decimal("100"))])
-        )
+        out_some = render_pendle_section(PendleSection(positions=[_pendle_pos(realized_yield_usd=Decimal("100"))]))
         assert "Realized yld:" in out_some
 
     def test_event_count_always_present(self):
@@ -413,16 +453,12 @@ class TestRenderDataQualitySection:
         assert "Reason:" not in out
 
     def test_position_key_truncated_to_16_chars(self):
-        out = render_data_quality_section(
-            DataQualitySection(issues=[_issue(position_key="K" * 30)])
-        )
+        out = render_data_quality_section(DataQualitySection(issues=[_issue(position_key="K" * 30)]))
         # The renderer uses [:16] without ellipsis for the data-quality position_key.
         assert "K" * 16 in out
 
     def test_both_issues_and_parse_errors(self):
-        out = render_data_quality_section(
-            DataQualitySection(issues=[_issue()], parse_errors=2)
-        )
+        out = render_data_quality_section(DataQualitySection(issues=[_issue()], parse_errors=2))
         assert "1 record(s) with UNAVAILABLE confidence" in out
         assert "2 event(s) failed to parse" in out
 

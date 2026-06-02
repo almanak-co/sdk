@@ -107,12 +107,25 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
         if pos.borrow_apr_pct is not None:
             lines.append(f"    Borrow APR: {_pct(pos.borrow_apr_pct)}")
         lines.append(f"    Gas:        {_m(-pos.total_gas_usd)}")
-        # W1-6 (T3b, VIB-4781): realized interest from REPAY/WITHDRAW
-        # events.  Use _m_signed to surface sub-cent values — the prior
-        # _m formatter rounded to 2 decimals so a real $0.000634 USDC
+        # W1-6 (T3b, VIB-4781): realized interest from REPAY/WITHDRAW/
+        # DELEVERAGE events.  Use _m_signed to surface sub-cent values — the
+        # prior _m formatter rounded to 2 decimals so a real $0.000634 USDC
         # supply yield rendered as "$0.00" and looked like nothing.
-        if pos.total_interest_delta_usd != 0:
-            lines.append(f"    Realized interest: {_m_signed(pos.total_interest_delta_usd)}")
+        #
+        # VIB-4974: render per-side, never netted.  Debt-side interest
+        # (REPAY / DELEVERAGE) is a borrow *cost* → "Interest paid: -$…";
+        # supply-side interest (WITHDRAW) is a *yield* → "Interest earned:
+        # +$…".  A MIXED (same-asset supply+borrow) position sharing one
+        # asset-scoped key shows BOTH gross components plus a net carry line —
+        # the paid borrow cost is never collapsed into a single figure.  In
+        # the normal case the supply and debt legs are separate keys, so each
+        # gets exactly one labelled line.
+        if pos.total_interest_paid_usd > 0:
+            lines.append(f"    Interest paid:    {_m_signed(-pos.total_interest_paid_usd)}")
+        if pos.total_interest_earned_usd > 0:
+            lines.append(f"    Interest earned:  {_m_signed(pos.total_interest_earned_usd)}")
+        if pos.total_interest_paid_usd > 0 and pos.total_interest_earned_usd > 0:
+            lines.append(f"    Net interest:     {_m_signed(pos.total_interest_delta_usd)}")
         # W1-2 (VIB-4777): unrealized carry from snapshot.
         if pos.unrealized_pnl_usd is not None:
             lines.append(f"    Unrealized carry: {_m_signed(pos.unrealized_pnl_usd)}")

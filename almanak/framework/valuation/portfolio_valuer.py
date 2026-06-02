@@ -2546,7 +2546,12 @@ class PortfolioValuer:
         # SUPPLY and BORROW for the same wallet/protocol/asset do not cross-contaminate.
         # The accounting position_key omits the lending side, so both sides share a key.
         if position_info.position_type == PositionType.BORROW:
-            relevant_event_types = {"BORROW", "REPAY"}
+            # DELEVERAGE closes/reduces a borrow through the same
+            # ``match_repay`` path as REPAY (VIB-4974) and carries debt-side
+            # principal + interest. It must be included here or a deleveraged
+            # unwind's realized cost is silently dropped from
+            # ``cost_basis_usd`` / ``realized_pnl_usd`` on the snapshot lane.
+            relevant_event_types = {"BORROW", "REPAY", "DELEVERAGE"}
         else:
             relevant_event_types = {"SUPPLY", "WITHDRAW"}
         events = [e for e in events if e.get("event_type") in relevant_event_types]

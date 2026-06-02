@@ -284,3 +284,78 @@ class TestPortfolioValuerCacheBackwardsCompat:
         assert pos_value.cost_basis_usd == Decimal("0")
         assert pos_value.unrealized_pnl_usd == Decimal("0")
         assert pos_value.realized_pnl_usd == Decimal("0")
+
+    def test_borrow_enricher_includes_deleverage_events(self) -> None:
+        """VIB-4974: DELEVERAGE must reach ``compute_position_pnl`` on the
+        BORROW side of the snapshot/valuation lane.
+
+        DELEVERAGE closes/reduces a borrow through the same ``match_repay``
+        path as REPAY and carries debt-side principal + interest. The
+        per-side event filter in ``_enrich_lending_pnl`` historically scoped
+        the BORROW side to ``{"BORROW", "REPAY"}`` only, silently dropping a
+        deleveraged unwind's realized cost from ``cost_basis_usd`` /
+        ``realized_pnl_usd``. This pins that the event survives the filter.
+
+        Decisive assertion: the same BORROW + DELEVERAGE event set that
+        ``test_position_pnl_interest_sign.test_deleverage_interest_is_a_cost``
+        scores as ``realized_pnl_usd == -0.001500`` must produce that here. If
+        the filter drops DELEVERAGE, only the lone BORROW survives and realized
+        PnL stays at the default ``0`` — so this fails on the unfixed filter.
+        """
+        import json
+
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.valuation.portfolio_valuer import PositionValue
+
+        def _delta_event(
+            position_key: str, event_type: str, *, principal: str | None = None, interest: str | None = None, ts: str
+        ) -> dict:
+            payload: dict = {}
+            if principal is not None:
+                payload["principal_delta_usd"] = principal
+            if interest is not None:
+                payload["interest_delta_usd"] = interest
+            ev = _accounting_event(position_key, event_type)
+            ev["payload_json"] = json.dumps(payload)
+            ev["timestamp"] = ts
+            ev["ledger_entry_id"] = f"led-{event_type}-{ts}"
+            return ev
+
+        v = PortfolioValuer()
+        v.set_accounting_context(_wire_store([]), "d1")
+
+        position_info = MagicMock()
+        position_info.position_type = PositionType.BORROW
+        position_info.position_id = "p-borrow"
+        position_info.protocol = "aave_v3"
+        position_info.details = {
+            "asset": "USDT",
+            "wallet": "0x1234567890123456789012345678901234567890",
+        }
+        key = v._try_derive_lending_position_key(position_info, "arbitrum")
+        assert key, "test setup: BORROW position key must derive"
+
+        v._snapshot_event_cache = {
+            key: [
+                _delta_event(key, "BORROW", principal="5.0", ts="2026-06-01T00:00:00"),
+                # principal_delta_usd is a POSITIVE magnitude in production for
+                # debt closes (lending_accounting.py:862-865); cost basis is
+                # reduced via ``cost_basis -= principal``.
+                _delta_event(key, "DELEVERAGE", principal="5.0", interest="0.001500", ts="2026-06-01T02:00:00"),
+            ]
+        }
+
+        pos_value = PositionValue(
+            position_type=PositionType.BORROW,
+            protocol="aave_v3",
+            chain="arbitrum",
+            value_usd=Decimal("0"),  # debt fully repaid by the DELEVERAGE
+            label="aave_v3 BORROW",
+            tokens=[],
+        )
+
+        v._enrich_lending_pnl(pos_value, position_info, "arbitrum")
+
+        # DELEVERAGE survived the filter → its borrow interest paid is realized
+        # as a cost. On the unfixed filter this assertion reads Decimal("0").
+        assert pos_value.realized_pnl_usd == Decimal("-0.001500")

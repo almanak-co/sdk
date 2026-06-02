@@ -208,6 +208,27 @@ class TestLendingSectionToDict:
         assert pos["deleverage_count"] == 2
         assert pos["is_closed"] is True
 
+    def test_interest_fields_signed_net_and_per_side(self):
+        # VIB-4974: the lending JSON contract carries the signed net realized
+        # interest (debt cost negative, supply yield positive) plus the
+        # per-side gross magnitudes. Lock all three keys + their values in so
+        # the contract can't silently regress.
+        out = lending_section_to_dict(
+            LendingSection(
+                positions=[
+                    _lend_pos(
+                        total_interest_delta_usd=Decimal("-0.25"),  # paid 0.75 - earned 0.50
+                        total_interest_paid_usd=Decimal("0.75"),
+                        total_interest_earned_usd=Decimal("0.50"),
+                    )
+                ]
+            )
+        )
+        pos = out["positions"][0]
+        assert pos["total_interest_delta_usd"] == "-0.25"
+        assert pos["total_interest_paid_usd"] == "0.75"
+        assert pos["total_interest_earned_usd"] == "0.50"
+
     def test_none_apr_fields_are_none(self):
         out = lending_section_to_dict(LendingSection(positions=[_lend_pos()]))
         pos = out["positions"][0]

@@ -49,7 +49,19 @@ class LendingPositionSummary:
 
     # Cumulative
     total_gas_usd: Decimal = Decimal("0")
+    # VIB-4974: signed net realized interest. Debt-side closes (REPAY /
+    # DELEVERAGE) accrue a borrow *cost* (negative); supply-side closes
+    # (WITHDRAW) accrue a supply *yield* (positive). ``interest_delta_usd`` is
+    # stored as a positive magnitude for BOTH sides on the event, so the sign
+    # is applied here — read-side — by event type. The two gross components
+    # below are kept separate so the renderer can label each side
+    # ("Interest paid" vs "Interest earned") without collapsing a borrow cost
+    # into a single netted figure on a MIXED (same-asset supply+borrow)
+    # position.  All three are derived from the same ``interest_delta_usd``
+    # field — no writer/schema change, no matching_policy_version bump.
     total_interest_delta_usd: Decimal = Decimal("0")
+    total_interest_paid_usd: Decimal = Decimal("0")  # debt-side cost magnitude (>= 0)
+    total_interest_earned_usd: Decimal = Decimal("0")  # supply-side yield magnitude (>= 0)
     deleverage_count: int = 0
     is_closed: bool = False
 
@@ -267,7 +279,21 @@ def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
             if ev.gas_usd is not None:
                 summary.total_gas_usd += ev.gas_usd
             if ev.interest_delta_usd is not None:
-                summary.total_interest_delta_usd += ev.interest_delta_usd
+                # VIB-4974: sign realized interest by the event side.
+                # ``interest_delta_usd`` is a positive magnitude for BOTH
+                # debt- and supply-side closes, so an unconditional ``+=``
+                # rendered a borrow cost as a +gain.  REPAY and DELEVERAGE
+                # both route through ``basis_store.match_repay`` and carry
+                # borrow-side interest (a cost → subtract); WITHDRAW carries
+                # supply yield (a gain → add).  Track the gross components
+                # separately so the renderer can label each side and never
+                # net a paid borrow cost into a single figure on a MIXED key.
+                if ev.event_type in (LendingEventType.REPAY, LendingEventType.DELEVERAGE):
+                    summary.total_interest_paid_usd += ev.interest_delta_usd
+                    summary.total_interest_delta_usd -= ev.interest_delta_usd
+                elif ev.event_type == LendingEventType.WITHDRAW:
+                    summary.total_interest_earned_usd += ev.interest_delta_usd
+                    summary.total_interest_delta_usd += ev.interest_delta_usd
             if ev.event_type == LendingEventType.DELEVERAGE:
                 summary.deleverage_count += 1
                 has_borrow_event = True

@@ -60,7 +60,11 @@ def lending_section_to_dict(section: LendingSection) -> dict[str, Any]:
                 "supply_apr_pct": _m(p.supply_apr_pct),
                 "borrow_apr_pct": _m(p.borrow_apr_pct),
                 "total_gas_usd": str(p.total_gas_usd),
+                # VIB-4974: signed net realized interest (debt cost negative,
+                # supply yield positive) plus the per-side gross magnitudes.
                 "total_interest_delta_usd": str(p.total_interest_delta_usd),
+                "total_interest_paid_usd": str(p.total_interest_paid_usd),
+                "total_interest_earned_usd": str(p.total_interest_earned_usd),
                 "deleverage_count": p.deleverage_count,
             }
             for p in section.positions
