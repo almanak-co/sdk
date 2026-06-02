@@ -52,8 +52,24 @@ MOCK_CURVE_POOLS = {
             "pool_type": "stableswap",
             "n_coins": 3,
         },
+        # Real registered 2-coin pool — coin/address combo copied verbatim from
+        # CURVE_POOLS["ethereum"]["steth"], so the asset-set resolver tests
+        # exercise a genuine prod pool (not a relabeled address).
+        "steth": {
+            "address": "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022",
+            "lp_token": "0x06325440D014e39736583c165C2963BA99fAf14E",
+            "coins": ["ETH", "stETH"],
+            "coin_addresses": [
+                "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+                "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 2,
+        },
     }
 }
+
+STETH_POOL = "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"
 
 MOCK_CURVE_ADDRESSES = {
     "ethereum": {
@@ -271,7 +287,6 @@ class TestCurveSwap:
         intent = SwapIntent(
             from_token="WETH",
             to_token="WBTC",
-
             amount_usd=Decimal("1000"),
             protocol="curve",
         )
@@ -430,6 +445,286 @@ class TestCurveLPOpen:
 
 
 # =============================================================================
+# LP ASSET-SET RESOLVER (VIB-3946)
+# =============================================================================
+
+
+class TestCurveLPAssetSetResolver:
+    """Tests for the Curve LP asset-set resolver (VIB-3946).
+
+    Strategy authors describe a *concept* ("USDT/USDC stable LP") rather than a
+    protocol pool nickname. The compiler must resolve the asset set to the
+    registered pool whose coins match exactly — the LP analogue of the SWAP pool
+    resolver.
+    """
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_open_asset_set_resolves_2coin_pool(self, mock_config_cls, mock_adapter_cls, compiler):
+        """``ETH/stETH`` resolves to the real 2-coin ``steth`` pool (not "Unknown").
+
+        Uses a genuine registered pool (coin/address combo copied verbatim from
+        the prod CURVE_POOLS), so the 2-coin acceptance case is a real one.
+        """
+        mock_adapter = MagicMock()
+        mock_adapter.add_liquidity.return_value = _make_mock_liq_result(success=True)
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPOpenIntent(
+            pool="ETH/stETH",
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert result.action_bundle.metadata["pool_name"] == "steth"
+        assert result.action_bundle.metadata["pool_address"] == STETH_POOL
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_open_asset_set_resolves_3coin_pool(self, mock_config_cls, mock_adapter_cls, compiler):
+        """``USDT/USDC/DAI`` (the human description of 3pool) resolves to ``3pool``.
+
+        This is the exact QA-100 S-051 failure: the author passes the 3-asset
+        description and previously hit "Unknown Curve pool".
+        """
+        mock_adapter = MagicMock()
+        mock_adapter.add_liquidity.return_value = _make_mock_liq_result(success=True)
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPOpenIntent(
+            pool="USDT/USDC/DAI",
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert result.action_bundle.metadata["pool_name"] == "3pool"
+        assert result.action_bundle.metadata["pool_address"] == THREEPOOL
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_asset_set_does_not_leak_into_accounting(self, mock_config_cls, mock_adapter_cls, compiler):
+        """The asset-set string must NOT leak into accounting (VIB-3946 regression).
+
+        Root-cause fix: the compiler resolves the canonical pool into
+        ``action_bundle.metadata["pool_name"]`` ("3pool"); the accounting layer
+        consumes THAT (threaded as ``resolved_pool``) instead of re-parsing the
+        raw ``intent.pool`` user input. We assert the *accounting-facing*
+        behaviour — what actually matters — by building the LP accounting event
+        the way the runner does:
+
+          * ``pool_address`` == "3pool" (the bare resolved label, no "/"), and
+          * ``token0`` / ``token1`` empty — because "3pool" has no "/" to split,
+            so no phantom ``token0="USDT"`` / ``token1="USDC"`` reaches
+            position_events.
+
+        Also asserts the frozen ``intent.pool`` is UNCHANGED — the fix does not
+        mutate the immutable audit-trail intent; canonicalization lives entirely
+        in the accounting derivation via the resolved-pool parameter.
+        """
+        from almanak.framework.accounting.lp_accounting import _get_pool_address, build_lp_accounting_event
+
+        mock_adapter = MagicMock()
+        mock_adapter.add_liquidity.return_value = _make_mock_liq_result(success=True)
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPOpenIntent(
+            pool="USDT/USDC/DAI",
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+        assert result.status == CompilationStatus.SUCCESS, result.error
+
+        # The compiler surfaces the canonical label here; the intent is untouched.
+        resolved_pool = result.action_bundle.metadata["pool_name"]
+        assert resolved_pool == "3pool"
+        assert intent.pool == "USDT/USDC/DAI", "frozen intent must NOT be mutated by the fix"
+
+        # Without the resolved label, the legacy path would leak token symbols.
+        assert _get_pool_address(intent) == "usdt/usdc/dai"  # raw asset-set (no resolved_pool)
+        assert _get_pool_address(intent, resolved_pool) == "3pool"  # resolved → canonical
+
+        # The accounting-facing behaviour that actually matters: build the event
+        # the way the runner does (threading resolved_pool) and confirm the
+        # asset-set produced NO phantom token0/token1 and the canonical pool.
+        event = build_lp_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="vib3946-unit",
+            cycle_id="vib3946-cycle",
+            execution_mode="paper",
+            chain="ethereum",
+            wallet_address=TEST_WALLET,
+            resolved_pool=resolved_pool,
+        )
+        assert event is not None
+        assert event.pool_address == "3pool"
+        assert event.token0 == "", f"asset-set must not leak token0; got {event.token0!r}"
+        assert event.token1 == "", f"asset-set must not leak token1; got {event.token1!r}"
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_open_asset_set_order_independent(self, mock_config_cls, mock_adapter_cls, compiler):
+        """Asset-set matching is order-independent (set equality, not sequence)."""
+        mock_adapter = MagicMock()
+        mock_adapter.add_liquidity.return_value = _make_mock_liq_result(success=True)
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPOpenIntent(
+            pool="DAI/USDT/USDC",  # different order than registry's [DAI, USDC, USDT]
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert result.action_bundle.metadata["pool_name"] == "3pool"
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_open_unknown_asset_set_errors_clearly(self, compiler):
+        """An asset set with no exact pool match still fails with a clear error.
+
+        The resolver must NOT loosely match a superset/subset pool — only an
+        exact coin-set match resolves. ``WETH/WBTC`` matches no stable pool.
+        """
+        intent = LPOpenIntent(
+            pool="WETH/WBTC",
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Unknown Curve pool" in result.error
+        # Helpful: lists each pool's asset set so the author can self-correct.
+        assert "asset sets" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_open_partial_asset_set_does_not_match_superset(self, compiler):
+        """``USDC/DAI`` must NOT resolve to 3pool (which also contains USDT).
+
+        Exact set equality prevents silently opening into the wrong pool — a
+        2-asset request never matches a 3-asset pool.
+        """
+        intent = LPOpenIntent(
+            pool="USDC/DAI",
+            amount0=Decimal("500"),
+            amount1=Decimal("500"),
+            range_lower=Decimal("1"),
+            range_upper=Decimal("2"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Unknown Curve pool" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_asset_set_resolves_pool(self, mock_config_cls, mock_adapter_cls, compiler):
+        """LP_CLOSE also accepts an asset-set string for the pool."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(success=True, op="remove_liquidity")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPCloseIntent(
+            position_id="100.5",
+            pool="ETH/stETH",
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert result.action_bundle.metadata["pool_name"] == "steth"
+
+    def test_lp_open_ambiguous_asset_set_raises_not_autopicks(self, compiler):
+        """Two registered pools with the identical coin set => FAIL LOUDLY (VIB-3946).
+
+        Curve routinely ships a legacy StableSwap and a StableSwap-NG for the same
+        pair on the same chain. If both register, the asset-set request is genuinely
+        ambiguous — alphabetical name order has no relationship to liquidity/safety.
+        The resolver must refuse to auto-pick and name the colliding pools.
+        """
+        # Two distinct pools, identical coin set {USDC, USDT}.
+        ambiguous_pools = {
+            "ethereum": {
+                "twocrypto_legacy": {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "lp_token": "0x1111111111111111111111111111111111111111",
+                    "coins": ["USDC", "USDT"],
+                    "pool_type": "stableswap",
+                    "n_coins": 2,
+                },
+                "twocrypto_ng": {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "lp_token": "0x2222222222222222222222222222222222222222",
+                    "coins": ["USDT", "USDC"],  # same set, different order
+                    "pool_type": "stableswap",
+                    "n_coins": 2,
+                },
+            }
+        }
+
+        with patch(CURVE_POOLS_PATH, ambiguous_pools), patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES):
+            intent = LPOpenIntent(
+                pool="USDC/USDT",
+                amount0=Decimal("500"),
+                amount1=Decimal("500"),
+                range_lower=Decimal("1"),
+                range_upper=Decimal("2"),
+                protocol="curve",
+            )
+
+            result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Ambiguous Curve asset set" in result.error
+        # Both colliding pool names must be surfaced so the author can disambiguate.
+        assert "twocrypto_legacy" in result.error
+        assert "twocrypto_ng" in result.error
+        # Must NOT have silently auto-picked one.
+        assert result.action_bundle is None
+
+
+# =============================================================================
 # LP CLOSE
 # =============================================================================
 
@@ -503,9 +798,7 @@ class TestCurveLPClose:
     def test_lp_close_adapter_failure_propagates(self, mock_config_cls, mock_adapter_cls, compiler):
         """Adapter remove_liquidity failure is propagated as FAILED."""
         mock_adapter = MagicMock()
-        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(
-            success=False, error="slippage exceeded"
-        )
+        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(success=False, error="slippage exceeded")
         mock_adapter_cls.return_value = mock_adapter
 
         intent = LPCloseIntent(

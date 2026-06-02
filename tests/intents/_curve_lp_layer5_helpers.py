@@ -216,6 +216,7 @@ async def _persist_curve_lp_or_gap(
     event_type: str,
     price_oracle: dict | None,
     eth_call_reader: Any,
+    resolved_pool: str | None = None,
 ) -> dict:
     """Persist one Curve LP result through Layer 5; return a row or a gap sentinel.
 
@@ -246,6 +247,7 @@ async def _persist_curve_lp_or_gap(
         success=bool(getattr(result, "success", False)),
         price_oracle=price_oracle,
         eth_call_reader=eth_call_reader,
+        resolved_pool=resolved_pool,
     )
     assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
     assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"
@@ -295,6 +297,7 @@ async def assert_curve_lp_layer5(
     eth_call_reader: Any,
     expected_pool_label: str | None = None,
     prior_open_row: dict | None = None,
+    resolved_pool: str | None = None,
 ) -> dict:
     """Drive the Curve LP Layer-5 contract through the real accounting path.
 
@@ -329,6 +332,7 @@ async def assert_curve_lp_layer5(
         event_type=event_type,
         price_oracle=price_oracle,
         eth_call_reader=eth_call_reader,
+        resolved_pool=resolved_pool,
     )
     if is_gap_row(row):
         # Non-terminal gap: the close leg must still run. The real-accounting

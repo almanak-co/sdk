@@ -227,7 +227,7 @@ def _intent_type_str(intent: Any) -> str:
     return it.value if hasattr(it, "value") else str(it)
 
 
-def _get_pool_address(intent: Any) -> str:
+def _get_pool_address(intent: Any, resolved_pool: str | None = None) -> str:
     """Extract pool address or stable identifier from LP intent.
 
     Handles several pool field formats used across protocols:
@@ -240,8 +240,21 @@ def _get_pool_address(intent: Any) -> str:
     The position_key uses this value to distinguish positions, so for symbolic
     forms like "USDC/DAI/stable" the result is "usdc/dai/stable" which is still
     a stable, unique identifier.
+
+    ``resolved_pool`` (VIB-3946): when the compiler already resolved a canonical
+    pool label — surfaced as ``action_bundle.metadata["pool_name"]`` — callers
+    pass it here so the derivation uses the *resolved* identifier rather than
+    re-parsing the raw ``intent.pool`` user input. This is what lets a Curve
+    asset-set intent (``pool="USDT/USDC/DAI"``) key off the canonical ``"3pool"``
+    label instead of the slash-separated string. When ``None`` / empty (every
+    non-Curve connector — only Curve populates ``pool_name``), the behaviour is
+    byte-identical to reading ``intent.pool`` directly, so Solidly token-pair
+    labels (``"USDC/DAI/stable"``) are untouched.
     """
-    pool = getattr(intent, "pool", None) or ""
+    if resolved_pool and str(resolved_pool).strip():
+        pool: Any = resolved_pool
+    else:
+        pool = getattr(intent, "pool", None) or ""
     pool_str = str(pool).strip()
     if not pool_str:
         return ""
@@ -409,6 +422,7 @@ def build_lp_accounting_event(  # noqa: C901
     wallet_address: str,
     ledger_entry_id: str | None = None,
     price_oracle: dict[str, Any] | None = None,
+    resolved_pool: str | None = None,
 ) -> LPAccountingEvent | None:
     """Build an LPAccountingEvent for a completed LP_OPEN or LP_CLOSE intent.
 
@@ -420,6 +434,16 @@ def build_lp_accounting_event(  # noqa: C901
     Amounts are sourced from result.lp_open_data / result.lp_close_data when
     available, with token decimals from the intent (fallback: 18 → ESTIMATED).
     cost_basis_usd is computed from price_oracle when provided.
+
+    ``resolved_pool`` (VIB-3946): the canonical pool label the compiler already
+    resolved (``action_bundle.metadata["pool_name"]``). When provided it drives
+    BOTH the pool_address/position_key derivation and the token0/token1 parse,
+    INSTEAD of re-parsing the raw ``intent.pool`` user input. Only Curve
+    populates ``pool_name`` today; for every other connector this is ``None`` and
+    the behaviour is byte-identical to reading ``intent.pool``. This stops a Curve
+    asset-set intent (``pool="USDT/USDC/DAI"``) from leaking phantom
+    ``token0="USDT"`` / ``token1="USDC"`` into accounting — the canonical
+    ``"3pool"`` label has no ``"/"`` so the symbols stay empty.
     """
     intent_type_str = _intent_type_str(intent)
     if intent_type_str not in _LP_INTENT_TYPES:
@@ -430,7 +454,7 @@ def build_lp_accounting_event(  # noqa: C901
     if "pendle" in protocol:
         return None
 
-    pool_address = _get_pool_address(intent)
+    pool_address = _get_pool_address(intent, resolved_pool)
     if not pool_address:
         logger.warning("LP accounting skipped: cannot resolve pool address from intent (protocol=%s)", protocol)
         return None
@@ -450,8 +474,15 @@ def build_lp_accounting_event(  # noqa: C901
     token1 = str(getattr(intent, "token1", None) or getattr(intent, "token_b", None) or "")
     # LP intents store tokens in the pool string (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
     # Bare token0/token1 attributes are not set on LP intents, so parse from pool string.
+    # VIB-3946: prefer the compiler-resolved canonical label when supplied so a Curve
+    # asset-set ("USDT/USDC/DAI") keys off "3pool" (no "/", token0/token1 stay empty)
+    # instead of leaking phantom symbols. None/empty → raw intent.pool (byte-identical
+    # for every non-Curve connector, e.g. Solidly "USDC/DAI/stable").
     if not token0 or not token1:
-        pool_str = (getattr(intent, "pool", "") or "").strip()
+        if resolved_pool and str(resolved_pool).strip():
+            pool_str = str(resolved_pool).strip()
+        else:
+            pool_str = (getattr(intent, "pool", "") or "").strip()
         if "/" in pool_str:
             parts = [p.strip() for p in pool_str.split("/") if p.strip()]
             normalized = [

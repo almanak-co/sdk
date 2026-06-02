@@ -14,6 +14,75 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 logger = logging.getLogger(__name__)
 
 
+def _normalize_asset_set_token(token: str, ctx: BaseCompilerContext) -> str:
+    """Canonicalize a single asset-set token to its uppercase registry symbol.
+
+    Mirrors the SWAP path, which compares ``ctx.services.resolve_token(...).symbol``
+    against each pool's ``coins``. Resolution normalizes aliases (e.g. ``"usdc"`` ->
+    ``"USDC"``); when the token is not in the registry we fall back to the raw
+    uppercased string so pure-symbol asset-sets still match without a registry hit.
+    """
+    raw = token.strip()
+    if not raw:
+        return ""
+    try:
+        resolved = ctx.services.resolve_token(raw)
+    except Exception:  # noqa: BLE001 - resolution failure must not block symbol-only match
+        resolved = None
+    if resolved is not None and getattr(resolved, "symbol", None):
+        return str(resolved.symbol).upper()
+    return raw.upper()
+
+
+def _resolve_pool_by_asset_set(
+    asset_set: str,
+    chain_pools: dict[str, dict[str, Any]],
+    ctx: BaseCompilerContext,
+) -> tuple[str, dict[str, Any]] | None:
+    """Resolve an asset-set string (e.g. ``"USDT/USDC"``) to a registered Curve pool.
+
+    The LP analogue of the SWAP pool resolver. Splits the asset-set on ``/``,
+    canonicalizes each token, and selects the pool whose ``coins`` set equals the
+    requested asset set exactly.
+
+    VIB-3946 core acceptance — *never silently pick the wrong pool*. If more than
+    one registered pool has the identical coin set (Curve routinely ships a legacy
+    StableSwap and a StableSwap-NG for the same pair on the same chain), this is
+    genuinely ambiguous: liquidity, not alphabetical name order, decides which is
+    "right", and the resolver has no liquidity signal. So it raises ``ValueError``
+    listing the colliding pools and instructing the author to disambiguate by pool
+    name or address — it does NOT auto-pick.
+
+    Returns ``(pool_name, pool_data)`` on a unique exact match, else ``None``.
+    Raises ``ValueError`` when the asset set matches more than one pool.
+    """
+    requested = {_normalize_asset_set_token(t, ctx) for t in asset_set.split("/")}
+    requested.discard("")
+    if len(requested) < 2:
+        # A single token (or empty) is not an asset set; let the caller error out.
+        return None
+
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for name, data in chain_pools.items():
+        coins = data.get("coins")
+        if not coins:
+            continue
+        coins_upper = {str(c).upper() for c in coins}
+        if coins_upper == requested:
+            matches.append((name, data))
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        colliding = {name: data.get("address") for name, data in matches}
+        raise ValueError(
+            f"Ambiguous Curve asset set {asset_set!r}: matches multiple registered pools "
+            f"{colliding}. Disambiguate by passing an explicit pool name or address as "
+            f"intent.pool — refusing to auto-pick, which could open into the wrong pool."
+        )
+    return matches[0]
+
+
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     """Compiler for Curve pool-based swaps and fungible LP positions."""
 
@@ -269,11 +338,24 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                         pool_address = data["address"]
                         break
 
+            if pool_data is None and "/" in intent.pool:
+                # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
+                # analogue of the SWAP pool resolver. VIB-3946.
+                asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
+                if asset_match is not None:
+                    pool_name, pool_data = asset_match
+                    pool_address = pool_data["address"]
+
             if pool_data is None:
                 available = {name: d["address"] for name, d in chain_pools.items()}
+                coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=(f"Unknown Curve pool: {intent.pool} on {ctx.chain}. Available pools: {available}"),
+                    error=(
+                        f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
+                        f"Available pools: {available}. "
+                        f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
+                    ),
                     intent_id=intent.intent_id,
                 )
 
@@ -396,11 +478,24 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                         pool_address = data["address"]
                         break
 
+            if pool_data is None and "/" in intent.pool:
+                # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
+                # analogue of the SWAP pool resolver. VIB-3946.
+                asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
+                if asset_match is not None:
+                    pool_name, pool_data = asset_match
+                    pool_address = pool_data["address"]
+
             if pool_data is None:
                 available = {name: d["address"] for name, d in chain_pools.items()}
+                coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=(f"Unknown Curve pool: {intent.pool} on {ctx.chain}. Available pools: {available}"),
+                    error=(
+                        f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
+                        f"Available pools: {available}. "
+                        f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
+                    ),
                     intent_id=intent.intent_id,
                 )
 

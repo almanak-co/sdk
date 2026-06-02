@@ -158,7 +158,9 @@ def _reset_sqlite_file(db_path: Path) -> None:
 
 
 @pytest_asyncio.fixture
-async def layer5_accounting_harness(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Layer5AccountingHarness:
+async def layer5_accounting_harness(
+    tmp_path_factory: pytest.TempPathFactory, worker_id: str
+) -> Layer5AccountingHarness:
     """Throwaway accounting SQLite for Layer-5 intent-test assertions.
 
     The path is keyed by xdist worker and reset in setup. We intentionally do
@@ -199,14 +201,16 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _default_compute_position_key(intent: Any, *, chain: str, wallet_address: str) -> tuple[str, str]:
+def _default_compute_position_key(
+    intent: Any, *, chain: str, wallet_address: str, resolved_pool: str | None = None
+) -> tuple[str, str]:
     intent_type = _intent_type_str(intent)
     protocol = (getattr(intent, "protocol", "") or "").lower()
-    if (
-        intent_type in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"}
-        and "pendle" not in protocol
-    ):
-        pool_address = _get_pool_address(intent)
+    if intent_type in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"} and "pendle" not in protocol:
+        # VIB-3946: mirror the runner — prefer the compiler-resolved canonical pool
+        # label (action_bundle.metadata["pool_name"]) so a Curve asset-set intent
+        # keys off "3pool" instead of the raw "USDT/USDC/DAI" string.
+        pool_address = _get_pool_address(intent, resolved_pool)
         return f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}", pool_address
     if intent_type == "SWAP":
         return f"swap:{chain.lower()}:{wallet_address.lower()}", ""
@@ -256,6 +260,7 @@ async def _persist_and_drain_for_intent_test(
     eth_call_reader: Any | None = None,
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
+    resolved_pool: str | None = None,
 ) -> Layer5Persisted:
     """Persist one real intent result through the production outbox path.
 
@@ -294,6 +299,7 @@ async def _persist_and_drain_for_intent_test(
         intent,
         chain=chain,
         wallet_address=wallet_address,
+        resolved_pool=resolved_pool,
     )
     accounting_processor._deployment_id = deployment_id
     outbox_id = await write_outbox_entry(
@@ -479,9 +485,7 @@ async def assert_no_accounting_on_failure(
     """
     assert intent is not None, "failure assertion requires the intent"
     assert result is not None, "failure assertion requires the execution result"
-    assert not bool(getattr(result, "success", False)), (
-        "use assert_accounting_persisted() for successful results"
-    )
+    assert not bool(getattr(result, "success", False)), "use assert_accounting_persisted() for successful results"
 
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
@@ -504,9 +508,9 @@ async def assert_no_accounting_on_failure(
     rows = await harness.store.get_accounting_events(deployment_id, limit=20)
     matching = [row for row in rows if row.get("ledger_entry_id") == persisted.ledger_entry_id]
     assert matching == [], (
-        f"failed execution must not write accounting_events rows for {persisted.ledger_entry_id}; "
-        f"got {matching!r}"
+        f"failed execution must not write accounting_events rows for {persisted.ledger_entry_id}; got {matching!r}"
     )
+
 
 # Chain configurations
 CHAIN_CONFIGS = {

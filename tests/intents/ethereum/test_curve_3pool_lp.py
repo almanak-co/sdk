@@ -138,8 +138,8 @@ class TestCurve3poolLPOpen:
             pool=POOL,
             amount0=LP_AMOUNT_DAI,
             amount1=LP_AMOUNT_USDC,
-            range_lower=Decimal("1"),        # Dummy -- Curve uses pool-based positions
-            range_upper=Decimal("1000000"),   # Dummy -- required by LPOpenIntent validation
+            range_lower=Decimal("1"),  # Dummy -- Curve uses pool-based positions
+            range_upper=Decimal("1000000"),  # Dummy -- required by LPOpenIntent validation
             protocol="curve",
             chain=CHAIN_NAME,
         )
@@ -194,8 +194,7 @@ class TestCurve3poolLPOpen:
                 lp_tokens_from_receipt = lp_minted
 
         assert lp_open_receipt_parsed, (
-            "AddLiquidity3 event must be found in LP_OPEN receipt. "
-            "Parser must detect Curve AddLiquidity events."
+            "AddLiquidity3 event must be found in LP_OPEN receipt. Parser must detect Curve AddLiquidity events."
         )
         assert lp_tokens_from_receipt is not None and lp_tokens_from_receipt > 0, (
             "LP tokens minted must be > 0 and extractable from receipt Transfer event."
@@ -214,12 +213,10 @@ class TestCurve3poolLPOpen:
         expected_usdc_spent = int(LP_AMOUNT_USDC * Decimal(10**6))
 
         assert dai_spent == expected_dai_spent, (
-            f"DAI spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_dai_spent}, Got: {dai_spent}"
+            f"DAI spent must EXACTLY equal LP_OPEN amount. Expected: {expected_dai_spent}, Got: {dai_spent}"
         )
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
         assert lp_received > 0, "Must receive LP tokens after adding liquidity"
         # extract_lp_tokens_received() returns human-readable Decimal (PR #999),
@@ -249,6 +246,163 @@ class TestCurve3poolLPOpen:
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
             expected_pool_label=POOL,
+        )
+        finalize_curve_lp_layer5(open_row)
+
+    @pytest.mark.intent(IntentType.LP_OPEN)
+    @pytest.mark.asyncio
+    async def test_lp_open_asset_set_resolves_3pool(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+    ):
+        """Asset-set form resolves to the real 3pool and behaves identically (VIB-3946).
+
+        Mirrors ``test_lp_open_dai_usdc`` EXACTLY (same amounts, same 4 layers),
+        but passes the asset-set form ``pool="USDT/USDC/DAI"`` instead of the
+        ``"3pool"`` nickname. This proves the new asset-set fallback branch in
+        ``CurveCompiler._resolve_pool_by_asset_set`` resolves to the same
+        registered pool and produces identical on-chain behaviour (compile ->
+        execute -> AddLiquidity3 receipt -> exact DAI/USDC balance deltas).
+
+        Order/case-independence is covered by unit tests; one canonical
+        asset-set variant is sufficient at the on-chain layer.
+        """
+        # Asset-set string: the human description of 3pool's coins (DAI/USDC/USDT).
+        ASSET_SET_POOL = "USDT/USDC/DAI"
+
+        # Fund DAI (not in standard funded_wallet set)
+        _fund_dai(funded_wallet, anvil_rpc_url)
+
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+
+        # --- Layer 4 BEFORE ---
+        dai_before = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
+        usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
+        lp_before = _get_lp_token_balance(web3, funded_wallet)
+
+        # --- Layer 1: Compile (asset-set form, NOT the "3pool" nickname) ---
+        intent = LPOpenIntent(
+            pool=ASSET_SET_POOL,
+            amount0=LP_AMOUNT_DAI,
+            amount1=LP_AMOUNT_USDC,
+            range_lower=Decimal("1"),  # Dummy -- Curve uses pool-based positions
+            range_upper=Decimal("1000000"),  # Dummy -- required by LPOpenIntent validation
+            protocol="curve",
+            chain=CHAIN_NAME,
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Curve LP_OPEN (asset-set) compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+        # Prove the asset-set resolved to the real 3pool (not a different/unknown pool).
+        assert compilation_result.action_bundle.metadata["pool_address"] == POOL_ADDRESS, (
+            f"Asset-set {ASSET_SET_POOL!r} must resolve to 3pool {POOL_ADDRESS}, "
+            f"got {compilation_result.action_bundle.metadata.get('pool_address')}"
+        )
+        assert compilation_result.action_bundle.metadata["pool_name"] == POOL
+
+        # --- Layer 2: Execute ---
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Curve LP_OPEN (asset-set) execution failed: {execution_result.error}"
+        execution_result = enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=compilation_result.action_bundle.metadata,
+        )
+
+        # --- Layer 3: Receipt Parsing ---
+        parser = CurveReceiptParser(chain=CHAIN_NAME)
+        lp_open_receipt_parsed = False
+        lp_tokens_from_receipt: Decimal | None = None
+
+        for tx_result in execution_result.transaction_results:
+            if not tx_result.receipt:
+                continue
+            receipt_dict = tx_result.receipt.to_dict()
+            parse_result = parser.parse_receipt(receipt_dict)
+            assert parse_result.success, f"Receipt parsing failed: {parse_result.error}"
+
+            for event in parse_result.events:
+                if event.event_type == CurveEventType.ADD_LIQUIDITY:
+                    lp_open_receipt_parsed = True
+                    logger.info(
+                        f"AddLiquidity event: token_amounts={event.data.get('token_amounts')}, "
+                        f"lp_token_supply={event.data.get('token_supply')}"
+                    )
+
+            lp_minted = parser.extract_lp_tokens_received(receipt_dict)
+            if lp_minted is not None and lp_minted > 0:
+                lp_tokens_from_receipt = lp_minted
+
+        assert lp_open_receipt_parsed, (
+            "AddLiquidity3 event must be found in LP_OPEN receipt. Parser must detect Curve AddLiquidity events."
+        )
+        assert lp_tokens_from_receipt is not None and lp_tokens_from_receipt > 0, (
+            "LP tokens minted must be > 0 and extractable from receipt Transfer event."
+        )
+
+        # --- Layer 4 AFTER: Balance Deltas ---
+        dai_after = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
+        usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
+        lp_after = _get_lp_token_balance(web3, funded_wallet)
+
+        dai_spent = dai_before - dai_after
+        usdc_spent = usdc_before - usdc_after
+        lp_received = lp_after - lp_before
+
+        expected_dai_spent = int(LP_AMOUNT_DAI * Decimal(10**18))
+        expected_usdc_spent = int(LP_AMOUNT_USDC * Decimal(10**6))
+
+        assert dai_spent == expected_dai_spent, (
+            f"DAI spent must EXACTLY equal LP_OPEN amount. Expected: {expected_dai_spent}, Got: {dai_spent}"
+        )
+        assert usdc_spent == expected_usdc_spent, (
+            f"USDC spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        )
+        assert lp_received > 0, "Must receive LP tokens after adding liquidity"
+        lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
+        assert lp_received_decimal == lp_tokens_from_receipt, (
+            f"LP tokens from receipt ({lp_tokens_from_receipt}) must match balance delta ({lp_received_decimal})"
+        )
+
+        logger.info(
+            f"LP_OPEN (asset-set {ASSET_SET_POOL}) success: spent {LP_AMOUNT_DAI} DAI + "
+            f"{LP_AMOUNT_USDC} USDC, received {lp_received_decimal} 3Crv LP tokens"
+        )
+
+        # --- Layer 5: real accounting pipeline (documented full-drop gap, VIB-4968) ---
+        # VIB-3946: thread the compiler-resolved canonical pool label
+        # (metadata["pool_name"]="3pool") into the accounting derivation, exactly
+        # as the runner does, so accounting keys off "3pool" and NOT the raw
+        # "USDT/USDC/DAI" asset-set string. token0/token1 stay empty (no "/").
+        open_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            expected_pool_label=POOL,
+            resolved_pool=compilation_result.action_bundle.metadata.get("pool_name"),
         )
         finalize_curve_lp_layer5(open_row)
 
@@ -398,9 +552,7 @@ class TestCurve3poolLPLifecycle:
 
         # Layer 1: Compile LP_CLOSE
         close_result = compiler.compile(close_intent)
-        assert close_result.status.value == "SUCCESS", (
-            f"LP_CLOSE compile failed: {close_result.error}"
-        )
+        assert close_result.status.value == "SUCCESS", f"LP_CLOSE compile failed: {close_result.error}"
         assert close_result.action_bundle is not None
 
         # Layer 2: Execute LP_CLOSE
@@ -430,9 +582,7 @@ class TestCurve3poolLPLifecycle:
                 if event.event_type == CurveEventType.REMOVE_LIQUIDITY:
                     remove_liquidity_found = True
                     lp_close_amounts = event.data.get("token_amounts", [])
-                    logger.info(
-                        f"RemoveLiquidity event: token_amounts={lp_close_amounts}"
-                    )
+                    logger.info(f"RemoveLiquidity event: token_amounts={lp_close_amounts}")
 
             extracted = parser.extract_lp_close_data(receipt_dict)
             if extracted is not None:
@@ -443,8 +593,7 @@ class TestCurve3poolLPLifecycle:
                 )
 
         assert remove_liquidity_found, (
-            "RemoveLiquidity3 event must be found in LP_CLOSE receipt. "
-            "Parser must detect Curve RemoveLiquidity events."
+            "RemoveLiquidity3 event must be found in LP_CLOSE receipt. Parser must detect Curve RemoveLiquidity events."
         )
 
         # Layer 4: LP_CLOSE balance deltas

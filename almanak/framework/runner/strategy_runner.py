@@ -3540,6 +3540,7 @@ class StrategyRunner:
         strategy: "StrategyProtocol",
         intent: "AnyIntent",
         ledger_entry_id: str,
+        resolved_pool: str | None = None,
     ) -> None:
         """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
 
@@ -3575,7 +3576,9 @@ class StrategyRunner:
             cycle_id = get_cycle_id() or ""
 
             # Compute position_key and market_id for each supported category
-            position_key, market_id = self._compute_outbox_position_key(intent, intent_type_str, chain, wallet_address)
+            position_key, market_id = self._compute_outbox_position_key(
+                intent, intent_type_str, chain, wallet_address, resolved_pool=resolved_pool
+            )
 
             # Update processor deployment_id (set once per strategy run)
             if self._accounting_processor._deployment_id != deployment_id:
@@ -3685,11 +3688,18 @@ class StrategyRunner:
         intent_type_str: str,
         chain: str,
         wallet_address: str,
+        resolved_pool: str | None = None,
     ) -> tuple[str, str]:
         """Return (position_key, market_id) for the given intent.
 
         Mirrors the position_key derivation logic in the inline accounting builders
         so the outbox row and accounting_events row use identical keys.
+
+        ``resolved_pool`` (VIB-3946): the compiler-resolved canonical pool label
+        (``metadata["pool_name"]``). For the non-Pendle LP branch it is threaded
+        into ``_get_pool_address`` so the position_key uses the resolved label
+        instead of re-parsing raw ``intent.pool``. ``None`` for every connector
+        except Curve, so all other position keys are byte-identical.
         """
         try:
             protocol = (getattr(intent, "protocol", "") or "").lower()
@@ -3735,7 +3745,7 @@ class StrategyRunner:
             if t in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"} and "pendle" not in protocol:
                 from ..accounting.lp_accounting import _get_pool_address as _lp_pool_addr
 
-                pool_address = _lp_pool_addr(intent)
+                pool_address = _lp_pool_addr(intent, resolved_pool)
                 if pool_address:
                     position_key = f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}"
                 return position_key, pool_address
@@ -4880,7 +4890,11 @@ class StrategyRunner:
         # VIB-3467/3478: AccountingProcessor is the sole accounting write path (dual-write
         # period ended with removal of _try_write_* methods in VIB-3478).
         if ledger_entry_id:
-            await self._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+            # VIB-3946: thread the compiler-resolved canonical pool label
+            # (metadata["pool_name"], populated by Curve) so the LP outbox
+            # position_key keys off "3pool" rather than a raw asset-set string.
+            resolved_pool = (state.last_bundle_metadata or {}).get("pool_name")
+            await self._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id, resolved_pool=resolved_pool)
         # VIB-3454: append one JSON line to the per-strategy sidecar file so the
         # portfolio dashboard can consume execution data without touching gateway.db.
         # Best-effort: the writer swallows all exceptions internally.
