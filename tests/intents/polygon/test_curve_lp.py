@@ -32,6 +32,11 @@ from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceipt
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._curve_lp_layer5_helpers import (
+    assert_curve_lp_layer5,
+    enrich_for_accounting,
+    finalize_curve_lp_layer5,
+)
 from tests.intents.conftest import (
     fund_erc20_token,
     get_token_balance,
@@ -132,6 +137,8 @@ class TestCurveAm3poolLPOpenPolygon:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test adding DAI + USDC.e to Curve am3pool on Polygon.
 
@@ -197,6 +204,13 @@ class TestCurveAm3poolLPOpenPolygon:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, (
             f"Curve LP_OPEN execution failed on Polygon: {execution_result.error}"
+        )
+        execution_result = enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=compilation_result.action_bundle.metadata,
         )
 
         # --- Layer 3: Receipt Parsing ---
@@ -266,6 +280,23 @@ class TestCurveAm3poolLPOpenPolygon:
             f"LP received={lp_received}"
         )
 
+        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
+        # Curve LP currently writes ZERO typed accounting_events: lp_handler
+        # rejects the bare "3pool" label (VIB-4968). NOTE: this test is
+        # also am3pool-xfail-marked (parser gap), which fires first today.
+        open_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            expected_pool_label=POOL,
+        )
+        finalize_curve_lp_layer5(open_row)
+
 
 # =============================================================================
 # LP Lifecycle Tests (Open -> Close)
@@ -296,6 +327,8 @@ class TestCurveAm3poolLPLifecyclePolygon:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test full Curve am3pool LP lifecycle on Polygon: open then close.
 
@@ -352,6 +385,13 @@ class TestCurveAm3poolLPLifecyclePolygon:
         # Layer 2: Execute LP_OPEN
         open_exec = await orchestrator.execute(open_result.action_bundle)
         assert open_exec.success, f"LP_OPEN execution failed: {open_exec.error}"
+        open_exec = enrich_for_accounting(
+            open_exec,
+            open_intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=open_result.action_bundle.metadata,
+        )
 
         # Layer 3: Parse LP_OPEN receipt
         parser = CurveReceiptParser(chain=CHAIN_NAME)
@@ -375,6 +415,19 @@ class TestCurveAm3poolLPLifecyclePolygon:
 
         assert add_liquidity_found, "AddLiquidity event must be found in LP_OPEN receipt"
         assert lp_tokens_received > 0, "Must extract LP tokens from LP_OPEN receipt"
+
+        # Layer 5: persist LP_OPEN (documented full-drop gap — xfails today).
+        open_accounting_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_exec,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            expected_pool_label=POOL,
+        )
 
         # ==================== CLOSE ====================
         lp_balance = _get_lp_token_balance(web3, funded_wallet)
@@ -405,11 +458,19 @@ class TestCurveAm3poolLPLifecyclePolygon:
         # Layer 2: Execute LP_CLOSE
         close_exec = await orchestrator.execute(close_result.action_bundle)
         assert close_exec.success, f"LP_CLOSE execution failed: {close_exec.error}"
+        close_exec = enrich_for_accounting(
+            close_exec,
+            close_intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=close_result.action_bundle.metadata,
+        )
 
         # Layer 3: Parse LP_CLOSE receipt and capture token_amounts so Layer 4
         # can reconcile exact deltas (not just positivity).
         remove_liquidity_found = False
         parsed_token_amounts: list[int] = []
+        lp_close_data = None
 
         for tx_result in close_exec.transaction_results:
             if not tx_result.receipt:
@@ -426,6 +487,10 @@ class TestCurveAm3poolLPLifecyclePolygon:
                     logger.info(
                         f"RemoveLiquidity event: token_amounts={parsed_token_amounts}"
                     )
+
+            extracted = parser.extract_lp_close_data(receipt_dict)
+            if extracted is not None:
+                lp_close_data = extracted
 
         assert remove_liquidity_found, (
             "RemoveLiquidity event must be found in LP_CLOSE receipt."
@@ -470,3 +535,18 @@ class TestCurveAm3poolLPLifecyclePolygon:
             f"{usdc_e_returned / 10**6:.4f} USDC.e + "
             f"{usdt_returned / 10**6:.4f} USDT"
         )
+
+        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
+        assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
+        close_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=close_exec,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            prior_open_row=open_accounting_row,
+        )
+        finalize_curve_lp_layer5(open_accounting_row, close_row)

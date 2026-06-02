@@ -28,6 +28,11 @@ from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceipt
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._curve_lp_layer5_helpers import (
+    assert_curve_lp_layer5,
+    enrich_for_accounting,
+    finalize_curve_lp_layer5,
+)
 from tests.intents.conftest import (
     _wrap_native_token,
     fund_erc20_token,
@@ -113,6 +118,8 @@ class TestCurveWethCbethLPOpen:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test adding WETH + cbETH to Curve WETH/cbETH Twocrypto pool on Base.
 
@@ -163,6 +170,13 @@ class TestCurveWethCbethLPOpen:
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Curve LP_OPEN execution failed on Base: {execution_result.error}"
+        execution_result = enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=compilation_result.action_bundle.metadata,
+        )
 
         # --- Layer 3: Receipt Parsing ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
@@ -230,6 +244,23 @@ class TestCurveWethCbethLPOpen:
             f"LP received={lp_received}"
         )
 
+        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
+        # Curve LP currently writes ZERO typed accounting_events: lp_handler
+        # rejects the bare "weth_cbeth" label, so this xfails on the documented
+        # gap (VIB-4968). When fixed it asserts the null-contract.
+        open_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            expected_pool_label=POOL,
+        )
+        finalize_curve_lp_layer5(open_row)
+
 
 # =============================================================================
 # LP Close Tests
@@ -258,6 +289,8 @@ class TestCurveWethCbethLPClose:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ):
         """Test removing WETH + cbETH from Curve WETH/cbETH pool on Base.
 
@@ -266,6 +299,7 @@ class TestCurveWethCbethLPClose:
         2. Record LP token balance as position_id
         3. Create LPCloseIntent with position_id
         4. Execute and verify WETH + cbETH returned, LP tokens burned
+        5. Layer 5: persist LP_OPEN (setup) and LP_CLOSE through the pipeline
         """
         # Setup: first open an LP position
         _fund_weth(funded_wallet, anvil_rpc_url, Decimal("1.0"))
@@ -294,10 +328,30 @@ class TestCurveWethCbethLPClose:
         assert open_result.status.value == "SUCCESS", f"LP open compilation failed: {open_result.error}"
         open_execution = await orchestrator.execute(open_result.action_bundle)
         assert open_execution.success, f"LP open execution failed: {open_execution.error}"
+        open_execution = enrich_for_accounting(
+            open_execution,
+            open_intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=open_result.action_bundle.metadata,
+        )
 
         # LP tokens received = position_id for LP_CLOSE
         lp_balance = _get_lp_token_balance(web3, funded_wallet)
         assert lp_balance > 0, "Must have LP tokens before LP_CLOSE test"
+
+        # Layer 5: persist LP_OPEN setup (documented full-drop gap — xfails today).
+        open_accounting_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=open_intent,
+            result=open_execution,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_OPEN",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            expected_pool_label=POOL,
+        )
 
         # --- Layer 4 BEFORE ---
         weth_before = get_token_balance(web3, WETH_ADDRESS, funded_wallet)
@@ -324,6 +378,13 @@ class TestCurveWethCbethLPClose:
         # --- Layer 2: Execute ---
         close_execution = await orchestrator.execute(close_result.action_bundle)
         assert close_execution.success, f"Curve LP_CLOSE execution failed on Base: {close_execution.error}"
+        close_execution = enrich_for_accounting(
+            close_execution,
+            close_intent,
+            funded_wallet,
+            chain=CHAIN_NAME,
+            bundle_metadata=close_result.action_bundle.metadata,
+        )
 
         # --- Layer 3: Receipt Parsing ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
@@ -382,3 +443,17 @@ class TestCurveWethCbethLPClose:
             f"cbETH returned={cbeth_received / 10**18:.6f}, "
             f"LP burned={lp_burned}"
         )
+
+        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
+        close_row = await assert_curve_lp_layer5(
+            layer5_accounting_harness,
+            intent=close_intent,
+            result=close_execution,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            event_type="LP_CLOSE",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            prior_open_row=open_accounting_row,
+        )
+        finalize_curve_lp_layer5(open_accounting_row, close_row)
