@@ -577,6 +577,26 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
             estimated_value = self.amount_x * token_x_price_usd + self.amount_y * token_y_price_usd
 
+            # VIB-4877: the teardown post-condition verifier resolves the closed
+            # LP by its 42-char LBPair contract address (details["pool_address"]).
+            # The pool *symbol* triple ("WAVAX/USDC/20") is human-readable only —
+            # if it leaks into the address slot the verifier rejects a
+            # successfully-closed position and flips teardown to FAILED. Resolve
+            # the real LBPair address here so pool_address is always a 42-char
+            # hex string; keep the symbol under "pool" for readability.
+            details: dict[str, Any] = {
+                "asset": f"{self.token_x_symbol}/{self.token_y_symbol}",
+                "num_bins": len(self._position_bin_ids),
+                "pool": self.pool,
+                "bin_step": self.bin_step,
+                "bin_ids": self._position_bin_ids,
+                "amount_x": str(self.amount_x),
+                "amount_y": str(self.amount_y),
+            }
+            pool_address = self._resolve_lb_pair_address()
+            if pool_address:
+                details["pool_address"] = pool_address
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.LP,
@@ -584,15 +604,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                     chain=self.chain,
                     protocol="traderjoe_v2",
                     value_usd=estimated_value,
-                    details={
-                        "asset": f"{self.token_x_symbol}/{self.token_y_symbol}",
-                        "num_bins": len(self._position_bin_ids),
-                        "pool": self.pool,
-                        "bin_step": self.bin_step,
-                        "bin_ids": self._position_bin_ids,
-                        "amount_x": str(self.amount_x),
-                        "amount_y": str(self.amount_y),
-                    },
+                    details=details,
                 )
             )
 
@@ -604,6 +616,43 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             total_value_usd=total_value,
             positions=positions,
         )
+
+    def _resolve_lb_pair_address(self) -> str | None:
+        """Resolve the 42-char LBPair contract address for this pool (VIB-4877).
+
+        The teardown post-condition verifier needs the LBPair contract
+        address (not the symbol triple) to confirm the position is closed.
+        We resolve it through the TraderJoe V2 connector adapter, which routes
+        its on-chain reads through the gateway — strategies never open their
+        own RPC. Returns ``None`` (logged) on any failure so teardown preview
+        still proceeds; the verifier then surfaces a precise missing-address
+        error rather than crashing.
+        """
+        try:
+            from almanak.connectors.traderjoe_v2 import (
+                TraderJoeV2Adapter,
+                TraderJoeV2Config,
+            )
+
+            adapter = TraderJoeV2Adapter(
+                TraderJoeV2Config(
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                    gateway_client=getattr(self, "_gateway_client", None),
+                )
+            )
+            token_x_addr = adapter.resolve_token_address(self.token_x_symbol)
+            token_y_addr = adapter.resolve_token_address(self.token_y_symbol)
+            return adapter.sdk.get_pool_address(token_x_addr, token_y_addr, self.bin_step)
+        except Exception as exc:  # noqa: BLE001 — fail-soft: preview must not crash
+            logger.warning(
+                "Could not resolve TraderJoe V2 LBPair address for %s (bin_step=%s): %s. "
+                "Teardown verification will report a missing pool_address.",
+                self.pool,
+                self.bin_step,
+                exc,
+            )
+            return None
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
         """Generate intents to close all LP positions."""

@@ -210,6 +210,80 @@ class TestGetPoolAddress:
         assert sdk._pool_address_cache[canonical] == POOL_ADDR
 
 
+class TestGetLBPairInformation:
+    """VIB-3100: get_lb_pair_information surfaces the ignoredForRouting flag."""
+
+    def test_decodes_ignored_for_routing_true(self) -> None:
+        sdk = _bare_sdk()
+        factory = MagicMock()
+        # (binStep, LBPair, createdByOwner, ignoredForRouting)
+        factory.functions.getLBPairInformation.return_value.call.return_value = (
+            15,
+            POOL_ADDR,
+            True,
+            True,  # ignoredForRouting
+        )
+        sdk._factory_contract = factory
+        sdk._pool_address_cache = {}
+
+        info = sdk.get_lb_pair_information(TOKEN_X, TOKEN_Y, 15)
+        assert info.pair_address == POOL_ADDR
+        assert info.bin_step == 15
+        assert info.ignored_for_routing is True
+        # Address lookup is cached for a later get_pool_address().
+        canonical = (min(TOKEN_X.lower(), TOKEN_Y.lower()), max(TOKEN_X.lower(), TOKEN_Y.lower()), 15)
+        assert sdk._pool_address_cache[canonical] == POOL_ADDR
+
+    def test_decodes_ignored_for_routing_false(self) -> None:
+        sdk = _bare_sdk()
+        factory = MagicMock()
+        factory.functions.getLBPairInformation.return_value.call.return_value = (
+            20,
+            POOL_ADDR,
+            False,
+            False,
+        )
+        sdk._factory_contract = factory
+        sdk._pool_address_cache = {}
+
+        info = sdk.get_lb_pair_information(TOKEN_X, TOKEN_Y, 20)
+        assert info.ignored_for_routing is False
+        assert info.pair_address == POOL_ADDR
+
+    def test_zero_address_raises_pool_not_found(self) -> None:
+        sdk = _bare_sdk()
+        factory = MagicMock()
+        factory.functions.getLBPairInformation.return_value.call.return_value = (
+            20,
+            "0x0000000000000000000000000000000000000000",
+            False,
+            False,
+        )
+        sdk._factory_contract = factory
+        sdk._pool_address_cache = {}
+
+        with pytest.raises(PoolNotFoundError):
+            sdk.get_lb_pair_information(TOKEN_X, TOKEN_Y, 20)
+
+    def test_rpc_error_raises_sdk_error_not_pool_not_found(self) -> None:
+        """VIB-3100 Gemini HIGH: a transient RPC error must surface as the base
+        TraderJoeV2SDKError and must NOT be masked as PoolNotFoundError. The
+        autodetect skip-loop catches PoolNotFoundError to skip a candidate, so
+        masking would silently drop a bin step that actually exists."""
+        sdk = _bare_sdk()
+        factory = MagicMock()
+        factory.functions.getLBPairInformation.return_value.call.side_effect = RuntimeError("rpc")
+        sdk._factory_contract = factory
+        sdk._pool_address_cache = {}
+
+        with pytest.raises(TraderJoeV2SDKError) as exc_info:
+            sdk.get_lb_pair_information(TOKEN_X, TOKEN_Y, 20)
+        # Critically NOT the absence signal — autodetect must fail loud, not skip.
+        assert not isinstance(exc_info.value, PoolNotFoundError)
+        # Original transport error is chained for diagnosis.
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
 # =============================================================================
 # Token contract / balance / allowance helpers
 # =============================================================================

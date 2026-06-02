@@ -6,6 +6,7 @@ instead of the DefaultSwapAdapter.
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -199,9 +200,12 @@ class TestTraderJoeV2SwapCompilation:
         """When no pool exists for the pair, compilation fails with helpful error."""
         mock_get_rpc.return_value = "http://localhost:8545"
 
-        # Mock adapter - all pool lookups fail
+        # Mock adapter - all pool lookups fail. Autodetect now probes via
+        # get_lb_pair_information (VIB-3100); set the side_effect there and on
+        # the legacy get_pool_address used by the build path.
         mock_adapter = MagicMock()
         mock_adapter_cls.return_value = mock_adapter
+        mock_adapter.sdk.get_lb_pair_information.side_effect = Exception("Pool not found")
         mock_adapter.sdk.get_pool_address.side_effect = Exception("Pool not found")
 
         compiler = _make_compiler()
@@ -513,3 +517,289 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         assert result.error is not None
         assert "zero amount_out" in result.error
         mock_adapter.build_swap_transaction.assert_not_called()
+
+
+class TestTraderJoeV2BinStepAutodetect:
+    """VIB-3100: autodetect must honour ignoredForRouting + pick the deepest pool.
+
+    On Arbitrum WETH/USDC the first *existing* pool (bin_step=25) is an empty
+    husk, bin_step=15 is deep but ``ignoredForRouting`` (deprecated), and the
+    routable liquid pool sits elsewhere. A first-liquid probe builds a swap
+    that reverts with ``LBPair__OutOfLiquidity``. These tests pin the new
+    selection contract directly against the connector compiler's private
+    autodetect helper.
+    """
+
+    @staticmethod
+    def _compiler(chain: str = "arbitrum"):
+        from almanak.connectors.traderjoe_v2.compiler import _TraderJoeV2CompileImpl
+
+        compiler = _TraderJoeV2CompileImpl.__new__(_TraderJoeV2CompileImpl)
+        compiler.chain = chain
+        return compiler
+
+    # Canonical pool token ordering for the WETH/USDC test pair: token_x = WETH
+    # (18 decimals), token_y = USDC (6 decimals).
+    _WETH_ADDR = "0x" + "a" * 40
+    _USDC_ADDR = "0x" + "b" * 40
+
+    @staticmethod
+    def _token(symbol: str, address: str, decimals: int = 18):
+        from almanak.framework.intents.compiler_models import TokenInfo
+
+        return TokenInfo(symbol=symbol, address=address, decimals=decimals)
+
+    @staticmethod
+    def _intent():
+        return SwapIntent(
+            from_token="WETH",
+            to_token="USDC",
+            amount=Decimal("1.0"),
+            max_slippage=Decimal("0.01"),
+            protocol="traderjoe_v2",
+            chain="arbitrum",
+        )
+
+    def _run(self, *, pools, x_decimals: int = 18, y_decimals: int = 18):
+        """pools: {bin_step: (pair_address, ignored, reserve_x, reserve_y)} or None.
+
+        reserve_x/reserve_y are RAW on-chain units (pre-decimal). token_x maps
+        to WETH (x_decimals), token_y to USDC (y_decimals), so callers can model
+        the WETH(1e18)/USDC(1e6) scale mismatch the audit flagged.
+        """
+        from almanak.connectors.traderjoe_v2.sdk import LBPairInformation, PoolNotFoundError
+
+        info_by_addr = {}
+        for bs, spec in pools.items():
+            if spec is None:
+                continue
+            addr, ignored, rx, ry = spec
+            info_by_addr[addr] = SimpleNamespace(
+                reserve_x=rx,
+                reserve_y=ry,
+                token_x=self._WETH_ADDR,
+                token_y=self._USDC_ADDR,
+            )
+
+        def fake_lb_pair_info(token_a, token_b, bin_step):
+            spec = pools.get(bin_step)
+            if spec is None:
+                raise PoolNotFoundError(token_a, token_b, bin_step)
+            addr, ignored, _, _ = spec
+            return LBPairInformation(pair_address=addr, bin_step=bin_step, ignored_for_routing=ignored)
+
+        def fake_pool_info(pool_address):
+            return info_by_addr[pool_address]
+
+        sdk = MagicMock()
+        sdk.get_lb_pair_information.side_effect = fake_lb_pair_info
+        sdk.get_pool_info.side_effect = fake_pool_info
+        adapter = MagicMock()
+        adapter.sdk = sdk
+
+        compiler = self._compiler()
+        return compiler._autodetect_traderjoe_v2_bin_step(
+            intent=self._intent(),
+            tj_adapter=adapter,
+            swap_from_token=self._token("WETH", self._WETH_ADDR, x_decimals),
+            swap_to_token=self._token("USDC", self._USDC_ADDR, y_decimals),
+            from_token_symbol="WETH",
+            to_token_symbol="USDC",
+            pool_not_found_exc=PoolNotFoundError,
+        )
+
+    def test_skips_empty_husk_and_picks_deepest(self):
+        """First existing pool (25) is empty; 50 is liquid → pick the deepest liquid."""
+        result = self._run(
+            pools={
+                20: None,
+                25: ("0x" + "2" * 40, False, 0, 0),          # empty husk
+                15: None,
+                10: None,
+                50: ("0x" + "5" * 40, False, 100, 200),       # liquid, total 300
+                5: ("0x" + "6" * 40, False, 10, 10),          # liquid, total 20
+            }
+        )
+        assert result == 50
+
+    def test_skips_ignored_for_routing_even_when_deepest(self):
+        """The deepest pool (15) is ignoredForRouting → must NOT be picked."""
+        result = self._run(
+            pools={
+                20: None,
+                25: ("0x" + "2" * 40, False, 50, 50),          # liquid, total 100
+                15: ("0x" + "f" * 40, True, 5000, 5000),       # DEEPEST but ignored
+                50: ("0x" + "5" * 40, False, 10, 10),          # liquid, total 20
+            }
+        )
+        assert result == 25  # deepest *non-ignored*
+
+    def test_only_ignored_or_empty_returns_no_pool_found(self):
+        """If every candidate is ignored or empty → FAILED, no pool found."""
+        result = self._run(
+            pools={
+                25: ("0x" + "2" * 40, True, 5000, 5000),       # ignored
+                50: ("0x" + "5" * 40, False, 0, 0),            # empty
+            }
+        )
+        assert result.status == CompilationStatus.FAILED
+        assert "No TraderJoe V2 pool found" in (result.error or "")
+
+    def test_tie_breaks_by_popularity_order(self):
+        """Equal reserves → fall back to popularity order (20 before 25)."""
+        result = self._run(
+            pools={
+                20: ("0x" + "1" * 40, False, 100, 100),
+                25: ("0x" + "2" * 40, False, 100, 100),
+            }
+        )
+        assert result == 20
+
+    def test_decimal_normalized_depth_balanced_outranks_one_sided(self):
+        """VIB-3100 audit item 1: a balanced 5-WETH/5M-USDC pool must outrank a
+        one-sided 10-WETH/0-USDC pool, despite the one-sided pool's larger RAW
+        reserve_x. Summing raw units (WETH 1e18 vs USDC 1e6) would pick the
+        shallower one-sided pool — the exact mis-rank this fix prevents.
+
+        token_x = WETH (18 decimals), token_y = USDC (6 decimals).
+          - bin 20 one-sided: 10 WETH raw = 10e18, 0 USDC.
+              raw sum   = 10e18           (wins on raw — WRONG)
+              norm sum  = 10 + 0   = 10
+          - bin 25 balanced: 5 WETH raw = 5e18, 5,000,000 USDC raw = 5e12.
+              raw sum   = 5e18 + 5e12 ≈ 5e18  (loses on raw)
+              norm sum  = 5 + 5,000,000 = 5,000,005   (wins on normalized — RIGHT)
+        """
+        result = self._run(
+            pools={
+                20: ("0x" + "1" * 40, False, 10 * 10**18, 0),          # one-sided
+                25: ("0x" + "2" * 40, False, 5 * 10**18, 5_000_000 * 10**6),  # balanced, deep
+            },
+            x_decimals=18,
+            y_decimals=6,
+        )
+        assert result == 25
+
+    def test_unmeasurable_reserves_still_selectable(self):
+        """When reserves can't be probed (RPC flake), keep the candidate (fail-open)."""
+        from almanak.connectors.traderjoe_v2.sdk import LBPairInformation, PoolNotFoundError
+
+        def fake_lb_pair_info(token_a, token_b, bin_step):
+            if bin_step == 20:
+                return LBPairInformation(pair_address="0x" + "1" * 40, bin_step=20, ignored_for_routing=False)
+            raise PoolNotFoundError(token_a, token_b, bin_step)
+
+        sdk = MagicMock()
+        sdk.get_lb_pair_information.side_effect = fake_lb_pair_info
+        sdk.get_pool_info.side_effect = RuntimeError("RPC down")
+        adapter = MagicMock()
+        adapter.sdk = sdk
+
+        compiler = self._compiler()
+        result = compiler._autodetect_traderjoe_v2_bin_step(
+            intent=self._intent(),
+            tj_adapter=adapter,
+            swap_from_token=self._token("WETH", "0x" + "a" * 40),
+            swap_to_token=self._token("USDC", "0x" + "b" * 40),
+            from_token_symbol="WETH",
+            to_token_symbol="USDC",
+            pool_not_found_exc=PoolNotFoundError,
+        )
+        assert result == 20
+
+    def test_unexpected_probe_error_fails_with_bin_step(self):
+        """A non-not-found probe error surfaces the failing bin step."""
+        from almanak.connectors.traderjoe_v2.sdk import PoolNotFoundError
+
+        sdk = MagicMock()
+        sdk.get_lb_pair_information.side_effect = RuntimeError("boom")
+        adapter = MagicMock()
+        adapter.sdk = sdk
+
+        compiler = self._compiler()
+        result = compiler._autodetect_traderjoe_v2_bin_step(
+            intent=self._intent(),
+            tj_adapter=adapter,
+            swap_from_token=self._token("WETH", "0x" + "a" * 40),
+            swap_to_token=self._token("USDC", "0x" + "b" * 40),
+            from_token_symbol="WETH",
+            to_token_symbol="USDC",
+            pool_not_found_exc=PoolNotFoundError,
+        )
+        assert result.status == CompilationStatus.FAILED
+        assert "Failed to probe TraderJoe V2 pool for bin_step=20" in (result.error or "")
+
+    def test_transient_rpc_error_propagates_not_silently_skipped(self):
+        """VIB-3100 Gemini HIGH: a transient RPC error (TraderJoeV2SDKError, NOT
+        PoolNotFoundError) on a candidate must FAIL LOUD — never be swallowed as
+        a skip that lets autodetect fall through to a shallower wrong pool.
+
+        bin 20 errors with a transport error; bin 25 is a deep liquid pool. If
+        the loop wrongly skipped bin 20 it would happily return 25; instead it
+        must return FAILED naming bin 20.
+        """
+        from almanak.connectors.traderjoe_v2.sdk import (
+            LBPairInformation,
+            PoolNotFoundError,
+            TraderJoeV2SDKError,
+        )
+
+        def fake_lb_pair_info(token_a, token_b, bin_step):
+            if bin_step == 20:
+                # Transport error masquerading as nothing — must propagate.
+                raise TraderJoeV2SDKError("getLBPairInformation RPC call failed")
+            return LBPairInformation(pair_address=self._USDC_ADDR, bin_step=bin_step, ignored_for_routing=False)
+
+        sdk = MagicMock()
+        sdk.get_lb_pair_information.side_effect = fake_lb_pair_info
+        sdk.get_pool_info.return_value = SimpleNamespace(
+            reserve_x=5 * 10**18, reserve_y=5 * 10**18, token_x=self._WETH_ADDR, token_y=self._USDC_ADDR
+        )
+        adapter = MagicMock()
+        adapter.sdk = sdk
+
+        compiler = self._compiler()
+        result = compiler._autodetect_traderjoe_v2_bin_step(
+            intent=self._intent(),
+            tj_adapter=adapter,
+            swap_from_token=self._token("WETH", self._WETH_ADDR),
+            swap_to_token=self._token("USDC", self._USDC_ADDR),
+            from_token_symbol="WETH",
+            to_token_symbol="USDC",
+            pool_not_found_exc=PoolNotFoundError,
+        )
+        # Did NOT return an int bin step (25) — failed loud on bin 20 instead.
+        assert not isinstance(result, int)
+        assert result.status == CompilationStatus.FAILED
+        assert "Failed to probe TraderJoe V2 pool for bin_step=20" in (result.error or "")
+
+    def test_genuine_absence_skips_to_next_candidate(self):
+        """Companion to the RPC-error test: a GENUINE PoolNotFoundError (factory
+        zero address) on early candidates is correctly skipped, and a later
+        existing pool is selected."""
+        from almanak.connectors.traderjoe_v2.sdk import LBPairInformation, PoolNotFoundError
+
+        def fake_lb_pair_info(token_a, token_b, bin_step):
+            if bin_step in (20, 25, 15):
+                raise PoolNotFoundError(token_a, token_b, bin_step)  # absent → skip
+            return LBPairInformation(pair_address=self._USDC_ADDR, bin_step=bin_step, ignored_for_routing=False)
+
+        sdk = MagicMock()
+        sdk.get_lb_pair_information.side_effect = fake_lb_pair_info
+        sdk.get_pool_info.return_value = SimpleNamespace(
+            reserve_x=3 * 10**18, reserve_y=3 * 10**18, token_x=self._WETH_ADDR, token_y=self._USDC_ADDR
+        )
+        adapter = MagicMock()
+        adapter.sdk = sdk
+
+        compiler = self._compiler()
+        result = compiler._autodetect_traderjoe_v2_bin_step(
+            intent=self._intent(),
+            tj_adapter=adapter,
+            swap_from_token=self._token("WETH", self._WETH_ADDR),
+            swap_to_token=self._token("USDC", self._USDC_ADDR),
+            from_token_symbol="WETH",
+            to_token_symbol="USDC",
+            pool_not_found_exc=PoolNotFoundError,
+        )
+        # 10 is the next candidate after 20/25/15 in popularity order.
+        assert result == 10

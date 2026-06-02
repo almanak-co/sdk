@@ -145,6 +145,21 @@ class PoolInfo:
 
 
 @dataclass
+class LBPairInformation:
+    """Decoded ``LBFactory.getLBPairInformation`` tuple.
+
+    The factory returns ``(binStep, LBPair, createdByOwner, ignoredForRouting)``.
+    ``ignored_for_routing`` is the deprecated-pool flag: the router will not
+    route through a pair marked ``ignoredForRouting``, even if it still holds
+    reserves (VIB-3100). Auto-detection must honour it.
+    """
+
+    pair_address: str
+    bin_step: int
+    ignored_for_routing: bool
+
+
+@dataclass
 class TransactionData:
     """Transaction data for execution."""
 
@@ -351,6 +366,60 @@ class TraderJoeV2SDK:
             if "PoolNotFoundError" in str(type(e).__name__):
                 raise
             raise PoolNotFoundError(token_x, token_y, bin_step) from e
+
+    def get_lb_pair_information(self, token_x: str, token_y: str, bin_step: int) -> LBPairInformation:
+        """Resolve the full LBPair information for a pair + binStep.
+
+        Unlike :meth:`get_pool_address` (which discards everything but the
+        address), this surfaces the ``ignoredForRouting`` flag so callers can
+        skip deprecated pools the router refuses to route through (VIB-3100).
+
+        Args:
+            token_x: Address of token X
+            token_y: Address of token Y
+            bin_step: Bin step of the pair (e.g., 20 for 0.2%)
+
+        Returns:
+            Decoded :class:`LBPairInformation`.
+
+        Raises:
+            PoolNotFoundError: Only for a GENUINE pool-absence signal — the
+                factory returns the zero address for the pair/binStep.
+            TraderJoeV2SDKError: For any other failure (RPC/network/ABI error).
+                Callers that skip absent bin steps (autodetect) MUST NOT
+                swallow this — a transient RPC error must fail loud, never be
+                masked as "pool not found", or autodetect could silently pick
+                a shallower wrong pool because a deeper candidate errored
+                (VIB-3100 Gemini HIGH).
+        """
+        token_x = Web3.to_checksum_address(token_x)
+        token_y = Web3.to_checksum_address(token_y)
+
+        # getLBPairInformation returns (binStep, LBPair, createdByOwner, ignoredForRouting).
+        # Distinguish a genuine absence (zero address) from a transport error:
+        # only the on-chain ``.call()`` itself can raise an RPC/ABI error, so
+        # wrap exactly that and re-raise as the base SDK error — never as
+        # PoolNotFoundError.
+        try:
+            pair_info = self._factory_contract.functions.getLBPairInformation(token_x, token_y, bin_step).call()
+        except Exception as e:  # noqa: BLE001 — surface transport errors as SDK errors, NOT absence
+            raise TraderJoeV2SDKError(
+                f"getLBPairInformation RPC call failed for {token_x}/{token_y} binStep={bin_step}: {e}"
+            ) from e
+
+        pair_address = pair_info[1]
+        if pair_address == "0x0000000000000000000000000000000000000000":
+            raise PoolNotFoundError(token_x, token_y, bin_step)
+
+        # Cache the address lookup so a later get_pool_address() is free.
+        cache_key = (min(token_x.lower(), token_y.lower()), max(token_x.lower(), token_y.lower()), bin_step)
+        self._pool_address_cache[cache_key] = pair_address
+
+        return LBPairInformation(
+            pair_address=pair_address,
+            bin_step=int(pair_info[0]),
+            ignored_for_routing=bool(pair_info[3]),
+        )
 
     def get_pair_contract(self, pool_address: str) -> Contract:
         """Get or create a pair contract instance."""

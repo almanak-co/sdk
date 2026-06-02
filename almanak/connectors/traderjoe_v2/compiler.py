@@ -11,7 +11,6 @@ from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext,
 from almanak.framework.intents._compiler_helpers import (
     assemble_action_bundle,
     normalise_gateway_or_rpc,
-    probe_traderjoe_bin_step,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_constants import DEFAULT_GAS_ESTIMATES, LP_POSITION_MANAGERS
@@ -938,6 +937,11 @@ class _TraderJoeV2CompileImpl:
         # `GatewayClient | None` the caller passed in.
         return cast("GatewayClient | None", client), rpc_url
 
+    # Common TraderJoe V2 bin steps in popularity order. Used both as the
+    # probe set and as the deterministic tie-break order when two candidate
+    # pools have equal total reserves (VIB-3100).
+    _BIN_STEP_ORDER: ClassVar[tuple[int, ...]] = (20, 25, 15, 10, 50, 5, 100, 1)
+
     def _autodetect_traderjoe_v2_bin_step(
         self,
         *,
@@ -951,18 +955,42 @@ class _TraderJoeV2CompileImpl:
     ) -> int | CompilationResult:
         """Auto-detect a TraderJoe V2 bin step by probing the SDK.
 
-        Iterates common bin steps (20, 25, 15, 10, 50, 5, 100, 1) and returns
-        the first one with a pool that is not fully empty (at least one
-        reserve > 0). The liquidity gate (VIB-4374) reflects
-        ``docs/internal/blueprints/05-connectors.md``'s Pool Selection Policy: "do not
-        assume a single fee tier has viable liquidity in both directions."
-        On arbitrum, several common pairs (e.g. WETH/USDC) have a
-        ``(0, 0)`` bin_step=25 pool ahead of a liquid bin_step=15 pool,
-        so a pool-existence-only probe would build a swap guaranteed to
-        revert at execution. The gate matches ``validate_traderjoe_pool``'s
-        definition of "empty" (both reserves zero) so pools with usable
-        one-sided liquidity remain selectable — the quote path will still
-        fail closed on zero output for the requested direction.
+        Scans every common bin step (20, 25, 15, 10, 50, 5, 100, 1) and picks
+        the **deepest routable** pool — the candidate with the largest
+        **decimal-normalized** ``reserve_x + reserve_y`` whose LBPair is *not*
+        flagged ``ignoredForRouting``. Ties break by the popularity order above.
+
+        Reserves come back from ``get_pool_info`` in raw on-chain units, so a
+        WETH/USDC pool's WETH leg (1e18 scale) dwarfs the USDC leg (1e6) by
+        ~1e12 — summing raw units would rank purely on the high-decimal token
+        and could pick a one-sided 10-WETH husk over a balanced 5-WETH/5M-USDC
+        pool, the exact mis-ranking VIB-3100 exists to prevent. We therefore
+        divide each leg by ``10**decimals`` (token-units, not USD; a true
+        USD-weighted proxy needs a price oracle this compile path lacks) before
+        summing. Decimals come from the already-resolved swap ``TokenInfo``s —
+        no extra RPC.
+
+        This reflects ``docs/internal/blueprints/05-connectors.md``'s Pool
+        Selection Policy ("do not assume a single fee tier has viable
+        liquidity") and fixes VIB-3100: on arbitrum WETH/USDC the first
+        existing pool (bin_step=25) is an empty husk while the liquid pool
+        sits at a later bin step, and the only *deep* pool (bin_step=15) is
+        flagged ``ignoredForRouting`` (deprecated) so the router refuses it.
+        A first-liquid probe would build a swap guaranteed to revert with
+        ``LBPair__OutOfLiquidity``; honouring ``ignoredForRouting`` plus
+        max-reserve selection avoids both failure modes.
+
+        Two filters are applied per candidate:
+          * ``ignoredForRouting == True`` → skip (router won't route through it).
+          * ``reserve_x == 0 and reserve_y == 0`` → skip (empty husk).
+            Matches ``validate_traderjoe_pool``'s empty-pool definition, so
+            pools with usable one-sided liquidity remain selectable.
+
+        Both filters are **fail-open**: when the ``ignoredForRouting`` flag or
+        the reserves cannot be proven (unit-test MagicMocks, RPC flakes, ABI
+        drift), the candidate is kept rather than discarded, so we never
+        regress a pair that genuinely has a live pool. The downstream quote
+        path still fails closed on zero output for the requested direction.
 
         Preserves the exact error strings pinned by
         ``test_compiler_traderjoe_v2_swap``:
@@ -970,41 +998,85 @@ class _TraderJoeV2CompileImpl:
             - "No TraderJoe V2 pool found for {X}/{Y} on {chain}. Tried bin
               steps: [...]. The pair may not have a Liquidity Book pool."
         """
-        bin_step_order = [20, 25, 15, 10, 50, 5, 100, 1]
+        bin_step_order = list(self._BIN_STEP_ORDER)
 
-        def _pool_has_liquidity(pool_address: str) -> bool:
-            # Fail-open: if reserve probing fails or returns non-numeric
-            # values (e.g. unit-test MagicMocks, RPC flakes, ABI drift), we
-            # cannot prove the pool is empty. Accept the candidate and let
-            # downstream ``validate_traderjoe_pool`` surface zero-liquidity
-            # cases without regressing call sites that genuinely have a
-            # live pool. Only reject when *both* reserves are zero —
-            # matches ``validate_traderjoe_pool``'s empty-pool definition
-            # (``reserve_x == 0 and reserve_y == 0``) so we don't skip
-            # pools with usable one-sided liquidity, where the quote path
-            # can still ask the router whether the requested direction
-            # has output liquidity and fail closed if it doesn't.
+        # address(lower) -> decimals, from the already-resolved swap tokens.
+        # Used to normalize raw reserves so depth is comparable across legs.
+        decimals_by_addr: dict[str, int] = {}
+        for tok in (swap_from_token, swap_to_token):
+            addr = getattr(tok, "address", None)
+            dec = getattr(tok, "decimals", None)
+            if isinstance(addr, str) and isinstance(dec, int):
+                decimals_by_addr[addr.lower()] = dec
+
+        def _ignored_for_routing(info: Any) -> bool:
+            # Fail-open: only treat the pool as ignored when the flag is an
+            # explicit bool True. MagicMock attributes / unexpected types are
+            # NOT proof of "ignored", so keep the candidate.
+            flag = getattr(info, "ignored_for_routing", None)
+            return flag is True
+
+        def _decimals_for(token_addr: Any) -> int:
+            # Default to 18 when the pool token isn't one of the two resolved
+            # swap tokens (shouldn't happen for the queried pair) — better to
+            # under-normalize than to crash; ranking stays best-effort.
+            if isinstance(token_addr, str):
+                return decimals_by_addr.get(token_addr.lower(), 18)
+            return 18
+
+        def _total_reserves(pool_address: str) -> Decimal | None:
+            # Returns decimal-normalized total reserves, or None when reserves
+            # cannot be proven (probe failure / non-numeric MagicMock) — None
+            # means "keep but cannot rank", distinct from 0 ("proven empty
+            # husk"). Each leg is divided by 10**decimals so a high-decimal
+            # token can't dominate the depth score (VIB-3100 audit item 1).
             try:
-                info = tj_adapter.sdk.get_pool_info(pool_address)
-                return int(info.reserve_x or 0) > 0 or int(info.reserve_y or 0) > 0
-            except Exception:  # noqa: BLE001 — fail-open: keep iterating
-                return True
+                pool_info = tj_adapter.sdk.get_pool_info(pool_address)
+                raw_x = int(pool_info.reserve_x or 0)
+                raw_y = int(pool_info.reserve_y or 0)
+                norm_x = Decimal(raw_x) / (Decimal(10) ** _decimals_for(pool_info.token_x))
+                norm_y = Decimal(raw_y) / (Decimal(10) ** _decimals_for(pool_info.token_y))
+                return norm_x + norm_y
+            except Exception:  # noqa: BLE001 — fail-open: cannot prove empty
+                return None
 
-        found_bin_step, broken_bs, unexpected_exc = probe_traderjoe_bin_step(
-            probe=tj_adapter.sdk.get_pool_address,
-            token_a=swap_from_token.address,
-            token_b=swap_to_token.address,
-            not_found_exception=pool_not_found_exc,
-            candidates=tuple(bin_step_order),
-            is_liquid=_pool_has_liquidity,
-        )
-        if unexpected_exc is not None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Failed to probe TraderJoe V2 pool for bin_step={broken_bs}: {unexpected_exc}",
-                intent_id=intent.intent_id,
-            )
-        if found_bin_step is None:
+        # (bin_step, normalized_total_reserves_or_None) for every routable,
+        # non-empty candidate, accumulated in popularity order so a later stable
+        # sort tie-breaks by that order.
+        ranked: list[tuple[int, Decimal | None]] = []
+        for bin_step in bin_step_order:
+            try:
+                pair_info = tj_adapter.sdk.get_lb_pair_information(
+                    swap_from_token.address, swap_to_token.address, bin_step
+                )
+            except pool_not_found_exc:
+                # GENUINE pool-absence (factory zero address) — skip this bin
+                # step and try the next candidate. This is the only condition
+                # that may be silently skipped.
+                continue
+            except Exception as exc:  # noqa: BLE001 — fail LOUD on transport errors
+                # Any other error (RPC/network/ABI — surfaced as
+                # TraderJoeV2SDKError, NOT PoolNotFoundError) must abort
+                # autodetect. Skipping it could silently pick a shallower wrong
+                # pool because a deeper candidate had a transient RPC error
+                # (VIB-3100 Gemini HIGH). Fail closed instead.
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Failed to probe TraderJoe V2 pool for bin_step={bin_step}: {exc}",
+                    intent_id=intent.intent_id,
+                )
+
+            if _ignored_for_routing(pair_info):
+                continue
+
+            pool_address = getattr(pair_info, "pair_address", None)
+            total = _total_reserves(pool_address) if pool_address is not None else None
+            if total is not None and total == 0:
+                # Proven empty husk on both sides — skip (VIB-4374/VIB-3100).
+                continue
+            ranked.append((bin_step, total))
+
+        if not ranked:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -1014,7 +1086,21 @@ class _TraderJoeV2CompileImpl:
                 ),
                 intent_id=intent.intent_id,
             )
-        return found_bin_step
+
+        # Prefer the deepest pool. Candidates whose reserves could not be
+        # proven (None) sort below any candidate with measured reserves, but
+        # above nothing — they remain selectable when no measured pool exists.
+        # Ties (including all-None) fall back to the popularity order, which
+        # is the list iteration order, so a stable sort by (-reserves) keeps it.
+        def _sort_key(entry: tuple[int, Decimal | None]) -> Decimal:
+            _, total = entry
+            # -total so larger reserves sort first; None → treated as -1 so it
+            # ranks below any measured (>=0) reserve but the stable sort still
+            # preserves popularity order among equally-unmeasured candidates.
+            return -(total if total is not None else Decimal(-1))
+
+        ranked.sort(key=_sort_key)
+        return ranked[0][0]
 
     @staticmethod
     def _fetch_traderjoe_v2_swap_quote(
