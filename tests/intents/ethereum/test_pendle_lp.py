@@ -19,18 +19,40 @@ Pendle **is** in ``_LP_PROTOCOLS`` and ``_SWAP_PROTOCOLS`` in
 ``synthetic_intents.py``, so this module does NOT carry the
 ``no_zodiac`` marker — the default-on Zodiac wrap applies.
 
+Layer 5 (accounting-persistence correctness, epic VIB-4591 / ticket
+VIB-4599): Pendle LP routes through the dedicated ``pendle_handler.py`` (NOT
+the generic ``lp_handler.py``), so the typed record is a
+``PendleAccountingEvent`` with ``event_type`` in {``PENDLE_LP_OPEN``,
+``PENDLE_LP_CLOSE``} — NOT the generic ``LP_OPEN`` / ``LP_CLOSE`` shape.
+Pendle LP events carry ``sy_amount`` / ``pt_amount`` (scaled by an assumed
+18-decimal precision) and are ALWAYS ``confidence=ESTIMATED`` by design (no
+USD price, no pt_token on the LP leg; see
+``almanak/framework/accounting/category_handlers/pendle_handler.py::handle_pendle_lp``).
+The conftest ``_default_compute_position_key`` deliberately special-cases
+pendle OUT of the generic ``lp:`` keyed branch, so the persisted Pendle LP
+event carries an empty ``position_key`` / ``market_id`` — a real contract
+divergence vs Uniswap V3 LP, asserted here as such. The WITHDRAW (PT
+redemption) test stays xfail-grandfathered and is NOT rolled into Layer 5.
+
 To run::
 
     uv run pytest tests/intents/ethereum/test_pendle_lp.py -v -s
 """
 
+import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from web3 import Web3
 
 from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
-from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.execution.orchestrator import (
+    ExecutionContext,
+    ExecutionOrchestrator,
+    ExecutionResult,
+)
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
@@ -40,6 +62,8 @@ from almanak.framework.intents import (
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
+    assert_accounting_persisted,
+    assert_no_accounting_on_failure,
     format_token_amount,
     fund_erc20_token,
     get_token_balance,
@@ -102,6 +126,96 @@ def _enrich_oracle_with_susde(
 
 
 # =============================================================================
+# Layer 5 — accounting-persistence helpers (VIB-4599)
+# =============================================================================
+
+# Pendle scales SY/PT amounts by an assumed 18-decimal precision
+# (handle_pendle_lp: ``Decimal(str(raw)) / 10**18``).
+_PENDLE_SCALE_18 = Decimal(10**18)
+
+
+def _execution_context(wallet: str) -> ExecutionContext:
+    # This deployment_id labels the ExecutionContext for enrichment only; it is
+    # NOT what lands in the persisted row. ``assert_accounting_persisted``
+    # stamps the row deployment_id from its own ``layer5-intent-test`` default
+    # (the descriptive-enrichment-id vs canonical-persisted-identity split that
+    # mirrors the merged Uniswap V3 / Spark goldens).
+    return ExecutionContext(
+        deployment_id="layer5-pendle-lp",
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        protocol="pendle",
+    )
+
+
+def _enrich_for_accounting(
+    execution_result: ExecutionResult,
+    intent: Any,
+    wallet: str,
+    bundle_metadata: dict | None = None,
+) -> ExecutionResult:
+    return enrich_result(
+        execution_result,
+        intent,
+        _execution_context(wallet),
+        live_mode=False,
+        bundle_metadata=bundle_metadata,
+    )
+
+
+def _payload(row: dict) -> dict:
+    return json.loads(row["payload_json"])
+
+
+def _to_human_18(raw: int | None) -> Decimal | None:
+    if raw is None:
+        return None
+    return Decimal(int(raw)) / _PENDLE_SCALE_18
+
+
+def _assert_pendle_lp_identity(row: dict, *, event_type: str, wallet: str) -> None:
+    """Identity contract shared by PENDLE_LP_OPEN / PENDLE_LP_CLOSE rows."""
+    assert row["deployment_id"] == "layer5-intent-test"
+    assert row["cycle_id"] == "layer5-cycle"
+    assert row["execution_mode"] == "paper"
+    assert row["event_type"] == event_type
+    assert row["tx_hash"], "accounting row must link to an on-chain tx_hash"
+    assert row["ledger_entry_id"], "accounting row must link to transaction_ledger"
+    assert row["wallet_address"].lower() == wallet.lower()
+    # Pendle LP is ALWAYS ESTIMATED on the LP leg (no USD price / pt_token).
+    assert row["confidence"] == "ESTIMATED"
+
+
+def _assert_pendle_lp_payload(
+    payload: dict,
+    *,
+    event_type: str,
+    sy_amount: Decimal | None,
+    pt_amount: Decimal | None,
+) -> None:
+    """Assert the actual PendleAccountingEvent contract (NOT the generic LP shape)."""
+    assert payload["event_type"] == event_type
+    # SY/PT amounts come from the parser's lp_open_data / lp_close_data, scaled 1e18.
+    assert sy_amount is not None
+    assert pt_amount is not None
+    assert Decimal(str(payload["sy_amount"])) == sy_amount
+    assert Decimal(str(payload["pt_amount"])) == pt_amount
+    # Pendle LP leg never carries USD price / PT token / yield / APR / maturity.
+    assert payload["pt_token"] == "", "Pendle LP leg must not fabricate a pt_token"
+    assert payload["pt_price"] is None
+    assert payload["sy_price"] is None
+    assert payload["implied_apr_bps"] is None
+    assert payload["days_to_maturity"] is None
+    assert payload["realized_yield_usd"] is None
+    assert payload["maturity_timestamp"] is None
+    assert payload["confidence"] == "ESTIMATED"
+    assert payload["unavailable_reason"], "Pendle LP must document why it is ESTIMATED (Empty != None discipline)"
+    # Pendle's conftest position-key special-case yields an empty key/market.
+    assert payload["position_key"] == "", "Pendle LP position_key is empty by design (see conftest)"
+    assert payload["market_id"] == "", "Pendle LP market_id is empty by design (see conftest)"
+
+
+# =============================================================================
 # LP_OPEN
 # =============================================================================
 
@@ -119,6 +233,8 @@ class TestPendleLPOpenEthereum:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ) -> None:
         """Open a single-sided sUSDe LP position in PT-sUSDe-13AUG2026."""
         # Seed sUSDe (10x deposit amount for headroom)
@@ -171,9 +287,20 @@ class TestPendleLPOpenEthereum:
             f"Execution failed: {execution_result.error}"
         )
 
+        # Layer 5 enrichment: populate execution_result.extracted_data
+        # (lp_open_data) so the accounting handler can read SY/PT amounts.
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
+
         # Layer 3: Receipt parsing — Pendle Mint event
         parser = PendleReceiptParser(chain=CHAIN_NAME)
         lp_minted_raw: int | None = None
+        net_sy_used_raw: int | None = None
+        net_pt_used_raw: int | None = None
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
@@ -181,6 +308,8 @@ class TestPendleLPOpenEthereum:
             if parse_result.mint_events:
                 mint = parse_result.mint_events[0]
                 lp_minted_raw = mint.net_lp_minted
+                net_sy_used_raw = mint.net_sy_used
+                net_pt_used_raw = mint.net_pt_used
                 assert mint.market_address.lower() == PENDLE_SUSDE_MARKET.lower()
                 break
         assert lp_minted_raw is not None, (
@@ -205,6 +334,95 @@ class TestPendleLPOpenEthereum:
         assert lp_received == lp_minted_raw, (
             f"On-chain LP delta ({lp_received}) must match Mint event "
             f"net_lp_minted ({lp_minted_raw})"
+        )
+
+        # Layer 5: accounting persistence — PendleAccountingEvent(PENDLE_LP_OPEN)
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="PENDLE_LP_OPEN",
+            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_pendle_lp_identity(accounting_row, event_type="PENDLE_LP_OPEN", wallet=funded_wallet)
+        # handle_pendle_lp scales lp_open_data.amount0/amount1 (net_sy_used /
+        # net_pt_used) by 1e18 into sy_amount / pt_amount.
+        _assert_pendle_lp_payload(
+            _payload(accounting_row),
+            event_type="PENDLE_LP_OPEN",
+            sy_amount=_to_human_18(net_sy_used_raw),
+            pt_amount=_to_human_18(net_pt_used_raw),
+        )
+
+    @pytest.mark.asyncio
+    async def test_lp_open_insufficient_balance_fails(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+    ) -> None:
+        """LP_OPEN with more sUSDe than the wallet holds must fail gracefully.
+
+        Failure-path Layer 5 contract: a reverted LP_OPEN writes a ledger row
+        but NO typed PendleAccountingEvent (mirrors the arbitrum failure test).
+        """
+        # Do NOT seed sUSDe — wallet should hold ~0; request a large amount.
+        susde_decimals = get_token_decimals(web3, SUSDE_ADDRESS)
+        susde_before = get_token_balance(web3, SUSDE_ADDRESS, funded_wallet)
+        lp_before = get_token_balance(web3, PENDLE_SUSDE_MARKET, funded_wallet)
+        balance_decimal = Decimal(susde_before) / Decimal(10**susde_decimals)
+        excessive_amount = (balance_decimal * Decimal("100")) + LP_DEPOSIT_AMOUNT
+
+        intent = LPOpenIntent(
+            pool=f"{SUSDE_SYMBOL}/{PENDLE_SUSDE_MARKET}",
+            amount0=excessive_amount,
+            amount1=Decimal("0"),
+            range_lower=_DUMMY_RANGE_LOWER,
+            range_upper=_DUMMY_RANGE_UPPER,
+            protocol="pendle",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS"
+        assert compilation_result.action_bundle is not None
+
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert not execution_result.success, "Execution should fail with insufficient balance"
+
+        # Bilateral conservation: both sUSDe and LP token unchanged after failure.
+        susde_after = get_token_balance(web3, SUSDE_ADDRESS, funded_wallet)
+        lp_after = get_token_balance(web3, PENDLE_SUSDE_MARKET, funded_wallet)
+        assert susde_after == susde_before, "sUSDe balance must be unchanged after failed LP_OPEN"
+        assert lp_after == lp_before, "LP token balance must be unchanged after failed LP_OPEN"
+
+        # Layer 5: a failed LP_OPEN must write NO typed PendleAccountingEvent.
+        failed_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
+        await assert_no_accounting_on_failure(
+            layer5_accounting_harness,
+            intent=intent,
+            result=failed_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            eth_call_reader=anvil_eth_call_adapter,
         )
 
 
@@ -275,6 +493,8 @@ class TestPendleLPCloseEthereum:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
     ) -> None:
         """Open then close an sUSDe Pendle LP position; verify sUSDe returned."""
         susde_decimals = get_token_decimals(web3, SUSDE_ADDRESS)
@@ -317,10 +537,20 @@ class TestPendleLPCloseEthereum:
             f"LP_CLOSE execution failed: {execution_result.error}"
         )
 
+        # Layer 5 enrichment: populate execution_result.extracted_data
+        # (lp_close_data) so the accounting handler can read SY/PT amounts.
+        execution_result = _enrich_for_accounting(
+            execution_result,
+            intent,
+            funded_wallet,
+            compilation_result.action_bundle.metadata,
+        )
+
         # Layer 3: Receipt parsing — Pendle Burn event
         parser = PendleReceiptParser(chain=CHAIN_NAME)
         lp_burned_raw: int | None = None
         sy_out_raw: int | None = None
+        pt_out_raw: int | None = None
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt is None:
                 continue
@@ -329,6 +559,7 @@ class TestPendleLPCloseEthereum:
                 burn = parse_result.burn_events[0]
                 lp_burned_raw = burn.net_lp_burned
                 sy_out_raw = burn.net_sy_out
+                pt_out_raw = burn.net_pt_out
                 break
         assert lp_burned_raw is not None, (
             "Expected exactly one Pendle Burn event for LP_CLOSE"
@@ -350,6 +581,27 @@ class TestPendleLPCloseEthereum:
             f"sUSDe must be returned on close (no-op guard). "
             f"Got delta: "
             f"{format_token_amount(susde_received, susde_decimals)}"
+        )
+
+        # Layer 5: accounting persistence — PendleAccountingEvent(PENDLE_LP_CLOSE)
+        accounting_row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=execution_result,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="PENDLE_LP_CLOSE",
+            price_oracle=_enrich_oracle_with_susde(price_oracle),
+            eth_call_reader=anvil_eth_call_adapter,
+        )
+        _assert_pendle_lp_identity(accounting_row, event_type="PENDLE_LP_CLOSE", wallet=funded_wallet)
+        # handle_pendle_lp scales lp_close_data.amount0_collected /
+        # amount1_collected (net_sy_out / net_pt_out) by 1e18.
+        _assert_pendle_lp_payload(
+            _payload(accounting_row),
+            event_type="PENDLE_LP_CLOSE",
+            sy_amount=_to_human_18(sy_out_raw),
+            pt_amount=_to_human_18(pt_out_raw),
         )
 
 
